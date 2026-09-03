@@ -316,3 +316,19 @@ export function setProgressScope(scope: ProgressScope): void {
   setProgressScopeSignal(scope);
   persistProgressScope(scope);
 }
+
+// ---------------------------------------------------------------------------
+// 书架多选（仅 UI 临时态，不持久化）
+// 选中书籍模式下 AppShell 隐藏底部 Tab，把屏幕最底部让给操作条。
+
+const [shelfSelecting, setShelfSelectingSignal] = createSignal<boolean>(false);
+
+/** 书架是否处于多选（选中书籍）模式 */
+export function shelfSelectingMode(): boolean {
+  return shelfSelecting();
+}
+
+/** 进入 / 退出书架多选模式 */
+export function setShelfSelecting(on: boolean): void {
+  setShelfSelectingSignal(on);
+}

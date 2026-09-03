@@ -18,7 +18,12 @@ import {
   splitTextByChars,
 } from "./chapterRules";
 import type { ChapterRule, TextSplitResult } from "./chapterRules";
-import type { BookFormat, LocalBook, LocalBookChapter } from "./booksTypes";
+import type {
+  BookFormat,
+  BookSource,
+  LocalBook,
+  LocalBookChapter,
+} from "./booksTypes";
 import { assignChapterCids, chapterCid } from "./booksTypes";
 import { parseEpubFile } from "./epub";
 import { ensureShelfEntry } from "./store";
@@ -250,7 +255,10 @@ export async function parseEpubFileDraft(
 }
 
 /** 将确认后的草稿交给 Rust 后端持久化并同步到响应式清单 */
-export async function persistBookDraft(draft: BookDraft): Promise<LocalBook> {
+export async function persistBookDraft(
+  draft: BookDraft,
+  source: BookSource = "local",
+): Promise<LocalBook> {
   const book: LocalBook = {
     id: newBookId(),
     title: draft.title.trim() || titleFromFileName(draft.fileName),
@@ -262,6 +270,8 @@ export async function persistBookDraft(draft: BookDraft): Promise<LocalBook> {
     hue: draft.hue,
     splitDesc: draft.splitDesc,
     chapters: assignChapterCids(draft.chapters),
+    // 只有 WebDAV 导入需要落盘来源标记；本地导入不写字段（读取时缺省为本地）
+    ...(source === "webdav" ? { source: "webdav" as const } : {}),
   };
   await saveRemoteBook(book);
   setBooksState((prev) => {

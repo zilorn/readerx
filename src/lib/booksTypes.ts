@@ -2,6 +2,14 @@
 
 export type BookFormat = "txt" | "epub";
 
+/** 书籍导入来源：webdav 导入带 "webdav" 标记，其余视为本地导入 */
+export type BookSource = "local" | "webdav";
+
+/** 归一化书籍来源：旧数据未存 source 字段时视为本地导入 */
+export function bookSourceOf(book: Pick<LocalBook, "source">): BookSource {
+  return book.source === "webdav" ? "webdav" : "local";
+}
+
 /**
  * 章节内的结构化正文块：
  * - p   ：自然段（缩进正文）
@@ -52,6 +60,8 @@ export interface LocalBook {
   chapters: LocalBookChapter[];
   /** 所属书架分组 id；未分组为空 */
   groupId?: string | null;
+  /** 导入来源：WebDAV 导入为 "webdav"；本地导入或旧数据缺失时不写此字段 */
+  source?: BookSource;
 }
 
 export function totalChars(book: Pick<LocalBook, "chapters">): number {

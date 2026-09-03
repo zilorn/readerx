@@ -66,4 +66,7 @@ pub struct LocalBook {
     /// 所属书架分组 id；未分组时为 null
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_id: Option<String>,
+    /// 导入来源：WebDAV 导入为 "webdav"；本地导入或旧数据缺失时为 None
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }

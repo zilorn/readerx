@@ -43,7 +43,8 @@ export function GroupPicker(props: GroupPickerProps) {
           </button>
         </div>
 
-        <div class="min-h-0 flex-1 overflow-y-auto px-0 py-1 pb-3.5 scrollbar-none">
+        {/* 底部预留安全区，避免列表 / 新建分组输入被 Home 指示条遮挡 */}
+        <div class="min-h-0 flex-1 overflow-y-auto px-0 py-1 pb-[calc(14px+env(safe-area-inset-bottom))] scrollbar-none">
           <GroupRow
             label="未分组"
             active={!props.value}

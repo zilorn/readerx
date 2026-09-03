@@ -10,6 +10,7 @@ import { TabBar } from "./components/TabBar";
 import { LoadingScreen } from "./components/LoadingScreen";
 import { ensureLocalBooksLoaded } from "./lib/books";
 import { currentToast } from "./lib/toast";
+import { shelfSelectingMode } from "./lib/store";
 
 // ---- 路由页面全部走代码分割 + 懒加载（配合 Suspense） ----
 const BookshelfPage = lazy(() => import("./pages/Bookshelf"));
@@ -36,6 +37,11 @@ const AppShell: Component<RouteSectionProps> = (props) => {
     return path === "/" || path === "/discover" || path === "/settings";
   });
 
+  // 书架多选时临时隐藏底部 Tab，把屏幕最底部让给“移动到分组 / 删除”操作条
+  const tabBarHidden = createMemo(
+    () => location.pathname === "/" && shelfSelectingMode(),
+  );
+
   let viewRef: HTMLDivElement | undefined;
   // 路由切换后，让滚动容器回到顶部（避免切页后停留在旧滚动位置）
   createEffect(
@@ -58,7 +64,7 @@ const AppShell: Component<RouteSectionProps> = (props) => {
           {props.children}
         </Suspense>
       </div>
-      <Show when={inMainTabs()}>
+      <Show when={inMainTabs() && !tabBarHidden()}>
         <TabBar />
       </Show>
       <Show when={currentToast()}>

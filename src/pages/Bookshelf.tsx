@@ -28,19 +28,27 @@ import {
   removeLocalBook,
   setLocalBookGroup,
 } from "../lib/books";
-import type { LocalBook } from "../lib/booksTypes";
+import { bookSourceOf, type BookSource, type LocalBook } from "../lib/booksTypes";
 import { groupList } from "../lib/groups";
 import {
   hasReadingProgress,
   readingPercent,
   resolveReadingTarget,
 } from "../lib/progress";
-import { removeShelfEntry, shelfOrder, type ShelfEntry } from "../lib/store";
+import {
+  removeShelfEntry,
+  setShelfSelecting,
+  shelfOrder,
+  type ShelfEntry,
+} from "../lib/store";
 
 interface ShelfItem {
   entry: ShelfEntry;
   book: LocalBook;
 }
+
+/** 书架来源筛选：全部 / 本地 / WebDAV */
+type SourceFilter = "all" | BookSource;
 
 /**
  * 按“正文文本位置”计算进度：已读章节累计字符 + 当前章节内偏移 → 整书百分比。
@@ -221,13 +229,18 @@ function GroupChip(props: {
 export default function BookshelfPage() {
   const navigate = useNavigate();
   const [groupId, setGroupId] = createSignal<string>("all");
+  const [sourceFilter, setSourceFilter] = createSignal<SourceFilter>("all");
   const [selecting, setSelecting] = createSignal(false);
   const [selectedIds, setSelectedIds] = createSignal<string[]>([]);
   const [groupPickerOpen, setGroupPickerOpen] = createSignal(false);
   const [confirmDelete, setConfirmDelete] = createSignal(false);
   let confirmTimer: number | undefined;
 
-  onCleanup(() => window.clearTimeout(confirmTimer));
+  onCleanup(() => {
+    window.clearTimeout(confirmTimer);
+    // 离开书架（页面卸载）时兜底复位，避免 AppShell 一直隐藏底部 Tab
+    setShelfSelecting(false);
+  });
 
   createEffect(() => {
     void ensureLocalBooksLoaded();
@@ -242,18 +255,49 @@ export default function BookshelfPage() {
       .filter((item): item is ShelfItem => item !== null),
   );
 
+  /** 书架内是否存在 WebDAV 导入的书（决定来源筛选行是否显示） */
+  const hasWebdavBooks = createMemo(() =>
+    items().some((item) => bookSourceOf(item.book) === "webdav"),
+  );
+
+  /** 实际生效的来源筛选：没有 WebDAV 书时来源行隐藏，一律视为全部 */
+  const activeSource = createMemo<SourceFilter>(() =>
+    hasWebdavBooks() ? sourceFilter() : "all",
+  );
+
+  /** 当前可见书架（分组筛选 × 来源筛选叠加） */
   const visibleItems = createMemo(() => {
     const gid = groupId();
-    return gid === "all"
-      ? items()
-      : items().filter((item) => (item.book.groupId ?? null) === gid);
+    const src = activeSource();
+    return items().filter((item) => {
+      if (gid !== "all" && (item.book.groupId ?? null) !== gid) return false;
+      if (src !== "all" && bookSourceOf(item.book) !== src) return false;
+      return true;
+    });
   });
 
+  /** 分组 chips 数量：在当前来源筛选内统计（两行筛选叠加生效） */
   const groupCounts = createMemo<Record<string, number>>(() => {
-    const counts: Record<string, number> = { all: items().length };
+    const src = activeSource();
+    const counts: Record<string, number> = { all: 0 };
     for (const item of items()) {
+      if (src !== "all" && bookSourceOf(item.book) !== src) continue;
+      counts.all = (counts.all ?? 0) + 1;
       const gid = item.book.groupId ?? null;
       if (gid) counts[gid] = (counts[gid] ?? 0) + 1;
+    }
+    return counts;
+  });
+
+  /** 来源 chips 数量：在当前分组筛选内统计 */
+  const sourceCounts = createMemo(() => {
+    const gid = groupId();
+    const counts = { all: 0, local: 0, webdav: 0 };
+    for (const item of items()) {
+      if (gid !== "all" && (item.book.groupId ?? null) !== gid) continue;
+      counts.all++;
+      if (bookSourceOf(item.book) === "webdav") counts.webdav++;
+      else counts.local++;
     }
     return counts;
   });
@@ -269,6 +313,7 @@ export default function BookshelfPage() {
   function onLongPress(id: string) {
     if (!selecting()) {
       setSelecting(true);
+      setShelfSelecting(true);
       setConfirmDelete(false);
       setGroupPickerOpen(false);
     }
@@ -277,6 +322,7 @@ export default function BookshelfPage() {
 
   function cancelSelect() {
     setSelecting(false);
+    setShelfSelecting(false);
     setSelectedIds([]);
     setConfirmDelete(false);
     setGroupPickerOpen(false);
@@ -364,29 +410,63 @@ export default function BookshelfPage() {
           )
         }
       >
-        <Show when={groupList().length > 0}>
-          <div class="m-0.5 flex gap-2 overflow-x-auto px-[18px] pb-1 pt-2 scrollbar-none">
-            <GroupChip
-              label="全部"
-              active={groupId() === "all"}
-              count={groupCounts().all ?? 0}
-              onClick={() => setGroupId("all")}
-            />
-            <For each={groupList()}>
-              {(group) => (
-                <GroupChip
-                  label={group.name}
-                  active={groupId() === group.id}
-                  count={groupCounts()[group.id] ?? 0}
-                  onClick={() => setGroupId(group.id)}
-                />
-              )}
-            </For>
-          </div>
-        </Show>
+        <div class="flex flex-col">
+          <Show when={groupList().length > 0}>
+            <div class="m-0.5 flex gap-2 overflow-x-auto px-[18px] pb-1 pt-2 scrollbar-none">
+              <GroupChip
+                label="全部"
+                active={groupId() === "all"}
+                count={groupCounts().all ?? 0}
+                onClick={() => setGroupId("all")}
+              />
+              <For each={groupList()}>
+                {(group) => (
+                  <GroupChip
+                    label={group.name}
+                    active={groupId() === group.id}
+                    count={groupCounts()[group.id] ?? 0}
+                    onClick={() => setGroupId(group.id)}
+                  />
+                )}
+              </For>
+            </div>
+          </Show>
+          <Show when={hasWebdavBooks()}>
+            <div
+              class="m-0.5 flex gap-2 overflow-x-auto px-[18px] pb-1.5 scrollbar-none"
+              classList={{ "pt-2": groupList().length === 0 }}
+            >
+              <GroupChip
+                label="全部"
+                active={activeSource() === "all"}
+                count={sourceCounts().all}
+                onClick={() => setSourceFilter("all")}
+              />
+              <GroupChip
+                label="本地"
+                active={activeSource() === "local"}
+                count={sourceCounts().local}
+                onClick={() => setSourceFilter("local")}
+              />
+              <GroupChip
+                label="WebDAV"
+                active={activeSource() === "webdav"}
+                count={sourceCounts().webdav}
+                onClick={() => setSourceFilter("webdav")}
+              />
+            </div>
+          </Show>
+        </div>
       </PageHeader>
 
-      <div class="px-[18px] pb-[calc(28px+env(safe-area-inset-bottom))] pt-1">
+      <div
+        class="px-[18px] pt-1"
+        classList={{
+          // 多选时给底部固定操作条让位，避免最后一行书被遮住
+          "pb-[calc(116px+env(safe-area-inset-bottom))]": selecting(),
+          "pb-[calc(28px+env(safe-area-inset-bottom))]": !selecting(),
+        }}
+      >
         <Show when={localBooksReady()} fallback={<LoadingScreen label="加载本地书库…" />}>
           <Show
             when={visibleItems().length > 0}
@@ -394,12 +474,18 @@ export default function BookshelfPage() {
               <div class="flex flex-col items-center gap-1 px-6 py-14 text-center text-text-3">
                 <LibraryIcon size={56} class="mb-2.5" />
                 <p class="text-[15.5px] font-semibold text-text-2">
-                  {groupId() === "all" ? "书架空空如也" : "该分组暂无书籍"}
+                  {items().length === 0
+                    ? "书架空空如也"
+                    : groupId() !== "all" && activeSource() === "all"
+                      ? "该分组暂无书籍"
+                      : "没有符合条件的书籍"}
                 </p>
                 <p class="mb-[18px] mt-0.5 text-[12.5px] leading-[1.6]">
-                  {groupId() === "all"
+                  {items().length === 0
                     ? "导入 TXT / EPUB 到本地书架"
-                    : "在书架顶部切回「全部」分组即可看到书"}
+                    : groupId() !== "all" && activeSource() === "all"
+                      ? "在书架顶部切回「全部」分组即可看到书"
+                      : "切换书架顶部的筛选条件即可看到其它书籍"}
                 </p>
                 <ImportButton
                   class="inline-flex items-center justify-center gap-1.5 rounded-xl bg-accent px-[22px] py-[11px] text-sm font-semibold text-on-accent shadow-lg shadow-accent/30 transition-[scale,opacity] duration-100 active:scale-[0.97] active:opacity-90"
@@ -439,9 +525,9 @@ export default function BookshelfPage() {
         </Show>
       </div>
 
-      {/* 多选底部操作条 */}
+      {/* 多选底部操作条：固定贴住屏幕最底部（期间底部 Tab 由 AppShell 临时隐藏） */}
       <Show when={selecting()}>
-        <div class="sticky bottom-0 z-20 animate-sheet-up border-t border-border bg-surface px-[18px] pb-[calc(10px+env(safe-area-inset-bottom))] pt-3">
+        <div class="fixed inset-x-0 bottom-0 z-30 mx-auto w-full max-w-[480px] animate-sheet-up border-t border-border bg-surface px-[18px] pb-[calc(10px+env(safe-area-inset-bottom))] pt-3 shadow-[0_-8px_28px_rgb(0_0_0/0.14)]">
           <Show when={selectedCount() > 0}>
             <div class="flex items-center gap-2.5">
               <button

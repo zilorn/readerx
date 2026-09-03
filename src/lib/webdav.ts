@@ -378,7 +378,7 @@ export async function importDavFile(
     format === "txt"
       ? await parseTxtFile(file, { kind: "auto" })
       : await parseEpubFileDraft(file);
-  const book = await persistBookDraft(draft);
+  const book = await persistBookDraft(draft, "webdav");
   ensureShelfEntry(book.id);
   return book;
 }
