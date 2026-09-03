@@ -8,22 +8,21 @@ import {
 } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 import { BookCover } from "../components/BookCover";
+import { GroupPicker } from "../components/GroupPicker";
 import { LoadingScreen } from "../components/LoadingScreen";
 import { PageHeader } from "../components/PageHeader";
 import { ImportButton } from "../components/ImportButton";
-import { LibraryIcon, PlusIcon, TrashIcon } from "../components/icons";
+import { FolderIcon, LibraryIcon, PlusIcon, TrashIcon } from "../components/icons";
 import {
   ensureLocalBooksLoaded,
   localBookById,
   localBooksReady,
   removeLocalBook,
+  setLocalBookGroup,
 } from "../lib/books";
 import type { LocalBook } from "../lib/booksTypes";
-import {
-  removeShelfEntry,
-  shelfOrder,
-  type ShelfEntry,
-} from "../lib/store";
+import { groupList } from "../lib/groups";
+import { removeShelfEntry, shelfOrder, type ShelfEntry } from "../lib/store";
 
 interface ShelfItem {
   entry: ShelfEntry;
@@ -40,10 +39,10 @@ interface ShelfGridProps {
   items: ShelfItem[];
   managing: boolean;
   confirmId: string | null;
-  /** 横向滚动分组（继续阅读）时为 flex 布局 */
   horizontal?: boolean;
   onOpen: (id: string) => void;
   onDelete: (id: string) => void;
+  onGroup: (id: string) => void;
 }
 
 function ShelfGrid(props: ShelfGridProps) {
@@ -82,13 +81,24 @@ function ShelfGrid(props: ShelfGridProps) {
                   }
                 }}
               >
-                <BookCover book={book} variant="grid" />
+                <BookCover
+                  book={{ title: book.title, author: book.author, hue: book.hue, format: book.format }}
+                  variant="grid"
+                />
                 <Show when={props.managing}>
                   <button
+                    class="absolute left-[5px] top-[5px] z-[2] inline-flex h-[26px] w-[26px] items-center justify-center rounded-full bg-black/70 text-white backdrop-blur-sm transition-colors duration-150"
+                    aria-label={`将《${book.title}》归入分组`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      props.onGroup(book.id);
+                    }}
+                  >
+                    <FolderIcon size={13} />
+                  </button>
+                  <button
                     class={`absolute right-[5px] top-[5px] z-[2] inline-flex h-[26px] min-w-[26px] items-center justify-center gap-[3px] rounded-full px-[7px] text-[11px] font-semibold text-white transition-colors duration-150 ${
-                      props.confirmId === book.id
-                        ? "bg-danger"
-                        : "bg-black/70 backdrop-blur-sm"
+                      props.confirmId === book.id ? "bg-danger" : "bg-black/70 backdrop-blur-sm"
                     }`}
                     aria-label={props.confirmId === book.id ? "确认删除这本书" : `删除《${book.title}》`}
                     onClick={(e) => {
@@ -103,10 +113,7 @@ function ShelfGrid(props: ShelfGridProps) {
               <span class="max-w-full truncate text-[13.5px] font-semibold">
                 {book.title}
               </span>
-              <Show
-                when={entry.chapter > 0}
-                fallback={<span class="text-[11px] text-text-3">未开始阅读</span>}
-              >
+              <Show when={entry.chapter > 0}>
                 <span
                   class={`text-[11px] font-medium ${
                     finished ? "text-success" : "text-accent"
@@ -114,10 +121,7 @@ function ShelfGrid(props: ShelfGridProps) {
                 >
                   {finished ? "已读完" : `读到 ${pct}%`}
                 </span>
-                <span
-                  class="h-[3px] w-full overflow-hidden rounded-[2px] bg-surface-2"
-                  aria-hidden="true"
-                >
+                <span class="h-[3px] w-full overflow-hidden rounded-[2px] bg-surface-2" aria-hidden="true">
                   <i
                     class="block h-full rounded-[2px] bg-accent transition-[width] duration-200"
                     style={{ width: `${pct}%` }}
@@ -132,15 +136,37 @@ function ShelfGrid(props: ShelfGridProps) {
   );
 }
 
+function GroupChip(props: {
+  label: string;
+  active: boolean;
+  count: number;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      class="inline-flex flex-none items-center gap-1.5 rounded-full px-3.5 py-[7px] text-[13px] transition-colors duration-150"
+      classList={{
+        "bg-accent text-on-accent font-semibold": props.active,
+        "bg-surface text-text-2 border border-border": !props.active,
+      }}
+      onClick={props.onClick}
+    >
+      {props.label}
+      <span class={props.active ? "text-on-accent/80" : "text-text-3"}>{props.count}</span>
+    </button>
+  );
+}
+
 export default function BookshelfPage() {
   const navigate = useNavigate();
+  const [groupId, setGroupId] = createSignal<string>("all");
   const [managing, setManaging] = createSignal(false);
   const [confirmId, setConfirmId] = createSignal<string | null>(null);
+  const [assigningId, setAssigningId] = createSignal<string | null>(null);
   let confirmTimer: number | undefined;
 
   onCleanup(() => window.clearTimeout(confirmTimer));
 
-  const ready = createMemo(() => localBooksReady());
   createEffect(() => {
     void ensureLocalBooksLoaded();
   });
@@ -151,16 +177,35 @@ export default function BookshelfPage() {
         const book = localBookById(entry.bookId);
         return book ? { entry, book } : null;
       })
-      .filter((x): x is ShelfItem => x !== null),
+      .filter((item): item is ShelfItem => item !== null),
   );
 
-  const continuing = createMemo(() => items().filter((i) => i.entry.chapter > 0));
+  const visibleItems = createMemo(() => {
+    const gid = groupId();
+    return gid === "all"
+      ? items()
+      : items().filter((item) => (item.book.groupId ?? null) === gid);
+  });
+
+  const continuing = createMemo(() =>
+    groupId() === "all" ? items().filter((item) => item.entry.chapter > 0) : [],
+  );
+
+  const groupCounts = createMemo<Record<string, number>>(() => {
+    const counts: Record<string, number> = { all: items().length };
+    for (const item of items()) {
+      const gid = item.book.groupId ?? null;
+      if (gid) counts[gid] = (counts[gid] ?? 0) + 1;
+    }
+    return counts;
+  });
 
   const openBook = (id: string) => navigate(`/book/${id}`);
 
   function toggleManage() {
     setManaging((value) => !value);
     setConfirmId(null);
+    setAssigningId(null);
   }
 
   function requestDelete(id: string) {
@@ -186,10 +231,10 @@ export default function BookshelfPage() {
   }
 
   return (
-    <div class="page">
+    <div class="page relative">
       <PageHeader
         title="书架"
-        subtitle={items().length > 0 ? `${items().length} 本在架` : undefined}
+        subtitle={visibleItems().length > 0 ? `${visibleItems().length} 本在架` : undefined}
         right={
           <div class="flex flex-none items-center gap-0.5">
             <ImportButton
@@ -203,7 +248,7 @@ export default function BookshelfPage() {
                 class={`grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,color,scale] duration-150 active:scale-[0.94] active:bg-surface-2 ${
                   managing() ? "bg-accent-weak text-accent" : ""
                 }`}
-                aria-label={managing() ? "退出管理" : "管理本地书籍"}
+                aria-label={managing() ? "退出管理" : "管理书籍"}
                 onClick={toggleManage}
               >
                 <TrashIcon />
@@ -211,20 +256,43 @@ export default function BookshelfPage() {
             </Show>
           </div>
         }
-      />
+      >
+        <Show when={groupList().length > 0}>
+          <div class="m-0.5 flex gap-2 overflow-x-auto px-[18px] pb-1 pt-2 scrollbar-none">
+            <GroupChip
+              label="全部"
+              active={groupId() === "all"}
+              count={groupCounts().all ?? 0}
+              onClick={() => setGroupId("all")}
+            />
+            <For each={groupList()}>
+              {(group) => (
+                <GroupChip
+                  label={group.name}
+                  active={groupId() === group.id}
+                  count={groupCounts()[group.id] ?? 0}
+                  onClick={() => setGroupId(group.id)}
+                />
+              )}
+            </For>
+          </div>
+        </Show>
+      </PageHeader>
 
       <div class="px-[18px] pb-[calc(28px+env(safe-area-inset-bottom))] pt-1">
-        <Show when={ready()} fallback={<LoadingScreen label="加载本地书库…" />}>
+        <Show when={localBooksReady()} fallback={<LoadingScreen label="加载本地书库…" />}>
           <Show
-            when={items().length > 0}
+            when={visibleItems().length > 0}
             fallback={
               <div class="flex flex-col items-center gap-1 px-6 py-14 text-center text-text-3">
                 <LibraryIcon size={56} class="mb-2.5" />
                 <p class="text-[15.5px] font-semibold text-text-2">
-                  书架空空如也
+                  {groupId() === "all" ? "书架空空如也" : "该分组暂无书籍"}
                 </p>
                 <p class="mb-[18px] mt-0.5 text-[12.5px] leading-[1.6]">
-                  导入 TXT / EPUB 后即可本地阅读，无需联网
+                  {groupId() === "all"
+                    ? "导入 TXT / EPUB，或在发现页连接 TransBook 下载书籍到本地"
+                    : "在管理模式下点开书籍封面左上角，即可将它归入这个分组"}
                 </p>
                 <ImportButton
                   class="inline-flex items-center justify-center gap-1.5 rounded-xl bg-accent px-[22px] py-[11px] text-sm font-semibold text-on-accent shadow-lg shadow-accent/30 transition-[scale,opacity] duration-100 active:scale-[0.97] active:opacity-90"
@@ -237,7 +305,7 @@ export default function BookshelfPage() {
           >
             <Show when={managing()}>
               <p class="mx-0.5 mt-2.5 text-xs text-text-3">
-                点击封面右上角删除，再点一次确认
+                点击封面右上角删除，再点一次确认；左上角图标可将书籍归入分组
               </p>
             </Show>
             <Show when={!managing() && continuing().length > 0}>
@@ -253,6 +321,7 @@ export default function BookshelfPage() {
                     horizontal
                     onOpen={openBook}
                     onDelete={requestDelete}
+                    onGroup={() => undefined}
                   />
                 </div>
               </section>
@@ -261,26 +330,39 @@ export default function BookshelfPage() {
                   全部书籍
                 </h2>
                 <ShelfGrid
-                  items={items()}
+                  items={visibleItems()}
                   managing={false}
                   confirmId={null}
                   onOpen={openBook}
                   onDelete={requestDelete}
+                  onGroup={() => undefined}
                 />
               </section>
             </Show>
             <Show when={managing() || continuing().length === 0}>
               <ShelfGrid
-                items={items()}
+                items={visibleItems()}
                 managing={managing()}
                 confirmId={confirmId()}
                 onOpen={openBook}
                 onDelete={requestDelete}
+                onGroup={(id) => setAssigningId(id)}
               />
             </Show>
           </Show>
         </Show>
       </div>
+
+      <Show when={assigningId()}>
+        <GroupPicker
+          value={items().find((item) => item.book.id === assigningId())?.book.groupId}
+          onSelect={(targetGroupId) => {
+            const item = items().find((it) => it.book.id === assigningId());
+            if (item) void setLocalBookGroup(item.book.id, targetGroupId);
+          }}
+          onClose={() => setAssigningId(null)}
+        />
+      </Show>
     </div>
   );
 }

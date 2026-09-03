@@ -5,6 +5,7 @@ import {
   createMemo,
   createSignal,
   on,
+  onCleanup,
 } from "solid-js";
 import { useNavigate, useParams } from "@solidjs/router";
 import { LoadingScreen } from "../components/LoadingScreen";
@@ -13,8 +14,14 @@ import {
   ChevronRightIcon,
   CloseIcon,
   ListIcon,
+  RefreshIcon,
 } from "../components/icons";
-import { ensureLocalBooksLoaded, localBookById, localBooksReady } from "../lib/books";
+import {
+  ensureLocalBooksLoaded,
+  localBookById,
+  localBooksReady,
+  refreshCloudBookLocal,
+} from "../lib/books";
 import {
   FONT_MAX,
   FONT_MIN,
@@ -38,6 +45,13 @@ export default function ReaderPage() {
   const book = createMemo(() => localBookById(bookId()));
   const [chapter, setChapter] = createSignal<number>(0);
   const [sheetOpen, setSheetOpen] = createSignal(false);
+  const [refreshing, setRefreshing] = createSignal(false);
+  const [refreshProgress, setRefreshProgress] = createSignal<{
+    done: number;
+    total: number;
+  } | null>(null);
+  const [refreshError, setRefreshError] = createSignal<string | null>(null);
+  let refreshErrorTimer: number | undefined;
 
   // 书载入后：补建进度档案并定位到上次章节
   createEffect(
@@ -89,6 +103,27 @@ export default function ReaderPage() {
     setSheetOpen(false);
   }
 
+  async function refreshBook() {
+    const current = book();
+    if (!current?.cloudRef || refreshing()) return;
+    setRefreshing(true);
+    setRefreshProgress({ done: 0, total: 0 });
+    setRefreshError(null);
+    try {
+      const refreshed = await refreshCloudBookLocal(current.id, (done, total) =>
+        setRefreshProgress({ done, total }),
+      );
+      setChapter((idx) => Math.min(idx, Math.max(0, refreshed.chapters.length - 1)));
+    } catch (err) {
+      setRefreshError(err instanceof Error ? err.message : "重新获取章节失败");
+      window.clearTimeout(refreshErrorTimer);
+      refreshErrorTimer = window.setTimeout(() => setRefreshError(null), 3200);
+    } finally {
+      setRefreshing(false);
+      setRefreshProgress(null);
+    }
+  }
+
   let listRef: HTMLDivElement | undefined;
   createEffect(
     on(sheetOpen, (open) => {
@@ -97,6 +132,8 @@ export default function ReaderPage() {
       current?.scrollIntoView({ block: "center" });
     }),
   );
+
+  onCleanup(() => window.clearTimeout(refreshErrorTimer));
 
   return (
     <div class="relative flex h-full flex-col">
@@ -126,7 +163,7 @@ export default function ReaderPage() {
                 >
                   <ChevronLeftIcon />
                 </button>
-                <div class="flex min-w-0 flex-1 flex-col items-center gap-[1px]">
+              <div class="flex min-w-0 flex-1 flex-col items-center gap-[1px]">
                   <span class="max-w-full truncate text-[14.5px] font-semibold">
                     {current().title}
                   </span>
@@ -134,6 +171,16 @@ export default function ReaderPage() {
                     {chapterData()?.title}
                   </span>
                 </div>
+                <Show when={current().cloudRef}>
+                  <button
+                    class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2 disabled:opacity-40"
+                    aria-label="重新获取章节"
+                    disabled={refreshing()}
+                    onClick={() => void refreshBook()}
+                  >
+                    <RefreshIcon />
+                  </button>
+                </Show>
                 <div class="flex flex-none gap-1" aria-label="调整字号">
                   <button
                     class="grid h-[30px] w-[30px] place-items-center rounded-lg border border-border text-xs font-bold text-text-2 disabled:opacity-30"
@@ -325,6 +372,26 @@ export default function ReaderPage() {
                       }}
                     </For>
                   </div>
+                </div>
+              </Show>
+
+              {/* 重新获取章节进度覆盖层 */}
+              <Show when={refreshing()}>
+                <div class="absolute inset-0 z-50 flex flex-col items-center justify-center gap-3 bg-bg/85 backdrop-blur-[2px]">
+                  <span class="size-7 animate-spin rounded-full border-[3px] border-surface-2 border-t-accent" aria-hidden="true" />
+                  <p class="text-[13px] text-text-2">正在重新获取章节…</p>
+                  <Show when={refreshProgress()}>
+                    {(p) => (
+                      <span class="text-[12px] text-text-3 tabular-nums">
+                        {p().done} / {p().total}
+                      </span>
+                    )}
+                  </Show>
+                </div>
+              </Show>
+              <Show when={refreshError()}>
+                <div class="absolute inset-x-4 top-[calc(max(env(safe-area-inset-top),8px)+52px)] z-40 rounded-[10px] bg-danger-weak px-3 py-2 text-center text-[12.5px] text-danger shadow">
+                  {refreshError()}
                 </div>
               </Show>
             </>

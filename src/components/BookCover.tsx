@@ -1,9 +1,12 @@
-import type { LocalBook } from "../lib/booksTypes";
-
 type CoverVariant = "grid" | "thumb" | "row";
 
 interface BookCoverProps {
-  book: Pick<LocalBook, "title" | "author" | "hue" | "format">;
+  book: {
+    title: string;
+    author: string;
+    hue: number;
+    format: string;
+  };
   variant?: CoverVariant;
   label?: string;
 }

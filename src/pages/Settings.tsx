@@ -1,12 +1,14 @@
-import { createSignal, onCleanup, type JSX } from "solid-js";
+import { Show, createEffect, createSignal, on, onCleanup, type JSX } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 import {
   BookOpenIcon,
   ChevronRightIcon,
+  LinkIcon,
   RegexIcon,
   TrashIcon,
 } from "../components/icons";
 import { PageHeader } from "../components/PageHeader";
+import { GroupManager } from "../components/GroupManager";
 import {
   FONT_MAX,
   FONT_MIN,
@@ -22,6 +24,14 @@ import {
   setTheme,
   type ThemeMode,
 } from "../lib/store";
+import {
+  clearTransbookUrl,
+  currentTransbookUrl,
+  initTransbookConfig,
+  saveTransbookUrl,
+  transbookReady,
+} from "../lib/transbook";
+import { initGroups } from "../lib/groups";
 
 const THEME_OPTIONS: { value: ThemeMode; label: string }[] = [
   { value: "light", label: "浅色" },
@@ -68,9 +78,53 @@ function Row(props: {
 export default function SettingsPage() {
   const navigate = useNavigate();
   const [resetConfirming, setResetConfirming] = createSignal(false);
+  const [urlInput, setUrlInput] = createSignal("");
+  const [savingUrl, setSavingUrl] = createSignal(false);
+  const [urlMsg, setUrlMsg] = createSignal<string | null>(null);
   let timer: number | undefined;
+  let urlTimer: number | undefined;
 
-  onCleanup(() => window.clearTimeout(timer));
+  onCleanup(() => {
+    window.clearTimeout(timer);
+    window.clearTimeout(urlTimer);
+  });
+
+  createEffect(() => {
+    void initTransbookConfig();
+  });
+
+  createEffect(() => {
+    void initGroups();
+  });
+
+  createEffect(
+    on(transbookReady, (ready) => {
+      if (ready) setUrlInput(currentTransbookUrl());
+    }),
+  );
+
+  async function onSaveBookSource() {
+    setSavingUrl(true);
+    setUrlMsg(null);
+    try {
+      await saveTransbookUrl(urlInput());
+      setUrlMsg("已保存并连接");
+    } catch {
+      setUrlMsg("保存失败，请重试");
+    } finally {
+      setSavingUrl(false);
+      window.clearTimeout(urlTimer);
+      urlTimer = window.setTimeout(() => setUrlMsg(null), 2600);
+    }
+  }
+
+  async function onClearBookSource() {
+    await clearTransbookUrl();
+    setUrlInput("");
+    setUrlMsg("已清除连接");
+    window.clearTimeout(urlTimer);
+    urlTimer = window.setTimeout(() => setUrlMsg(null), 2600);
+  }
 
   function onResetProgress() {
     if (!resetConfirming()) {
@@ -212,6 +266,71 @@ export default function SettingsPage() {
               <ChevronRightIcon size={18} class="flex-none text-text-3" />
             </Row>
           </div>
+        </section>
+
+        {/* 书源 */}
+        <section class="mb-6">
+          <h2 class="mx-1 mb-2 text-[12.5px] font-medium tracking-[0.04em] text-text-3">
+            书源
+          </h2>
+          <div class="overflow-hidden rounded-[14px] border border-border bg-surface">
+            <div class="px-4 py-[13px]">
+              <div class="flex items-center gap-3">
+                <span class="grid h-[34px] w-[34px] flex-none place-items-center rounded-[10px] bg-surface-2 text-text-2">
+                  <LinkIcon size={18} />
+                </span>
+                <span class="flex min-w-0 flex-1 flex-col gap-0.5">
+                  <span class="text-[14.5px] font-medium">TransBook 服务器</span>
+                  <span class="text-[11.5px] text-text-3">
+                    连接后可浏览远程书架与书籍
+                  </span>
+                </span>
+                <Show when={currentTransbookUrl()}>
+                  <span class="flex-none rounded-full bg-success/15 px-2 py-0.5 text-[11px] font-medium text-success">
+                    已连接
+                  </span>
+                </Show>
+              </div>
+              <input
+                type="url"
+                placeholder="http://192.168.0.104:8300"
+                value={urlInput()}
+                onInput={(e) => setUrlInput(e.currentTarget.value)}
+                class="mt-3 w-full rounded-[10px] border border-border bg-bg px-3 py-[9px] text-[14px] text-text outline-none transition-colors placeholder:text-text-3 focus:border-accent"
+                aria-label="TransBook 服务器地址"
+              />
+              <div class="mt-2.5 flex items-center gap-2">
+                <button
+                  class="inline-flex h-[38px] flex-1 items-center justify-center gap-1.5 rounded-[10px] bg-accent px-3 text-[13.5px] font-semibold text-on-accent transition-[scale,opacity] duration-100 active:scale-[0.97] active:opacity-90 disabled:opacity-50"
+                  disabled={savingUrl()}
+                  onClick={() => void onSaveBookSource()}
+                >
+                  <LinkIcon size={16} />
+                  保存
+                </button>
+                <button
+                  class="inline-flex h-[38px] items-center justify-center rounded-[10px] border border-border bg-surface px-3 text-[13.5px] text-text-2 transition-colors active:bg-surface-2"
+                  onClick={() => void onClearBookSource()}
+                >
+                  清除
+                </button>
+              </div>
+              <Show when={urlMsg()}>
+                <p class="mt-2 text-[11.5px] text-text-3">{urlMsg()}</p>
+              </Show>
+            </div>
+          </div>
+        </section>
+
+        {/* 书架分组 */}
+        <section class="mb-6">
+          <h2 class="mx-1 mb-2 text-[12.5px] font-medium tracking-[0.04em] text-text-3">
+            书架分组
+          </h2>
+          <p class="mx-1 mb-2 text-[11.5px] leading-[1.6] text-text-3">
+            本地书与云端书都可归入分组，在书架顶部按分组筛选
+          </p>
+          <GroupManager />
         </section>
 
         {/* 数据 */}

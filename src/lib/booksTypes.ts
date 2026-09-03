@@ -35,6 +35,10 @@ export interface LocalBook {
   /** 分章方式描述，如“中文章节标题 / 按字数分章” */
   splitDesc: string;
   chapters: LocalBookChapter[];
+  /** 所属书架分组 id；未分组为空 */
+  groupId?: string | null;
+  /** 来自 TransBook 云端下载的来源引用；用于“重新获取章节” */
+  cloudRef?: { serverUrl: string; remoteId: string } | null;
 }
 
 export function totalChars(book: Pick<LocalBook, "chapters">): number {

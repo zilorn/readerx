@@ -21,6 +21,11 @@ import type { ChapterRule, TextSplitResult } from "./chapterRules";
 import type { BookFormat, LocalBook, LocalBookChapter } from "./booksTypes";
 import { parseEpubFile } from "./epub";
 import { ensureShelfEntry } from "./store";
+import {
+  fetchTransBookDetail,
+  fetchTransChapterContent,
+  transHue,
+} from "./transbook";
 
 export type ImportSplitChoice =
   | { kind: "auto" }
@@ -272,6 +277,159 @@ export async function importLocalBookFile(file: File): Promise<LocalBook> {
 export async function removeLocalBook(id: string): Promise<void> {
   await deleteRemoteBook(id);
   setBooksState((prev) => prev?.filter((book) => book.id !== id) ?? prev);
+}
+
+/** 设置本地书所属书架分组 */
+export async function setLocalBookGroup(
+  id: string,
+  groupId: string | null,
+): Promise<void> {
+  const book = localBookById(id);
+  if (!book) return;
+  const next = { ...book, groupId: groupId ?? null };
+  await saveRemoteBook(next);
+  setBooksState((prev) => prev?.map((item) => (item.id === id ? next : item)) ?? prev);
+}
+
+/** 分组删除后，把该书架内本地书退回未分组 */
+export async function clearLocalGroup(groupId: string): Promise<void> {
+  const affected = localBookList().filter((book) => book.groupId === groupId);
+  await Promise.all(
+    affected.map(async (book) => {
+      const next = { ...book, groupId: null };
+      await saveRemoteBook(next);
+      setBooksState(
+        (prev) => prev?.map((item) => (item.id === book.id ? next : item)) ?? prev,
+      );
+    }),
+  );
+}
+
+/** 由「服务器地址 + 远端 id」派生稳定本地 id，避免重复下载 */
+export function cloudBookId(serverUrl: string, remoteId: string): string {
+  const seed = `${serverUrl}|${remoteId}`;
+  let hash = 0;
+  for (let i = 0; i < seed.length; i++) {
+    hash = (Math.imul(hash, 31) + seed.charCodeAt(i)) | 0;
+  }
+  return `cloud-${Math.abs(hash).toString(36)}`;
+}
+
+async function mapPool<T>(
+  items: T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<void>,
+): Promise<void> {
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const index = next++;
+      await fn(items[index], index);
+    }
+  });
+  await Promise.all(workers);
+}
+
+function toLocalFormat(format?: string): BookFormat {
+  return format === "epub" ? "epub" : "txt";
+}
+
+/**
+ * 从 TransBook 下载整书并转为本地书（进入本地书架）。
+ * 若已存在同一来源的本地书，则覆盖更新（内容可能被修改）。
+ */
+export async function importCloudBookToLocal(
+  remoteId: string,
+  serverUrl: string,
+  onProgress?: (done: number, total: number) => void,
+): Promise<LocalBook> {
+  const detail = await fetchTransBookDetail(remoteId, serverUrl);
+  if ((detail.format ?? "") === "comic") {
+    throw new Error("漫画书暂不支持下载为本地文本");
+  }
+  const id = cloudBookId(serverUrl, remoteId);
+  const existing = localBookById(id);
+  const total = detail.chapters.length;
+  const paragraphsByChapter: string[][] = [];
+  let done = 0;
+
+  await mapPool(detail.chapters, 3, async (chapter, index) => {
+    try {
+      const text = await fetchTransChapterContent(
+        remoteId,
+        {
+          id: chapter.id,
+          title: chapter.title,
+          format: chapter.format,
+          status: chapter.status,
+        },
+        serverUrl,
+      );
+      paragraphsByChapter[index] = text
+        .split(/\n+/)
+        .map((p) => p.trim())
+        .filter(Boolean);
+    } catch {
+      paragraphsByChapter[index] = ["[章节下载失败，请重新获取]"];
+    }
+    done += 1;
+    onProgress?.(done, total);
+  });
+
+  const chapters: LocalBookChapter[] = detail.chapters.map((chapter, index) => ({
+    title: chapter.title_translated || chapter.title || `第 ${index + 1} 章`,
+    paragraphs: paragraphsByChapter[index] ?? [],
+  }));
+  const title = detail.title_translated || detail.title || "未命名书籍";
+  const format = toLocalFormat(detail.format);
+  const fileName = `${title}.${format === "epub" ? "epub" : "txt"}`;
+  const size = chapters.reduce(
+    (sum, chapter) =>
+      sum +
+      chapter.paragraphs.reduce(
+        (paraSum, paragraph) => paraSum + paragraph.length,
+        0,
+      ),
+    0,
+  );
+  const book: LocalBook = {
+    id,
+    title,
+    author: detail.author || "佚名",
+    format,
+    fileName,
+    size,
+    importedAt: existing?.importedAt ?? Date.now(),
+    hue: transHue(title || remoteId),
+    splitDesc: "TransBook 下载",
+    chapters,
+    groupId: existing?.groupId ?? null,
+    cloudRef: { serverUrl, remoteId },
+  };
+  await saveRemoteBook(book);
+  setBooksState((prev) => {
+    const rest = (prev ?? []).filter((item) => item.id !== id);
+    const next = [...rest, book];
+    next.sort((a, b) => b.importedAt - a.importedAt);
+    return next;
+  });
+  return book;
+}
+
+/** 重新获取章节：从来源重新下载并更新本地书（云端内容可能被改动） */
+export async function refreshCloudBookLocal(
+  bookId: string,
+  onProgress?: (done: number, total: number) => void,
+): Promise<LocalBook> {
+  const existing = localBookById(bookId);
+  if (!existing?.cloudRef) {
+    throw new Error("这本书不是来自云端，无法重新获取");
+  }
+  return importCloudBookToLocal(
+    existing.cloudRef.serverUrl,
+    existing.cloudRef.remoteId,
+    onProgress,
+  );
 }
 
 /** 清空全部本地书籍（不可恢复） */

@@ -33,6 +33,7 @@ fn ensure_books_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+
 fn valid_state_key(key: &str) -> bool {
     !key.is_empty()
         && key.len() <= 80
