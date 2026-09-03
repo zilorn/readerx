@@ -81,3 +81,14 @@ export async function clearRemoteBooks(): Promise<void> {
   const books = await listRemoteBooks();
   await Promise.all(books.map((book) => deleteRemoteBook(book.id)));
 }
+
+/** 读取随应用打包的 LICENSE 全文；仅 Tauri 环境可用，浏览器开发环境返回 null */
+export async function readLicenseText(): Promise<string | null> {
+  if (!tauri) return null;
+  try {
+    return await invoke<string>("readerx_license_text");
+  } catch (err) {
+    console.error("[backend] 读取开源许可失败", err);
+    return null;
+  }
+}

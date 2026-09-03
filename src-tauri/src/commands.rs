@@ -7,6 +7,8 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use serde_json::Value;
 use tauri::AppHandle;
+use tauri::Manager;
+use tauri_plugin_fs::FsExt;
 
 #[tauri::command]
 pub async fn readerx_state_get(app: AppHandle, key: String) -> Result<Option<Value>, String> {
@@ -110,6 +112,24 @@ pub async fn readerx_tts_cache_clear(
     spawn_blocking(move || storage::clear_tts_cache(&app, book_id.as_deref()))
         .await
         .map_err(|e| format!("听书缓存清理任务失败: {e}"))?
+}
+
+/// 读取随应用打包的 LICENSE（配置在 bundle.resources，运行期位于 resource 目录）。
+/// Android 的 resource 目录是 APK asset（asset:// 前缀），统一走 fs 插件读取。
+#[tauri::command]
+pub async fn readerx_license_text(app: AppHandle) -> Result<String, String> {
+    spawn_blocking(move || -> Result<String, String> {
+        let resource_dir = app
+            .path()
+            .resource_dir()
+            .map_err(|e| format!("无法定位资源目录: {e}"))?;
+        let license_path = resource_dir.join("LICENSE");
+        app.fs()
+            .read_to_string(license_path)
+            .map_err(|e| format!("读取开源许可失败: {e}"))
+    })
+    .await
+    .map_err(|e| format!("开源许可读取任务失败: {e}"))?
 }
 
 #[tauri::command]

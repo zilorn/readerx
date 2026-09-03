@@ -11,12 +11,16 @@ import { readState, writeState } from "./backend";
 
 export type ThemeMode = "light" | "dark" | "sepia";
 export type PageMode = "paged" | "scroll";
+/** 阅读页底部状态栏的进度百分比口径：整本书 / 当前章节 */
+export type ProgressScope = "book" | "chapter";
 
 const THEME_KEY = "readerx.theme";
 const SHELF_KEY = "readerx.shelf";
 const FONT_KEY = "readerx.fontSize";
 const PARA_SPACING_KEY = "readerx.paragraphSpacing";
 const PAGE_MODE_KEY = "readerx.pageMode";
+const STATUS_BAR_KEY = "readerx.statusBar";
+const PROGRESS_SCOPE_KEY = "readerx.progressScope";
 
 export const FONT_MIN = 15;
 export const FONT_MAX = 28;
@@ -47,13 +51,16 @@ let initialized = false;
 export async function initReaderState(): Promise<void> {
   if (initialized) return;
   initialized = true;
-  const [storedTheme, storedShelf, storedFont, storedSpacing, storedPageMode] = await Promise.all([
-    readState<string>(THEME_KEY),
-    readState<Record<string, ShelfEntry>>(SHELF_KEY),
-    readState<number>(FONT_KEY),
-    readState<number>(PARA_SPACING_KEY),
-    readState<PageMode>(PAGE_MODE_KEY),
-  ]);
+  const [storedTheme, storedShelf, storedFont, storedSpacing, storedPageMode, storedStatusBar, storedScope] =
+    await Promise.all([
+      readState<string>(THEME_KEY),
+      readState<Record<string, ShelfEntry>>(SHELF_KEY),
+      readState<number>(FONT_KEY),
+      readState<number>(PARA_SPACING_KEY),
+      readState<PageMode>(PAGE_MODE_KEY),
+      readState<boolean>(STATUS_BAR_KEY),
+      readState<ProgressScope>(PROGRESS_SCOPE_KEY),
+    ]);
 
   // 未保存过偏好时默认护眼(sepia)，不再跟随系统深浅色
   const mode = normalizeTheme(storedTheme) ?? "sepia";
@@ -71,6 +78,12 @@ export async function initReaderState(): Promise<void> {
   }
   if (storedPageMode === "paged" || storedPageMode === "scroll") {
     setPageModeSignal(storedPageMode);
+  }
+  if (typeof storedStatusBar === "boolean") {
+    setStatusBarEnabledSignal(storedStatusBar);
+  }
+  if (storedScope === "book" || storedScope === "chapter") {
+    setProgressScopeSignal(storedScope);
   }
 }
 
@@ -260,4 +273,46 @@ function persistPageMode(next: PageMode): void {
 export function setPageMode(mode: PageMode): void {
   setPageModeSignal(mode);
   persistPageMode(mode);
+}
+
+// ---------------------------------------------------------------------------
+// 阅读页底部状态栏（全局偏好：入口在阅读页菜单顶栏的「阅读设置」）
+// 开关控制状态栏是否常驻显示；进度口径决定百分比按全书还是当前章节统计。
+
+const [statusBarEnabled, setStatusBarEnabledSignal] = createSignal<boolean>(true);
+let statusBarWriteQueue: Promise<void> = Promise.resolve();
+
+/** 响应式：阅读页底部状态栏是否开启 */
+export function currentStatusBarEnabled(): boolean {
+  return statusBarEnabled();
+}
+
+function persistStatusBarEnabled(on: boolean): void {
+  statusBarWriteQueue = statusBarWriteQueue.then(() => writeState(STATUS_BAR_KEY, on));
+}
+
+/** 开启 / 关闭阅读页底部状态栏并持久化 */
+export function setStatusBarEnabled(on: boolean): void {
+  setStatusBarEnabledSignal(on);
+  persistStatusBarEnabled(on);
+}
+
+const [progressScope, setProgressScopeSignal] = createSignal<ProgressScope>("book");
+let progressScopeWriteQueue: Promise<void> = Promise.resolve();
+
+/** 响应式进度口径（book=整本书百分比，chapter=当前章节百分比） */
+export function currentProgressScope(): ProgressScope {
+  return progressScope();
+}
+
+function persistProgressScope(scope: ProgressScope): void {
+  progressScopeWriteQueue = progressScopeWriteQueue.then(() =>
+    writeState(PROGRESS_SCOPE_KEY, scope),
+  );
+}
+
+/** 切换进度口径并持久化 */
+export function setProgressScope(scope: ProgressScope): void {
+  setProgressScopeSignal(scope);
+  persistProgressScope(scope);
 }

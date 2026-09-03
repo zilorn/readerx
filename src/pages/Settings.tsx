@@ -5,12 +5,14 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   BookOpenIcon,
   ChevronRightIcon,
+  FileTextIcon,
   GitHubIcon,
   HeadphonesIcon,
   RegexIcon,
   TrashIcon,
 } from "../components/icons";
 import { PageHeader } from "../components/PageHeader";
+import { LicenseSheet } from "../components/LicenseSheet";
 import { GroupManager } from "../components/GroupManager";
 import {
   FONT_MAX,
@@ -93,6 +95,7 @@ function Row(props: {
 export default function SettingsPage() {
   const navigate = useNavigate();
   const [resetConfirming, setResetConfirming] = createSignal(false);
+  const [licenseOpen, setLicenseOpen] = createSignal(false);
   let timer: number | undefined;
 
   onCleanup(() => {
@@ -332,11 +335,18 @@ export default function SettingsPage() {
             >
               <ChevronRightIcon size={18} class="flex-none text-text-3" />
             </Row>
-            <Row label="开源许可" desc="MIT License">
+            <Row
+              icon={<FileTextIcon size={18} />}
+              label="开源许可"
+              desc="MIT License"
+              onClick={() => setLicenseOpen(true)}
+            >
               <ChevronRightIcon size={18} class="flex-none text-text-3" />
             </Row>
           </div>
         </section>
+
+        <LicenseSheet open={licenseOpen()} onClose={() => setLicenseOpen(false)} />
 
         <p class="-mt-2 mb-2.5 text-center text-[11px] text-text-3">
           ReaderX {appVersion()} · 基于 Tauri 2 构建

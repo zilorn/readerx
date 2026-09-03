@@ -7,6 +7,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_http::init())
+        .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_tts::init())
         .invoke_handler(tauri::generate_handler![
             commands::greet,
@@ -19,7 +20,8 @@ pub fn run() {
             commands::readerx_tts_cache_put,
             commands::readerx_tts_cache_get,
             commands::readerx_tts_cache_stats,
-            commands::readerx_tts_cache_clear
+            commands::readerx_tts_cache_clear,
+            commands::readerx_license_text
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

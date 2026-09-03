@@ -11,6 +11,7 @@ import {
 } from "solid-js";
 import { useNavigate, useParams } from "@solidjs/router";
 import { LoadingScreen } from "../components/LoadingScreen";
+import { ReaderSettingsSheet } from "../components/ReaderSettingsSheet";
 import { BookmarkPanel } from "../components/BookmarkPanel";
 import { SelectionMenu } from "../components/SelectionMenu";
 import { TtsBubble } from "../components/TtsBubble";
@@ -23,6 +24,7 @@ import {
   FollowBackIcon,
   HeadphonesIcon,
   ListIcon,
+  SettingsIcon,
 } from "../components/icons";
 import {
   ensureLocalBooksLoaded,
@@ -65,11 +67,13 @@ import {
   currentFontSize,
   currentPageMode,
   currentParaSpacing,
+  currentProgressScope,
+  currentStatusBarEnabled,
   ensureShelfEntry,
   shelfEntries,
   updateReadingLocation,
 } from "../lib/store";
-import { progressContextAt, resolveReadingTarget } from "../lib/progress";
+import { progressContextAt, readingPercent, resolveReadingTarget } from "../lib/progress";
 import { showToast } from "../lib/toast";
 import {
   charNodeAtOffset,
@@ -372,6 +376,9 @@ export default function ReaderPage() {
   const [menuOpen, setMenuOpen] = createSignal(false);
   const [tocOpen, setTocOpen] = createSignal(false);
   const [bmPanelOpen, setBmPanelOpen] = createSignal(false);
+  const [readerSettingsOpen, setReaderSettingsOpen] = createSignal(false);
+  // 当前阅读位置（章节正文镜像偏移：分页=页首行，滚动=视口顶部），状态栏百分比用
+  const [viewOffset, setViewOffset] = createSignal(0);
 
   // 精确恢复目标：打开书时按存档的“章节 cid + 文本偏移”置位，就绪后跳到该处一次
   const [resumeTarget, setResumeTarget] = createSignal<{ cid: string; char: number } | null>(
@@ -701,6 +708,42 @@ export default function ReaderPage() {
 
   const totalPages = createMemo(() => paged()?.pages.length ?? 0);
 
+  // -------------------------------------------------------------------
+  // 底部状态栏：章节名 + 阅读进度（百分比口径可在「阅读设置」切换）
+  // 整书百分比沿用进度模块的“正文字符累计”口径（readingPercent，带缓存）
+  // -------------------------------------------------------------------
+  const statusShown = createMemo(
+    () =>
+      currentStatusBarEnabled() &&
+      !!book() &&
+      !!layout() &&
+      !!chapter() &&
+      !menuOpen() &&
+      !tocOpen() &&
+      !bmPanelOpen() &&
+      !readerSettingsOpen(),
+  );
+
+  /** 整本书进度百分比（按章节正文累计字符） */
+  const bookPercent = createMemo<number | null>(() => {
+    const current = book();
+    if (!current || current.chapters.length === 0) return null;
+    return readingPercent(current, chapterIdx(), viewOffset());
+  });
+
+  /** 状态栏显示的百分比（口径可选：整本书 / 当前章节） */
+  const statusPercent = createMemo<number | null>(() => {
+    if (isPaged() && totalPages() <= 0) return null; // 分页重排中，暂不显示
+    let pct: number | null = null;
+    if (currentProgressScope() === "book") {
+      pct = bookPercent();
+    } else {
+      const len = mirror().text.length;
+      pct = len > 0 ? (Math.min(len, viewOffset()) / len) * 100 : 0;
+    }
+    return pct === null ? null : Math.min(100, Math.max(0, Math.round(pct)));
+  });
+
   // 需要跳转到上一章最后一页时置位（回翻/工具栏上一章）
   let wantLastPage = false;
 
@@ -765,6 +808,7 @@ export default function ReaderPage() {
     if (!ch) return;
     const mir = mirror();
     const clamped = Math.min(Math.max(0, Math.floor(offset) || 0), mir.text.length);
+    setViewOffset(clamped);
     locationPending = {
       ci: chapterIdx(),
       cid: ch.cid,
@@ -985,6 +1029,7 @@ export default function ReaderPage() {
     if (clamped === chapterIdx()) return;
     setChapterIdx(clamped);
     setPageIdx(0);
+    setViewOffset(0);
   }
 
   function jumpFromToc(idx: number): void {
@@ -1368,7 +1413,7 @@ export default function ReaderPage() {
                         class="relative flex-none"
                         style={{ height: `${bottomPadPaged()}px` }}
                       >
-                        <Show when={totalPages() > 1 && !menuOpen()}>
+                        <Show when={totalPages() > 1 && !menuOpen() && !currentStatusBarEnabled()}>
                           <span
                             class="pointer-events-none absolute bottom-0 left-1/2 -translate-x-1/2 text-[10.5px] tracking-[0.08em] text-text-3 opacity-70 tabular-nums"
                             aria-hidden="true"
@@ -1414,6 +1459,26 @@ export default function ReaderPage() {
                   </div>
                 </div>
               </Show>
+            </Show>
+
+            {/* 底部阅读状态栏：章节名 + 阅读进度（呼出菜单/抽屉时隐藏，避免遮挡） */}
+            <Show when={statusShown()}>
+              <div
+                aria-hidden="true"
+                class="pointer-events-none absolute inset-x-0 bottom-0 z-[15] select-none bg-gradient-to-t from-bg via-bg/45 to-transparent"
+              >
+                <div class="flex items-center justify-between gap-3 px-6 pb-[max(env(safe-area-inset-bottom),10px)] pt-2 text-[10.5px] leading-none text-text-3">
+                  <span class="min-w-0 flex-1 truncate">{chapter()!.title}</span>
+                  <span class="flex-none whitespace-nowrap tabular-nums">
+                    <Show when={statusPercent() !== null}>
+                      <span>{statusPercent()}%</span>
+                    </Show>
+                    <Show when={isPaged() && totalPages() > 1}>
+                      <span> · {pageIdx() + 1} / {totalPages()} 页</span>
+                    </Show>
+                  </span>
+                </div>
+              </div>
             </Show>
 
             {/* 顶部工具栏（菜单呼出后显示） */}
@@ -1480,6 +1545,18 @@ export default function ReaderPage() {
                   >
                     <HeadphonesIcon size={21} />
                   </button>
+                  <button
+                    class="grid h-10 w-10 flex-none place-items-center rounded-xl transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
+                    classList={{
+                      "text-accent": readerSettingsOpen(),
+                      "text-text-2": !readerSettingsOpen(),
+                    }}
+                    aria-label="阅读设置"
+                    aria-pressed={readerSettingsOpen()}
+                    onClick={() => setReaderSettingsOpen(true)}
+                  >
+                    <SettingsIcon size={21} />
+                  </button>
                 </div>
               </div>
             </header>
@@ -1544,6 +1621,7 @@ export default function ReaderPage() {
                       }
                     } else if (!isFirstChapter()) {
                       setChapterIdx((c) => c - 1);
+                      setViewOffset(0);
                     }
                     cancelFollowIfActive();
                   }}
@@ -1571,6 +1649,7 @@ export default function ReaderPage() {
                       if (!isLastChapter()) goToChapter(chapterIdx() + 1);
                     } else if (!isLastChapter()) {
                       setChapterIdx((c) => c + 1);
+                      setViewOffset(0);
                     }
                     cancelFollowIfActive();
                   }}
@@ -1686,6 +1765,12 @@ export default function ReaderPage() {
               onPrewarmBook={() => void runPrewarmBook()}
               onStop={() => ttsPlayer.stop()}
               onClose={() => setTtsSettingsOpen(false)}
+            />
+
+            {/* 阅读设置（底部状态栏显示与进度口径） */}
+            <ReaderSettingsSheet
+              open={readerSettingsOpen()}
+              onClose={() => setReaderSettingsOpen(false)}
             />
           </div>
         </Show>
