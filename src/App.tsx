@@ -8,18 +8,21 @@ import {
 } from "@solidjs/router";
 import { TabBar } from "./components/TabBar";
 import { LoadingScreen } from "./components/LoadingScreen";
+import { ensureLocalBooksLoaded } from "./lib/books";
+import { currentToast } from "./lib/toast";
 
 // ---- 路由页面全部走代码分割 + 懒加载（配合 Suspense） ----
 const BookshelfPage = lazy(() => import("./pages/Bookshelf"));
 const DiscoverPage = lazy(() => import("./pages/Discover"));
 const SettingsPage = lazy(() => import("./pages/Settings"));
+const ChapterRulesPage = lazy(() => import("./pages/ChapterRules"));
 const ReaderPage = lazy(() => import("./pages/Reader"));
 const NotFoundPage = lazy(() => import("./pages/NotFound"));
 
 /**
  * 根布局：包裹所有路由。
  * - <Suspense> 承接懒加载页面代码块未就绪时的 loading
- * - 只有书架/发现/设置三个主 Tab 页面显示底部导航
+ * - 书架 / 发现 / 设置三个主 Tab 页面显示底部导航
  */
 const AppShell: Component<RouteSectionProps> = (props) => {
   const location = useLocation();
@@ -40,8 +43,14 @@ const AppShell: Component<RouteSectionProps> = (props) => {
   );
 
   return (
-    <div class="app">
-      <div class="app-view" ref={viewRef}>
+    <div
+      class="relative mx-auto flex h-screen w-full max-w-[480px] flex-col overflow-hidden bg-bg min-[521px]:border-x min-[521px]:border-border min-[521px]:shadow-[0_0_44px_rgb(0_0_0/0.16)]"
+      style={{ height: "100dvh" }}
+    >
+      <div
+        ref={viewRef}
+        class="relative min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain scrollbar-none"
+      >
         <Suspense fallback={<LoadingScreen label="页面加载中…" />}>
           {props.children}
         </Suspense>
@@ -49,16 +58,36 @@ const AppShell: Component<RouteSectionProps> = (props) => {
       <Show when={inMainTabs()}>
         <TabBar />
       </Show>
+      <Show when={currentToast()}>
+        {(toast) => (
+          <div
+            class="absolute bottom-[calc(84px+env(safe-area-inset-bottom))] left-1/2 z-[60] max-w-[calc(100%-48px)] animate-toast-in rounded-full px-4 py-[9px] text-center text-[13px] leading-[1.4] shadow-lg shadow-black/20 [transform:translateX(-50%)]"
+            classList={{
+              "bg-text text-bg": !toast().error,
+              "bg-danger text-white": toast().error,
+            }}
+            role="status"
+          >
+            {toast().text}
+          </div>
+        )}
+      </Show>
     </div>
   );
 };
 
 function App() {
+  // 尽早载入本地书库（幂等），让书架/阅读页直接消费响应式数据
+  createEffect(() => {
+    void ensureLocalBooksLoaded();
+  });
+
   return (
     <Router root={AppShell}>
       <Route path="/" component={BookshelfPage} />
       <Route path="/discover" component={DiscoverPage} />
       <Route path="/settings" component={SettingsPage} />
+      <Route path="/chapter-rules" component={ChapterRulesPage} />
       <Route path="/book/:id" component={ReaderPage} />
       <Route path="*404" component={NotFoundPage} />
     </Router>

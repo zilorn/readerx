@@ -1,7 +1,9 @@
 import { createSignal, onCleanup, type JSX } from "solid-js";
+import { useNavigate } from "@solidjs/router";
 import {
   BookOpenIcon,
   ChevronRightIcon,
+  RegexIcon,
   TrashIcon,
 } from "../components/icons";
 import { PageHeader } from "../components/PageHeader";
@@ -10,9 +12,9 @@ import {
   FONT_MIN,
   currentFontSize,
   currentTheme,
+  resetReadingProgress,
   setFontSize,
   setTheme,
-  clearShelf,
   type ThemeMode,
 } from "../lib/store";
 
@@ -30,20 +32,28 @@ function Row(props: {
   onClick?: () => void;
   children?: JSX.Element;
 }) {
+  const iconClass = props.danger
+    ? "bg-danger-weak text-danger"
+    : "bg-surface-2 text-text-2";
   return (
     <button
-      class="settings-row"
-      classList={{ "settings-row--danger": props.danger }}
+      class="flex w-full items-center gap-3 px-4 py-[13px] text-left transition-colors duration-150 active:bg-surface-2"
+      classList={{ "text-danger": props.danger }}
       onClick={props.onClick}
     >
       {props.icon && (
-        <span class="settings-row__icon" aria-hidden="true">
+        <span
+          class={`grid h-[34px] w-[34px] flex-none place-items-center rounded-[10px] ${iconClass}`}
+          aria-hidden="true"
+        >
           {props.icon}
         </span>
       )}
-      <span class="settings-row__main">
-        <span class="settings-row__label">{props.label}</span>
-        {props.desc && <span class="settings-row__desc">{props.desc}</span>}
+      <span class="flex min-w-0 flex-1 flex-col gap-0.5">
+        <span class="text-[14.5px] font-medium">{props.label}</span>
+        {props.desc && (
+          <span class="text-[11.5px] text-text-3">{props.desc}</span>
+        )}
       </span>
       {props.children}
     </button>
@@ -51,49 +61,57 @@ function Row(props: {
 }
 
 export default function SettingsPage() {
-  const [confirming, setConfirming] = createSignal(false);
+  const navigate = useNavigate();
+  const [resetConfirming, setResetConfirming] = createSignal(false);
   let timer: number | undefined;
-
-  function onClearShelf() {
-    if (!confirming()) {
-      setConfirming(true);
-      window.clearTimeout(timer);
-      timer = window.setTimeout(() => setConfirming(false), 3000);
-      return;
-    }
-    window.clearTimeout(timer);
-    setConfirming(false);
-    clearShelf();
-  }
 
   onCleanup(() => window.clearTimeout(timer));
 
-  const font = () => currentFontSize();
+  function onResetProgress() {
+    if (!resetConfirming()) {
+      setResetConfirming(true);
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => setResetConfirming(false), 3000);
+      return;
+    }
+    window.clearTimeout(timer);
+    setResetConfirming(false);
+    resetReadingProgress();
+  }
 
   return (
     <div class="page">
       <PageHeader title="设置" />
 
-      <div class="page-body page-body--settings">
+      <div class="px-[18px] pb-[calc(36px+env(safe-area-inset-bottom))] pt-2">
         {/* 外观 */}
-        <section class="settings-group">
-          <h2 class="settings-group__title">外观</h2>
-          <div class="settings-group__body">
-            <div class="settings-row settings-row--static">
-              <span class="settings-row__main">
-                <span class="settings-row__label">主题</span>
+        <section class="mb-6">
+          <h2 class="mx-1 mb-2 text-[12.5px] font-medium tracking-[0.04em] text-text-3">
+            外观
+          </h2>
+          <div class="overflow-hidden rounded-[14px] border border-border bg-surface">
+            <div class="flex w-full cursor-default items-center gap-3 px-4 py-[13px] text-left">
+              <span class="flex min-w-0 flex-1 flex-col gap-0.5">
+                <span class="text-[14.5px] font-medium">主题</span>
               </span>
-              <div class="segmented" role="radiogroup" aria-label="主题">
+              <div
+                class="flex flex-none gap-0.5 rounded-[10px] bg-surface-2 p-[3px]"
+                role="radiogroup"
+                aria-label="主题"
+              >
                 {THEME_OPTIONS.map((opt) => (
                   <button
                     role="radio"
                     aria-checked={currentTheme() === opt.value}
-                    class="seg"
-                    classList={{ "seg--active": currentTheme() === opt.value }}
+                    class="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg px-[11px] py-[7px] text-[12.5px] text-text-2 transition-all duration-150"
+                    classList={{
+                      "bg-surface font-semibold text-text shadow-sm shadow-black/15":
+                        currentTheme() === opt.value,
+                    }}
                     onClick={() => setTheme(opt.value)}
                   >
                     <i
-                      class="seg__dot"
+                      class="size-[9px] flex-none rounded-full border border-black/30"
                       style={{
                         background:
                           opt.value === "light"
@@ -112,84 +130,108 @@ export default function SettingsPage() {
         </section>
 
         {/* 阅读 */}
-        <section class="settings-group">
-          <h2 class="settings-group__title">阅读</h2>
-          <div class="settings-group__body">
-            <div class="settings-row settings-row--static">
-              <span class="settings-row__main">
-                <span class="settings-row__label">正文字号</span>
+        <section class="mb-6">
+          <h2 class="mx-1 mb-2 text-[12.5px] font-medium tracking-[0.04em] text-text-3">
+            阅读
+          </h2>
+          <div class="divide-y divide-border overflow-hidden rounded-[14px] border border-border bg-surface">
+            <div class="flex w-full cursor-default items-center gap-3 px-4 py-[13px] text-left">
+              <span class="flex min-w-0 flex-1 flex-col gap-0.5">
+                <span class="text-[14.5px] font-medium">正文字号</span>
               </span>
-              <div class="stepper">
+              <div class="flex flex-none items-center gap-2.5">
                 <button
-                  class="stepper__btn"
+                  class="grid h-[34px] w-[34px] place-items-center rounded-lg border border-border text-[13px] font-bold text-text-2 disabled:opacity-35"
                   aria-label="减小正文字号"
-                  disabled={font() <= FONT_MIN}
-                  onClick={() => setFontSize(font() - 1)}
+                  disabled={currentFontSize() <= FONT_MIN}
+                  onClick={() => setFontSize(currentFontSize() - 1)}
                 >
                   A−
                 </button>
-                <span class="stepper__val">{font()}px</span>
+                <span class="min-w-[46px] text-center text-[13.5px] font-semibold tabular-nums">
+                  {currentFontSize()}px
+                </span>
                 <button
-                  class="stepper__btn"
+                  class="grid h-[34px] w-[34px] place-items-center rounded-lg border border-border text-[13px] font-bold text-text-2 disabled:opacity-35"
                   aria-label="增大正文字号"
-                  disabled={font() >= FONT_MAX}
-                  onClick={() => setFontSize(font() + 1)}
+                  disabled={currentFontSize() >= FONT_MAX}
+                  onClick={() => setFontSize(currentFontSize() + 1)}
                 >
                   A+
                 </button>
               </div>
             </div>
-            <div class="settings-row settings-row--static">
-              <span class="settings-row__main">
-                <span class="settings-row__label">翻页方式</span>
+            <div class="flex w-full cursor-default items-center gap-3 px-4 py-[13px] text-left">
+              <span class="flex min-w-0 flex-1 flex-col gap-0.5">
+                <span class="text-[14.5px] font-medium">翻页方式</span>
               </span>
-              <span class="settings-row__value">上下滚动</span>
-              <ChevronRightIcon size={18} class="settings-row__chevron" />
+              <span class="flex-none text-[13px] text-text-3">上下滚动</span>
+              <ChevronRightIcon size={18} class="flex-none text-text-3" />
             </div>
           </div>
         </section>
 
+        {/* 导入 */}
+        <section class="mb-6">
+          <h2 class="mx-1 mb-2 text-[12.5px] font-medium tracking-[0.04em] text-text-3">
+            导入
+          </h2>
+          <div class="overflow-hidden rounded-[14px] border border-border bg-surface">
+            <Row
+              icon={<RegexIcon size={18} />}
+              label="分章规则"
+              desc="管理导入 TXT 时的自动分章"
+              onClick={() => navigate("/chapter-rules")}
+            >
+              <ChevronRightIcon size={18} class="flex-none text-text-3" />
+            </Row>
+          </div>
+        </section>
+
         {/* 数据 */}
-        <section class="settings-group">
-          <h2 class="settings-group__title">数据</h2>
-          <div class="settings-group__body">
+        <section class="mb-6">
+          <h2 class="mx-1 mb-2 text-[12.5px] font-medium tracking-[0.04em] text-text-3">
+            数据
+          </h2>
+          <div class="overflow-hidden rounded-[14px] border border-border bg-surface">
             <Row
               icon={<TrashIcon size={18} />}
-              label={confirming() ? "再点一次确认清空" : "清空书架数据"}
-              desc="移除书架记录与阅读进度，仅影响本地缓存"
+              label={resetConfirming() ? "再点一次确认重置" : "重置全部阅读进度"}
+              desc="所有书籍回到第 1 章，本地书籍文件不会删除"
               danger
-              onClick={onClearShelf}
+              onClick={onResetProgress}
             />
           </div>
         </section>
 
         {/* 关于 */}
-        <section class="settings-group">
-          <h2 class="settings-group__title">关于</h2>
-          <div class="settings-group__body">
-            <div class="app-about">
-              <span class="app-about__logo">
+        <section class="mb-6">
+          <h2 class="mx-1 mb-2 text-[12.5px] font-medium tracking-[0.04em] text-text-3">
+            关于
+          </h2>
+          <div class="divide-y divide-border overflow-hidden rounded-[14px] border border-border bg-surface">
+            <div class="flex items-center gap-[13px] p-4">
+              <span class="grid h-[42px] w-[42px] flex-none place-items-center rounded-[12px] bg-[linear-gradient(150deg,var(--accent),color-mix(in_srgb,var(--accent)_55%,var(--accent-deep)))] text-on-accent shadow-lg shadow-accent/30">
                 <BookOpenIcon size={22} />
               </span>
-              <span class="app-about__main">
-                <strong class="app-about__name">ReaderX</strong>
-                <span class="app-about__desc">移动端极简阅读器</span>
+              <span class="flex flex-col gap-0.5">
+                <strong class="text-[16px] font-bold tracking-[0.03em]">ReaderX</strong>
+                <span class="text-[11.5px] text-text-3">本地电子书阅读器</span>
               </span>
-              <span class="app-about__version">v0.1.0</span>
+              <span class="ml-auto text-xs text-text-3">v0.2.0</span>
             </div>
             <Row label="技术栈" desc="Tauri 2 · SolidJS · TypeScript · Vite">
-              <ChevronRightIcon size={18} class="settings-row__chevron" />
-            </Row>
-            <Row label="检查更新">
-              <ChevronRightIcon size={18} class="settings-row__chevron" />
+              <ChevronRightIcon size={18} class="flex-none text-text-3" />
             </Row>
             <Row label="开源许可" desc="MIT License">
-              <ChevronRightIcon size={18} class="settings-row__chevron" />
+              <ChevronRightIcon size={18} class="flex-none text-text-3" />
             </Row>
           </div>
         </section>
 
-        <p class="settings-footer">ReaderX 0.1.0 · 基于 Tauri 2 构建</p>
+        <p class="-mt-2 mb-2.5 text-center text-[11px] text-text-3">
+          ReaderX 0.2.0 · 基于 Tauri 2 构建
+        </p>
       </div>
     </div>
   );

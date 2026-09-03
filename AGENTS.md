@@ -4,44 +4,24 @@
 
 ## 项目是什么
 
-**ReaderX** —— 基于 **Tauri 2 + SolidJS** 的移动端风格电子书阅读器（书架 / 发现 / 设置 / 阅读）。
+**ReaderX** —— 基于 **Tauri 2 + SolidJS** 的移动端风格电子书阅读器（书架 / 导入 / 设置 / 阅读）。
 
 - 形态：移动优先的 Web 前端，宿主为 Tauri（桌面窗口按手机宽度渲染，也可 `tauri android dev` 跑真机/模拟器）。
-- 当前阶段：前端骨架 + 本地 mock 数据，尚无后端与真实书源。
 - 包管理：**pnpm**（仓库已有 `pnpm-lock.yaml`，新增依赖请用 `pnpm add`）。
+- 本地书管理：此项目专注于本地书管理。
 
 ## 常用命令
 
-| 命令 | 说明 |
-| --- | --- |
-| `pnpm dev` | 启动 Vite 开发服务器（固定 `http://localhost:1420`） |
-| `pnpm build` | 生产构建（输出 `dist/`） |
-| `pnpm exec tsc --noEmit` | 类型检查（严格模式，改动后必须跑，勿提交红叉） |
-| `pnpm tauri dev` | Tauri 桌面开发窗口 |
-| `pnpm tauri android dev` | Android 真机/模拟器开发 |
-| `pnpm tauri build` | 打包发布 |
+| 命令                     | 说明                                                 |
+| ------------------------ | ---------------------------------------------------- |
+| `pnpm dev`               | 启动 Vite 开发服务器（固定 `http://localhost:1420`） |
+| `pnpm build`             | 生产构建（输出 `dist/`）                             |
+| `pnpm exec tsc --noEmit` | 类型检查（严格模式，改动后必须跑，勿提交红叉）       |
+| `pnpm tauri dev`         | Tauri 桌面开发窗口                                   |
+| `pnpm tauri android dev` | Android 真机/模拟器开发                              |
+| `pnpm tauri build`       | 打包发布                                             |
 
 > 端口 1420 可能已被 `tauri android dev` 占用，勿再起第二个 dev server。
-
-## 目录结构
-
-```
-src/
-  index.tsx        # 入口：初始化主题 + render(App)
-  App.tsx          # 路由定义（JSX <Route>）+ 根布局 AppShell（Suspense + 底部 Tab）
-  index.css        # 全局样式 & 三套主题变量（light/dark/sepia）
-  components/      # 通用组件：TabBar、BookCover、PageHeader、icons(内联SVG)、LoadingScreen
-  pages/           # 路由页面（default export），全部懒加载
-    Bookshelf.tsx  # 书架（/）
-    Discover.tsx   # 发现（/discover）
-    Settings.tsx   # 设置（/settings）
-    Reader.tsx     # 阅读（/book/:id，含目录抽屉）
-    NotFound.tsx   # 404
-  lib/
-    mock.ts        # Book 类型 + 假书单 + 正文生成器（接后端时替换）
-    store.ts       # 全局状态（主题/书架进度/字号），localStorage 持久化
-src-tauri/         # Tauri/Rust 壳，一般无需改动
-```
 
 ## 路由与懒加载约定
 
@@ -63,16 +43,16 @@ src-tauri/         # Tauri/Rust 壳，一般无需改动
 
 - 全局状态一律放 `src/lib/store.ts` 的**模块级 signal**（`createSignal` 于模块顶层创建，无需 Context）。
 - 读取即响应式：组件里直接调用导出的 getter 函数即可被追踪；修改走导出的 setter/action。
-- 持久化键统一前缀 `readerx.*`（localStorage）。
 - 页面内部一次性 UI 状态（搜索词、弹层开关）用组件内 `createSignal`。
 - 阅读字号、主题、书架进度是**跨页面共享偏好**：书架→阅读页→设置页应实时联动，勿在页面里各自存一份。
 - 不要引入 Redux/MobX 之类的状态库，不要用 `createEffect` 驱动 UI 渲染树。
 
 ## 主题与样式约定
 
-- 三套主题（浅色/深色/护眼 sepia）由 `html[data-theme]` 切换，变量定义在 `src/index.css` 顶部；新增颜色一律走 `var(--*)`，禁止写死色值。
-- 应用外壳为 ≤480px 的居中手机列（`.app`），内容滚动区 `.app-view`；新页面按此结构书写。
-- 阅读区以字号变量缩放、行高/字距有专门约定（见 `.reader__ch`），修改字号勿破坏排版节奏。
+- 样式统一使用 **Tailwind CSS v4**（`@tailwindcss/vite` 已接入，入口为 `src/index.css`）。不要在组件里新写手写 BEM/业务 CSS，复杂规则如需 CSS 也优先用 `@utility` 等 Tailwind 机制。
+- 三套主题（浅色/深色/护眼 sepia）由 `html[data-theme]` 切换，CSS 变量仍定义在 `src/index.css`；Tailwind 颜色 token 通过 `@theme inline` 映射到 `var(--bg)` / `var(--surface)` / `var(--text)` / `var(--accent)` 等运行期变量。颜色一律走 `var(--*)` 或 Tailwind token（如 `text-text-2`、`bg-accent`），禁止在组件里写死色值。
+- 应用外壳为 ≤480px 的居中手机列（`.app` 对应 Tailwind `mx-auto max-w-[480px]`），内容滚动区为 `.app-view` 对应 `flex-1 overflow-y-auto`；新页面按现有结构书写。
+- 阅读字号来自全局 signal（px 值内联设置），行高/字距沿用阅读区既有排版（`leading-[1.95]` / `tracking-[0.01em]`、段首 `indent-[2em]`），修改字号勿破坏排版节奏。
 - 图标不引第三方库：往 `src/components/icons.tsx` 里加内联 SVG 函数（线性 24px，stroke="currentColor"）。
 
 ## 类型与质量门槛
@@ -85,3 +65,28 @@ src-tauri/         # Tauri/Rust 壳，一般无需改动
 
 - Tauri WebView 只认较新的 CSS：flex/grid/backdrop-filter 可用，但避免过度依赖实验特性（`color-mix` 已用，注意低版本 Android WebView 兼容性，必要时加 fallback）。
 - 新增 Rust command 需同步注册 `src-tauri/src/lib.rs` 的 `invoke_handler`，并在 `src-tauri/capabilities` 里按需授权。
+
+## 沙箱问题
+
+- 遇到沙箱阻拦请提权。
+
+## 关于前端
+
+- 不要加入无意义的页面：可以不加入页面就不加入，除非用户要求。
+- 不要加入无意义的文本提示，不要将用户的话写进页面中。
+
+如：
+用户：在这个页面中添加爬取`XXX`的功能。
+你写的文件中：在此页面通过爬取XXX获取书记，以便……
+
+这个**绝对禁止**。
+
+## 后端与储存
+
+后端代码尽量写在Rust中，而不是webview。
+储存数据，持久化数据请用Rust后端操作，不要将数据储存在webview中。
+
+## 功能删除与修改
+
+- 除非用户强制要求，请不要随意删除功能。（包括删除页面，删除某个功能，删除有重要用途的方法）
+- 修改功能可以随意抉择。

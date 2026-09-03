@@ -1,10 +1,19 @@
 /* @refresh reload */
 import { render } from "solid-js/web";
-import { initTheme } from "./lib/store";
+import { initReaderState } from "./lib/store";
+import { initChapterRules } from "./lib/chapterRules";
+import { ensureLocalBooksLoaded } from "./lib/books";
 import "./index.css";
 import App from "./App";
 
-// 先落主题属性，避免首屏闪色
-initTheme();
+// 先让 Rust 后端把主题/字号/进度/书库载入完毕，再渲染，避免主题闪色。
+async function start() {
+  await Promise.all([
+    initReaderState(),
+    initChapterRules(),
+    ensureLocalBooksLoaded().catch(() => undefined),
+  ]);
+  render(() => <App />, document.getElementById("root") as HTMLElement);
+}
 
-render(() => <App />, document.getElementById("root") as HTMLElement);
+void start();

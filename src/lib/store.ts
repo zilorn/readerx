@@ -1,9 +1,12 @@
 /**
  * 轻量全局状态（模块级 signal，无额外依赖）：
  * - 主题：light / dark / sepia（护眼）
- * - 书架：记录每本书的阅读进度，均持久化到 localStorage
+ * - 书架：记录每本本地书的阅读进度
+ * - 阅读字号
+ * 持久化统一交给 Rust 后端（readerx.* key），WebView 不落盘。
  */
 import { createSignal } from "solid-js";
+import { readState, writeState } from "./backend";
 
 export type ThemeMode = "light" | "dark" | "sepia";
 
@@ -13,27 +16,9 @@ const FONT_KEY = "readerx.fontSize";
 
 export const FONT_MIN = 15;
 export const FONT_MAX = 28;
-// 首次进入时预置到书架的书
-const SEED_SHELF = ["b01", "b04", "b06", "b09"];
 
-function readRaw(key: string): string | null {
-  try {
-    return window.localStorage.getItem(key);
-  } catch {
-    return null;
-  }
-}
-
-function writeRaw(key: string, value: string): void {
-  try {
-    window.localStorage.setItem(key, value);
-  } catch {
-    /* 忽略隐私模式等写入失败 */
-  }
-}
-
-function normalizeTheme(value: string | null): ThemeMode {
-  return value === "dark" || value === "sepia" ? value : "light";
+function normalizeTheme(value: string | null): ThemeMode | null {
+  return value === "dark" || value === "sepia" ? value : value === "light" ? "light" : null;
 }
 
 function systemTheme(): ThemeMode {
@@ -46,30 +31,61 @@ function systemTheme(): ThemeMode {
   }
 }
 
-/** 初始化（html[data-theme]），返回当前主题；供入口在 render 前调用防止闪色 */
-export function initTheme(): ThemeMode {
-  const mode = normalizeTheme(readRaw(THEME_KEY)) || systemTheme();
-  document.documentElement.dataset.theme = mode;
-  return mode;
+function clampFont(value: number): number {
+  return Math.min(FONT_MAX, Math.max(FONT_MIN, Math.round(value)));
 }
 
-const [theme, setThemeSignal] = createSignal<ThemeMode>(
-  normalizeTheme(readRaw(THEME_KEY)) || systemTheme(),
-);
+let initialized = false;
+
+/**
+ * 应用启动时从 Rust 后端载入全部偏好（幂等）。
+ * 入口在 render 前 await，避免主题闪色。
+ */
+export async function initReaderState(): Promise<void> {
+  if (initialized) return;
+  initialized = true;
+  const [storedTheme, storedShelf, storedFont] = await Promise.all([
+    readState<string>(THEME_KEY),
+    readState<Record<string, ShelfEntry>>(SHELF_KEY),
+    readState<number>(FONT_KEY),
+  ]);
+
+  const mode = normalizeTheme(storedTheme) ?? systemTheme();
+  setThemeSignal(mode);
+  document.documentElement.dataset.theme = mode;
+
+  if (storedShelf && typeof storedShelf === "object") {
+    setShelfMap(storedShelf);
+  }
+  if (typeof storedFont === "number" && Number.isFinite(storedFont)) {
+    setFontSizeSignal(clampFont(storedFont));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 主题
+
+const [theme, setThemeSignal] = createSignal<ThemeMode>(systemTheme());
+let themeWriteQueue: Promise<void> = Promise.resolve();
 
 /** 响应式主题值 */
 export function currentTheme(): ThemeMode {
   return theme();
 }
 
+function persistTheme(next: ThemeMode): void {
+  themeWriteQueue = themeWriteQueue.then(() => writeState(THEME_KEY, next));
+}
+
 /** 切换主题并持久化 */
 export function setTheme(next: ThemeMode): void {
   setThemeSignal(next);
   document.documentElement.dataset.theme = next;
-  writeRaw(THEME_KEY, next);
+  persistTheme(next);
 }
 
 // ---------------------------------------------------------------------------
+// 书架进度
 
 export interface ShelfEntry {
   bookId: string;
@@ -79,29 +95,12 @@ export interface ShelfEntry {
   updatedAt: number;
 }
 
-function loadShelf(): Record<string, ShelfEntry> {
-  const raw = readRaw(SHELF_KEY);
-  if (raw) {
-    try {
-      return JSON.parse(raw) as Record<string, ShelfEntry>;
-    } catch {
-      /* 数据损坏时回退到种子数据 */
-    }
-  }
-  const seeded: Record<string, ShelfEntry> = {};
-  const now = Date.now();
-  SEED_SHELF.forEach((id, i) => {
-    seeded[id] = { bookId: id, chapter: 0, updatedAt: now - i * 86_400_000 };
-  });
-  return seeded;
-}
-
-const [shelfMap, setShelfMap] = createSignal<Record<string, ShelfEntry>>(
-  loadShelf(),
-);
+const [shelfMap, setShelfMap] = createSignal<Record<string, ShelfEntry>>({});
+let shelfWriteQueue: Promise<void> = Promise.resolve();
 
 function persistShelf(): void {
-  writeRaw(SHELF_KEY, JSON.stringify(shelfMap()));
+  const snapshot = { ...shelfMap() };
+  shelfWriteQueue = shelfWriteQueue.then(() => writeState(SHELF_KEY, snapshot));
 }
 
 /** 响应式书架记录表 */
@@ -118,14 +117,11 @@ export function isOnShelf(bookId: string): boolean {
   return Object.prototype.hasOwnProperty.call(shelfMap(), bookId);
 }
 
-/** 加入 / 移出书架 */
-export function toggleShelf(bookId: string): void {
+/** 导入书籍后自动建档（已有则保留进度） */
+export function ensureShelfEntry(bookId: string, chapter = 0): void {
   const map = { ...shelfMap() };
-  if (bookId in map) {
-    delete map[bookId];
-  } else {
-    map[bookId] = { bookId, chapter: 0, updatedAt: Date.now() };
-  }
+  if (bookId in map) return;
+  map[bookId] = { bookId, chapter, updatedAt: Date.now() };
   setShelfMap(map);
   persistShelf();
 }
@@ -134,44 +130,52 @@ export function toggleShelf(bookId: string): void {
 export function setReadingChapter(bookId: string, chapter: number): void {
   const map = { ...shelfMap() };
   const entry = map[bookId];
-  if (!entry) return;
+  if (!entry) {
+    ensureShelfEntry(bookId, chapter);
+    return;
+  }
   map[bookId] = { ...entry, chapter, updatedAt: Date.now() };
   setShelfMap(map);
   persistShelf();
 }
 
-/** 清空书架 */
-export function clearShelf(): void {
-  setShelfMap({});
+/** 从书架移除某本书（通常在删除本地书时调用） */
+export function removeShelfEntry(bookId: string): void {
+  const map = { ...shelfMap() };
+  if (!(bookId in map)) return;
+  delete map[bookId];
+  setShelfMap(map);
+  persistShelf();
+}
+
+/** 重置全部阅读进度（书籍本身保留） */
+export function resetReadingProgress(): void {
+  const next: Record<string, ShelfEntry> = {};
+  for (const entry of Object.values(shelfMap())) {
+    next[entry.bookId] = { ...entry, chapter: 0 };
+  }
+  setShelfMap(next);
   persistShelf();
 }
 
 // ---------------------------------------------------------------------------
 // 阅读字号（全局偏好，设置页与阅读页共用）
 
-function clampFont(value: number): number {
-  return Math.min(FONT_MAX, Math.max(FONT_MIN, Math.round(value)));
-}
-
-function loadFont(): number {
-  const raw = readRaw(FONT_KEY);
-  if (raw) {
-    const n = Number(raw);
-    if (Number.isFinite(n)) return clampFont(n);
-  }
-  return 19;
-}
-
-const [fontSize, setFontSizeSignal] = createSignal<number>(loadFont());
+const [fontSize, setFontSizeSignal] = createSignal<number>(19);
+let fontSizeWriteQueue: Promise<void> = Promise.resolve();
 
 /** 响应式正文字号（px） */
 export function currentFontSize(): number {
   return fontSize();
 }
 
+function persistFontSize(next: number): void {
+  fontSizeWriteQueue = fontSizeWriteQueue.then(() => writeState(FONT_KEY, next));
+}
+
 /** 调整正文字号（自动 clamp 并持久化） */
 export function setFontSize(value: number): void {
   const next = clampFont(value);
   setFontSizeSignal(next);
-  writeRaw(FONT_KEY, String(next));
+  persistFontSize(next);
 }
