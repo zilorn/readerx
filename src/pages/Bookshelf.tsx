@@ -29,6 +29,11 @@ import {
 } from "../lib/books";
 import type { LocalBook } from "../lib/booksTypes";
 import { groupList } from "../lib/groups";
+import {
+  hasReadingProgress,
+  readingPercent,
+  resolveReadingTarget,
+} from "../lib/progress";
 import { removeShelfEntry, shelfOrder, type ShelfEntry } from "../lib/store";
 
 interface ShelfItem {
@@ -36,10 +41,26 @@ interface ShelfItem {
   book: LocalBook;
 }
 
-function progressPercent(entry: ShelfEntry, book: LocalBook): number {
-  if (book.chapters.length === 0) return 0;
-  const pct = Math.round(((entry.chapter + 1) / book.chapters.length) * 100);
-  return Math.min(100, Math.max(1, pct));
+/**
+ * 按“正文文本位置”计算进度：已读章节累计字符 + 当前章节内偏移 → 整书百分比。
+ * 不使用页码（受字号 / 版面影响），同一偏移在任意排版下都指向同一段文字。
+ */
+function cardProgress(entry: ShelfEntry, book: LocalBook): {
+  hasRead: boolean;
+  finished: boolean;
+  percent: number;
+} {
+  const loc = resolveReadingTarget(book, entry);
+  const hasRead = hasReadingProgress(entry);
+  const percent = Math.round(
+    readingPercent(book, loc?.chapterIndex ?? entry.chapter, loc?.charOffset ?? null),
+  );
+  const finished =
+    hasRead &&
+    loc !== null &&
+    loc.chapterIndex + 1 >= book.chapters.length &&
+    percent >= 99.5;
+  return { hasRead, finished, percent: Math.max(1, Math.min(100, percent)) };
 }
 
 /** 单本书卡片：支持单击打开、长按进入多选、选中状态下点击切换选中 */
@@ -53,8 +74,7 @@ function BookCard(props: {
   onToggle: (id: string) => void;
 }) {
   const { entry, book } = props.item;
-  const finished = entry.chapter + 1 >= book.chapters.length;
-  const pct = progressPercent(entry, book);
+  const { hasRead, finished, percent } = cardProgress(entry, book);
 
   let longPressTimer: number | undefined;
   let longPressFired = false;
@@ -132,18 +152,18 @@ function BookCard(props: {
       <span class="max-w-full truncate text-[13.5px] font-semibold">
         {book.title}
       </span>
-      <Show when={entry.chapter > 0}>
+      <Show when={hasRead}>
         <span
           class={`text-[11px] font-medium ${
             finished ? "text-success" : "text-accent"
           }`}
         >
-          {finished ? "已读完" : `读到 ${pct}%`}
+          {finished ? "已读完" : `读到 ${percent}%`}
         </span>
         <span class="h-[3px] w-full overflow-hidden rounded-[2px] bg-surface-2" aria-hidden="true">
           <i
             class="block h-full rounded-[2px] bg-accent transition-[width] duration-200"
-            style={{ width: `${pct}%` }}
+            style={{ width: `${finished ? 100 : percent}%` }}
           />
         </span>
       </Show>
@@ -240,7 +260,7 @@ export default function BookshelfPage() {
   });
 
   const continuing = createMemo(() =>
-    groupId() === "all" ? items().filter((item) => item.entry.chapter > 0) : [],
+    groupId() === "all" ? items().filter((item) => hasReadingProgress(item.entry)) : [],
   );
 
   const groupCounts = createMemo<Record<string, number>>(() => {

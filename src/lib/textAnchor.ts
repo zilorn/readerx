@@ -43,6 +43,30 @@ function textLengthOf(node: Node): number {
 }
 
 /**
+ * 元素内字符偏移 → 所在的（文本节点, 节点内偏移）。
+ * 与 charOffsetInElement 互为逆向：偏移落在嵌套 span（书签下划线）内也正确。
+ * 供“滚动模式按字符滚动定位”使用；找不到（偏移越界）返回 null。
+ */
+export function charNodeAtOffset(
+  el: Element,
+  offset: number,
+): { node: Text; offset: number } | null {
+  const target = Math.max(0, Math.floor(offset));
+  let acc = 0;
+  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  let cur: Node | null;
+  while ((cur = walker.nextNode())) {
+    const text = cur as Text;
+    const len = text.data.length;
+    if (target <= acc + len) {
+      return { node: text, offset: Math.min(len, Math.max(0, target - acc)) };
+    }
+    acc += len;
+  }
+  return null;
+}
+
+/**
  * 计算「el 内从开头到 (node, offset) 边界点」的字符数。
  * node 需为 el 的后代（或 el 本身）。边界落在嵌套 span（书签下划线）内也正确。
  */

@@ -35,11 +35,13 @@ import {
   removeBookmark,
   resolveBookmarkTarget,
   sortedBookmarks,
+  unitAtGlobalOffset,
   type Bookmark,
   type TextMirror,
 } from "../lib/bookmarks";
 import {
   MISSING_IMAGE_HEIGHT,
+  READING_LINE_HEIGHT,
   chapterUnits,
   decodeImageSize,
   figureStyle,
@@ -63,11 +65,13 @@ import {
   currentParaSpacing,
   ensureShelfEntry,
   setFontSize,
-  setReadingChapter,
   shelfEntries,
+  updateReadingLocation,
 } from "../lib/store";
+import { progressContextAt, resolveReadingTarget } from "../lib/progress";
 import { showToast } from "../lib/toast";
 import {
+  charNodeAtOffset,
   charOffsetInElement,
   copyPlainText,
   dataAnchorOf,
@@ -326,6 +330,17 @@ export default function ReaderPage() {
   const [tocOpen, setTocOpen] = createSignal(false);
   const [bmPanelOpen, setBmPanelOpen] = createSignal(false);
 
+  // 精确恢复目标：打开书时按存档的“章节 cid + 文本偏移”置位，就绪后跳到该处一次
+  const [resumeTarget, setResumeTarget] = createSignal<{ cid: string; char: number } | null>(
+    null,
+  );
+  let resumeTick: number | undefined;
+  // 阅读位置提交（章节 + 章节正文镜像文本内偏移），去抖合并
+  let locationTimer: number | undefined;
+  let locationPending: { ci: number; cid: string; off: number; ctx: string } | null = null;
+  let scrollFrame = 0;
+  let scrollRef: HTMLDivElement | undefined;
+
   const isPaged = () => currentPageMode() === "paged";
 
   // 书签数据（跨页面载入一次）
@@ -333,25 +348,39 @@ export default function ReaderPage() {
     void ensureBookmarksLoaded();
   });
 
-  // 书载入后：补建档案、恢复上次章节
+  // 书载入后：补建档案、按存档的精确文本位置（cid+偏移）恢复章节
   createEffect(
     on(book, (current) => {
       if (!current) return;
       ensureShelfEntry(current.id);
       const entry = shelfEntries()[current.id];
+      const target = entry ? resolveReadingTarget(current, entry) : null;
       const max = Math.max(0, current.chapters.length - 1);
-      setChapterIdx(Math.min(max, Math.max(0, entry?.chapter ?? 0)));
+      setChapterIdx(
+        Math.min(max, Math.max(0, target?.chapterIndex ?? entry?.chapter ?? 0)),
+      );
       setPageIdx(0);
+      // 进入章节开头后，等排版/正文就绪再把视口精确滚动到存档文本位置
+      const t = target && target.charOffset > 0 ? target : null;
+      const onCid =
+        t && t.chapterCid === current.chapters[Math.min(t.chapterIndex, max)]?.cid
+          ? { cid: t.chapterCid, char: t.charOffset }
+          : null;
+      setResumeTarget(onCid);
     }),
   );
 
-  // 章节变化 → 持久化阅读进度
-  createEffect(
-    on(chapterIdx, (idx) => {
-      const current = book();
-      if (current) setReadingChapter(current.id, idx);
-    }),
-  );
+  // 恢复目标置位期间定时尝试落地（分页等重排、滚动正文等挂载/图片加载）
+  createEffect(() => {
+    const pending = resumeTarget() !== null;
+    if (pending) {
+      window.clearInterval(resumeTick);
+      resumeTick = window.setInterval(applyResume, 160);
+    } else if (resumeTick !== undefined) {
+      window.clearInterval(resumeTick);
+      resumeTick = undefined;
+    }
+  });
 
   const chapter = createMemo(() => {
     const current = book();
@@ -461,6 +490,9 @@ export default function ReaderPage() {
         setPageIdx(Math.max(0, result.pages.length - 1));
       }
       setPaged(result);
+      // 打开书恢复进度：分页一就绪就立即落位，正文首次渲染即为目标页，
+      // 不用等轮询 tick；(轮询仍保留，兜底排版再次重排等场景)
+      if (resumeTarget() !== null) applyResume();
     })();
   });
 
@@ -484,6 +516,237 @@ export default function ReaderPage() {
     const total = totalPages();
     const idx = pageIdx();
     if (total > 0 && idx >= total) setPageIdx(total - 1);
+  });
+
+  // -------------------------------------------------------------------
+  // 精确进度（文本定位）：阅读位置 ↔ 章节 cid + 章节正文镜像文本字符偏移
+  // 不用页码记录：字号 / 窗口宽度 / 分页结果变化后，同一偏移仍指同一段文字；
+  // 定位不靠“搜索一段可能重复的文字”，因此重复文本不会导致跳错位置。
+  // -------------------------------------------------------------------
+
+  // 分页模式：每页顶部对应的镜像文本偏移（页首行起始字符；整页无文本页取其后首个文本）
+  const pageTopOffsets = createMemo<number[]>(() => {
+    const pg = paged();
+    const mir = mirror();
+    if (!pg || !mir) return [];
+    const out = new Array<number>(pg.pages.length);
+    let cursor = 0;
+    for (let pi = 0; pi < pg.pages.length; pi++) {
+      out[pi] = cursor;
+      for (const f of pg.pages[pi]) {
+        if (f.kind !== "p" && f.kind !== "h") continue;
+        const base = mir.unitStart[f.unit] ?? -1;
+        if (base < 0) continue;
+        const end = base + f.cstart + f.text.length;
+        if (end > cursor) cursor = end;
+      }
+    }
+    return out;
+  });
+
+  /** 立即把挂起的阅读位置落库（去抖超时 / 退出阅读页 / 页面隐藏时调用） */
+  function flushLocation(): void {
+    window.clearTimeout(locationTimer);
+    locationTimer = undefined;
+    const p = locationPending;
+    locationPending = null;
+    const current = book();
+    const ch = chapter();
+    if (!p || !current || !ch || ch.cid !== p.cid) return; // 章节已切换，等待新位置提交
+    updateReadingLocation(current.id, p.ci, p.cid, p.off, p.ctx);
+  }
+
+  /** 记录当前章节镜像文本 offset 处的阅读位置（去抖合并后落库） */
+  function queueLocation(offset: number): void {
+    const ch = chapter();
+    if (!ch) return;
+    const mir = mirror();
+    const clamped = Math.min(Math.max(0, Math.floor(offset) || 0), mir.text.length);
+    locationPending = {
+      ci: chapterIdx(),
+      cid: ch.cid,
+      off: clamped,
+      ctx: progressContextAt(mir.text, clamped),
+    };
+    window.clearTimeout(locationTimer);
+    locationTimer = window.setTimeout(flushLocation, 150);
+  }
+
+  /** 分页模式：翻页 / 重排落定后按“当前页首行字符”记录位置 */
+  createEffect(() => {
+    if (!isPaged()) return;
+    const ch = chapter();
+    const offsets = pageTopOffsets();
+    const pi = pageIdx();
+    if (!ch || offsets.length === 0 || pi < 0 || pi >= offsets.length) return;
+    if (resumeTarget() !== null) return; // 精确恢复落定前不覆盖存档位置
+    queueLocation(offsets[pi]);
+  });
+
+  /** 视口顶部正在阅读的文本 → 镜像偏移（滚动模式，viewport 坐标采样） */
+  function visibleCharAtTop(root: HTMLElement): number | null {
+    const mir = mirror();
+    if (!mir || mir.text.length === 0) return null;
+    const lay = layout();
+    if (!lay) return null;
+    const rect = root.getBoundingClientRect();
+    const lineH = READING_LINE_HEIGHT * lay.fontSize;
+    const d = document as Document & {
+      caretRangeFromPoint?: (x: number, y: number) => Range | null;
+      caretPositionFromPoint?: (
+        x: number,
+        y: number,
+      ) => { offsetNode: Node; offset: number } | null;
+    };
+    const probe = (x: number, y: number): number | null => {
+      const range = d.caretRangeFromPoint?.(x, y) ?? null;
+      let node: Node | null = null;
+      let off = 0;
+      if (range) {
+        node = range.startContainer;
+        off = range.startOffset;
+      } else {
+        const pos = d.caretPositionFromPoint?.(x, y);
+        if (pos) {
+          node = pos.offsetNode;
+          off = pos.offset;
+        }
+      }
+      if (!node) return null;
+      const anchor = dataAnchorOf(node);
+      if (!anchor) return null;
+      const base = mir.unitStart[anchor.unit] ?? -1;
+      if (base < 0) return null;
+      const local = charOffsetInElement(anchor.el, node, off);
+      return Math.min(mir.text.length, base + anchor.cstart + local);
+    };
+    const xs = [
+      rect.left + PAD_X + lay.textWidth * 0.5,
+      rect.left + PAD_X + lay.textWidth * 0.16,
+      rect.left + PAD_X + lay.textWidth * 0.84,
+    ];
+    for (let row = 0; row < 5; row++) {
+      const y = rect.top + topPad() + lineH * (0.35 + row);
+      for (const x of xs) {
+        const g = probe(x, y);
+        if (g !== null) return g;
+      }
+    }
+    return null;
+  }
+
+  /** 滚动模式：把镜像偏移 targetChar 滚动到视口顶部附近（精确恢复用） */
+  function scrollToCharOffset(root: HTMLElement, targetChar: number): boolean {
+    const mir = mirror();
+    const lay = layout();
+    if (!mir || !lay || mir.text.length === 0) return false;
+    const pos = unitAtGlobalOffset(mir, targetChar);
+    if (!pos) {
+      // 存档偏移落在正文末尾边界（无具体字符可挂靠）：滚到底部视为命中，
+      // 避免正文一直保持隐藏等待定位
+      if (targetChar >= mir.text.length) {
+        root.scrollTop = root.scrollHeight;
+        return true;
+      }
+      return false;
+    }
+    const el = root.querySelector<HTMLElement>(`[data-u="${pos.unit}"]`);
+    if (!el) return false;
+    const base = mir.unitStart[pos.unit] ?? -1;
+    if (base < 0) return false;
+    const cstart = Number(el.dataset.c ?? "0") || 0;
+    const local = targetChar - base - cstart;
+    if (local < 0) return false;
+    const pt = charNodeAtOffset(el, local);
+    if (!pt) return false;
+    const lineH = READING_LINE_HEIGHT * lay.fontSize;
+    const cr = root.getBoundingClientRect();
+    try {
+      const range = document.createRange();
+      range.setStart(pt.node, pt.offset);
+      range.collapse(true);
+      const r = range.getBoundingClientRect();
+      if (r && (r.height > 0 || r.width > 0)) {
+        const targetY = cr.top + topPad() + lineH * 0.35;
+        root.scrollTop += r.top - targetY;
+        return true;
+      }
+    } catch {
+      /* 降级为段落对齐 */
+    }
+    el.scrollIntoView({ block: "start" });
+    return true;
+  }
+
+  /** 精确恢复：等章节 / 排版 / 正文就绪后，把视口定位到存档文本位置（仅打开书一次） */
+  function applyResume(): void {
+    const target = resumeTarget();
+    if (!target) return;
+    const current = book();
+    const ch = chapter();
+    if (!current || !ch) return;
+    if (ch.cid !== target.cid) {
+      setResumeTarget(null); // 用户已切到其它章节，放弃自动恢复
+      return;
+    }
+    const mir = mirror();
+    if (mir.text.length === 0) {
+      setResumeTarget(null);
+      return;
+    }
+    if (isPaged()) {
+      const pg = paged();
+      if (!pg) return; // 分页重排中，等下一个 tick
+      const page = pageIndexOfChar(pg.pages, mir, target.char);
+      const next = page < 0 ? pg.pages.length - 1 : page;
+      // 先落到目标页、再解除隐藏：正文首次可见即是恢复位置，不闪章节开头
+      if (next !== pageIdx()) setPageIdx(next);
+      setResumeTarget(null);
+      return;
+    }
+    const root = scrollRef;
+    if (!root) return; // 正文尚未挂载，等下一个 tick
+    if (scrollToCharOffset(root, target.char)) setResumeTarget(null);
+  }
+
+  /** 滚动模式滚动事件：帧节流后按视口顶部文本提交位置 */
+  function onScrollBody(): void {
+    if (scrollFrame) return;
+    scrollFrame = requestAnimationFrame(() => {
+      scrollFrame = 0;
+      if (isPaged() || resumeTarget() !== null) return;
+      const root = scrollRef;
+      if (!root) return;
+      const offset = visibleCharAtTop(root);
+      if (offset !== null) queueLocation(offset);
+    });
+  }
+
+  // 滚动模式：章节刚进入 / 精确恢复落定后提交当前位置（无滚动事件也要记录一次）
+  createEffect(() => {
+    if (isPaged()) return;
+    const ch = chapter();
+    const root = scrollRef;
+    if (!ch || !root) return;
+    if (resumeTarget() !== null) return;
+    void layout();
+    queueLocation(visibleCharAtTop(root) ?? 0);
+  });
+
+  // 退出阅读页 / 页面隐藏时冲刷挂起的精确位置，避免丢最后一段进度
+  onCleanup(() => {
+    window.cancelAnimationFrame(scrollFrame);
+    window.clearInterval(resumeTick);
+    flushLocation();
+  });
+  onMount(() => {
+    const onHide = () => flushLocation();
+    window.addEventListener("pagehide", onHide);
+    window.addEventListener("beforeunload", onHide);
+    onCleanup(() => {
+      window.removeEventListener("pagehide", onHide);
+      window.removeEventListener("beforeunload", onHide);
+    });
   });
 
   const pageFragments = createMemo<PageFragment[]>(() => {
@@ -859,6 +1122,7 @@ export default function ReaderPage() {
                   <div
                     ref={pageAnimRef}
                     class="absolute inset-0 overflow-hidden"
+                    classList={{ invisible: resumeTarget() !== null }}
                     style={{ "touch-action": "none" }}
                   >
                     <div
@@ -902,7 +1166,10 @@ export default function ReaderPage() {
               >
                 {/* 滚动模式：整章上下滚动 */}
                 <div
+                  ref={scrollRef}
+                  onScroll={onScrollBody}
                   class="absolute inset-0 overflow-y-auto overscroll-contain scrollbar-none"
+                  classList={{ invisible: resumeTarget() !== null }}
                   style={{
                     padding: `${topPad()}px ${PAD_X}px ${bottomPadScroll()}px`,
                   }}

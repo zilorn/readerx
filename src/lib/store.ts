@@ -1,7 +1,7 @@
 /**
  * 轻量全局状态（模块级 signal，无额外依赖）：
  * - 主题：light / dark / sepia（护眼）
- * - 书架：记录每本本地书的阅读进度
+ * - 书架：记录每本本地书的阅读进度（章节 cid + 章节正文镜像文本内偏移）
  * - 阅读字号
  * - 段落间距（em，相对正文字号）
  * 持久化统一交给 Rust 后端（readerx.* key），WebView 不落盘。
@@ -27,16 +27,6 @@ export const PARA_SPACING_DEFAULT = 1.05;
 
 function normalizeTheme(value: string | null): ThemeMode | null {
   return value === "dark" || value === "sepia" ? value : value === "light" ? "light" : null;
-}
-
-function systemTheme(): ThemeMode {
-  try {
-    return window.matchMedia?.("(prefers-color-scheme: dark)").matches
-      ? "dark"
-      : "light";
-  } catch {
-    return "light";
-  }
 }
 
 function clampFont(value: number): number {
@@ -65,7 +55,8 @@ export async function initReaderState(): Promise<void> {
     readState<PageMode>(PAGE_MODE_KEY),
   ]);
 
-  const mode = normalizeTheme(storedTheme) ?? systemTheme();
+  // 未保存过偏好时默认护眼(sepia)，不再跟随系统深浅色
+  const mode = normalizeTheme(storedTheme) ?? "sepia";
   setThemeSignal(mode);
   document.documentElement.dataset.theme = mode;
 
@@ -86,7 +77,8 @@ export async function initReaderState(): Promise<void> {
 // ---------------------------------------------------------------------------
 // 主题
 
-const [theme, setThemeSignal] = createSignal<ThemeMode>(systemTheme());
+// 默认护眼(sepia)；initReaderState 加载用户已保存的偏好后覆盖
+const [theme, setThemeSignal] = createSignal<ThemeMode>("sepia");
 let themeWriteQueue: Promise<void> = Promise.resolve();
 
 /** 响应式主题值 */
@@ -110,8 +102,18 @@ export function setTheme(next: ThemeMode): void {
 
 export interface ShelfEntry {
   bookId: string;
-  /** 当前读到的章节索引（0 起） */
+  /** 当前读到的章节索引（0 起；始终与 chapterCid 指向同一章） */
   chapter: number;
+  /** 精确进度：当前章节的稳定 cid（章节身份，不随目录序号变动） */
+  chapterCid?: string;
+  /**
+   * 精确进度：该章节正文镜像文本（p/h 正文按序拼接，不含图片）内的全局字符偏移。
+   * 文本级定位：字号 / 窗口宽度 / 翻页方式都改变它；绝不落页码。
+   * 同一段文字在文中重复出现也不影响定位（定位不靠搜索文字，只靠结构偏移）。
+   */
+  charOffset?: number;
+  /** 定位校验快照：charOffset 处往后的一段原文（≤48 字），内容漂移时作兜底比对 */
+  context?: string;
   /** 最近一次进度更新时间戳 */
   updatedAt: number;
 }
@@ -147,15 +149,31 @@ export function ensureShelfEntry(bookId: string, chapter = 0): void {
   persistShelf();
 }
 
-/** 更新某本书的阅读进度 */
-export function setReadingChapter(bookId: string, chapter: number): void {
+/**
+ * 更新某本书的精确阅读位置（章节 + 该章节正文镜像文本内的字符偏移）。
+ * 阅读页在翻页 / 滚动位置变化时调用；context 为偏移处往后一小段原文快照。
+ */
+export function updateReadingLocation(
+  bookId: string,
+  chapterIndex: number,
+  chapterCid: string,
+  charOffset: number,
+  context: string,
+): void {
+  if (!bookId || !chapterCid) return;
+  const chapter = Math.max(0, Math.floor(chapterIndex) || 0);
+  const offset =
+    Number.isFinite(charOffset) && charOffset > 0 ? Math.max(0, Math.floor(charOffset)) : 0;
   const map = { ...shelfMap() };
-  const entry = map[bookId];
-  if (!entry) {
-    ensureShelfEntry(bookId, chapter);
-    return;
-  }
-  map[bookId] = { ...entry, chapter, updatedAt: Date.now() };
+  const prev = map[bookId] ?? { bookId, chapter, updatedAt: Date.now() };
+  map[bookId] = {
+    ...prev,
+    chapter,
+    chapterCid,
+    charOffset: offset,
+    context: context || undefined,
+    updatedAt: Date.now(),
+  };
   setShelfMap(map);
   persistShelf();
 }
@@ -169,11 +187,11 @@ export function removeShelfEntry(bookId: string): void {
   persistShelf();
 }
 
-/** 重置全部阅读进度（书籍本身保留） */
+/** 重置全部阅读进度（书籍本身保留），清空章节内偏移定位 */
 export function resetReadingProgress(): void {
   const next: Record<string, ShelfEntry> = {};
   for (const entry of Object.values(shelfMap())) {
-    next[entry.bookId] = { ...entry, chapter: 0 };
+    next[entry.bookId] = { bookId: entry.bookId, chapter: 0, updatedAt: Date.now() };
   }
   setShelfMap(next);
   persistShelf();
@@ -182,7 +200,7 @@ export function resetReadingProgress(): void {
 // ---------------------------------------------------------------------------
 // 阅读字号（全局偏好，设置页与阅读页共用）
 
-const [fontSize, setFontSizeSignal] = createSignal<number>(19);
+const [fontSize, setFontSizeSignal] = createSignal<number>(24);
 let fontSizeWriteQueue: Promise<void> = Promise.resolve();
 
 /** 响应式正文字号（px） */
