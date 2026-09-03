@@ -291,7 +291,7 @@ export default function BookshelfPage() {
                 </p>
                 <p class="mb-[18px] mt-0.5 text-[12.5px] leading-[1.6]">
                   {groupId() === "all"
-                    ? "导入 TXT / EPUB，或在发现页连接 TransBook 下载书籍到本地"
+                    ? "导入 TXT / EPUB 到本地书架"
                     : "在管理模式下点开书籍封面左上角，即可将它归入这个分组"}
                 </p>
                 <ImportButton

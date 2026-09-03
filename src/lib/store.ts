@@ -61,7 +61,6 @@ export async function initReaderState(): Promise<void> {
     readState<number>(FONT_KEY),
     readState<number>(PARA_SPACING_KEY),
   ]);
-  await initTransbookConfig();
 
   const mode = normalizeTheme(storedTheme) ?? systemTheme();
   setThemeSignal(mode);
@@ -216,52 +215,4 @@ export function setParaSpacing(value: number): void {
   const next = clampParaSpacing(value);
   setParaSpacingSignal(next);
   persistParaSpacing(next);
-}
-
-// ---------------------------------------------------------------------------
-// TransBook 书源（跨页共享偏好：设置页与发现页实时联动）
-
-const TRANSBOOK_URL_KEY = "readerx.transbookUrl";
-const [transbookUrl, setTransbookUrlSignal] = createSignal<string>("");
-const [transbookUrlReady, setTransbookUrlReady] = createSignal(false);
-let transbookInitialized = false;
-
-/** 归一化用户输入：补协议、去尾部斜杠 */
-export function normalizeTransbookUrl(input: string): string {
-  let value = (input || "").trim();
-  if (!value) return "";
-  if (!/^https?:\/\//i.test(value)) value = `http://${value}`;
-  return value.replace(/\/+$/, "").replace(/\/openapi\.json$/i, "");
-}
-
-/** 响应式 TransBook 服务器地址（已是规范化形式，无尾部斜杠） */
-export function currentTransbookUrl(): string {
-  return transbookUrl();
-}
-
-/** 地址是否已从后端载入（避免首屏误判“未配置”） */
-export function transbookReady(): boolean {
-  return transbookUrlReady();
-}
-
-/** 应用启动时载入已保存地址（幂等） */
-export async function initTransbookConfig(): Promise<void> {
-  if (transbookInitialized) return;
-  transbookInitialized = true;
-  const stored = await readState<string>(TRANSBOOK_URL_KEY);
-  setTransbookUrlSignal(normalizeTransbookUrl(stored ?? ""));
-  setTransbookUrlReady(true);
-}
-
-/** 保存并立即生效；空串等价于清除 */
-export async function saveTransbookUrl(input: string): Promise<void> {
-  const next = normalizeTransbookUrl(input);
-  setTransbookUrlSignal(next);
-  await writeState(TRANSBOOK_URL_KEY, next || null);
-}
-
-/** 清除连接 */
-export async function clearTransbookUrl(): Promise<void> {
-  setTransbookUrlSignal("");
-  await writeState(TRANSBOOK_URL_KEY, null);
 }

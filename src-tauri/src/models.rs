@@ -43,15 +43,4 @@ pub struct LocalBook {
     /// 所属书架分组 id；未分组时为 null
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_id: Option<String>,
-    /// 来自 TransBook 云端下载时的来源引用；用于“重新获取章节”
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cloud_ref: Option<CloudRef>,
-}
-
-/// TransBook 云端下载的来源引用。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CloudRef {
-    pub server_url: String,
-    pub remote_id: String,
 }
