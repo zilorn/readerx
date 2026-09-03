@@ -341,6 +341,29 @@ export function FollowBackIcon(p: SvgIconProps) {
   );
 }
 
+/** 服务器 / WebDAV（双叠机架） */
+export function ServerIcon(p: SvgIconProps) {
+  return (
+    <Icon {...p}>
+      <rect x="2.5" y="3" width="19" height="7" rx="2" />
+      <rect x="2.5" y="14" width="19" height="7" rx="2" />
+      <line x1="6" y1="6.5" x2="6.01" y2="6.5" />
+      <line x1="6" y1="17.5" x2="6.01" y2="17.5" />
+      <line x1="10" y1="6.5" x2="18" y2="6.5" />
+      <line x1="10" y1="17.5" x2="18" y2="17.5" />
+    </Icon>
+  );
+}
+
+/** 云盘（WebDAV 空态 / 目录归属） */
+export function CloudIcon(p: SvgIconProps) {
+  return (
+    <Icon {...p}>
+      <path d="M17.5 19a4.5 4.5 0 0 0 .42-8.98 6 6 0 0 0-11.7 1.45A4 4 0 0 0 6.5 19z" />
+    </Icon>
+  );
+}
+
 /** 书签（丝带）；filled 时实心填充 */
 export function BookmarkIcon(p: SvgIconProps & { filled?: boolean }) {
   if (p.filled) {

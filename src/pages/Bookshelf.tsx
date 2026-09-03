@@ -371,7 +371,7 @@ export default function BookshelfPage() {
               </button>
               <ImportButton
                 class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-                ariaLabel="导入本地书籍"
+                ariaLabel="导入书籍"
               >
                 <PlusIcon />
               </ImportButton>
@@ -418,9 +418,9 @@ export default function BookshelfPage() {
                 </p>
                 <ImportButton
                   class="inline-flex items-center justify-center gap-1.5 rounded-xl bg-accent px-[22px] py-[11px] text-sm font-semibold text-on-accent shadow-lg shadow-accent/30 transition-[scale,opacity] duration-100 active:scale-[0.97] active:opacity-90"
-                  ariaLabel="导入本地书籍"
+                  ariaLabel="导入书籍"
                 >
-                  导入本地书籍
+                  导入书籍
                 </ImportButton>
               </div>
             }
