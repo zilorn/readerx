@@ -1,17 +1,20 @@
 /**
- * 听书播放控制器（原生 TTS / 自定义 HTTP 源 双引擎）。
+ * 听书播放控制器（原生 TTS / 自定义 HTTP 源 双引擎，HTTP 源走 WebAudio）。
  *
  * 职责：
  * - 以「章节镜像偏移」为单位维护当前朗读句（与书签/正文高亮同一套坐标）；
  * - 原生引擎（native）：句子逐句交给系统 TTS，靠 speech:finish 事件切下一句；
  *   暂停 = 停止当前句，继续时从当前句开头重读（系统 TTS 无暂停 API）；
- * - 自定义 HTTP 源（http）：把句子发到用户配置的接口拿音频文件，用 <audio>
- *   播放，可暂停续播到句中位置并缓存预取（见 httpTts.ts / ttsSettings.ts）；
+ * - 自定义 HTTP 源（http）：把句子发到用户配置的接口拿音频字节，用 WebAudio
+ *   decodeAudioData + AudioBufferSourceNode 播放（无 <audio> 标签）；暂停用
+ *   AudioContext.suspend/resume 可精确停在句中位置；倍速用 playbackRate；
  * - 上一句/下一句、暂停/继续、倍速/音色即时生效（重读当前句）；
  *   章节播完自动切下一章（读完整本书），定时（分钟 / 本章结束）自动停止；
+ * - 预热：HTTP 引擎下，阅读页空闲会预热当前章节窗口；也可 warmBook 批量把
+ *   整本书逐句合成进按书籍的磁盘缓存（同书同声源下次直接命中，不再请求）。
  * - 视图章节由外部（阅读页）驱动：外部翻章时调用 noteViewChapter() 跟随。
  *
- * 实例与阅读页同生命周期；dispose() 负责清理监听、计时器、音频与临时地址。
+ * 实例与阅读页同生命周期；dispose() 负责清理监听、计时器与 WebAudio 节点。
  */
 import { createSignal } from "solid-js";
 import type { LocalBookChapter } from "./booksTypes";
@@ -20,10 +23,7 @@ import {
   currentTtsRate,
   currentTtsVoice,
   ensureTtsPrefsLoaded,
-  httpTtsBody,
   httpTtsConfigured,
-  httpTtsMethod,
-  httpTtsUrl,
   setTtsEngine as persistEngine,
   setTtsRate as persistRate,
   setTtsVoice as persistVoice,
@@ -38,7 +38,18 @@ import {
   stopNativeSpeech,
   subscribeNativeSpeechEvents,
 } from "./ttsEngine";
-import { revokeHttpAudio, synthesizeHttpSentence, trackHttpUrl } from "./httpTts";
+import {
+  httpHasRatePlaceholder,
+  httpRequestFingerprint,
+  synthesizeHttpAudio,
+} from "./httpTts";
+import {
+  createSourceNode,
+  decodeAudio,
+  pauseAudioContext,
+  resumeAudioContext,
+  stopSourceNode,
+} from "./webAudio";
 import { buildChapterSpeechItems, type ChapterSpeechItem } from "./ttsSegment";
 
 export type TtsStatus = "stopped" | "loading" | "playing" | "paused" | "error";
@@ -94,13 +105,25 @@ export interface TtsPlayer {
   setTimer: (mode: TtsTimerMode, minutes?: number) => void;
   /** 视图章节变化时调用（阅读页 createEffect(chapterIdx)） */
   noteViewChapter: () => void;
-  /** 停止状态下预热当前章节的后续句子（HTTP 源写盘缓存） */
+  /** 停止状态下预热当前章节窗口（HTTP 源写盘缓存） */
   warmup: () => void;
+  /**
+   * 批量预热整本书（HTTP 源）：逐句合成写进按书籍的缓存。
+   * 播放开始即中止；进度经回调上报。返回处理成功的句数（可能少于总数）。
+   */
+  warmBook: (onProgress?: (done: number, total: number) => void) => Promise<number>;
   dispose: () => void;
 }
 
-/** HTTP 源预取超前句数 */
+/** HTTP 源播放预取超前句数（播放中提前合成） */
 const PREFETCH_DIST = 9;
+/** 批量预热并发数（用户口径：激进、不限速） */
+const WARM_CONCURRENCY = 8;
+
+interface ActiveSource {
+  node: AudioBufferSourceNode;
+  my: number;
+}
 
 export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
   const [status, setStatus] = createSignal<TtsStatus>("stopped");
@@ -128,9 +151,10 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
   let watchdogHandle: number | undefined;
   let listenersReady = false;
   let unlistenEvents: (() => void) | undefined;
-  // ---- HTTP 源（http）状态 ----
-  let audio: HTMLAudioElement | null = null;
-  let audioCache = new Map<string, string>();
+  // ---- HTTP 源（WebAudio）状态 ----
+  let activeSource: ActiveSource | null = null;
+  /** 已取回的音频字节（一句一份，切章/停止时清空） */
+  let audioBytesCache = new Map<string, { mime: string; bytes: Uint8Array }>();
   /** 最近一次失败的真实原因（供 UI 透出，便于无日志环境排查） */
   let lastSynthError: string | null = null;
 
@@ -190,100 +214,43 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
   }
 
   // ------------------------------------------------------------------
-  // HTTP 源（audio 播放）辅助
+  // HTTP 源（WebAudio）辅助
   // ------------------------------------------------------------------
 
-  function stopAudioOnly(): void {
-    if (audio) {
-      audio.onended = null;
-      audio.onerror = null;
-      audio.pause();
-      audio.removeAttribute("src");
-      try {
-        audio.load();
-      } catch {
-        /* ignore */
-      }
+  /** 缓存键：含接口配置（声明了 {$RATE} 时含倍速），源/配置变化后自然失效 */
+  function httpCacheKey(item: ChapterSpeechItem): string {
+    return `${item.unit}#${item.ls}#${item.le}#${httpRequestFingerprint()}`;
+  }
+
+  /** 停掉当前 WebAudio 节点（停止/换句前调用） */
+  function stopActiveSource(): void {
+    if (activeSource) {
+      stopSourceNode(activeSource.node);
+      activeSource = null;
     }
   }
 
-  function clearAudioCache(): void {
-    revokeHttpAudio();
-    audioCache.clear();
-  }
-
-  /** 缓存键：含接口配置，源地址/方法/body 变化后自然失效 */
-  function httpCacheKey(item: ChapterSpeechItem): string {
-    const cfg = httpConfigSignature();
-    return `${item.unit}#${item.ls}#${item.le}#${cfg}`;
-  }
-
-  /** 当前接口配置快照（不含需要动态替换的文本） */
-  function httpConfigSignature(): string {
-    return `${httpTtsMethod()}|${httpTtsUrl()}|${httpTtsBody()}`;
-  }
-
-  async function ensureAudioSrc(item: ChapterSpeechItem, my: number): Promise<string | null> {
+  async function ensureAudioBytes(
+    item: ChapterSpeechItem,
+    my: number,
+  ): Promise<{ mime: string; bytes: Uint8Array } | null> {
     const key = httpCacheKey(item);
-    const hit = audioCache.get(key);
+    const hit = audioBytesCache.get(key);
     if (hit) return hit;
-    let src: string | null = null;
+    let audio: { mime: string; bytes: Uint8Array } | null = null;
     try {
-      src = await synthesizeHttpSentence(item.text, ctx.bookId());
+      audio = await synthesizeHttpAudio(item.text, ctx.bookId());
     } catch (err) {
       lastSynthError = err instanceof Error ? err.message : String(err);
     }
-    if (src === null) return null;
-    // 只有任务未被取代、接口配置未变时才写入缓存
+    if (audio === null) return null;
+    // 任务未被取代、接口配置未变时写入会话内存缓存
     if (my === seq || my === 0) {
       if (httpCacheKey(item) === key) {
-        audioCache.set(key, src);
-        trackHttpUrl(src);
+        audioBytesCache.set(key, audio);
       }
     }
-    return src;
-  }
-
-  function startAudio(src: string, my: number): void {
-    if (pausedRequested) {
-      setStatus("paused");
-      return;
-    }
-    const a = audio ?? (audio = new Audio());
-    a.onended = () => {
-      if (my !== seq || disposed) return;
-      advanceFromCurrent();
-    };
-    a.onerror = () => {
-      if (my !== seq || disposed) return;
-      reportError("音频播放失败");
-    };
-    try {
-      a.src = src;
-    } catch {
-      /* 旧 WebView 对 blob 地址不识别时走错误分支 */
-      a.onerror?.(new Event("error"));
-      return;
-    }
-    a.playbackRate = currentTtsRate();
-    void a.play().then(() => {
-      if (my === seq && !pausedRequested) setStatus("playing");
-    }).catch(() => {
-      if (my === seq) setStatus("paused"); // 自动播放被拦截时保持可点播
-    });
-  }
-
-  /** 为后续句子预取音频（限超前句数，分批并发，避免一次性压垮服务端） */
-  async function prefetchAhead(my: number): Promise<void> {
-    const limit = Math.min(items.length, (focus()?.index ?? 0) + 1 + PREFETCH_DIST);
-    let k = (focus()?.index ?? 0) + 1;
-    while (!disposed && k < limit && my === seq && status() === "playing") {
-      const batch: Promise<unknown>[] = [];
-      for (let n = 0; n < 3 && k < limit && my === seq; n++, k++) {
-        batch.push(ensureAudioSrc(items[k], 0));
-      }
-      if (batch.length > 0) await Promise.all(batch);
-    }
+    return audio;
   }
 
   // ------------------------------------------------------------------
@@ -294,7 +261,7 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
     chapterIdxEngine = chapterIndex;
     const ch = ctx.chapterAt(chapterIndex);
     items = ch ? buildChapterSpeechItems(ch) : [];
-    clearAudioCache();
+    audioBytesCache.clear();
   }
 
   function nearestIndexFor(offset: number | null): number {
@@ -333,7 +300,8 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
   function reportError(msg: string): void {
     pausedRequested = false;
     clearNativeWait();
-    stopAudioOnly();
+    stopActiveSource();
+    void resumeAudioContext().catch(() => {});
     setStatus("error");
     setError(msg);
     ctx.notify?.(msg, true);
@@ -431,22 +399,74 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
     armWatchdog(item.text);
   }
 
-  /** HTTP 源：loading(请求音频) → playing，播完（audio ended）切下一句 */
+  /** HTTP 源：loading(请求/解码) → playing（WebAudio 播完触发 onended 切下一句） */
   async function httpPlayFrom(my: number): Promise<void> {
     const item = items[focus()?.index ?? -1];
     if (!item) return;
     setStatus("loading");
-    const src = await ensureAudioSrc(item, my);
+    const audio = await ensureAudioBytes(item, my);
     if (disposed || my !== seq) return;
-    const ch = ctx.chapterAt(chapterIdxEngine);
-    const cur = focus();
-    if (!ch || !cur || cur.cid !== ch.cid) return;
-    if (!src) {
+    if (!audio) {
       reportError(lastSynthError ?? "语音合成失败，请检查自定义源配置与网络");
       return;
     }
-    startAudio(src, my);
+    if (pausedRequested) {
+      setStatus("paused");
+      return;
+    }
+    let buffer: AudioBuffer;
+    try {
+      buffer = await decodeAudio(audio.bytes);
+    } catch {
+      reportError("音频解码失败：自定义源需返回可解码的音频（mp3 / wav / ogg）");
+      return;
+    }
+    if (disposed || my !== seq) return;
+    if (pausedRequested) {
+      setStatus("paused");
+      return;
+    }
+    const ch = ctx.chapterAt(chapterIdxEngine);
+    const cur = focus();
+    if (!ch || !cur || cur.cid !== ch.cid) return;
+    // 变速不变调交给服务端：地址/body 用了 {$RATE} 时音频已按倍速合成，
+    // 客户端原速播放；未声明 {$RATE} 则退回客户端变速（会有轻微变调）
+    const rate = currentTtsRate();
+    const playRate = httpHasRatePlaceholder() ? 1 : rate;
+    if (disposed || my !== seq) return;
+    stopActiveSource();
+    await resumeAudioContext().catch(() => {});
+    if (disposed || my !== seq) return;
+    const node = createSourceNode(buffer, playRate);
+    activeSource = { node, my };
+    node.onended = () => {
+      if (activeSource?.node === node && activeSource.my === my && my === seq) {
+        activeSource = null;
+        advanceFromCurrent();
+      }
+    };
+    try {
+      node.start();
+    } catch {
+      stopActiveSource();
+      reportError("音频播放失败");
+      return;
+    }
+    setStatus("playing");
     prefetchAhead(my);
+  }
+
+  /** 为后续句子预取音频（限超前句数，分批并发，避免一次性压垮服务端） */
+  async function prefetchAhead(my: number): Promise<void> {
+    const limit = Math.min(items.length, (focus()?.index ?? 0) + 1 + PREFETCH_DIST);
+    let k = (focus()?.index ?? 0) + 1;
+    while (!disposed && k < limit && my === seq && status() === "playing") {
+      const batch: Promise<unknown>[] = [];
+      for (let n = 0; n < 3 && k < limit && my === seq; n++, k++) {
+        batch.push(ensureAudioBytes(items[k], 0).catch(() => null));
+      }
+      if (batch.length > 0) await Promise.all(batch);
+    }
   }
 
   /** 跨章跳转（引擎主动切章）。落章后由 noteViewChapter() 续播 */
@@ -457,7 +477,7 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
     void bump();
     pausedRequested = false;
     clearNativeWait();
-    stopAudioOnly();
+    stopActiveSource();
     void stopNativeSpeech();
     ctx.navigateChapter(target);
     // 立即同步（阅读页的 chapterIdx 已更新；重复调用会被幂等拦截）
@@ -476,7 +496,8 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
     // 先停掉旧章节仍在读的句子，避免新章开始前的空窗继续出声
     if (nativeWaiting || status() === "playing" || status() === "loading") {
       clearNativeWait();
-      stopAudioOnly();
+      stopActiveSource();
+      void resumeAudioContext().catch(() => {});
       void stopNativeSpeech();
     }
     loadItems(vi);
@@ -542,9 +563,10 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
     void bump();
     pausedRequested = false;
     clearNativeWait();
-    stopAudioOnly();
+    stopActiveSource();
+    void resumeAudioContext().catch(() => {});
     void stopNativeSpeech();
-    clearAudioCache();
+    audioBytesCache.clear();
     items = [];
     chapterIdxEngine = ctx.chapterIndex();
     pendingAutoNav = -1;
@@ -570,21 +592,16 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
         startFromView();
         return;
       }
-      if (status() === "paused" && !isNativeMode()) {
-        // HTTP 源：能续播（未播完）则从中途继续，否则重播当前句
-        const a = audio;
+      if (status() === "paused" && !isNativeMode() && activeSource) {
+        // HTTP 源：WebAudio suspend 暂停，可直接从句中位置续播
         pausedRequested = false;
-        if (a && a.src && !a.ended && a.currentTime > 0 && (!a.duration || a.currentTime < a.duration)) {
-          setError(null);
-          setStatus("playing");
-          void a
-            .play()
-            .then(() => setStatus("playing"))
-            .catch(() => setStatus("paused"));
-          return;
-        }
+        setError(null);
+        void resumeAudioContext()
+          .then(() => setStatus("playing"))
+          .catch(() => setStatus("paused"));
+        return;
       }
-      // 原生引擎没有暂停：继续 = 从当前句开头重读
+      // 原生引擎（无暂停）或暂停发生在解码前：从当前句开头重读
       setError(null);
       void playFrom(f.index);
       return;
@@ -596,7 +613,7 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
       clearNativeWait();
       void stopNativeSpeech();
     } else {
-      stopAudioOnly();
+      void pauseAudioContext();
     }
     setStatus("paused");
   }
@@ -644,7 +661,8 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
     void bump(); // 让正在进行的旧朗读作废
     pausedRequested = stayPaused;
     clearNativeWait();
-    stopAudioOnly();
+    stopActiveSource();
+    void resumeAudioContext().catch(() => {});
     void stopNativeSpeech();
     setError(null);
     const f = focus();
@@ -667,7 +685,7 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
   function setEngine(engine: TtsEngine): void {
     if (engine === currentTtsEngine()) return;
     persistEngine(engine);
-    clearAudioCache(); // http 接口产物只属于 http 引擎
+    audioBytesCache.clear(); // http 接口产物只属于 http 引擎
     applySettingChange();
   }
 
@@ -703,7 +721,11 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
     }
   }
 
-  /** 预热：停止状态下把阅读位置往后的若干句合成为音频并写进按书籍的磁盘缓存 */
+  // ------------------------------------------------------------------
+  // 预热
+  // ------------------------------------------------------------------
+
+  /** 预热当前章节窗口：停止状态下把阅读位置往后的若干句合成为音频并写进缓存 */
   function warmup(): void {
     if (disposed || status() !== "stopped") return;
     if (currentTtsEngine() !== "http" || !httpTtsConfigured()) return;
@@ -718,20 +740,71 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
       while (!disposed && k < end && status() === "stopped") {
         const group: Promise<unknown>[] = [];
         for (let n = 0; n < 3 && k < end && status() === "stopped"; n++, k++) {
-          group.push(ensureAudioSrc(items[k], 0).catch(() => null));
+          group.push(ensureAudioBytes(items[k], 0).catch(() => null));
         }
         if (group.length > 0) await Promise.all(group);
       }
     })();
   }
 
+  /**
+   * 批量预热整本书：从第 0 章到最后一章逐句合成写进按书籍的缓存。
+   * 仅 HTTP 源可用；一旦开始播放立即中止。返回成功处理（含命中缓存）的句数。
+   */
+  async function warmBook(onProgress?: (done: number, total: number) => void): Promise<number> {
+    if (disposed || currentTtsEngine() !== "http" || !httpTtsConfigured()) return 0;
+    const bookId = ctx.bookId();
+    const chapterCount = ctx.chapterCount();
+    // 预扫描总句数（同时校验无内容章节的边界）
+    let total = 0;
+    const plan: string[] = [];
+    for (let ci = 0; ci < chapterCount; ci++) {
+      const ch = ctx.chapterAt(ci);
+      if (!ch) continue;
+      const itemsIn = buildChapterSpeechItems(ch);
+      for (const s of itemsIn) {
+        if (s.text.trim()) {
+          plan.push(s.text);
+        }
+      }
+    }
+    total = plan.length;
+    if (total === 0) return 0;
+    onProgress?.(0, total);
+
+    let done = 0;
+    const CHUNK = WARM_CONCURRENCY;
+    const queue = [...plan];
+    // 一个句子一把：synthesizeHttpAudio 内部先查磁盘缓存，命中即瞬间返回
+    const worker = async (): Promise<void> => {
+      while (!disposed && queue.length > 0 && status() === "stopped") {
+        const text = queue.shift();
+        if (text === undefined) return;
+        try {
+          await synthesizeHttpAudio(text, bookId);
+        } catch {
+          /* 单句失败不中断整本预热 */
+        }
+        done += 1;
+        onProgress?.(done, total);
+      }
+    };
+    const workers: Promise<void>[] = [];
+    for (let i = 0; i < CHUNK && status() === "stopped"; i++) {
+      workers.push(worker());
+    }
+    await Promise.all(workers);
+    return done;
+  }
+
   function dispose(): void {
     disposed = true;
     clearTimerHandle();
     clearNativeWait();
-    stopAudioOnly();
+    stopActiveSource();
+    void resumeAudioContext().catch(() => {});
     void stopNativeSpeech();
-    clearAudioCache();
+    audioBytesCache.clear();
     unlistenEvents?.();
     unlistenEvents = undefined;
   }
@@ -765,6 +838,7 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
     setTimer,
     noteViewChapter,
     warmup,
+    warmBook,
     dispose,
   };
 }

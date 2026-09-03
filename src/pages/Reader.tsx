@@ -523,6 +523,18 @@ export default function ReaderPage() {
     notify: (message, isError) => showToast(message, !!isError),
   });
   const [ttsSettingsOpen, setTtsSettingsOpen] = createSignal(false);
+  const [prewarmText, setPrewarmText] = createSignal<string | null>(null);
+
+  /** 批量预热整本书（HTTP 源）：逐句合成写入按书籍的磁盘缓存 */
+  async function runPrewarmBook(): Promise<void> {
+    if (prewarmText() !== null) return; // 已在预热
+    setPrewarmText("准备中…");
+    const done = await ttsPlayer.warmBook((d, total) => {
+      setPrewarmText(`${d} / ${total}`);
+    });
+    setPrewarmText(null);
+    if (done > 0) showToast(`预热完成：${done} 句已写入缓存`);
+  }
 
   // 预热：HTTP 自定义源下，停止状态时把当前章节后续句子合成进按书籍的缓存，
   // 之后播放/下次同声源直接命中缓存，不再请求服务端
@@ -1605,6 +1617,8 @@ export default function ReaderPage() {
               onRate={(rate) => ttsPlayer.setRate(rate)}
               onVoice={(voiceId) => ttsPlayer.setVoice(voiceId)}
               onTimer={(mode, minutes) => ttsPlayer.setTimer(mode, minutes)}
+              prewarmText={prewarmText}
+              onPrewarmBook={() => void runPrewarmBook()}
               onStop={() => ttsPlayer.stop()}
               onClose={() => setTtsSettingsOpen(false)}
             />

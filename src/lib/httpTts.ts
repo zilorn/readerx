@@ -6,6 +6,8 @@
  * - 默认对该文本做一次 URL 编码（encodeURIComponent）；
  *   可在占位里带参数关闭或叠加：`{$TEXT?URLencoding=0}` 不编码、
  *   `{$TEXT?URLencoding=2}` 编码两次，数字可任意（N=编码 N 次）；
+ * - `{$RATE}` 占位会被替换成当前倍速数值，由服务端自行实现「变速不变调」；
+ *   声明了 {$RATE} 的请求指纹含倍速（不同倍速缓存不同的音频），客户端原速播放；
  * - 地址与 body 中都可使用占位，按各自出现的占位规则独立替换；
  * - 服务端应直接返回音频字节（mp3/wav 等）；POST 的 body 内容类型按
  *   模板启发式判断：以 `{` 或 `[` 开头视为 JSON，其余按表单编码。
@@ -15,11 +17,12 @@
  *   同书同声源下次直接读缓存，不再请求服务端；
  * - 播放/预取都会走这里，播放时天然把后续句子预热进缓存（ttsPlayer.ts）。
  *
- * 本模块只负责“文本 → 音频地址”，逐句播放/缓存/暂停由 ttsPlayer.ts 处理。
+ * 本模块只负责“文本 → 音频字节”，WebAudio 解码/播放由 ttsPlayer/webAudio 处理。
  */
 import { isTauri } from "@tauri-apps/api/core";
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 import {
+  currentTtsRate,
   httpTtsBody,
   httpTtsMethod,
   httpTtsUrl,
@@ -28,6 +31,16 @@ import {
 import { readTtsAudioCache, writeTtsAudioCache } from "./audioCache";
 
 const MARKER = /\{\$TEXT(?:\?\s*URLencoding=(\d+))?\}/g;
+const RATE_MARKER = /\{\$RATE(?:\?\s*URLencoding=(\d+))?\}/g;
+/** 非全局副本用于探测占位是否存在（避免 /g 的 lastIndex 状态） */
+const HAS_RATE = /\{\$RATE(?:\?\s*URLencoding=\d+)?\}/;
+
+export interface SynthesizedAudio {
+  /** 音频 MIME（audio/mpeg / audio/wav / audio/ogg …） */
+  mime: string;
+  /** 音频原始字节 */
+  bytes: Uint8Array;
+}
 
 /** Tauri 内走 Rust 侧请求（无 CORS 限制），纯浏览器回退 window.fetch */
 function httpFetch(url: string, init?: RequestInit): Promise<Response> {
@@ -44,12 +57,18 @@ function encodeText(text: string, times: number | undefined): string {
   return out;
 }
 
-/** 在 url / body 中逐个替换 {$TEXT...} 占位 */
-function applyPlaceholders(template: string, text: string): string {
-  return template.replace(MARKER, (_full, timesRaw?: string) => {
+/** 在 url / body 中逐个替换 {$TEXT...} 与 {$RATE...} 占位 */
+function applyPlaceholders(template: string, text: string, rate: number): string {
+  let out = template.replace(MARKER, (_full, timesRaw?: string) => {
     const times = timesRaw === undefined ? undefined : Number(timesRaw);
     return encodeText(text, times);
   });
+  out = out.replace(RATE_MARKER, (_full, timesRaw?: string) => {
+    const times = timesRaw === undefined ? undefined : Number(timesRaw);
+    // 倍速交给服务端处理（变速不变调）；数值本身无需编码，带参时按规则处理
+    return encodeText(String(rate), times);
+  });
+  return out;
 }
 
 function describeError(err: unknown): string {
@@ -64,18 +83,28 @@ function guessContentType(bodyTemplate: string): string {
   return "application/x-www-form-urlencoded; charset=UTF-8";
 }
 
-// ---------------------------------------------------------------------------
-// 音频缓存相关
-// ---------------------------------------------------------------------------
+/** 是否在地址/body 里声明了 {$RATE}（有则倍速由服务端负责，客户端原速播放） */
+export function httpHasRatePlaceholder(): boolean {
+  return HAS_RATE.test(httpTtsUrl()) || HAS_RATE.test(httpTtsBody());
+}
 
 /** 当前声源指纹（方法 + 地址 + body，不含句子文本） */
 export function httpSourceSignature(): string {
   return `${httpTtsMethod()}|${httpTtsUrl()}|${httpTtsBody()}`;
 }
 
-/** 句子缓存 key：声源指纹 + 句子文本的 SHA-256 摘要（64 位 hex 前缀） */
-async function sentenceCacheKey(text: string): Promise<string> {
+/**
+ * 请求指纹：声明了 {$RATE} 时，倍速不同 → 服务端音频不同，故把倍速并入指纹；
+ * 未声明时倍速只影响客户端播放，合成产物相同，指纹不带倍速。
+ */
+export function httpRequestFingerprint(): string {
   const sig = httpSourceSignature();
+  return httpHasRatePlaceholder() ? `${sig}\u0000rate=${currentTtsRate()}` : sig;
+}
+
+/** 句子缓存 key：声源/请求指纹 + 句子文本的 SHA-256 摘要（64 位 hex 前缀） */
+export async function sentenceCacheKey(text: string): Promise<string> {
+  const sig = httpRequestFingerprint();
   const data = new TextEncoder().encode(`${sig}\u0000${text}`);
   const digest = await crypto.subtle.digest("SHA-256", data);
   const bytes = new Uint8Array(digest);
@@ -102,17 +131,12 @@ function base64ToBytes(base64: string): Uint8Array<ArrayBuffer> {
   return bytes;
 }
 
-// ---------------------------------------------------------------------------
-// 合成
-// ---------------------------------------------------------------------------
-
 /**
- * 请求一次自定义源（优先读本机缓存），把当前句文本合成为一段音频。
+ * 请求一次自定义源（优先读本机缓存），把当前句文本合成为音频字节。
  * @param text   当前朗读句
  * @param bookId 书籍 id（用于按书籍缓存；空串/纯浏览器环境跳过磁盘缓存）
- * @returns      可播放的 blob URL（由 revokeHttpAudio 统一回收）
  */
-export async function synthesizeHttpSentence(text: string, bookId?: string): Promise<string> {
+export async function synthesizeHttpAudio(text: string, bookId?: string): Promise<SynthesizedAudio> {
   const method: HttpTtsMethod = httpTtsMethod();
   const urlTemplate = httpTtsUrl();
   if (!urlTemplate.trim()) {
@@ -120,22 +144,22 @@ export async function synthesizeHttpSentence(text: string, bookId?: string): Pro
   }
   if (!text.trim()) throw new Error("没有可朗读的文本");
 
-  // 1) 磁盘缓存命中 → 直接播放，不再请求服务端
+  // 1) 磁盘缓存命中 → 直接用缓存字节，不再请求服务端
   const book = bookId ?? "";
   let key = "";
   if (book) {
     key = await sentenceCacheKey(text);
     const hit = await readTtsAudioCache(book, key);
     if (hit && hit.data) {
-      const mime = hit.mime || "audio/mpeg";
-      return URL.createObjectURL(new Blob([base64ToBytes(hit.data)], { type: mime }));
+      return { mime: hit.mime || "audio/mpeg", bytes: base64ToBytes(hit.data) };
     }
   }
 
   // 2) 请求服务端合成
-  const url = applyPlaceholders(urlTemplate, text);
+  const rate = currentTtsRate();
+  const url = applyPlaceholders(urlTemplate, text, rate);
   const bodyTemplate = httpTtsBody();
-  const body = applyPlaceholders(bodyTemplate, text);
+  const body = applyPlaceholders(bodyTemplate, text, rate);
 
   let res: Response;
   try {
@@ -170,25 +194,13 @@ export async function synthesizeHttpSentence(text: string, bookId?: string): Pro
     throw new Error("自定义源返回了空音频");
   }
   const mime = ct || "audio/mpeg";
+  const bytes = new Uint8Array(buf);
 
   // 3) 写盘预热（失败不影响本次播放，等下一句自然覆盖）
   if (book && key) {
-    const bytes = new Uint8Array(buf);
     const data64 = bytesToBase64(bytes);
     void writeTtsAudioCache(book, key, data64, mime);
   }
 
-  return URL.createObjectURL(new Blob([buf], { type: mime }));
-}
-
-/** 回收由本模块创建的临时音频地址（停止/换源/销毁时调用） */
-const createdUrls = new Set<string>();
-export function trackHttpUrl(url: string): void {
-  if (url.startsWith("blob:")) createdUrls.add(url);
-}
-export function revokeHttpAudio(): void {
-  for (const u of createdUrls) {
-    URL.revokeObjectURL(u);
-  }
-  createdUrls.clear();
+  return { mime, bytes };
 }

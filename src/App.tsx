@@ -16,6 +16,7 @@ const BookshelfPage = lazy(() => import("./pages/Bookshelf"));
 const DiscoverPage = lazy(() => import("./pages/Discover"));
 const SettingsPage = lazy(() => import("./pages/Settings"));
 const ChapterRulesPage = lazy(() => import("./pages/ChapterRules"));
+const TtsCachePage = lazy(() => import("./pages/TtsCache"));
 const ReaderPage = lazy(() => import("./pages/Reader"));
 const NotFoundPage = lazy(() => import("./pages/NotFound"));
 
@@ -88,6 +89,7 @@ function App() {
       <Route path="/discover" component={DiscoverPage} />
       <Route path="/settings" component={SettingsPage} />
       <Route path="/chapter-rules" component={ChapterRulesPage} />
+      <Route path="/tts-cache" component={TtsCachePage} />
       <Route path="/book/:id" component={ReaderPage} />
       <Route path="*404" component={NotFoundPage} />
     </Router>

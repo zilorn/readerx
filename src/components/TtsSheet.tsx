@@ -38,6 +38,9 @@ export interface TtsSheetProps {
   onRate: (rate: number) => void;
   onVoice: (voiceId: string) => void;
   onTimer: (mode: TtsTimerMode, minutes?: number) => void;
+  /** 批量预热状态文案（预热中显示进度；null 表示空闲） */
+  prewarmText: () => string | null;
+  onPrewarmBook: () => void;
   onStop: () => void;
   onClose: () => void;
 }
@@ -249,7 +252,7 @@ export function TtsSheet(props: TtsSheetProps) {
               <input
                 class={inputBase}
                 spellcheck={false}
-                placeholder="http://127.0.0.1:8000/tts?text={$TEXT}"
+                placeholder="http://127.0.0.1:8000/tts?text={$TEXT}&rate={$RATE}"
                 value={httpTtsUrl()}
                 onInput={(e) => setHttpTtsUrl(e.currentTarget.value)}
               />
@@ -262,6 +265,18 @@ export function TtsSheet(props: TtsSheetProps) {
                   onInput={(e) => setHttpTtsBody(e.currentTarget.value)}
                 />
               </Show>
+            </div>
+            <div class="px-3 pb-2">
+              <button
+                class="flex w-full cursor-pointer items-center justify-center gap-1.5 rounded-lg border border-accent/40 bg-accent-weak py-2 text-[12.5px] font-semibold text-accent transition-[scale] duration-100 active:scale-[0.98] disabled:cursor-default disabled:opacity-60"
+                disabled={props.prewarmText() !== null}
+                aria-label="批量预热整本书"
+                onClick={props.onPrewarmBook}
+              >
+                {props.prewarmText() === null
+                  ? "批量预热整本书（写入按书籍缓存）"
+                  : `预热中 ${props.prewarmText()}`}
+              </button>
             </div>
             <div class="px-3 pb-4 pt-1">
               <div class="rounded-lg border border-border bg-surface-2 px-3 py-2 text-[11.5px] leading-relaxed text-text-3">
@@ -279,13 +294,21 @@ export function TtsSheet(props: TtsSheetProps) {
                   <li class="leading-snug">
                     <span class="mr-1 text-text-3">→</span>编码两次（数字可任意）
                   </li>
+                  {helpLine("{$RATE}")}
+                  <li class="leading-snug">
+                    <span class="mr-1 text-text-3">→</span>当前倍速数值（1 / 1.5 / 2 …），由服务端变速不变调
+                  </li>
+                  <li class="leading-snug">
+                    <span class="mr-1 text-text-3">·</span>
+                    地址里用了 {`{$RATE}`} 时客户端原速播放；没声明则退回客户端变速（可能有变调）
+                  </li>
                   <li class="leading-snug">
                     <span class="mr-1 text-text-3">·</span>
                     POST 的 body 以 {`{`} 或 {`[`} 开头按 JSON 发送，否则按表单编码
                   </li>
                   <li class="leading-snug">
                     <span class="mr-1 text-text-3">·</span>
-                    服务端应返回音频字节（mp3 / wav / ogg），倍速由客户端播放实现
+                    服务端返回音频字节（mp3 / wav / ogg）
                   </li>
                   <li class="leading-snug">
                     <span class="mr-1 text-text-3">·</span>
