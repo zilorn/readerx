@@ -20,6 +20,7 @@ import {
   ChevronLeftIcon,
   ChevronRightIcon,
   CloseIcon,
+  FollowBackIcon,
   HeadphonesIcon,
   ListIcon,
 } from "../components/icons";
@@ -525,6 +526,35 @@ export default function ReaderPage() {
   const [ttsSettingsOpen, setTtsSettingsOpen] = createSignal(false);
   const [prewarmText, setPrewarmText] = createSignal<string | null>(null);
 
+  // -------------------------------------------------------------------
+  // 跟读跟随：语音激活期间视图默认跟随朗读句自动翻页/滚动（避免读到屏幕外）。
+  // 用户手动翻页 / 滚动 / 切章会解除跟随（语音继续朗读，页面停在手动位置），
+  // 呼出菜单后可通过底栏上方的「返回跟读」把视图跳回当前朗读句并恢复跟随。
+  // -------------------------------------------------------------------
+  const [followEnabled, setFollowEnabled] = createSignal(true);
+  /** 程序化定位引发的滚动窗口：此期间内的 scroll 事件不算用户手动滚动 */
+  let suppressFollowCancelUntil = 0;
+
+  const ttsActive = (): boolean => ttsPlayer.status() !== "stopped";
+
+  /** 用户手动翻页/滚动/切章时调用：解除“视图跟随朗读句”，语音不受影响 */
+  function cancelFollowIfActive(): void {
+    if (followEnabled() && ttsActive()) setFollowEnabled(false);
+  }
+
+  /** 「返回跟读」：恢复跟随，并把视图跳回当前正在朗读的句子 */
+  function resumeFollow(): void {
+    if (!ttsActive()) return;
+    setFollowEnabled(true);
+    const f = ttsPlayer.focus();
+    if (f && f.cid === chapter()?.cid) ensureSpeakVisible(f);
+  }
+
+  // 朗读停止（手动停止 / 整本读完）后复位跟随，保证下一次朗读默认从跟读开始
+  createEffect(() => {
+    if (ttsPlayer.status() === "stopped") setFollowEnabled(true);
+  });
+
   /** 批量预热整本书（HTTP 源）：逐句合成写入按书籍的磁盘缓存 */
   async function runPrewarmBook(): Promise<void> {
     if (prewarmText() !== null) return; // 已在预热
@@ -590,11 +620,13 @@ export default function ReaderPage() {
     return scrollToCharOffset(root, f.item.start);
   }
 
-  // 听书激活期间跟随当前朗读句（自动翻页/滚动），避免读到屏幕外
+  // 听书激活期间跟随当前朗读句（自动翻页/滚动），避免读到屏幕外；
+  // 用户手动翻页/滚动/切章会先取消跟随（cancelFollowIfActive），此后不再自动跳页
   let ttsFollowTimer: number | undefined;
   createEffect(() => {
     window.clearInterval(ttsFollowTimer);
     ttsFollowTimer = undefined;
+    if (!followEnabled()) return;
     const f = ttsPlayer.focus();
     if (!f || ttsPlayer.status() === "stopped" || f.cid !== chapter()?.cid) return;
     const step = (): void => {
@@ -816,6 +848,7 @@ export default function ReaderPage() {
       // 存档偏移落在正文末尾边界（无具体字符可挂靠）：滚到底部视为命中，
       // 避免正文一直保持隐藏等待定位
       if (targetChar >= mir.text.length) {
+        suppressFollowCancelUntil = performance.now() + 250;
         root.scrollTop = root.scrollHeight;
         return true;
       }
@@ -839,12 +872,14 @@ export default function ReaderPage() {
       const r = range.getBoundingClientRect();
       if (r && (r.height > 0 || r.width > 0)) {
         const targetY = cr.top + topPad() + lineH * 0.35;
+        suppressFollowCancelUntil = performance.now() + 250;
         root.scrollTop += r.top - targetY;
         return true;
       }
     } catch {
       /* 降级为段落对齐 */
     }
+    suppressFollowCancelUntil = performance.now() + 250;
     el.scrollIntoView({ block: "start" });
     return true;
   }
@@ -880,14 +915,24 @@ export default function ReaderPage() {
     if (scrollToCharOffset(root, target.char)) setResumeTarget(null);
   }
 
-  /** 滚动模式滚动事件：帧节流后按视口顶部文本提交位置 */
-  function onScrollBody(): void {
+  /** 滚动模式滚动事件：帧节流后按视口顶部文本提交位置；
+      用户手动滚动（浏览器原生 scroll 事件）同时解除跟读跟随 */
+  function onScrollBody(e: Event): void {
     if (scrollFrame) return;
+    const userScrolled = e.isTrusted === true;
     scrollFrame = requestAnimationFrame(() => {
       scrollFrame = 0;
       if (isPaged() || resumeTarget() !== null) return;
       const root = scrollRef;
       if (!root) return;
+      if (
+        userScrolled &&
+        followEnabled() &&
+        ttsActive() &&
+        performance.now() >= suppressFollowCancelUntil
+      ) {
+        setFollowEnabled(false);
+      }
       const offset = visibleCharAtTop(root);
       if (offset !== null) queueLocation(offset);
     });
@@ -944,6 +989,7 @@ export default function ReaderPage() {
 
   function jumpFromToc(idx: number): void {
     goToChapter(idx);
+    cancelFollowIfActive();
     setTocOpen(false);
     setMenuOpen(false);
   }
@@ -956,21 +1002,25 @@ export default function ReaderPage() {
     if (dir > 0) {
       if (idx + 1 < total) {
         setPageIdx(idx + 1);
+        cancelFollowIfActive();
         return true;
       }
       if (!isLastChapter()) {
         goToChapter(chapterIdx() + 1);
+        cancelFollowIfActive();
         return true;
       }
       return false;
     }
     if (idx > 0) {
       setPageIdx(idx - 1);
+      cancelFollowIfActive();
       return true;
     }
     if (!isFirstChapter()) {
       wantLastPage = true;
       goToChapter(chapterIdx() - 1);
+      cancelFollowIfActive();
       return true;
     }
     return false;
@@ -1444,7 +1494,7 @@ export default function ReaderPage() {
               style={{ "pointer-events": menuOpen() ? "auto" : "none" }}
               aria-hidden={!menuOpen()}
             >
-              {/* 听书悬浮球：停靠在底部菜单栏上方 */}
+              {/* 听书悬浮球 + 返回跟读：停靠在底部菜单栏上方 */}
               <Show
                 when={
                   ttsPlayer.status() !== "stopped" &&
@@ -1452,17 +1502,30 @@ export default function ReaderPage() {
                   !bmPanelOpen()
                 }
               >
-                <div class="flex justify-end px-3 pb-1.5 pt-2">
-                  <TtsBubble
-                    status={ttsPlayer.status}
-                    rate={ttsPlayer.rate}
-                    voiceLabel={() => ttsPlayer.voiceName()}
-                    error={ttsPlayer.error}
-                    onPrev={() => ttsPlayer.prev()}
-                    onNext={() => ttsPlayer.next()}
-                    onToggle={() => ttsPlayer.togglePlay()}
-                    onOpenSettings={() => setTtsSettingsOpen(true)}
-                  />
+                <div class="flex items-center gap-2 px-3 pb-1.5 pt-2">
+                  <Show when={!followEnabled()}>
+                    <button
+                      data-reader-ui
+                      class="flex flex-none cursor-pointer items-center gap-1.5 rounded-full border border-accent/50 bg-accent-weak py-[7px] pl-3 pr-3.5 text-[12px] font-semibold text-accent transition-[scale] duration-100 active:scale-[0.96]"
+                      aria-label="返回跟读"
+                      onClick={resumeFollow}
+                    >
+                      <FollowBackIcon size={15} />
+                      返回跟读
+                    </button>
+                  </Show>
+                  <div class="flex min-w-0 flex-1 justify-end">
+                    <TtsBubble
+                      status={ttsPlayer.status}
+                      rate={ttsPlayer.rate}
+                      voiceLabel={() => ttsPlayer.voiceName()}
+                      error={ttsPlayer.error}
+                      onPrev={() => ttsPlayer.prev()}
+                      onNext={() => ttsPlayer.next()}
+                      onToggle={() => ttsPlayer.togglePlay()}
+                      onOpenSettings={() => setTtsSettingsOpen(true)}
+                    />
+                  </div>
                 </div>
               </Show>
               <footer
@@ -1482,6 +1545,7 @@ export default function ReaderPage() {
                     } else if (!isFirstChapter()) {
                       setChapterIdx((c) => c - 1);
                     }
+                    cancelFollowIfActive();
                   }}
                 >
                   <ChevronLeftIcon size={16} />
@@ -1508,6 +1572,7 @@ export default function ReaderPage() {
                     } else if (!isLastChapter()) {
                       setChapterIdx((c) => c + 1);
                     }
+                    cancelFollowIfActive();
                   }}
                 >
                   下一章

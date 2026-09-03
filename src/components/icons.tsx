@@ -330,6 +330,17 @@ export function TimerIcon(p: SvgIconProps) {
   );
 }
 
+/** 定位朗读句（返回跟读）：四向准星 + 中心点 */
+export function FollowBackIcon(p: SvgIconProps) {
+  return (
+    <Icon {...p}>
+      <circle cx="12" cy="12" r="6.5" />
+      <path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3" />
+      <circle cx="12" cy="12" r="1.3" fill="currentColor" stroke="none" />
+    </Icon>
+  );
+}
+
 /** 书签（丝带）；filled 时实心填充 */
 export function BookmarkIcon(p: SvgIconProps & { filled?: boolean }) {
   if (p.filled) {

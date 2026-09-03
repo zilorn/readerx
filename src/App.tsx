@@ -13,6 +13,7 @@ import { currentToast } from "./lib/toast";
 
 // ---- 路由页面全部走代码分割 + 懒加载（配合 Suspense） ----
 const BookshelfPage = lazy(() => import("./pages/Bookshelf"));
+const ShelfSearchPage = lazy(() => import("./pages/ShelfSearch"));
 const DiscoverPage = lazy(() => import("./pages/Discover"));
 const SettingsPage = lazy(() => import("./pages/Settings"));
 const ChapterRulesPage = lazy(() => import("./pages/ChapterRules"));
@@ -86,6 +87,7 @@ function App() {
   return (
     <Router root={AppShell}>
       <Route path="/" component={BookshelfPage} />
+      <Route path="/shelf-search" component={ShelfSearchPage} />
       <Route path="/discover" component={DiscoverPage} />
       <Route path="/settings" component={SettingsPage} />
       <Route path="/chapter-rules" component={ChapterRulesPage} />

@@ -18,6 +18,7 @@ import {
   FolderIcon,
   LibraryIcon,
   PlusIcon,
+  SearchIcon,
   TrashIcon,
 } from "../components/icons";
 import {
@@ -360,12 +361,21 @@ export default function BookshelfPage() {
               <CloseIcon />
             </button>
           ) : (
-            <ImportButton
-              class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-              ariaLabel="导入本地书籍"
-            >
-              <PlusIcon />
-            </ImportButton>
+            <div class="flex flex-none items-center gap-1">
+              <button
+                class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
+                aria-label="搜索书架书籍"
+                onClick={() => navigate("/shelf-search")}
+              >
+                <SearchIcon />
+              </button>
+              <ImportButton
+                class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
+                ariaLabel="导入本地书籍"
+              >
+                <PlusIcon />
+              </ImportButton>
+            </div>
           )
         }
       >
