@@ -205,6 +205,15 @@ export function LinkIcon(p: SvgIconProps) {
   );
 }
 
+/** GitHub（猫头剪影） */
+export function GitHubIcon(p: SvgIconProps) {
+  return (
+    <Icon {...p}>
+      <path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22" />
+    </Icon>
+  );
+}
+
 /** 刷新 */
 export function RefreshIcon(p: SvgIconProps) {
   return (
@@ -240,6 +249,83 @@ export function CopyIcon(p: SvgIconProps) {
     <Icon {...p}>
       <rect x="9" y="9" width="12" height="12" rx="2.5" />
       <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+    </Icon>
+  );
+}
+
+/** 耳机（听书） */
+export function HeadphonesIcon(p: SvgIconProps) {
+  return (
+    <Icon {...p}>
+      <path d="M3 14v-2a9 9 0 0 1 18 0v2" />
+      <path d="M21 15a2 2 0 0 1-2 2h-1a1 1 0 0 1-1-1v-4a1 1 0 0 1 1-1h1a2 2 0 0 1 2 2z" />
+      <path d="M3 15a2 2 0 0 0 2 2h1a1 1 0 0 0 1-1v-4a1 1 0 0 0-1-1H5a2 2 0 0 0-2 2z" />
+    </Icon>
+  );
+}
+
+/** 播放（三角） */
+export function PlayIcon(p: SvgIconProps) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width={p.size ?? 22}
+      height={p.size ?? 22}
+      class={p.class}
+      fill="currentColor"
+      stroke="none"
+      aria-hidden="true"
+    >
+      <path d="M8 5.14v13.72a1 1 0 0 0 1.5.86l11-6.86a1 1 0 0 0 0-1.72l-11-6.86a1 1 0 0 0-1.5.86z" />
+    </svg>
+  );
+}
+
+/** 暂停（双竖条） */
+export function PauseIcon(p: SvgIconProps) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width={p.size ?? 22}
+      height={p.size ?? 22}
+      class={p.class}
+      fill="currentColor"
+      stroke="none"
+      aria-hidden="true"
+    >
+      <rect x="6" y="4" width="4" height="16" rx="1.2" />
+      <rect x="14" y="4" width="4" height="16" rx="1.2" />
+    </svg>
+  );
+}
+
+/** 上一句（跳回） */
+export function SkipBackIcon(p: SvgIconProps) {
+  return (
+    <Icon {...p}>
+      <polygon points="19 5 11 12 19 19 19 5" fill="currentColor" stroke="none" />
+      <line x1="5" y1="5" x2="5" y2="19" />
+    </Icon>
+  );
+}
+
+/** 下一句（跳过） */
+export function SkipForwardIcon(p: SvgIconProps) {
+  return (
+    <Icon {...p}>
+      <polygon points="5 5 13 12 5 19 5 5" fill="currentColor" stroke="none" />
+      <line x1="19" y1="5" x2="19" y2="19" />
+    </Icon>
+  );
+}
+
+/** 定时（钟表） */
+export function TimerIcon(p: SvgIconProps) {
+  return (
+    <Icon {...p}>
+      <circle cx="12" cy="13" r="8" />
+      <polyline points="12 9 12 13 15 15" />
+      <line x1="9" y1="2" x2="15" y2="2" />
     </Icon>
   );
 }

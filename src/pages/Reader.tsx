@@ -13,11 +13,14 @@ import { useNavigate, useParams } from "@solidjs/router";
 import { LoadingScreen } from "../components/LoadingScreen";
 import { BookmarkPanel } from "../components/BookmarkPanel";
 import { SelectionMenu } from "../components/SelectionMenu";
+import { TtsBubble } from "../components/TtsBubble";
+import { TtsSheet } from "../components/TtsSheet";
 import {
   BookmarkIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
   CloseIcon,
+  HeadphonesIcon,
   ListIcon,
 } from "../components/icons";
 import {
@@ -58,13 +61,10 @@ import {
   type ReaderBlock,
 } from "../lib/pagination";
 import {
-  FONT_MAX,
-  FONT_MIN,
   currentFontSize,
   currentPageMode,
   currentParaSpacing,
   ensureShelfEntry,
-  setFontSize,
   shelfEntries,
   updateReadingLocation,
 } from "../lib/store";
@@ -77,6 +77,11 @@ import {
   dataAnchorOf,
   flashUnitRange,
 } from "../lib/textAnchor";
+import {
+  createTtsPlayer,
+  type TtsFocus,
+} from "../lib/ttsPlayer";
+import { currentTtsEngine, ensureTtsPrefsLoaded } from "../lib/ttsSettings";
 
 const PAD_X = 24; // 阅读区左右留白
 const PAD_TOP = 14; // 正文顶部留白
@@ -111,11 +116,16 @@ function asCss(record: CssRecord): JSX.CSSProperties {
 // 书签下划线：按单元内字符区间把文本切段渲染
 // ---------------------------------------------------------------------------
 
-/** 单元内被书签覆盖的字符区间（局部于该单元文本） */
+/** 标记的视觉语义：书签=下划线，朗读中=浅橙底 */
+export type MarkKind = "bookmark" | "speak";
+
+/** 单元内被标记覆盖的字符区间（局部于该单元文本） */
 export interface UnitMark {
   unit: number;
   s: number;
   e: number;
+  /** 缺省视为书签下划线 */
+  kind?: MarkKind;
 }
 
 /** 待定位高亮的字符区间（镜像文本全局坐标） */
@@ -128,41 +138,70 @@ interface PendingFlash {
 
 interface TextSegment {
   text: string;
-  marked: boolean;
+  bookmark: boolean;
+  speak: boolean;
 }
 
-/** 把文本按覆盖区间切段（窗口 [winStart, winStart+text.length) 之外的书签忽略） */
+/** 把文本按覆盖区间切段（窗口 [winStart, winStart+text.length) 之外的标记忽略） */
 function splitMarkedText(
   text: string,
   winStart: number,
   unit: number,
   marks: UnitMark[],
 ): TextSegment[] {
-  const segments: TextSegment[] = [];
-  let pos = 0;
+  const spans: { s: number; e: number; kind: MarkKind }[] = [];
   for (const mark of marks) {
     if (mark.unit !== unit) continue;
-    if (mark.e <= winStart) continue;
     const winEnd = winStart + text.length;
-    if (mark.s >= winEnd) break;
-    const s = Math.max(mark.s, winStart) - winStart;
-    const e = Math.min(mark.e, winEnd) - winStart;
-    if (e <= pos) continue;
-    if (s > pos) {
-      segments.push({ text: text.slice(pos, s), marked: false });
-      pos = s;
-    }
-    segments.push({ text: text.slice(pos, e), marked: true });
-    pos = e;
-    if (pos >= text.length) break;
+    const s = Math.max(mark.s, winStart);
+    const e = Math.min(mark.e, winEnd);
+    if (e <= s) continue;
+    spans.push({ s: s - winStart, e: e - winStart, kind: mark.kind ?? "bookmark" });
   }
-  if (pos < text.length) {
-    segments.push({ text: text.slice(pos), marked: false });
+  if (spans.length === 0) {
+    return [{ text, bookmark: false, speak: false }];
+  }
+  const points = [0, text.length];
+  for (const sp of spans) {
+    points.push(sp.s, sp.e);
+  }
+  points.sort((a, b) => a - b);
+  const uniq: number[] = [];
+  for (const p of points) {
+    if (uniq.length === 0 || uniq[uniq.length - 1] !== p) uniq.push(p);
+  }
+  const segments: TextSegment[] = [];
+  for (let i = 0; i + 1 < uniq.length; i++) {
+    const a = uniq[i];
+    const b = uniq[i + 1];
+    if (b <= a) continue;
+    let bookmark = false;
+    let speak = false;
+    for (const sp of spans) {
+      if (sp.e > a && sp.s < b) {
+        if (sp.kind === "speak") speak = true;
+        else bookmark = true;
+      }
+    }
+    segments.push({ text: text.slice(a, b), bookmark, speak });
   }
   return segments;
 }
 
-/** 渲染切段：命中书签的片段包橙色下划线 span */
+/** 合并两组区间标记（书签 + 朗读高亮），供正文切段渲染共用 */
+function combineMarks(...lists: UnitMark[][]): UnitMark[] {
+  const out: UnitMark[] = [];
+  for (const list of lists) {
+    for (const m of list) {
+      if (m.e <= m.s) continue;
+      out.push(m);
+    }
+  }
+  out.sort((a, b) => a.unit - b.unit || a.s - b.s || a.e - b.e);
+  return out;
+}
+
+/** 渲染切段：命中书签的片段包下划线 span；朗读中的片段包浅橙底 span */
 function renderMarkedText(
   text: string,
   winStart: number,
@@ -170,25 +209,28 @@ function renderMarkedText(
   marks: UnitMark[],
 ): JSX.Element {
   const segments = splitMarkedText(text, winStart, unit, marks);
-  if (segments.length === 1 && !segments[0].marked) return segments[0].text;
+  if (
+    segments.length === 1 &&
+    !segments[0].bookmark &&
+    !segments[0].speak
+  ) {
+    return segments[0].text;
+  }
   return (
     <>
-      {segments.map((seg) =>
-        seg.marked ? (
+      {segments.map((seg) => {
+        if (!seg.bookmark && !seg.speak) return seg.text;
+        return (
           <span
-            style={{
-              "text-decoration-line": "underline",
-              "text-decoration-color": "var(--accent)",
-              "text-decoration-thickness": "2px",
-              "text-underline-offset": "0.2em",
+            classList={{
+              "readerx-bookmark": seg.bookmark,
+              "readerx-speak": seg.speak,
             }}
           >
             {seg.text}
           </span>
-        ) : (
-          seg.text
-        ),
-      )}
+        );
+      })}
     </>
   );
 }
@@ -455,7 +497,124 @@ export default function ReaderPage() {
     return out;
   });
 
+  // -------------------------------------------------------------------
+  // 听书：播放控制器（逐句合成），朗读高亮 + 跟随阅读位置
+  // -------------------------------------------------------------------
+
+  /** 当前阅读位置（镜像偏移）：分页用当前页首行，滚动用最近上报位置 */
+  function ttsReadingOffset(): number | null {
+    if (isPaged()) {
+      const offsets = pageTopOffsets();
+      const pi = pageIdx();
+      if (offsets.length > 0 && pi >= 0 && pi < offsets.length) return offsets[pi];
+    }
+    const p = locationPending;
+    if (p && p.cid === chapter()?.cid) return p.off;
+    return null;
+  }
+
+  const ttsPlayer = createTtsPlayer({
+    bookId,
+    chapterIndex: chapterIdx,
+    chapterAt: (idx) => book()?.chapters[idx],
+    chapterCount: () => book()?.chapters.length ?? 0,
+    navigateChapter: (idx) => goToChapter(idx),
+    readingOffset: ttsReadingOffset,
+    notify: (message, isError) => showToast(message, !!isError),
+  });
+  const [ttsSettingsOpen, setTtsSettingsOpen] = createSignal(false);
+
+  // 预热：HTTP 自定义源下，停止状态时把当前章节后续句子合成进按书籍的缓存，
+  // 之后播放/下次同声源直接命中缓存，不再请求服务端
+  createEffect(() => {
+    void chapter()?.cid;
+    void currentTtsEngine();
+    void bookId();
+    if (ttsPlayer.status() === "stopped") {
+      void ensureTtsPrefsLoaded().then(() => {
+        if (ttsPlayer.status() === "stopped") ttsPlayer.warmup();
+      });
+    }
+  });
+
+  /** 当前朗读句在“本视图章节”内的高亮区间（单元局部坐标） */
+  const speakMarks = createMemo<UnitMark[]>(() => {
+    const f = ttsPlayer.focus();
+    if (!f || f.cid !== chapter()?.cid) return [];
+    const item = f.item;
+    const unitLen = mirror().unitLength[item.unit];
+    if (item.ls < 0 || item.le <= item.ls || item.le > (unitLen ?? -1)) return [];
+    return [{ unit: item.unit, s: item.ls, e: item.le, kind: "speak" }];
+  });
+
+  /** 正文渲染用：书签下划线 + 朗读高亮的并集 */
+  const renderMarks = createMemo<UnitMark[]>(() =>
+    combineMarks(unitMarks(), speakMarks()),
+  );
+
+  // 视图切章（用户翻章 / 引擎自动跨章）后让播放控制器跟随
+  createEffect(() => {
+    void chapterIdx();
+    ttsPlayer.noteViewChapter();
+  });
+
+  /** 把某朗读句滚动到可见（分页翻页 / 滚动定位），返回是否已就位 */
+  function ensureSpeakVisible(f: TtsFocus): boolean {
+    if (f.item.start < 0) return true; // 章节标题句没有正文位置，无需定位
+    const mir = mirror();
+    if (!mir || mir.text.length === 0) return false;
+    if (isPaged()) {
+      const pg = paged();
+      if (!pg) return false;
+      const page = pageIndexOfChar(pg.pages, mir, f.item.start);
+      if (page < 0) return false;
+      if (page !== pageIdx()) {
+        setPageIdx(page);
+      }
+      return true;
+    }
+    const root = scrollRef;
+    if (!root) return false;
+    return scrollToCharOffset(root, f.item.start);
+  }
+
+  // 听书激活期间跟随当前朗读句（自动翻页/滚动），避免读到屏幕外
+  let ttsFollowTimer: number | undefined;
+  createEffect(() => {
+    window.clearInterval(ttsFollowTimer);
+    ttsFollowTimer = undefined;
+    const f = ttsPlayer.focus();
+    if (!f || ttsPlayer.status() === "stopped" || f.cid !== chapter()?.cid) return;
+    const step = (): void => {
+      const cur = ttsPlayer.focus();
+      if (
+        !cur ||
+        cur.cid !== chapter()?.cid ||
+        ttsPlayer.status() === "stopped" ||
+        ttsPlayer.status() === "error"
+      ) {
+        window.clearInterval(ttsFollowTimer);
+        ttsFollowTimer = undefined;
+        return;
+      }
+      if (ensureSpeakVisible(cur)) {
+        window.clearInterval(ttsFollowTimer);
+        ttsFollowTimer = undefined;
+      }
+    };
+    step();
+    if (ttsFollowTimer === undefined) {
+      ttsFollowTimer = window.setInterval(step, 180);
+    }
+  });
+  onCleanup(() => {
+    window.clearInterval(ttsFollowTimer);
+    ttsPlayer.dispose();
+  });
+
+  // -------------------------------------------------------------------
   // 分页结果：图片解码完成后重算
+  // -------------------------------------------------------------------
   const [paged, setPaged] = createSignal<ReturnType<typeof paginateChapter>>(null);
   createEffect(() => {
     const mode = isPaged();
@@ -810,10 +969,6 @@ export default function ReaderPage() {
     else navigate("/");
   }
 
-  function incFont(delta: number): void {
-    setFontSize(currentFontSize() + delta);
-  }
-
   // -------------------------------------------------------------------
   // 手势：点中间呼出/收起菜单；左右区域翻页；横向滑动翻页
   // -------------------------------------------------------------------
@@ -1142,7 +1297,7 @@ export default function ReaderPage() {
                             <PagedFragment
                               fragment={fragment}
                               layout={layout()!}
-                              marks={unitMarks()}
+                              marks={renderMarks()}
                             />
                           )}
                         </For>
@@ -1190,7 +1345,7 @@ export default function ReaderPage() {
                           layout={layout()!}
                           block={block}
                           unit={idx()}
-                          marks={unitMarks()}
+                          marks={renderMarks()}
                         />
                       )}
                     </For>
@@ -1242,24 +1397,27 @@ export default function ReaderPage() {
                       filled={bookBookmarks().length > 0 || bmPanelOpen()}
                     />
                   </button>
-                  <div class="flex gap-1" aria-label="调整字号">
-                    <button
-                      class="grid h-[30px] w-[30px] place-items-center rounded-lg border border-border text-xs font-bold text-text-2 disabled:opacity-30"
-                      aria-label="减小字号"
-                      disabled={currentFontSize() <= FONT_MIN}
-                      onClick={() => incFont(-1)}
-                    >
-                      A−
-                    </button>
-                    <button
-                      class="grid h-[30px] w-[30px] place-items-center rounded-lg border border-border text-xs font-bold text-text-2 disabled:opacity-30"
-                      aria-label="增大字号"
-                      disabled={currentFontSize() >= FONT_MAX}
-                      onClick={() => incFont(1)}
-                    >
-                      A+
-                    </button>
-                  </div>
+                  <button
+                    class="grid h-10 w-10 flex-none place-items-center rounded-xl transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
+                    classList={{
+                      "text-accent": ttsPlayer.status() !== "stopped",
+                      "text-text-2": ttsPlayer.status() === "stopped",
+                    }}
+                    aria-label={ttsPlayer.status() === "stopped" ? "听书" : "停止听书"}
+                    aria-pressed={ttsPlayer.status() !== "stopped"}
+                    onClick={() => {
+                      if (ttsPlayer.status() === "stopped") {
+                        setMenuOpen(false);
+                        setTocOpen(false);
+                        setBmPanelOpen(false);
+                        ttsPlayer.start();
+                      } else {
+                        ttsPlayer.stop();
+                      }
+                    }}
+                  >
+                    <HeadphonesIcon size={21} />
+                  </button>
                 </div>
               </div>
             </header>
@@ -1275,7 +1433,7 @@ export default function ReaderPage() {
               style={{ "pointer-events": menuOpen() ? "auto" : "none" }}
               aria-hidden={!menuOpen()}
             >
-              <div class="flex items-center gap-2 px-3.5 pb-[calc(10px+env(safe-area-inset-bottom))] pt-2">
+              <div class="flex items-center gap-2 px-3.5 pb-[calc(10px+max(env(safe-area-inset-bottom),16px))] pt-2">
                 <button
                   class="inline-flex flex-1 items-center justify-center gap-1.5 rounded-[10px] border border-border bg-bg px-0.5 py-[9px] text-[12.5px] text-text-2 disabled:pointer-events-none disabled:opacity-30"
                   disabled={isFirstChapter()}
@@ -1407,6 +1565,48 @@ export default function ReaderPage() {
               }
               onCopy={(text) => void handleCopyText(text)}
               onBookmark={(range) => handleBookmarkRange(range)}
+            />
+
+            {/* 听书悬浮球：暂停/继续、上一句/下一句、打开听书设置 */}
+            <Show
+              when={
+                ttsPlayer.status() !== "stopped" &&
+                !menuOpen() &&
+                !tocOpen() &&
+                !bmPanelOpen()
+              }
+            >
+              <TtsBubble
+                status={ttsPlayer.status}
+                rate={ttsPlayer.rate}
+                voiceLabel={() => ttsPlayer.voiceName()}
+                error={ttsPlayer.error}
+                onPrev={() => ttsPlayer.prev()}
+                onNext={() => ttsPlayer.next()}
+                onToggle={() => ttsPlayer.togglePlay()}
+                onOpenSettings={() => setTtsSettingsOpen(true)}
+                bounds={() => ({
+                  w: areaRef?.clientWidth ?? 0,
+                  h: areaRef?.clientHeight ?? 0,
+                })}
+              />
+            </Show>
+
+            {/* 听书设置（引擎 / 音色 / 自定义源 / 倍速 / 定时） */}
+            <TtsSheet
+              open={ttsSettingsOpen()}
+              engine={ttsPlayer.engine}
+              rate={ttsPlayer.rate}
+              voiceId={ttsPlayer.voice}
+              timerMode={ttsPlayer.timerMode}
+              timerMinutes={ttsPlayer.timerMinutes}
+              timerRemainSec={ttsPlayer.timerRemainSec}
+              onEngine={(engine) => ttsPlayer.setEngine(engine)}
+              onRate={(rate) => ttsPlayer.setRate(rate)}
+              onVoice={(voiceId) => ttsPlayer.setVoice(voiceId)}
+              onTimer={(mode, minutes) => ttsPlayer.setTimer(mode, minutes)}
+              onStop={() => ttsPlayer.stop()}
+              onClose={() => setTtsSettingsOpen(false)}
             />
           </div>
         </Show>

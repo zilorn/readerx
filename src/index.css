@@ -226,6 +226,22 @@
   animation: readerx-flash 1.7s ease 0.25s both;
 }
 
+/* 听书正在朗读的文字：浅色透明橙背景（每段文字独立圆角，跨行不断开） */
+.readerx-speak {
+  border-radius: 3px;
+  background-color: color-mix(in srgb, var(--accent) 24%, transparent);
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+
+/* 书签下划线（与朗读背景可叠加在同一段文字上） */
+.readerx-bookmark {
+  text-decoration-line: underline;
+  text-decoration-color: var(--accent);
+  text-decoration-thickness: 2px;
+  text-underline-offset: 0.2em;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   ::before,

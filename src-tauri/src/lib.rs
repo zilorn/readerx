@@ -7,6 +7,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_http::init())
+        .plugin(tauri_plugin_tts::init())
         .invoke_handler(tauri::generate_handler![
             commands::greet,
             commands::readerx_state_get,
@@ -14,7 +15,11 @@ pub fn run() {
             commands::readerx_state_remove,
             commands::readerx_book_put,
             commands::readerx_book_list,
-            commands::readerx_book_delete
+            commands::readerx_book_delete,
+            commands::readerx_tts_cache_put,
+            commands::readerx_tts_cache_get,
+            commands::readerx_tts_cache_stats,
+            commands::readerx_tts_cache_clear
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

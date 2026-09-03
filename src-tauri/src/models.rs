@@ -32,6 +32,26 @@ pub struct LocalBookChapter {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CachedAudio {
+    /// 音频字节（base64 编码，由前端解码为 Blob）
+    pub data: String,
+    /// 音频 MIME（如 audio/mpeg / audio/wav）
+    pub mime: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TtsCacheStat {
+    /// 有缓存音频的书籍 id
+    pub book_id: String,
+    /// 该书的音频条目数
+    pub files: u64,
+    /// 该书的音频字节数
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LocalBook {
     pub id: String,
     pub title: String,

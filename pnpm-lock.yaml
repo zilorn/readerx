@@ -26,6 +26,9 @@ importers:
       solid-js:
         specifier: ^1.9.3
         version: 1.9.15
+      tauri-plugin-tts-api:
+        specifier: ^0.1.13
+        version: 0.1.13
     devDependencies:
       '@tailwindcss/vite':
         specifier: ^4.3.3
@@ -774,6 +777,9 @@ packages:
     resolution: {integrity: sha512-uxc/zpqFg6x7C8vOE7lh6Lbda8eEL9zmVm/PLeTPBRhh1xCgdWaQ+J1CUieGpIfm2HdtsUpRv+HshiasBMcc6A==}
     engines: {node: '>=6'}
 
+  tauri-plugin-tts-api@0.1.13:
+    resolution: {integrity: sha512-i/uq68I1OxveTh8nfOi9FRp38UBJtOiMnpMR4lipwdXIbL7ALvAw/30kmtOWiF5IkdBJZDz/PxsoyBmKbbm3VQ==}
+
   tinyglobby@0.2.17:
     resolution: {integrity: sha512-wXR/dYpcqKmfWpEdZjiKJOwCNFndD0DMnrW/cYjVGttEkBfVgcLFHoNrlj47mjOVic9yyNu65alsgF4NQyTa2g==}
     engines: {node: '>=12.0.0'}
@@ -1437,6 +1443,10 @@ snapshots:
   tailwindcss@4.3.3: {}
 
   tapable@2.3.3: {}
+
+  tauri-plugin-tts-api@0.1.13:
+    dependencies:
+      '@tauri-apps/api': 2.11.1
 
   tinyglobby@0.2.17:
     dependencies:

@@ -6,7 +6,7 @@
 
 **ReaderX** —— 基于 **Tauri 2 + SolidJS** 的移动端风格电子书阅读器（书架 / 导入 / 设置 / 阅读）。
 
-- 形态：移动优先的 Web 前端，宿主为 Tauri（桌面窗口按手机宽度渲染，也可 `tauri android dev` 跑真机/模拟器）。
+- 形态：移动端优先的 Web 前端（不要考虑桌面端），宿主为 Tauri（桌面窗口按手机宽度渲染，也可 `tauri android dev` 跑真机/模拟器）。
 - 包管理：**pnpm**（仓库已有 `pnpm-lock.yaml`，新增依赖请用 `pnpm add`）。
 - 本地书管理：此项目专注于本地书管理。
 

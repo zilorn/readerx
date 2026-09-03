@@ -6,6 +6,7 @@
   "permissions": [
     "core:default",
     "opener:default",
+    "tts:default",
     {
       "identifier": "http:default",
       "allow": [

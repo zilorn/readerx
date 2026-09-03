@@ -3,10 +3,11 @@
 //! - 本地书籍按 id 存为独立 JSON 文件。
 //! 全部为同步磁盘 I/O，仅对 `commands` 暴露；WebView 侧只通过 command 访问。
 
-use crate::models::LocalBook;
+use crate::models::{LocalBook, TtsCacheStat};
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 use tauri::{AppHandle, Manager};
 
 fn data_root(app: &AppHandle) -> Result<PathBuf, String> {
@@ -124,6 +125,153 @@ pub(crate) fn delete_book(app: &AppHandle, id: &str) -> Result<(), String> {
     let path = dir.join(format!("{id}.json"));
     if path.exists() {
         fs::remove_file(&path).map_err(|e| format!("删除书籍失败: {e}"))?;
+    }
+    // 顺带清掉该书的听书音频缓存（不存在则忽略）
+    let cache_dir = tts_cache_dir(app, id)?;
+    if cache_dir.exists() {
+        fs::remove_dir_all(&cache_dir).map_err(|e| format!("清理听书缓存失败: {e}"))?;
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 听书音频缓存：按书籍独立目录存放（每句一个文件 + .mime 元数据）。
+// WebView 不落盘：全部经 command 读写；文件数超上限时按修改时间淘汰最旧。
+// ---------------------------------------------------------------------------
+
+/// 每本书最多保留的音频条目数（超过后淘汰最旧的）
+const TTS_CACHE_MAX_FILES: u64 = 1500;
+
+fn valid_audio_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 64
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+}
+
+fn tts_cache_dir(app: &AppHandle, book_id: &str) -> Result<PathBuf, String> {
+    if !valid_component(book_id) {
+        return Err("非法的书籍 id".to_string());
+    }
+    Ok(data_root(app)?.join("tts-audio").join(book_id))
+}
+
+/// 写入一句缓存音频；条目数超限时淘汰最旧（按修改时间）。
+pub(crate) fn put_tts_audio(
+    app: &AppHandle,
+    book_id: &str,
+    key: &str,
+    mime: &str,
+    bytes: &[u8],
+) -> Result<(), String> {
+    if !valid_audio_key(key) {
+        return Err("非法的音频缓存 key".to_string());
+    }
+    let dir = tts_cache_dir(app, book_id)?;
+    ensure_dir(&dir)?;
+    fs::write(dir.join(key), bytes).map_err(|e| format!("写入听书缓存失败: {e}"))?;
+    fs::write(dir.join(format!("{key}.mime")), mime)
+        .map_err(|e| format!("写入听书缓存元数据失败: {e}"))?;
+    prune_tts_cache(&dir);
+    Ok(())
+}
+
+/// 读取一句缓存音频；不存在返回 None。
+pub(crate) fn get_tts_audio(
+    app: &AppHandle,
+    book_id: &str,
+    key: &str,
+) -> Result<Option<(String, Vec<u8>)>, String> {
+    if !valid_audio_key(key) {
+        return Err("非法的音频缓存 key".to_string());
+    }
+    let dir = tts_cache_dir(app, book_id)?;
+    let data_path = dir.join(key);
+    if !data_path.exists() {
+        return Ok(None);
+    }
+    let mime = fs::read_to_string(dir.join(format!("{key}.mime"))).unwrap_or_else(|_| "audio/mpeg".to_string());
+    let bytes = fs::read(&data_path).map_err(|e| format!("读取听书缓存失败: {e}"))?;
+    Ok(Some((mime, bytes)))
+}
+
+/// 淘汰最旧的音频文件（保留 .mime 不参与计数；删除时连同元数据一起删）
+fn prune_tts_cache(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut audios: Vec<(SystemTime, PathBuf)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) == Some("mime") {
+            continue;
+        }
+        if let Ok(meta) = fs::metadata(&path) {
+            audios.push((meta.modified().unwrap_or(SystemTime::UNIX_EPOCH), path));
+        }
+    }
+    if audios.len() as u64 <= TTS_CACHE_MAX_FILES {
+        return;
+    }
+    audios.sort_by_key(|(t, _)| *t);
+    let excess = audios.len() as u64 - TTS_CACHE_MAX_FILES;
+    for (_, path) in audios.into_iter().take(excess as usize) {
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(path.with_extension("mime"));
+    }
+}
+
+/// 各书籍的听书缓存统计（仅统计有缓存的书籍）
+pub(crate) fn list_tts_cache(app: &AppHandle) -> Result<Vec<TtsCacheStat>, String> {
+    let root = data_root(app)?.join("tts-audio");
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+    let mut stats = Vec::new();
+    for entry in fs::read_dir(&root).map_err(|e| format!("读取听书缓存目录失败: {e}"))?.flatten() {
+        let dir_path = entry.path();
+        if !dir_path.is_dir() {
+            continue;
+        }
+        let mut files: u64 = 0;
+        let mut bytes: u64 = 0;
+        if let Ok(entries) = fs::read_dir(&dir_path) {
+            for file in entries.flatten() {
+                let path = file.path();
+                if path.extension().and_then(|s| s.to_str()) == Some("mime") {
+                    continue;
+                }
+                files += 1;
+                if let Ok(meta) = fs::metadata(&path) {
+                    bytes += meta.len();
+                }
+            }
+        }
+        if files > 0 {
+            let book_id = entry.file_name().to_string_lossy().into_owned();
+            stats.push(TtsCacheStat { book_id, files, bytes });
+        }
+    }
+    stats.sort_by(|a, b| a.book_id.cmp(&b.book_id));
+    Ok(stats)
+}
+
+/// 清除听书缓存：book_id 为 None 清空全部书籍
+pub(crate) fn clear_tts_cache(app: &AppHandle, book_id: Option<&str>) -> Result<(), String> {
+    match book_id {
+        Some(id) => {
+            let dir = tts_cache_dir(app, id)?;
+            if dir.exists() {
+                fs::remove_dir_all(&dir).map_err(|e| format!("清除听书缓存失败: {e}"))?;
+            }
+        }
+        None => {
+            let root = data_root(app)?.join("tts-audio");
+            if root.exists() {
+                fs::remove_dir_all(&root).map_err(|e| format!("清除听书缓存失败: {e}"))?;
+            }
+        }
     }
     Ok(())
 }

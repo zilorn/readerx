@@ -5,7 +5,7 @@ import { BookIcon, CompassIcon, SettingsIcon } from "./icons";
 export function TabBar() {
   return (
     <nav
-      class="z-30 flex flex-none border-t border-border bg-surface px-1.5 pb-[calc(6px+env(safe-area-inset-bottom))] pt-1 text-text-3"
+      class="z-30 flex flex-none border-t border-border bg-surface px-1.5 pb-[calc(6px+max(env(safe-area-inset-bottom),20px))] pt-1 text-text-3"
       aria-label="主导航"
     >
       <A
