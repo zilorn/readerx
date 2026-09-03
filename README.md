@@ -2,8 +2,6 @@
 
 基于 **Tauri 2 + SolidJS + TypeScript** 的移动端风格电子书阅读器。
 
-> 移动优先布局，可跑在 Tauri 桌面窗口（手机宽度列）或 `tauri android dev` 的真机 / 模拟器上。
-
 ## 功能
 
 - **书架** `/`：本地书籍网格、继续阅读、阅读进度、书籍删除管理
@@ -19,12 +17,12 @@ TXT 导入时依次尝试“分章规则”匹配章节标题，未命中自动�
 
 ## 技术栈
 
-| 层 | 选型 |
-| --- | --- |
-| UI | SolidJS 1.9 |
-| 路由 | @solidjs/router 1.x（JSX Route + lazy 懒加载） |
-| 构建 | Vite 8 + TypeScript 6（strict） |
-| 桌面/移动壳 | Tauri 2（Rust） |
+| 层          | 选型                                           |
+| ----------- | ---------------------------------------------- |
+| UI          | SolidJS 1.9                                    |
+| 路由        | @solidjs/router 1.x（JSX Route + lazy 懒加载） |
+| 构建        | Vite 8 + TypeScript 6（strict）                |
+| 桌面/移动壳 | Tauri 2（Rust）                                |
 
 ## 开发
 
