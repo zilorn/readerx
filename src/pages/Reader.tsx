@@ -112,6 +112,13 @@ const topPad = () => safeInsets().top + PAD_TOP;
 const bottomPadPaged = () => safeInsets().bottom + PAD_BOTTOM_PAGED;
 const bottomPadScroll = () => safeInsets().bottom + PAD_BOTTOM_SCROLL;
 
+// 顶部工具栏上缘留白：env(safe-area-inset-top) 不可用/为 0 的设备回退到 8px 最小间距
+const topbarPadTop = () => Math.max(safeInsets().top, 8);
+// 底部状态栏下缘留白：env() 失效时也至少保留 10px
+const statusBarPadBottom = () => Math.max(safeInsets().bottom, 10);
+// 底部菜单栏下缘留白：10px 内容间距 + env() 失效时至少 16px 安全区
+const menuBarPadBottom = () => 10 + Math.max(safeInsets().bottom, 16);
+
 /** 分页引擎的行内样式记录 → Solid 样式对象 */
 function asCss(record: CssRecord): JSX.CSSProperties {
   return record as JSX.CSSProperties;
@@ -1467,7 +1474,10 @@ export default function ReaderPage() {
                 aria-hidden="true"
                 class="pointer-events-none absolute inset-x-0 bottom-0 z-[15] select-none bg-gradient-to-t from-bg via-bg/45 to-transparent"
               >
-                <div class="flex items-center justify-between gap-3 px-6 pb-[max(env(safe-area-inset-bottom),10px)] pt-2 text-[10.5px] leading-none text-text-3">
+                <div
+                  class="flex items-center justify-between gap-3 px-6 pt-2 text-[10.5px] leading-none text-text-3"
+                  style={{ "padding-bottom": `${statusBarPadBottom()}px` }}
+                >
                   <span class="min-w-0 flex-1 truncate">{chapter()!.title}</span>
                   <span class="flex-none whitespace-nowrap tabular-nums">
                     <Show when={statusPercent() !== null}>
@@ -1492,7 +1502,10 @@ export default function ReaderPage() {
               style={{ "pointer-events": menuOpen() ? "auto" : "none" }}
               aria-hidden={!menuOpen()}
             >
-              <div class="flex items-center gap-1.5 px-3 pb-2 pt-[max(env(safe-area-inset-top),8px)]">
+              <div
+                class="flex items-center gap-1.5 px-3 pb-2"
+                style={{ "padding-top": `${topbarPadTop()}px` }}
+              >
                 <button
                   class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
                   aria-label="返回"
@@ -1609,7 +1622,10 @@ export default function ReaderPage() {
                 data-reader-ui
                 class="select-none border-t border-border bg-surface"
               >
-                <div class="flex items-center gap-2 px-3.5 pb-[calc(10px+max(env(safe-area-inset-bottom),16px))] pt-2">
+                <div
+                  class="flex items-center gap-2 px-3.5 pt-2"
+                  style={{ "padding-bottom": `${menuBarPadBottom()}px` }}
+                >
                 <button
                   class="inline-flex flex-1 items-center justify-center gap-1.5 rounded-[10px] border border-border bg-bg px-0.5 py-[9px] text-[12.5px] text-text-2 disabled:pointer-events-none disabled:opacity-30"
                   disabled={isFirstChapter()}
