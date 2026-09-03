@@ -20,6 +20,9 @@ pub struct ChapterBlock {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalBookChapter {
+    /// 章节稳定 id，如 c0001、c0002 …；旧数据缺失时前端回填
+    #[serde(default)]
+    pub cid: String,
     pub title: String,
     pub paragraphs: Vec<String>,
     /// 结构化正文块（EPUB 含标题/图片）；旧数据缺失时前端退回 paragraphs

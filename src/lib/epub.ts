@@ -9,6 +9,7 @@
  */
 import { unzipSync } from "fflate";
 import type { ChapterBlock, LocalBookChapter } from "./booksTypes";
+import { chapterCid } from "./booksTypes";
 
 export interface ParsedEpub {
   title: string;
@@ -289,6 +290,7 @@ function buildDocumentChapters(
   const commit = () => {
     if (body.length === 0 && paragraphs.length === 0) return;
     chapters.push({
+      cid: chapterCid(chapters.length),
       title: title || docTitle || fallbackTitle,
       paragraphs,
       blocks: body,

@@ -110,6 +110,9 @@
   --animate-toast-in: toast-in 0.18s ease;
   --animate-sheet-fade: sheet-fade 0.15s ease;
   --animate-sheet-up: sheet-up 0.2s ease;
+  --animate-pop-in: pop-in 0.18s ease;
+  --animate-page-in-left: page-in-left 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+  --animate-page-in-right: page-in-right 0.28s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 @keyframes toast-in {
@@ -133,6 +136,27 @@
   from {
     transform: translateY(24px);
     opacity: 0.6;
+  }
+}
+
+@keyframes pop-in {
+  from {
+    transform: scale(0.6);
+    opacity: 0;
+  }
+}
+
+@keyframes page-in-left {
+  from {
+    transform: translateX(-100%);
+    opacity: 0.4;
+  }
+}
+
+@keyframes page-in-right {
+  from {
+    transform: translateX(100%);
+    opacity: 0.4;
   }
 }
 

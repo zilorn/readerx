@@ -19,6 +19,7 @@ import {
 } from "./chapterRules";
 import type { ChapterRule, TextSplitResult } from "./chapterRules";
 import type { BookFormat, LocalBook, LocalBookChapter } from "./booksTypes";
+import { assignChapterCids, chapterCid } from "./booksTypes";
 import { parseEpubFile } from "./epub";
 import { ensureShelfEntry } from "./store";
 
@@ -64,8 +65,20 @@ export function ensureLocalBooksLoaded(): Promise<void> {
     ensurePromise = (async () => {
       try {
         const all = await listRemoteBooks();
-        all.sort((a, b) => b.importedAt - a.importedAt);
-        setBooksState(all);
+        // 兼容旧书库：为缺失 cid 的章节补上，并回写后端
+        const migrated = all.map((book) => {
+          const chapters = assignChapterCids(book.chapters);
+          const changed = chapters.some(
+            (chapter, index) => chapter.cid !== book.chapters[index]?.cid,
+          );
+          return changed ? { book: { ...book, chapters }, changed } : { book, changed };
+        });
+        for (const { book, changed } of migrated) {
+          if (changed) void saveRemoteBook(book);
+        }
+        const books = migrated.map((item) => item.book);
+        books.sort((a, b) => b.importedAt - a.importedAt);
+        setBooksState(books);
       } catch {
         /* 后端暂不可用（如纯浏览器调试）时按空书库渲染 */
         setBooksState([]);
@@ -196,6 +209,12 @@ export async function parseTxtFile(
         }
       : splitText(text, choice.kind === "rule" ? [choice.rule] : chapterRuleList());
 
+  const localChapters: LocalBookChapter[] = result.chapters.map((chapter, index) => ({
+    cid: chapterCid(index),
+    title: chapter.title,
+    paragraphs: chapter.paragraphs,
+  }));
+
   const splitDesc =
     result.mode === "regex"
       ? `正则匹配「${result.ruleName}」`
@@ -209,7 +228,7 @@ export async function parseTxtFile(
     overrides?.title ?? titleFromFileName(file.name),
     overrides?.author ?? "",
     splitDesc,
-    result.chapters,
+    localChapters,
   );
 }
 
@@ -241,7 +260,7 @@ export async function persistBookDraft(draft: BookDraft): Promise<LocalBook> {
     importedAt: Date.now(),
     hue: draft.hue,
     splitDesc: draft.splitDesc,
-    chapters: draft.chapters,
+    chapters: assignChapterCids(draft.chapters),
   };
   await saveRemoteBook(book);
   setBooksState((prev) => {

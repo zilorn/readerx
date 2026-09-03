@@ -15,20 +15,29 @@ import {
   PARA_SPACING_MIN,
   PARA_SPACING_STEP,
   currentFontSize,
+  currentPageMode,
   currentParaSpacing,
   currentTheme,
   resetReadingProgress,
   setFontSize,
+  setPageMode,
   setParaSpacing,
   setTheme,
+  type PageMode,
   type ThemeMode,
 } from "../lib/store";
 import { initGroups } from "../lib/groups";
+import { appVersion, loadAppVersion } from "../lib/version";
 
 const THEME_OPTIONS: { value: ThemeMode; label: string }[] = [
   { value: "light", label: "浅色" },
   { value: "dark", label: "深色" },
   { value: "sepia", label: "护眼" },
+];
+
+const PAGE_MODE_OPTIONS: { value: PageMode; label: string }[] = [
+  { value: "paged", label: "左右翻页" },
+  { value: "scroll", label: "上下滚动" },
 ];
 
 function Row(props: {
@@ -78,6 +87,7 @@ export default function SettingsPage() {
 
   createEffect(() => {
     void initGroups();
+    void loadAppVersion();
   });
 
   function onResetProgress() {
@@ -199,8 +209,26 @@ export default function SettingsPage() {
               <span class="flex min-w-0 flex-1 flex-col gap-0.5">
                 <span class="text-[14.5px] font-medium">翻页方式</span>
               </span>
-              <span class="flex-none text-[13px] text-text-3">上下滚动</span>
-              <ChevronRightIcon size={18} class="flex-none text-text-3" />
+              <div
+                class="flex flex-none gap-0.5 rounded-[10px] bg-surface-2 p-[3px]"
+                role="radiogroup"
+                aria-label="翻页方式"
+              >
+                {PAGE_MODE_OPTIONS.map((opt) => (
+                  <button
+                    role="radio"
+                    aria-checked={currentPageMode() === opt.value}
+                    class="inline-flex items-center whitespace-nowrap rounded-lg px-[11px] py-[7px] text-[12.5px] text-text-2 transition-all duration-150"
+                    classList={{
+                      "bg-surface font-semibold text-text shadow-sm shadow-black/15":
+                        currentPageMode() === opt.value,
+                    }}
+                    onClick={() => setPageMode(opt.value)}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
         </section>
@@ -263,11 +291,8 @@ export default function SettingsPage() {
                 <strong class="text-[16px] font-bold tracking-[0.03em]">ReaderX</strong>
                 <span class="text-[11.5px] text-text-3">本地电子书阅读器</span>
               </span>
-              <span class="ml-auto text-xs text-text-3">v0.2.0</span>
+              <span class="ml-auto text-xs text-text-3">v{appVersion()}</span>
             </div>
-            <Row label="技术栈" desc="Tauri 2 · SolidJS · TypeScript · Vite">
-              <ChevronRightIcon size={18} class="flex-none text-text-3" />
-            </Row>
             <Row label="开源许可" desc="MIT License">
               <ChevronRightIcon size={18} class="flex-none text-text-3" />
             </Row>
@@ -275,7 +300,7 @@ export default function SettingsPage() {
         </section>
 
         <p class="-mt-2 mb-2.5 text-center text-[11px] text-text-3">
-          ReaderX 0.2.0 · 基于 Tauri 2 构建
+          ReaderX {appVersion()} · 基于 Tauri 2 构建
         </p>
       </div>
     </div>

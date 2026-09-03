@@ -10,11 +10,13 @@ import { createSignal } from "solid-js";
 import { readState, writeState } from "./backend";
 
 export type ThemeMode = "light" | "dark" | "sepia";
+export type PageMode = "paged" | "scroll";
 
 const THEME_KEY = "readerx.theme";
 const SHELF_KEY = "readerx.shelf";
 const FONT_KEY = "readerx.fontSize";
 const PARA_SPACING_KEY = "readerx.paragraphSpacing";
+const PAGE_MODE_KEY = "readerx.pageMode";
 
 export const FONT_MIN = 15;
 export const FONT_MAX = 28;
@@ -55,11 +57,12 @@ let initialized = false;
 export async function initReaderState(): Promise<void> {
   if (initialized) return;
   initialized = true;
-  const [storedTheme, storedShelf, storedFont, storedSpacing] = await Promise.all([
+  const [storedTheme, storedShelf, storedFont, storedSpacing, storedPageMode] = await Promise.all([
     readState<string>(THEME_KEY),
     readState<Record<string, ShelfEntry>>(SHELF_KEY),
     readState<number>(FONT_KEY),
     readState<number>(PARA_SPACING_KEY),
+    readState<PageMode>(PAGE_MODE_KEY),
   ]);
 
   const mode = normalizeTheme(storedTheme) ?? systemTheme();
@@ -74,6 +77,9 @@ export async function initReaderState(): Promise<void> {
   }
   if (typeof storedSpacing === "number" && Number.isFinite(storedSpacing)) {
     setParaSpacingSignal(clampParaSpacing(storedSpacing));
+  }
+  if (storedPageMode === "paged" || storedPageMode === "scroll") {
+    setPageModeSignal(storedPageMode);
   }
 }
 
@@ -215,4 +221,25 @@ export function setParaSpacing(value: number): void {
   const next = clampParaSpacing(value);
   setParaSpacingSignal(next);
   persistParaSpacing(next);
+}
+
+// ---------------------------------------------------------------------------
+// 阅读翻页方式（全局偏好，设置页与阅读页共用）
+
+const [pageModeSignal, setPageModeSignal] = createSignal<PageMode>("paged");
+let pageModeWriteQueue: Promise<void> = Promise.resolve();
+
+/** 响应式翻页方式（paged=左右翻页，scroll=上下滚动） */
+export function currentPageMode(): PageMode {
+  return pageModeSignal();
+}
+
+function persistPageMode(next: PageMode): void {
+  pageModeWriteQueue = pageModeWriteQueue.then(() => writeState(PAGE_MODE_KEY, next));
+}
+
+/** 切换翻页方式并持久化 */
+export function setPageMode(mode: PageMode): void {
+  setPageModeSignal(mode);
+  persistPageMode(mode);
 }

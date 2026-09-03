@@ -12,7 +12,14 @@ import { GroupPicker } from "../components/GroupPicker";
 import { LoadingScreen } from "../components/LoadingScreen";
 import { PageHeader } from "../components/PageHeader";
 import { ImportButton } from "../components/ImportButton";
-import { FolderIcon, LibraryIcon, PlusIcon, TrashIcon } from "../components/icons";
+import {
+  CheckIcon,
+  CloseIcon,
+  FolderIcon,
+  LibraryIcon,
+  PlusIcon,
+  TrashIcon,
+} from "../components/icons";
 import {
   ensureLocalBooksLoaded,
   localBookById,
@@ -35,14 +42,123 @@ function progressPercent(entry: ShelfEntry, book: LocalBook): number {
   return Math.min(100, Math.max(1, pct));
 }
 
+/** 单本书卡片：支持单击打开、长按进入多选、选中状态下点击切换选中 */
+function BookCard(props: {
+  item: ShelfItem;
+  horizontal?: boolean;
+  selectMode: boolean;
+  selected: boolean;
+  onOpen: (id: string) => void;
+  onLongPress: (id: string) => void;
+  onToggle: (id: string) => void;
+}) {
+  const { entry, book } = props.item;
+  const finished = entry.chapter + 1 >= book.chapters.length;
+  const pct = progressPercent(entry, book);
+
+  let longPressTimer: number | undefined;
+  let longPressFired = false;
+  let downX = 0;
+  let downY = 0;
+
+  function onPointerDown(e: PointerEvent) {
+    longPressFired = false;
+    downX = e.clientX;
+    downY = e.clientY;
+    window.clearTimeout(longPressTimer);
+    longPressTimer = window.setTimeout(() => {
+      if (!props.selectMode) props.onLongPress(book.id);
+    }, 480);
+  }
+
+  function onPointerMove(e: PointerEvent) {
+    if (Math.hypot(e.clientX - downX, e.clientY - downY) > 12) {
+      window.clearTimeout(longPressTimer);
+    }
+  }
+
+  function cancelLongPress() {
+    window.clearTimeout(longPressTimer);
+  }
+
+  function onClick() {
+    if (longPressFired) return;
+    if (props.selectMode) props.onToggle(book.id);
+    else props.onOpen(book.id);
+  }
+
+  function onKeyDown(e: KeyboardEvent) {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    e.preventDefault();
+    if (props.selectMode) props.onToggle(book.id);
+    else props.onOpen(book.id);
+  }
+
+  return (
+    <div
+      class={`flex select-none flex-col items-start gap-[5px] text-left touch-manipulation ${
+        props.horizontal ? "w-24" : "w-full"
+      }`}
+      role="button"
+      tabindex={0}
+      aria-label={
+        props.selectMode
+          ? props.selected
+            ? `取消选中《${book.title}》`
+            : `选中《${book.title}》`
+          : `打开《${book.title}》`
+      }
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={cancelLongPress}
+      onPointerCancel={cancelLongPress}
+      onPointerLeave={cancelLongPress}
+      onContextMenu={(e) => e.preventDefault()}
+      onClick={onClick}
+      onKeyDown={onKeyDown}
+    >
+      <div class="relative w-full rounded-[10px]">
+        <BookCover
+          book={{ title: book.title, author: book.author, hue: book.hue, format: book.format }}
+          variant="grid"
+        />
+        <Show when={props.selectMode && props.selected}>
+          <span class="absolute right-[5px] top-[5px] z-[2] grid h-[26px] w-[26px] animate-pop-in place-items-center rounded-full bg-accent text-on-accent shadow-md">
+            <CheckIcon size={15} />
+          </span>
+          <span class="pointer-events-none absolute inset-0 rounded-[10px] ring-2 ring-accent" />
+        </Show>
+      </div>
+      <span class="max-w-full truncate text-[13.5px] font-semibold">
+        {book.title}
+      </span>
+      <Show when={entry.chapter > 0}>
+        <span
+          class={`text-[11px] font-medium ${
+            finished ? "text-success" : "text-accent"
+          }`}
+        >
+          {finished ? "已读完" : `读到 ${pct}%`}
+        </span>
+        <span class="h-[3px] w-full overflow-hidden rounded-[2px] bg-surface-2" aria-hidden="true">
+          <i
+            class="block h-full rounded-[2px] bg-accent transition-[width] duration-200"
+            style={{ width: `${pct}%` }}
+          />
+        </span>
+      </Show>
+    </div>
+  );
+}
+
 interface ShelfGridProps {
   items: ShelfItem[];
-  managing: boolean;
-  confirmId: string | null;
   horizontal?: boolean;
+  selectMode: boolean;
+  selectedIds: string[];
   onOpen: (id: string) => void;
-  onDelete: (id: string) => void;
-  onGroup: (id: string) => void;
+  onLongPress: (id: string) => void;
+  onToggle: (id: string) => void;
 }
 
 function ShelfGrid(props: ShelfGridProps) {
@@ -55,82 +171,17 @@ function ShelfGrid(props: ShelfGridProps) {
       }
     >
       <For each={props.items}>
-        {(item) => {
-          const { entry, book } = item;
-          const finished = entry.chapter + 1 >= book.chapters.length;
-          const pct = progressPercent(entry, book);
-          const openable = !props.managing;
-          return (
-            <div
-              class={`flex flex-col items-start gap-[5px] text-left ${
-                props.horizontal ? "w-24" : "w-full"
-              }`}
-            >
-              <div
-                class={`relative w-full rounded-[10px] ${
-                  openable ? "cursor-pointer" : ""
-                }`}
-                role={openable ? "button" : undefined}
-                tabindex={openable ? 0 : undefined}
-                aria-label={openable ? `打开《${book.title}》` : undefined}
-                onClick={() => openable && props.onOpen(book.id)}
-                onKeyDown={(e) => {
-                  if (openable && (e.key === "Enter" || e.key === " ")) {
-                    e.preventDefault();
-                    props.onOpen(book.id);
-                  }
-                }}
-              >
-                <BookCover
-                  book={{ title: book.title, author: book.author, hue: book.hue, format: book.format }}
-                  variant="grid"
-                />
-                <Show when={props.managing}>
-                  <button
-                    class="absolute left-[5px] top-[5px] z-[2] inline-flex h-[26px] w-[26px] items-center justify-center rounded-full bg-black/70 text-white backdrop-blur-sm transition-colors duration-150"
-                    aria-label={`将《${book.title}》归入分组`}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      props.onGroup(book.id);
-                    }}
-                  >
-                    <FolderIcon size={13} />
-                  </button>
-                  <button
-                    class={`absolute right-[5px] top-[5px] z-[2] inline-flex h-[26px] min-w-[26px] items-center justify-center gap-[3px] rounded-full px-[7px] text-[11px] font-semibold text-white transition-colors duration-150 ${
-                      props.confirmId === book.id ? "bg-danger" : "bg-black/70 backdrop-blur-sm"
-                    }`}
-                    aria-label={props.confirmId === book.id ? "确认删除这本书" : `删除《${book.title}》`}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      props.onDelete(book.id);
-                    }}
-                  >
-                    {props.confirmId === book.id ? "确认" : <TrashIcon size={13} />}
-                  </button>
-                </Show>
-              </div>
-              <span class="max-w-full truncate text-[13.5px] font-semibold">
-                {book.title}
-              </span>
-              <Show when={entry.chapter > 0}>
-                <span
-                  class={`text-[11px] font-medium ${
-                    finished ? "text-success" : "text-accent"
-                  }`}
-                >
-                  {finished ? "已读完" : `读到 ${pct}%`}
-                </span>
-                <span class="h-[3px] w-full overflow-hidden rounded-[2px] bg-surface-2" aria-hidden="true">
-                  <i
-                    class="block h-full rounded-[2px] bg-accent transition-[width] duration-200"
-                    style={{ width: `${pct}%` }}
-                  />
-                </span>
-              </Show>
-            </div>
-          );
-        }}
+        {(item) => (
+          <BookCard
+            item={item}
+            horizontal={props.horizontal}
+            selectMode={props.selectMode}
+            selected={props.selectedIds.includes(item.book.id)}
+            onOpen={props.onOpen}
+            onLongPress={props.onLongPress}
+            onToggle={props.onToggle}
+          />
+        )}
       </For>
     </div>
   );
@@ -160,9 +211,10 @@ function GroupChip(props: {
 export default function BookshelfPage() {
   const navigate = useNavigate();
   const [groupId, setGroupId] = createSignal<string>("all");
-  const [managing, setManaging] = createSignal(false);
-  const [confirmId, setConfirmId] = createSignal<string | null>(null);
-  const [assigningId, setAssigningId] = createSignal<string | null>(null);
+  const [selecting, setSelecting] = createSignal(false);
+  const [selectedIds, setSelectedIds] = createSignal<string[]>([]);
+  const [groupPickerOpen, setGroupPickerOpen] = createSignal(false);
+  const [confirmDelete, setConfirmDelete] = createSignal(false);
   let confirmTimer: number | undefined;
 
   onCleanup(() => window.clearTimeout(confirmTimer));
@@ -202,59 +254,99 @@ export default function BookshelfPage() {
 
   const openBook = (id: string) => navigate(`/book/${id}`);
 
-  function toggleManage() {
-    setManaging((value) => !value);
-    setConfirmId(null);
-    setAssigningId(null);
+  function toggleSelect(id: string) {
+    setSelectedIds((prev) =>
+      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id],
+    );
   }
 
-  function requestDelete(id: string) {
-    if (confirmId() === id) {
+  function onLongPress(id: string) {
+    if (!selecting()) {
+      setSelecting(true);
+      setConfirmDelete(false);
+      setGroupPickerOpen(false);
+    }
+    toggleSelect(id);
+  }
+
+  function cancelSelect() {
+    setSelecting(false);
+    setSelectedIds([]);
+    setConfirmDelete(false);
+    setGroupPickerOpen(false);
+  }
+
+  async function deleteSelected() {
+    const ids = selectedIds();
+    for (const id of ids) {
+      try {
+        await removeLocalBook(id);
+        removeShelfEntry(id);
+      } catch {
+        /* 单本失败不影响其它 */
+      }
+    }
+    cancelSelect();
+  }
+
+  async function moveSelectedToGroup(groupId: string | null) {
+    const ids = selectedIds();
+    for (const id of ids) {
+      await setLocalBookGroup(id, groupId);
+    }
+    cancelSelect();
+  }
+
+  function sharedGroup(): string | null | undefined {
+    const ids = selectedIds();
+    if (ids.length === 0) return undefined;
+    const groups = ids.map((id) => localBookById(id)?.groupId ?? null);
+    return groups.every((g) => g === groups[0]) ? groups[0] : undefined;
+  }
+
+  function onRequestDelete() {
+    if (selectedIds().length === 0) return;
+    if (!confirmDelete()) {
+      setConfirmDelete(true);
       window.clearTimeout(confirmTimer);
-      setConfirmId(null);
-      void deleteBook(id);
+      confirmTimer = window.setTimeout(() => setConfirmDelete(false), 3000);
       return;
     }
-    setConfirmId(id);
     window.clearTimeout(confirmTimer);
-    confirmTimer = window.setTimeout(() => setConfirmId(null), 3000);
+    setConfirmDelete(false);
+    void deleteSelected();
   }
 
-  async function deleteBook(id: string) {
-    try {
-      await removeLocalBook(id);
-      removeShelfEntry(id);
-    } catch {
-      /* 删除失败时保持原样即可 */
-    }
-    if (items().length <= 1) setManaging(false);
-  }
+  const selectedCount = () => selectedIds().length;
 
   return (
     <div class="page relative">
       <PageHeader
-        title="书架"
-        subtitle={visibleItems().length > 0 ? `${visibleItems().length} 本在架` : undefined}
+        title={selecting() ? "选中书籍" : "书架"}
+        subtitle={
+          selecting()
+            ? `已选 ${selectedCount()} 本`
+            : visibleItems().length > 0
+              ? `${visibleItems().length} 本在架`
+              : undefined
+        }
         right={
-          <div class="flex flex-none items-center gap-0.5">
+          selecting() ? (
+            <button
+              class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
+              aria-label="取消选择"
+              onClick={cancelSelect}
+            >
+              <CloseIcon />
+            </button>
+          ) : (
             <ImportButton
               class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
               ariaLabel="导入本地书籍"
             >
               <PlusIcon />
             </ImportButton>
-            <Show when={items().length > 0}>
-              <button
-                class={`grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,color,scale] duration-150 active:scale-[0.94] active:bg-surface-2 ${
-                  managing() ? "bg-accent-weak text-accent" : ""
-                }`}
-                aria-label={managing() ? "退出管理" : "管理书籍"}
-                onClick={toggleManage}
-              >
-                <TrashIcon />
-              </button>
-            </Show>
-          </div>
+          )
         }
       >
         <Show when={groupList().length > 0}>
@@ -292,7 +384,7 @@ export default function BookshelfPage() {
                 <p class="mb-[18px] mt-0.5 text-[12.5px] leading-[1.6]">
                   {groupId() === "all"
                     ? "导入 TXT / EPUB 到本地书架"
-                    : "在管理模式下点开书籍封面左上角，即可将它归入这个分组"}
+                    : "在书架顶部切回「全部」分组即可看到书"}
                 </p>
                 <ImportButton
                   class="inline-flex items-center justify-center gap-1.5 rounded-xl bg-accent px-[22px] py-[11px] text-sm font-semibold text-on-accent shadow-lg shadow-accent/30 transition-[scale,opacity] duration-100 active:scale-[0.97] active:opacity-90"
@@ -303,64 +395,103 @@ export default function BookshelfPage() {
               </div>
             }
           >
-            <Show when={managing()}>
+            <Show when={selecting()}>
               <p class="mx-0.5 mt-2.5 text-xs text-text-3">
-                点击封面右上角删除，再点一次确认；左上角图标可将书籍归入分组
+                长按书籍进入多选；点击已选书籍可取消，底部可移动到分组或删除
               </p>
-            </Show>
-            <Show when={!managing() && continuing().length > 0}>
-              <section>
-                <h2 class="mx-0.5 mb-3 mt-5 text-[15px] font-semibold tracking-[0.02em]">
-                  继续阅读
-                </h2>
-                <div class="-mx-[18px] overflow-x-auto px-[18px] pb-1 scrollbar-none">
-                  <ShelfGrid
-                    items={continuing()}
-                    managing={false}
-                    confirmId={null}
-                    horizontal
-                    onOpen={openBook}
-                    onDelete={requestDelete}
-                    onGroup={() => undefined}
-                  />
-                </div>
-              </section>
-              <section>
-                <h2 class="mx-0.5 mb-3 mt-5 text-[15px] font-semibold tracking-[0.02em]">
-                  全部书籍
-                </h2>
+              <div class="mt-1">
                 <ShelfGrid
                   items={visibleItems()}
-                  managing={false}
-                  confirmId={null}
+                  selectMode
+                  selectedIds={selectedIds()}
                   onOpen={openBook}
-                  onDelete={requestDelete}
-                  onGroup={() => undefined}
+                  onLongPress={onLongPress}
+                  onToggle={toggleSelect}
                 />
-              </section>
+              </div>
             </Show>
-            <Show when={managing() || continuing().length === 0}>
-              <ShelfGrid
-                items={visibleItems()}
-                managing={managing()}
-                confirmId={confirmId()}
-                onOpen={openBook}
-                onDelete={requestDelete}
-                onGroup={(id) => setAssigningId(id)}
-              />
+            <Show when={!selecting()}>
+              <Show when={continuing().length > 0}>
+                <section>
+                  <h2 class="mx-0.5 mb-3 mt-5 text-[15px] font-semibold tracking-[0.02em]">
+                    继续阅读
+                  </h2>
+                  <div class="-mx-[18px] overflow-x-auto px-[18px] pb-1 scrollbar-none">
+                    <ShelfGrid
+                      items={continuing()}
+                      horizontal
+                      selectMode={false}
+                      selectedIds={[]}
+                      onOpen={openBook}
+                      onLongPress={onLongPress}
+                      onToggle={toggleSelect}
+                    />
+                  </div>
+                </section>
+                <section>
+                  <h2 class="mx-0.5 mb-3 mt-5 text-[15px] font-semibold tracking-[0.02em]">
+                    全部书籍
+                  </h2>
+                  <ShelfGrid
+                    items={visibleItems()}
+                    selectMode={false}
+                    selectedIds={[]}
+                    onOpen={openBook}
+                    onLongPress={onLongPress}
+                    onToggle={toggleSelect}
+                  />
+                </section>
+              </Show>
+              <Show when={continuing().length === 0}>
+                <ShelfGrid
+                  items={visibleItems()}
+                  selectMode={false}
+                  selectedIds={[]}
+                  onOpen={openBook}
+                  onLongPress={onLongPress}
+                  onToggle={toggleSelect}
+                />
+              </Show>
             </Show>
           </Show>
         </Show>
       </div>
 
-      <Show when={assigningId()}>
+      {/* 多选底部操作条 */}
+      <Show when={selecting()}>
+        <div class="sticky bottom-0 z-20 animate-sheet-up border-t border-border bg-surface px-[18px] pb-[calc(10px+env(safe-area-inset-bottom))] pt-3">
+          <Show when={selectedCount() > 0}>
+            <div class="flex items-center gap-2.5">
+              <button
+                class="inline-flex flex-1 items-center justify-center gap-1.5 rounded-xl border border-border bg-bg px-0.5 py-[11px] text-[13.5px] font-medium text-text-2 transition-colors active:bg-surface-2"
+                onClick={() => setGroupPickerOpen(true)}
+              >
+                <FolderIcon size={17} />
+                移动到分组
+              </button>
+              <button
+                class="inline-flex flex-1 items-center justify-center gap-1.5 rounded-xl border px-0.5 py-[11px] text-[13.5px] font-medium transition-colors"
+                classList={{
+                  "border-transparent bg-danger text-white": confirmDelete(),
+                  "border-border bg-bg text-danger": !confirmDelete(),
+                }}
+                onClick={onRequestDelete}
+              >
+                <TrashIcon size={17} />
+                {confirmDelete() ? "确认删除" : "删除"}
+              </button>
+            </div>
+          </Show>
+        </div>
+      </Show>
+
+      <Show when={groupPickerOpen()}>
         <GroupPicker
-          value={items().find((item) => item.book.id === assigningId())?.book.groupId}
+          value={sharedGroup()}
           onSelect={(targetGroupId) => {
-            const item = items().find((it) => it.book.id === assigningId());
-            if (item) void setLocalBookGroup(item.book.id, targetGroupId);
+            void moveSelectedToGroup(targetGroupId);
           }}
-          onClose={() => setAssigningId(null)}
+          onClose={() => setGroupPickerOpen(false)}
         />
       </Show>
     </div>

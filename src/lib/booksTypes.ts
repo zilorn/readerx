@@ -14,11 +14,26 @@ export type ChapterBlock =
   | { kind: "img"; src: string; alt?: string };
 
 export interface LocalBookChapter {
+  /** 章节稳定 id，如 c0001、c0002 …（旧数据可能在载入时回填） */
+  cid: string;
   title: string;
   /** 兼容字段：正文纯文本段落（新解析也会填充，便于字数等统计） */
   paragraphs: string[];
   /** 结构化正文块。TXT 或旧数据缺失时 Reader 退回 paragraphs */
   blocks?: ChapterBlock[];
+}
+
+/** 生成章节 cid：下标 0 → c0001 */
+export function chapterCid(index: number): string {
+  return `c${String(index + 1).padStart(4, "0")}`;
+}
+
+/** 为缺失 cid 的章节补上稳定 cid（幂等，不改动已有 cid） */
+export function assignChapterCids(chapters: LocalBookChapter[]): LocalBookChapter[] {
+  return chapters.map((chapter, index) => {
+    const cid = chapter.cid || chapterCid(index);
+    return cid === chapter.cid ? chapter : { ...chapter, cid };
+  });
 }
 
 export interface LocalBook {
