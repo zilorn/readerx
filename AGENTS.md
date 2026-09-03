@@ -60,6 +60,7 @@
 - tsconfig 开启 `strict / noUnusedLocals / noUnusedParameters`：未使用的 import、变量会直接报错，写完先 `pnpm exec tsc --noEmit`。
 - 组件 props 用 interface/type 显式声明；页面组件 default export，其余组件具名导出。
 - 提交前保证 `pnpm build` 通过；不要提交 `dist/` 与 `node_modules/`。
+- 提交前保证是否过度依赖一个文件中的代码，即一个文件承担了太多职责。
 
 ## 平台提醒
 

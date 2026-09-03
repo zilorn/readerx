@@ -155,7 +155,12 @@ function toDraft(
       sum + chapter.paragraphs.reduce((paraSum, paragraph) => paraSum + paragraph.length, 0),
     0,
   );
-  if (totalChars === 0) throw new Error("没有读取到可阅读的正文内容");
+  const hasImage = chapters.some((chapter) =>
+    chapter.blocks?.some((block) => block.kind === "img"),
+  );
+  if (totalChars === 0 && !hasImage) {
+    throw new Error("没有读取到可阅读的正文内容");
+  }
   return {
     format,
     title: title.trim() || titleFromFileName(file.name),

@@ -1,11 +1,14 @@
 /**
- * 极简 EPUB 解析（仅取正文文本，不处理字体/图片/样式）：
+ * 极简 EPUB 解析：
  * 1. 解压 ZIP，读取 META-INF/container.xml 定位 OPF；
  * 2. 从 OPF 的 metadata / manifest / spine 取书名、作者与阅读顺序；
- * 3. 逐个读取 spine 中的 XHTML/HTML，剥离标签并按块级元素切成自然段。
+ * 3. 逐 spine 读取 XHTML/HTML，用 DOM 遍历还原成“自然段 / 标题 / 插图”结构化块。
+ *
+ * 与旧版不同：不再用不可见字符标记 + 空行切分，避免正文丢字、标题重复、
+ * 分段混乱；<img> 会被提取为 data URL 引用，保证图片正常显示。
  */
 import { unzipSync } from "fflate";
-import type { LocalBookChapter } from "./booksTypes";
+import type { ChapterBlock, LocalBookChapter } from "./booksTypes";
 
 export interface ParsedEpub {
   title: string;
@@ -67,6 +70,32 @@ function firstNamespaceText(doc: Document, tag: string): string {
   return (el?.textContent ?? "").replace(/\s+/g, " ").trim();
 }
 
+function normalizeWhitespace(text: string): string {
+  return text
+    .replace(/\u00a0/g, " ")
+    .replace(/[\t\r\n ]+/g, " ")
+    .trim();
+}
+
+// ---------------------------------------------------------------------------
+// DOM -> 结构化块
+
+const UNRENDERABLE = new Set([
+  "SCRIPT",
+  "STYLE",
+  "HEAD",
+  "LINK",
+  "META",
+  "TITLE",
+  "NOSCRIPT",
+  "TEMPLATE",
+  "IFRAME",
+  "OBJECT",
+  "EMBED",
+  "SOURCE",
+  "TRACK",
+]);
+
 const BLOCK_TAGS = new Set([
   "P",
   "DIV",
@@ -90,114 +119,263 @@ const BLOCK_TAGS = new Set([
   "PRE",
   "UL",
   "OL",
+  "TABLE",
+  "HEADER",
+  "FOOTER",
+  "ASIDE",
+  "MAIN",
+  "NAV",
+  "HR",
+  "ADDRESS",
+  "FORM",
+  "FIELDSET",
+  "DETAILS",
+  "SUMMARY",
 ]);
 
 const HEADING_RE = /^H([1-6])$/;
 
-const HEADING_START = "\uE000";
-const HEADING_SEP = "\uE001";
-const HEADING_END = "\uE002";
+/** 过长段落的分段阈值（字数），超过则按句读切分为可读的较短段落 */
+const PARA_SPLIT_MAX = 280;
+const SENTENCE_END_CHARS = "。！？；…!?";
+
+/** 把超长段落按句读标点切成 ≤PARA_SPLIT_MAX 的若干段 */
+function splitParagraph(text: string): string[] {
+  if (text.length <= PARA_SPLIT_MAX) return [text];
+  const out: string[] = [];
+  let rest = text;
+  while (rest.length > PARA_SPLIT_MAX) {
+    const floor = Math.floor(PARA_SPLIT_MAX * 0.55);
+    let cut = PARA_SPLIT_MAX;
+    for (let i = PARA_SPLIT_MAX; i > floor; i--) {
+      if (SENTENCE_END_CHARS.includes(rest.charAt(i - 1))) {
+        cut = i;
+        break;
+      }
+    }
+    out.push(normalizeWhitespace(rest.slice(0, cut)));
+    rest = rest.slice(cut);
+  }
+  if (rest) out.push(normalizeWhitespace(rest));
+  return out.filter(Boolean);
+}
+
+/** 把文本按句读标点切成句子（保留标点、去掉各句首尾空白） */
+function splitSentences(text: string): string[] {
+  const parts: string[] = [];
+  let last = 0;
+  const re = new RegExp(`[${SENTENCE_END_CHARS.replace(/[\\]/g, "\\\\")}]`, "g");
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text))) {
+    parts.push(text.slice(last, m.index + 1));
+    last = m.index + 1;
+  }
+  if (last < text.length) parts.push(text.slice(last));
+  return parts.map((p) => p.trim()).filter(Boolean);
+}
 
 /**
- * 渲染正文：块级元素间以空行分隔；
- * 标题段落用不可见字符包裹，便于之后按标题拆章而不丢正文。
+ * 章节开篇若首句很短且复述了章节名（如“封面 1. 书名”），
+ * 把它收掉，避免正文重复出现标题。
  */
-function renderNode(node: Node): string {
-  let out = "";
-  for (const child of Array.from(node.childNodes)) {
-    if (child.nodeType === Node.TEXT_NODE) {
-      out += child.textContent ?? "";
-    } else if (child.nodeType === Node.ELEMENT_NODE) {
-      const element = child as Element;
-      if (element.tagName === "BR") {
-        out += "\n";
-        continue;
-      }
-      const heading = HEADING_RE.exec(element.tagName);
-      if (heading) {
-        const headingText = renderNode(child).replace(/\s+/g, " ").trim();
-        if (headingText) {
-          out += `${HEADING_START}${heading[1]}${HEADING_SEP}${headingText}${HEADING_END}`;
-        }
-        out += "\n\n";
-        continue;
-      }
-      out += renderNode(child);
-      if (BLOCK_TAGS.has(element.tagName)) out += "\n\n";
-    }
+function stripLeadingTitle(text: string, title: string): { rest: string; stripped: boolean } {
+  const t = normalizeWhitespace(title);
+  if (!t) return { rest: text, stripped: false };
+  const sentences = splitSentences(text);
+  if (sentences.length === 0) return { rest: text, stripped: false };
+  const first = normalizeWhitespace(sentences[0]);
+  if (first && first.length <= 40 && first.includes(t)) {
+    const rest = sentences.slice(1).join("").trim();
+    return { rest, stripped: true };
   }
-  return out;
+  return { rest: text, stripped: false };
 }
 
-interface ContentBlock {
-  heading: boolean;
-  level: number;
-  text: string;
-}
+/**
+ * 把容器内的 DOM 还原成顺序块。逐元素遍历，块级标签处换段，
+ * 标题单独成块，<img> 生成图片块；h1-h2 之外的标题保留为章内副标题。
+ */
+function renderBlocks(
+  root: Element,
+  getImageSrc: (el: Element) => string | null,
+): ChapterBlock[] {
+  const blocks: ChapterBlock[] = [];
+  let buf = "";
 
-/** HTML 块级元素转“自然段 + 章节标题”列表，不丢弃任何正文 */
-function extractContentBlocks(doc: Document): ContentBlock[] {
-  // XML DOM 的 doc.body 可能为 null，此时显式找 <body> 以排除 <head> 元信息
-  const container = doc.body ?? doc.querySelector("body") ?? doc.documentElement;
-  // 只移除程序性节点；正文（含短页、页脚等）一律保留
-  container.querySelectorAll("head, script, style, link, meta").forEach((el) => el.remove());
-  let text = renderNode(container);
-  text = text
-    .replace(/\u00a0/g, " ")
-    .replace(/[ \t]+/g, " ")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-  return text
-    .split(/\n\s*\n+/)
-    .map((block) => block.replace(/\s+/g, " ").trim())
-    .filter(Boolean)
-    .map((block) => {
-      const marker = block.indexOf(HEADING_START);
-      if (marker < 0) return { heading: false, level: 0, text: block };
-      const head = block.indexOf(HEADING_SEP, marker);
-      const tail = block.indexOf(HEADING_END, head);
-      if (head < 0 || tail < 0) {
-        return { heading: false, level: 0, text: block.replace(HEADING_START, "").trim() };
+  const flush = () => {
+    const text = normalizeWhitespace(buf);
+    if (text) {
+      for (const part of splitParagraph(text)) {
+        blocks.push({ kind: "p", text: part });
       }
-      const level = Number(block.slice(marker + 1, head));
-      return {
-        heading: true,
-        level,
-        text: block.slice(head + 1, tail).trim().slice(0, 80),
-      };
-    })
-    .filter((block) => block.heading || block.text.length > 0);
+    }
+    buf = "";
+  };
+
+  const walk = (node: Node): void => {
+    for (const child of Array.from(node.childNodes)) {
+      if (child.nodeType === Node.TEXT_NODE) {
+        buf += child.nodeValue ?? "";
+        continue;
+      }
+      if (child.nodeType !== Node.ELEMENT_NODE) continue;
+      const el = child as Element;
+      // XML(application/xhtml+xml) 解析下的 tagName 为小写，统一大写比较
+      const tag = el.tagName.toUpperCase();
+
+      if (UNRENDERABLE.has(tag)) continue;
+
+      // 软换行：当作一个空格，避免把诗歌/短行硬拆成多个段落
+      if (tag === "BR") {
+        buf += " ";
+        continue;
+      }
+
+      if (tag === "IMG") {
+        flush();
+        const src = getImageSrc(el);
+        // 即使图片缺失也保留占位块，避免在段落中间静默丢图
+        blocks.push({
+          kind: "img",
+          src: src ?? "",
+          alt: el.getAttribute("alt") ?? "插图",
+        });
+        continue;
+      }
+
+      const heading = HEADING_RE.exec(tag);
+      if (heading) {
+        flush();
+        const text = normalizeWhitespace(el.textContent ?? "");
+        if (text) blocks.push({ kind: "h", level: Number(heading[1]), text });
+        continue;
+      }
+
+      if (BLOCK_TAGS.has(tag)) {
+        // 块级元素：先收掉当前段，再递归收集其子内容（内部会自管分段）
+        flush();
+        buf = "";
+        walk(el);
+        flush();
+        continue;
+      }
+
+      // 行内元素：递归收集，可能包含 BR / IMG / 子标题
+      walk(el);
+    }
+  };
+
+  walk(root);
+  flush();
+  return blocks;
 }
 
-/** 单个 XHTML：把标题与正文分成若干章；正文段落不做任何长度过滤 */
+/**
+ * 把单份 XHTML 内容块按章节切分：
+ * - 首个标题（任意级）作为章节名，不再进入正文，避免重复；
+ * - 之后 h1/h2 作为新章边界；h3+ 保留为章内副标题；
+ * - 开篇与章节名重复的短句会被收掉（避免正文重复标题）。
+ */
 function buildDocumentChapters(
-  doc: Document,
+  blocks: ChapterBlock[],
+  docTitle: string,
   fallbackTitle: string,
 ): LocalBookChapter[] {
-  const docTitle = firstText(doc, "title") || fallbackTitle;
-  const blocks = extractContentBlocks(doc);
-
   const chapters: LocalBookChapter[] = [];
   let title = "";
   let paragraphs: string[] = [];
+  let body: ChapterBlock[] = [];
 
   const commit = () => {
-    if (paragraphs.length === 0) return;
-    chapters.push({ title: title || docTitle || fallbackTitle, paragraphs });
+    if (body.length === 0 && paragraphs.length === 0) return;
+    chapters.push({
+      title: title || docTitle || fallbackTitle,
+      paragraphs,
+      blocks: body,
+    });
+    title = "";
     paragraphs = [];
+    body = [];
   };
 
   for (const block of blocks) {
-    if (block.heading) {
-      commit();
-      title = block.text;
-    } else {
-      paragraphs.push(block.text);
+    if (block.kind === "h") {
+      const isBoundary = block.level <= 2 || (body.length === 0 && paragraphs.length === 0);
+      if (isBoundary) {
+        commit();
+        title = block.text;
+      } else {
+        body.push(block);
+      }
+      continue;
     }
+
+    if (block.kind === "p") {
+      const atStart = body.length === 0 && paragraphs.length === 0;
+      const reference = title || docTitle || fallbackTitle;
+      let text = block.text;
+      if (atStart) {
+        const { rest, stripped } = stripLeadingTitle(text, reference);
+        if (stripped) {
+          if (rest) {
+            text = rest;
+          } else if (!title) {
+            // 整段都是章节名的复述，把它用作章节名，不再进入正文
+            title = block.text;
+            continue;
+          } else {
+            continue;
+          }
+        }
+      }
+      for (const part of splitParagraph(text)) {
+        paragraphs.push(part);
+        body.push({ kind: "p", text: part });
+      }
+      continue;
+    }
+
+    body.push(block);
   }
   commit();
   return chapters;
 }
+
+// ---------------------------------------------------------------------------
+// 图片提取
+
+function mimeFromPath(path: string): string {
+  const ext = path.split(".").pop()?.toLowerCase();
+  switch (ext) {
+    case "jpg":
+    case "jpeg":
+      return "image/jpeg";
+    case "png":
+      return "image/png";
+    case "gif":
+      return "image/gif";
+    case "webp":
+      return "image/webp";
+    case "avif":
+      return "image/avif";
+    case "svg":
+      return "image/svg+xml";
+    default:
+      return "application/octet-stream";
+  }
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
+// ---------------------------------------------------------------------------
+// 入口
 
 export async function parseEpubFile(file: File): Promise<ParsedEpub> {
   const bytes = new Uint8Array(await file.arrayBuffer());
@@ -224,16 +402,19 @@ export async function parseEpubFile(file: File): Promise<ParsedEpub> {
   const title =
     firstNamespaceText(opfDoc, "title") ||
     (file.name.replace(/\.(epub|equb)$/i, "").trim() || "未命名");
-  const author =
-    firstNamespaceText(opfDoc, "creator") ||
-    "佚名";
+  const author = firstNamespaceText(opfDoc, "creator") || "佚名";
 
-  const manifest = new Map<string, { href: string; mediaType: string }>();
+  const manifest = new Map<string, { href: string; mediaType: string; properties: string }>();
+  const manifestByHref = new Map<string, string>();
   for (const item of Array.from(opfDoc.querySelectorAll("manifest > item"))) {
     const id = item.getAttribute("id");
     const href = item.getAttribute("href") ?? "";
     const mediaType = item.getAttribute("media-type") ?? "";
-    if (id && href) manifest.set(id, { href, mediaType });
+    const properties = item.getAttribute("properties") ?? "";
+    if (id && href) {
+      manifest.set(id, { href, mediaType, properties });
+      manifestByHref.set(resolvePath(opfDir, href), mediaType);
+    }
   }
 
   const spineOrder: string[] = [];
@@ -247,13 +428,33 @@ export async function parseEpubFile(file: File): Promise<ParsedEpub> {
   for (const idref of spineOrder) {
     const item = manifest.get(idref);
     if (!item) throw new Error(`EPUB spine 引用了不存在的清单项：${idref}`);
+    // 跳过导航文档 / NCX 等非正文项，避免把目录当正文
+    if (item.properties.includes("nav") || item.mediaType === "application/x-dtbncx+xml") {
+      continue;
+    }
     const hrefKey = resolvePath(opfDir, item.href);
     const content = entries[hrefKey];
     if (!content) throw new Error(`EPUB 正文文件缺失：${item.href}`);
     index += 1;
 
+    const itemDir = hrefKey.includes("/") ? hrefKey.slice(0, hrefKey.lastIndexOf("/") + 1) : "";
+    const getImageSrc = (el: Element): string | null => {
+      const rawSrc = el.getAttribute("src")?.trim();
+      if (!rawSrc) return null;
+      const key = resolvePath(itemDir, rawSrc);
+      const imgBytes = entries[key];
+      if (!imgBytes) return null;
+      const mediaType = manifestByHref.get(key) ?? mimeFromPath(key);
+      return `data:${mediaType};base64,${bytesToBase64(imgBytes)}`;
+    };
+
     const doc = parseHtml(decodeText(content));
-    chapters.push(...buildDocumentChapters(doc, `第 ${index} 节`));
+    const container = doc.body ?? doc.querySelector("body") ?? doc.documentElement;
+    container.querySelectorAll("head, script, style, link, meta, title, noscript, template, iframe, object, embed, source, track")
+      .forEach((el) => el.remove());
+    const docTitle = firstText(doc, "title") || `第 ${index} 节`;
+    const blocks = renderBlocks(container, getImageSrc);
+    chapters.push(...buildDocumentChapters(blocks, docTitle, `第 ${index} 节`));
   }
 
   if (chapters.length === 0) {

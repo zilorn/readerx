@@ -10,10 +10,15 @@ import { PageHeader } from "../components/PageHeader";
 import {
   FONT_MAX,
   FONT_MIN,
+  PARA_SPACING_MAX,
+  PARA_SPACING_MIN,
+  PARA_SPACING_STEP,
   currentFontSize,
+  currentParaSpacing,
   currentTheme,
   resetReadingProgress,
   setFontSize,
+  setParaSpacing,
   setTheme,
   type ThemeMode,
 } from "../lib/store";
@@ -159,6 +164,27 @@ export default function SettingsPage() {
                 >
                   A+
                 </button>
+              </div>
+            </div>
+            <div class="flex w-full cursor-default items-center gap-3 px-4 py-[13px] text-left">
+              <span class="flex min-w-0 flex-1 flex-col gap-0.5">
+                <span class="text-[14.5px] font-medium">段落间距</span>
+                <span class="text-[11.5px] text-text-3">正文段落之间的留白</span>
+              </span>
+              <div class="flex flex-none items-center gap-3">
+                <span class="min-w-[42px] text-right text-[13px] font-semibold tabular-nums">
+                  {currentParaSpacing().toFixed(2)}
+                </span>
+                <input
+                  type="range"
+                  class="accent-accent"
+                  min={PARA_SPACING_MIN}
+                  max={PARA_SPACING_MAX}
+                  step={PARA_SPACING_STEP}
+                  value={currentParaSpacing()}
+                  aria-label="段落间距"
+                  onInput={(e) => setParaSpacing(Number(e.currentTarget.value))}
+                />
               </div>
             </div>
             <div class="flex w-full cursor-default items-center gap-3 px-4 py-[13px] text-left">

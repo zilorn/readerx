@@ -19,6 +19,7 @@ import {
   FONT_MAX,
   FONT_MIN,
   currentFontSize,
+  currentParaSpacing,
   ensureShelfEntry,
   setFontSize,
   setReadingChapter,
@@ -168,11 +169,70 @@ export default function ReaderPage() {
                   <p class="mb-5 text-center text-[0.66em] tracking-[0.4em] text-text-3">
                     {current().author} 著
                   </p>
-                  <For each={chapterData()?.paragraphs ?? []}>
-                    {(paragraph) => (
-                      <p class="mb-[1.05em] indent-[2em]">{paragraph}</p>
+                  <Show
+                    when={chapterData()?.blocks}
+                    fallback={
+                      <For each={chapterData()?.paragraphs ?? []}>
+                        {(paragraph) => (
+                          <p
+                            class="indent-[2em]"
+                            style={{ "margin-bottom": `${currentParaSpacing()}em` }}
+                          >
+                            {paragraph}
+                          </p>
+                        )}
+                      </For>
+                    }
+                  >
+                    {(blocks) => (
+                      <For each={blocks()}>
+                        {(block) => {
+                          if (block.kind === "p") {
+                            return (
+                              <p
+                                class="indent-[2em]"
+                                style={{ "margin-bottom": `${currentParaSpacing()}em` }}
+                              >
+                                {block.text}
+                              </p>
+                            );
+                          }
+                          if (block.kind === "h") {
+                            return (
+                              <h3
+                                class="font-semibold tracking-[0.04em]"
+                                style={{
+                                  "margin-bottom": `${currentParaSpacing()}em`,
+                                  "margin-top": `calc(${currentParaSpacing()}em * 1.2)`,
+                                  "font-size": block.level <= 3 ? "1.15em" : "1.05em",
+                                }}
+                              >
+                                {block.text}
+                              </h3>
+                            );
+                          }
+                          return (
+                            <figure class="my-[1em] text-center">
+                              <Show
+                                when={block.src}
+                                fallback={
+                                  <div class="mx-auto flex max-w-full items-center justify-center rounded-md border border-dashed border-border bg-surface-2 px-4 py-10 text-[12px] text-text-3">
+                                    {block.alt ? `${block.alt}（图片缺失）` : "图片缺失"}
+                                  </div>
+                                }
+                              >
+                                <img
+                                  src={block.src}
+                                  alt={block.alt ?? ""}
+                                  class="mx-auto max-h-[68vh] max-w-full rounded-md object-contain"
+                                />
+                              </Show>
+                            </figure>
+                          );
+                        }}
+                      </For>
                     )}
-                  </For>
+                  </Show>
                 </div>
               </div>
 
