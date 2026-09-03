@@ -1434,10 +1434,9 @@ export default function ReaderPage() {
               </div>
             </header>
 
-            {/* 底部工具栏 */}
-            <footer
-              data-reader-ui
-              class="absolute inset-x-0 bottom-0 z-30 select-none border-t border-border bg-surface transition-transform duration-200"
+            {/* 底部菜单栏 + 听书悬浮球（固定在菜单栏上方，随菜单一同滑入/滑出） */}
+            <div
+              class="absolute inset-x-0 bottom-0 z-30 transition-transform duration-200"
               classList={{
                 "translate-y-full": !menuOpen(),
                 "translate-y-0": menuOpen(),
@@ -1445,7 +1444,32 @@ export default function ReaderPage() {
               style={{ "pointer-events": menuOpen() ? "auto" : "none" }}
               aria-hidden={!menuOpen()}
             >
-              <div class="flex items-center gap-2 px-3.5 pb-[calc(10px+max(env(safe-area-inset-bottom),16px))] pt-2">
+              {/* 听书悬浮球：停靠在底部菜单栏上方 */}
+              <Show
+                when={
+                  ttsPlayer.status() !== "stopped" &&
+                  !tocOpen() &&
+                  !bmPanelOpen()
+                }
+              >
+                <div class="flex justify-end px-3 pb-1.5 pt-2">
+                  <TtsBubble
+                    status={ttsPlayer.status}
+                    rate={ttsPlayer.rate}
+                    voiceLabel={() => ttsPlayer.voiceName()}
+                    error={ttsPlayer.error}
+                    onPrev={() => ttsPlayer.prev()}
+                    onNext={() => ttsPlayer.next()}
+                    onToggle={() => ttsPlayer.togglePlay()}
+                    onOpenSettings={() => setTtsSettingsOpen(true)}
+                  />
+                </div>
+              </Show>
+              <footer
+                data-reader-ui
+                class="select-none border-t border-border bg-surface"
+              >
+                <div class="flex items-center gap-2 px-3.5 pb-[calc(10px+max(env(safe-area-inset-bottom),16px))] pt-2">
                 <button
                   class="inline-flex flex-1 items-center justify-center gap-1.5 rounded-[10px] border border-border bg-bg px-0.5 py-[9px] text-[12.5px] text-text-2 disabled:pointer-events-none disabled:opacity-30"
                   disabled={isFirstChapter()}
@@ -1489,8 +1513,9 @@ export default function ReaderPage() {
                   下一章
                   <ChevronRightIcon size={16} />
                 </button>
-              </div>
-            </footer>
+                </div>
+              </footer>
+            </div>
 
             {/* 目录抽屉 */}
             <Show when={tocOpen()}>
@@ -1578,31 +1603,6 @@ export default function ReaderPage() {
               onCopy={(text) => void handleCopyText(text)}
               onBookmark={(range) => handleBookmarkRange(range)}
             />
-
-            {/* 听书悬浮球：暂停/继续、上一句/下一句、打开听书设置 */}
-            <Show
-              when={
-                ttsPlayer.status() !== "stopped" &&
-                !menuOpen() &&
-                !tocOpen() &&
-                !bmPanelOpen()
-              }
-            >
-              <TtsBubble
-                status={ttsPlayer.status}
-                rate={ttsPlayer.rate}
-                voiceLabel={() => ttsPlayer.voiceName()}
-                error={ttsPlayer.error}
-                onPrev={() => ttsPlayer.prev()}
-                onNext={() => ttsPlayer.next()}
-                onToggle={() => ttsPlayer.togglePlay()}
-                onOpenSettings={() => setTtsSettingsOpen(true)}
-                bounds={() => ({
-                  w: areaRef?.clientWidth ?? 0,
-                  h: areaRef?.clientHeight ?? 0,
-                })}
-              />
-            </Show>
 
             {/* 听书设置（引擎 / 音色 / 自定义源 / 倍速 / 定时） */}
             <TtsSheet
