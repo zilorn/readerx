@@ -67,7 +67,6 @@ function cardProgress(entry: ShelfEntry, book: LocalBook): {
 /** 单本书卡片：支持单击打开、长按进入多选、选中状态下点击切换选中 */
 function BookCard(props: {
   item: ShelfItem;
-  horizontal?: boolean;
   selectMode: boolean;
   selected: boolean;
   onOpen: (id: string) => void;
@@ -117,9 +116,7 @@ function BookCard(props: {
 
   return (
     <div
-      class={`flex select-none flex-col items-start gap-[5px] text-left touch-manipulation ${
-        props.horizontal ? "w-24" : "w-full"
-      }`}
+      class="flex w-full select-none flex-col items-start gap-[5px] text-left touch-manipulation"
       role="button"
       tabindex={0}
       aria-label={
@@ -174,7 +171,6 @@ function BookCard(props: {
 
 interface ShelfGridProps {
   items: ShelfItem[];
-  horizontal?: boolean;
   selectMode: boolean;
   selectedIds: string[];
   onOpen: (id: string) => void;
@@ -184,18 +180,11 @@ interface ShelfGridProps {
 
 function ShelfGrid(props: ShelfGridProps) {
   return (
-    <div
-      class={
-        props.horizontal
-          ? "flex w-max gap-4"
-          : "grid grid-cols-3 gap-x-3.5 gap-y-[22px] py-[2px] pb-1.5"
-      }
-    >
+    <div class="grid grid-cols-3 gap-x-3.5 gap-y-[22px] py-[2px] pb-1.5">
       <For each={props.items}>
         {(item) => (
           <BookCard
             item={item}
-            horizontal={props.horizontal}
             selectMode={props.selectMode}
             selected={props.selectedIds.includes(item.book.id)}
             onOpen={props.onOpen}
@@ -259,10 +248,6 @@ export default function BookshelfPage() {
       ? items()
       : items().filter((item) => (item.book.groupId ?? null) === gid);
   });
-
-  const continuing = createMemo(() =>
-    groupId() === "all" ? items().filter((item) => hasReadingProgress(item.entry)) : [],
-  );
 
   const groupCounts = createMemo<Record<string, number>>(() => {
     const counts: Record<string, number> = { all: items().length };
@@ -441,47 +426,14 @@ export default function BookshelfPage() {
               </div>
             </Show>
             <Show when={!selecting()}>
-              <Show when={continuing().length > 0}>
-                <section>
-                  <h2 class="mx-0.5 mb-3 mt-5 text-[15px] font-semibold tracking-[0.02em]">
-                    继续阅读
-                  </h2>
-                  <div class="-mx-[18px] overflow-x-auto px-[18px] pb-1 scrollbar-none">
-                    <ShelfGrid
-                      items={continuing()}
-                      horizontal
-                      selectMode={false}
-                      selectedIds={[]}
-                      onOpen={openBook}
-                      onLongPress={onLongPress}
-                      onToggle={toggleSelect}
-                    />
-                  </div>
-                </section>
-                <section>
-                  <h2 class="mx-0.5 mb-3 mt-5 text-[15px] font-semibold tracking-[0.02em]">
-                    全部书籍
-                  </h2>
-                  <ShelfGrid
-                    items={visibleItems()}
-                    selectMode={false}
-                    selectedIds={[]}
-                    onOpen={openBook}
-                    onLongPress={onLongPress}
-                    onToggle={toggleSelect}
-                  />
-                </section>
-              </Show>
-              <Show when={continuing().length === 0}>
-                <ShelfGrid
-                  items={visibleItems()}
-                  selectMode={false}
-                  selectedIds={[]}
-                  onOpen={openBook}
-                  onLongPress={onLongPress}
-                  onToggle={toggleSelect}
-                />
-              </Show>
+              <ShelfGrid
+                items={visibleItems()}
+                selectMode={false}
+                selectedIds={[]}
+                onOpen={openBook}
+                onLongPress={onLongPress}
+                onToggle={toggleSelect}
+              />
             </Show>
           </Show>
         </Show>
