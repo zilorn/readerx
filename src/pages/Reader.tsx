@@ -11,7 +11,10 @@ import {
 } from "solid-js";
 import { useNavigate, useParams } from "@solidjs/router";
 import { LoadingScreen } from "../components/LoadingScreen";
+import { BookmarkPanel } from "../components/BookmarkPanel";
+import { SelectionMenu } from "../components/SelectionMenu";
 import {
+  BookmarkIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
   CloseIcon,
@@ -22,6 +25,19 @@ import {
   localBookById,
   localBooksReady,
 } from "../lib/books";
+import {
+  BOOKMARK_MAX_LEN,
+  addBookmark,
+  bookmarkAtExactRange,
+  buildTextMirror,
+  ensureBookmarksLoaded,
+  makeBookmark,
+  removeBookmark,
+  resolveBookmarkTarget,
+  sortedBookmarks,
+  type Bookmark,
+  type TextMirror,
+} from "../lib/bookmarks";
 import {
   MISSING_IMAGE_HEIGHT,
   chapterUnits,
@@ -51,6 +67,12 @@ import {
   shelfEntries,
 } from "../lib/store";
 import { showToast } from "../lib/toast";
+import {
+  charOffsetInElement,
+  copyPlainText,
+  dataAnchorOf,
+  flashUnitRange,
+} from "../lib/textAnchor";
 
 const PAD_X = 24; // 阅读区左右留白
 const PAD_TOP = 14; // 正文顶部留白
@@ -79,6 +101,92 @@ const bottomPadScroll = () => safeInsets().bottom + PAD_BOTTOM_SCROLL;
 /** 分页引擎的行内样式记录 → Solid 样式对象 */
 function asCss(record: CssRecord): JSX.CSSProperties {
   return record as JSX.CSSProperties;
+}
+
+// ---------------------------------------------------------------------------
+// 书签下划线：按单元内字符区间把文本切段渲染
+// ---------------------------------------------------------------------------
+
+/** 单元内被书签覆盖的字符区间（局部于该单元文本） */
+export interface UnitMark {
+  unit: number;
+  s: number;
+  e: number;
+}
+
+/** 待定位高亮的字符区间（镜像文本全局坐标） */
+interface PendingFlash {
+  chapter: number;
+  unit: number;
+  charStart: number;
+  charEnd: number;
+}
+
+interface TextSegment {
+  text: string;
+  marked: boolean;
+}
+
+/** 把文本按覆盖区间切段（窗口 [winStart, winStart+text.length) 之外的书签忽略） */
+function splitMarkedText(
+  text: string,
+  winStart: number,
+  unit: number,
+  marks: UnitMark[],
+): TextSegment[] {
+  const segments: TextSegment[] = [];
+  let pos = 0;
+  for (const mark of marks) {
+    if (mark.unit !== unit) continue;
+    if (mark.e <= winStart) continue;
+    const winEnd = winStart + text.length;
+    if (mark.s >= winEnd) break;
+    const s = Math.max(mark.s, winStart) - winStart;
+    const e = Math.min(mark.e, winEnd) - winStart;
+    if (e <= pos) continue;
+    if (s > pos) {
+      segments.push({ text: text.slice(pos, s), marked: false });
+      pos = s;
+    }
+    segments.push({ text: text.slice(pos, e), marked: true });
+    pos = e;
+    if (pos >= text.length) break;
+  }
+  if (pos < text.length) {
+    segments.push({ text: text.slice(pos), marked: false });
+  }
+  return segments;
+}
+
+/** 渲染切段：命中书签的片段包橙色下划线 span */
+function renderMarkedText(
+  text: string,
+  winStart: number,
+  unit: number,
+  marks: UnitMark[],
+): JSX.Element {
+  const segments = splitMarkedText(text, winStart, unit, marks);
+  if (segments.length === 1 && !segments[0].marked) return segments[0].text;
+  return (
+    <>
+      {segments.map((seg) =>
+        seg.marked ? (
+          <span
+            style={{
+              "text-decoration-line": "underline",
+              "text-decoration-color": "var(--accent)",
+              "text-decoration-thickness": "2px",
+              "text-underline-offset": "0.2em",
+            }}
+          >
+            {seg.text}
+          </span>
+        ) : (
+          seg.text
+        ),
+      )}
+    </>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -141,7 +249,11 @@ function ImageBlock(props: {
 }
 
 /** 分页视图里的单个片段 */
-function PagedFragment(props: { fragment: PageFragment; layout: PaginateLayout }) {
+function PagedFragment(props: {
+  fragment: PageFragment;
+  layout: PaginateLayout;
+  marks: UnitMark[];
+}) {
   const fragment = props.fragment;
   const layout = props.layout;
   if (fragment.kind === "title") {
@@ -149,26 +261,47 @@ function PagedFragment(props: { fragment: PageFragment; layout: PaginateLayout }
   }
   if (fragment.kind === "p") {
     return (
-      <p style={asCss(paragraphStyle(layout, fragment.indent, fragment.end))}>
-        {fragment.text}
+      <p
+        data-u={fragment.unit}
+        data-c={fragment.cstart}
+        style={asCss(paragraphStyle(layout, fragment.indent, fragment.end))}
+      >
+        {renderMarkedText(fragment.text, fragment.cstart, fragment.unit, props.marks)}
       </p>
     );
   }
   if (fragment.kind === "h") {
-    return <h3 style={asCss(headingStyle(layout, fragment.level))}>{fragment.text}</h3>;
+    return (
+      <h3 data-u={fragment.unit} data-c={fragment.cstart} style={asCss(headingStyle(layout, fragment.level))}>
+        {renderMarkedText(fragment.text, fragment.cstart, fragment.unit, props.marks)}
+      </h3>
+    );
   }
   return <ImageBlock src={fragment.src} alt={fragment.alt} w={fragment.w} h={fragment.h} />;
 }
 
 /** 滚动模式下的正文单元 */
-function ScrollBlock(props: { layout: PaginateLayout; block: ReaderBlock }) {
+function ScrollBlock(props: {
+  layout: PaginateLayout;
+  block: ReaderBlock;
+  unit: number;
+  marks: UnitMark[];
+}) {
   const block = props.block;
   const layout = props.layout;
   if (block.kind === "p") {
-    return <p style={asCss(paragraphStyle(layout, true, true))}>{block.text}</p>;
+    return (
+      <p data-u={props.unit} data-c={0} style={asCss(paragraphStyle(layout, true, true))}>
+        {renderMarkedText(block.text, 0, props.unit, props.marks)}
+      </p>
+    );
   }
   if (block.kind === "h") {
-    return <h3 style={asCss(headingStyle(layout, block.level))}>{block.text}</h3>;
+    return (
+      <h3 data-u={props.unit} data-c={0} style={asCss(headingStyle(layout, block.level))}>
+        {renderMarkedText(block.text, 0, props.unit, props.marks)}
+      </h3>
+    );
   }
   return <ImageBlock src={block.src} alt={block.alt} natural />;
 }
@@ -191,8 +324,14 @@ export default function ReaderPage() {
   const [pageIdx, setPageIdx] = createSignal(0);
   const [menuOpen, setMenuOpen] = createSignal(false);
   const [tocOpen, setTocOpen] = createSignal(false);
+  const [bmPanelOpen, setBmPanelOpen] = createSignal(false);
 
   const isPaged = () => currentPageMode() === "paged";
+
+  // 书签数据（跨页面载入一次）
+  createEffect(() => {
+    void ensureBookmarksLoaded();
+  });
 
   // 书载入后：补建档案、恢复上次章节
   createEffect(
@@ -262,6 +401,29 @@ export default function ReaderPage() {
   const units = createMemo<ReaderBlock[]>(() => {
     const ch = chapter();
     return ch ? chapterUnits(ch) : [];
+  });
+
+  // 章节文本镜像（单元文本按序拼接 + 单元起始偏移），书签偏移换算基准
+  const mirror = createMemo(() => buildTextMirror(units()));
+
+  // 本书记签（按位置排序，响应式）
+  const bookBookmarks = createMemo(() => sortedBookmarks(bookId()));
+
+  // 当前章节内、书签覆盖的单元内字符区间（供下划线渲染）
+  const unitMarks = createMemo<UnitMark[]>(() => {
+    const bms = bookBookmarks();
+    const ch = chapter();
+    const mir = mirror();
+    if (!ch || bms.length === 0) return [];
+    const out: UnitMark[] = [];
+    for (const bm of bms) {
+      if (bm.chapterCid !== ch.cid) continue;
+      const base = mir.unitStart[bm.unitIndex] ?? -1;
+      if (base < 0) continue;
+      out.push({ unit: bm.unitIndex, s: bm.charStart - base, e: bm.charEnd - base });
+    }
+    out.sort((a, b) => a.unit - b.unit || a.s - b.s || a.e - b.e);
+    return out;
   });
 
   // 分页结果：图片解码完成后重算
@@ -402,6 +564,12 @@ export default function ReaderPage() {
     return !!target?.closest?.("[data-reader-ui]");
   }
 
+  /** 当前是否正处于文本选中状态（选区来自正文） */
+  function hasActiveTextSelection(): boolean {
+    const sel = window.getSelection();
+    return !!sel && !sel.isCollapsed && !!sel.toString().trim();
+  }
+
   function onSurfacePointerDown(e: PointerEvent) {
     if (e.pointerType === "mouse" && e.button !== 0) return;
     if (isUiTarget(e)) return;
@@ -429,6 +597,9 @@ export default function ReaderPage() {
       }
       return;
     }
+
+    // 文本正处于选中状态：本次抬手只结束选取，不翻页、不呼出菜单
+    if (hasActiveTextSelection()) return;
 
     // 横向滑动翻页
     if (isPaged() && moved >= 56 && Math.abs(dx) > Math.abs(dy)) {
@@ -488,6 +659,152 @@ export default function ReaderPage() {
     onCleanup(() => window.removeEventListener("keydown", onKey));
   });
 
+  // -------------------------------------------------------------------
+  // 选区操作：复制 / 书签（新增、重复选取则移除）
+  // -------------------------------------------------------------------
+
+  async function handleCopyText(text: string): Promise<void> {
+    const ok = await copyPlainText(text);
+    showToast(ok ? "已复制" : "复制失败", !ok);
+  }
+
+  function handleBookmarkRange(range: Range): void {
+    const b = book();
+    const ch = chapter();
+    const mir = mirror();
+    if (!b || !ch || mir.text.length === 0) {
+      showToast("当前内容无法添加书签", true);
+      return;
+    }
+    const anchorStart = dataAnchorOf(range.startContainer);
+    const anchorEnd = dataAnchorOf(range.endContainer);
+    if (!anchorStart || !anchorEnd || anchorStart.unit !== anchorEnd.unit) {
+      showToast("书签需在同一段文字内选取", true);
+      return;
+    }
+    const base = mir.unitStart[anchorStart.unit] ?? -1;
+    if (base < 0) {
+      showToast("当前内容无法添加书签", true);
+      return;
+    }
+    const os = charOffsetInElement(anchorStart.el, range.startContainer, range.startOffset);
+    const oe = charOffsetInElement(anchorEnd.el, range.endContainer, range.endOffset);
+    const rawS = base + anchorStart.cstart + os;
+    const rawE = base + anchorEnd.cstart + oe;
+    if (rawE <= rawS) {
+      showToast("请选择要标记的文字", true);
+      return;
+    }
+    const charStart = Math.min(rawS, rawE);
+    const charEnd = Math.max(rawS, rawE);
+    // 操作完成即收起原生选区
+    window.getSelection()?.removeAllRanges();
+
+    const existed = bookmarkAtExactRange(b.id, ch.cid, charStart, charEnd);
+    if (existed) {
+      removeBookmark(existed.id);
+      showToast("已移除书签");
+      return;
+    }
+    if (charEnd - charStart > BOOKMARK_MAX_LEN) {
+      showToast("所选文字过长，无法添加书签", true);
+      return;
+    }
+    const bookmark = makeBookmark(
+      b.id,
+      ch,
+      chapterIdx(),
+      anchorStart.unit,
+      charStart,
+      charEnd,
+      mir,
+    );
+    if (!bookmark) {
+      showToast("无法添加书签", true);
+      return;
+    }
+    addBookmark(bookmark);
+    showToast("已添加书签");
+  }
+
+  // -------------------------------------------------------------------
+  // 书签跳转：解析 → 切章/翻页 → 定位高亮
+  // -------------------------------------------------------------------
+
+  const [pendingFlash, setPendingFlash] = createSignal<PendingFlash | null>(null);
+  let flashRaf = 0;
+
+  /** 字符偏移落在哪一页（分页结果片段均带 unit/cstart） */
+  function pageIndexOfChar(pages: PageFragment[][], mir: TextMirror, g: number): number {
+    for (let pi = 0; pi < pages.length; pi++) {
+      const page = pages[pi];
+      for (const f of page) {
+        if (f.kind !== "p" && f.kind !== "h") continue;
+        const base = mir.unitStart[f.unit] ?? -1;
+        if (base < 0) continue;
+        const s = base + f.cstart;
+        if (g >= s && g < s + f.text.length) return pi;
+      }
+    }
+    return -1;
+  }
+
+  function jumpToBookmark(bookmark: Bookmark): void {
+    const b = book();
+    if (!b) return;
+    const resolved = resolveBookmarkTarget(b, bookmark);
+    if (!resolved) {
+      showToast("未能定位该书签", true);
+      return;
+    }
+    setBmPanelOpen(false);
+    setMenuOpen(false);
+    if (resolved.chapterIndex !== chapterIdx()) {
+      goToChapter(resolved.chapterIndex);
+    }
+    setPendingFlash({
+      chapter: resolved.chapterIndex,
+      unit: resolved.unitIndex,
+      charStart: resolved.charStart,
+      charEnd: resolved.charEnd,
+    });
+  }
+
+  // 等待章节/分页就绪后，把书签字符区间滚动到可见并短暂高亮
+  createEffect(() => {
+    const p = pendingFlash();
+    if (!p) return;
+    const current = chapter();
+    const mode = isPaged();
+    const pg = paged();
+    const pageNow = pageIdx();
+    const root = areaRef;
+    if (!current || !root) return;
+    if (p.chapter !== chapterIdx()) return; // 章节切换尚未落地
+    const mir = mirror();
+    if (mode) {
+      if (!pg) return; // 分页重排中
+      const page = pageIndexOfChar(pg.pages, mir, p.charStart);
+      if (page < 0) {
+        setPendingFlash(null);
+        return;
+      }
+      if (pageNow !== page) {
+        setPageIdx(page);
+        return;
+      }
+    }
+    window.cancelAnimationFrame(flashRaf);
+    flashRaf = window.requestAnimationFrame(() => {
+      const base = mir.unitStart[p.unit] ?? -1;
+      if (base >= 0) {
+        flashUnitRange(root, p.unit, base, p.charStart, p.charEnd, { scroll: !mode });
+      }
+      setPendingFlash(null);
+    });
+  });
+  onCleanup(() => window.cancelAnimationFrame(flashRaf));
+
   // 首次进入时的操作提示（一次性）
   let hintShown = false;
   createEffect(() => {
@@ -525,7 +842,7 @@ export default function ReaderPage() {
         >
           <div
             ref={areaRef}
-            class="relative min-h-0 flex-1 select-none overflow-hidden"
+            class="relative min-h-0 flex-1 overflow-hidden [-webkit-touch-callout:none]"
             onPointerDown={onSurfacePointerDown}
             onPointerUp={onSurfacePointerUp}
             onContextMenu={(e) => e.preventDefault()}
@@ -558,7 +875,11 @@ export default function ReaderPage() {
                       >
                         <For each={pageFragments()}>
                           {(fragment) => (
-                            <PagedFragment fragment={fragment} layout={layout()!} />
+                            <PagedFragment
+                              fragment={fragment}
+                              layout={layout()!}
+                              marks={unitMarks()}
+                            />
                           )}
                         </For>
                       </div>
@@ -597,7 +918,14 @@ export default function ReaderPage() {
                       }
                     />
                     <For each={units()}>
-                      {(block) => <ScrollBlock layout={layout()!} block={block} />}
+                      {(block, idx) => (
+                        <ScrollBlock
+                          layout={layout()!}
+                          block={block}
+                          unit={idx()}
+                          marks={unitMarks()}
+                        />
+                      )}
                     </For>
                   </div>
                 </div>
@@ -607,7 +935,7 @@ export default function ReaderPage() {
             {/* 顶部工具栏（菜单呼出后显示） */}
             <header
               data-reader-ui
-              class="absolute inset-x-0 top-0 z-30 border-b border-border bg-topbar-bg backdrop-blur-[14px] transition-transform duration-200"
+              class="absolute inset-x-0 top-0 z-30 select-none border-b border-border bg-topbar-bg backdrop-blur-[14px] transition-transform duration-200"
               classList={{
                 "-translate-y-full": !menuOpen(),
                 "translate-y-0": menuOpen(),
@@ -631,23 +959,40 @@ export default function ReaderPage() {
                     {chapter() ? `${chapter()!.cid} · ${chapter()!.title}` : ""}
                   </span>
                 </div>
-                <div class="flex flex-none gap-1" aria-label="调整字号">
+                <div class="flex flex-none items-center gap-1">
                   <button
-                    class="grid h-[30px] w-[30px] place-items-center rounded-lg border border-border text-xs font-bold text-text-2 disabled:opacity-30"
-                    aria-label="减小字号"
-                    disabled={currentFontSize() <= FONT_MIN}
-                    onClick={() => incFont(-1)}
+                    class="grid h-10 w-10 flex-none place-items-center rounded-xl transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
+                    classList={{
+                      "text-accent": bookBookmarks().length > 0 || bmPanelOpen(),
+                      "text-text-2": bookBookmarks().length === 0 && !bmPanelOpen(),
+                    }}
+                    aria-label="书签"
+                    aria-pressed={bmPanelOpen()}
+                    onClick={() => setBmPanelOpen((open) => !open)}
                   >
-                    A−
+                    <BookmarkIcon
+                      size={21}
+                      filled={bookBookmarks().length > 0 || bmPanelOpen()}
+                    />
                   </button>
-                  <button
-                    class="grid h-[30px] w-[30px] place-items-center rounded-lg border border-border text-xs font-bold text-text-2 disabled:opacity-30"
-                    aria-label="增大字号"
-                    disabled={currentFontSize() >= FONT_MAX}
-                    onClick={() => incFont(1)}
-                  >
-                    A+
-                  </button>
+                  <div class="flex gap-1" aria-label="调整字号">
+                    <button
+                      class="grid h-[30px] w-[30px] place-items-center rounded-lg border border-border text-xs font-bold text-text-2 disabled:opacity-30"
+                      aria-label="减小字号"
+                      disabled={currentFontSize() <= FONT_MIN}
+                      onClick={() => incFont(-1)}
+                    >
+                      A−
+                    </button>
+                    <button
+                      class="grid h-[30px] w-[30px] place-items-center rounded-lg border border-border text-xs font-bold text-text-2 disabled:opacity-30"
+                      aria-label="增大字号"
+                      disabled={currentFontSize() >= FONT_MAX}
+                      onClick={() => incFont(1)}
+                    >
+                      A+
+                    </button>
+                  </div>
                 </div>
               </div>
             </header>
@@ -655,7 +1000,7 @@ export default function ReaderPage() {
             {/* 底部工具栏 */}
             <footer
               data-reader-ui
-              class="absolute inset-x-0 bottom-0 z-30 border-t border-border bg-surface transition-transform duration-200"
+              class="absolute inset-x-0 bottom-0 z-30 select-none border-t border-border bg-surface transition-transform duration-200"
               classList={{
                 "translate-y-full": !menuOpen(),
                 "translate-y-0": menuOpen(),
@@ -719,7 +1064,7 @@ export default function ReaderPage() {
               />
               <div
                 data-reader-ui
-                class="absolute inset-x-0 bottom-0 z-[41] flex max-h-[72%] animate-sheet-up flex-col overflow-hidden rounded-t-[16px] bg-surface shadow-[0_-10px_34px_rgb(0_0_0/0.22)]"
+                class="absolute inset-x-0 bottom-0 z-[41] flex max-h-[72%] select-none animate-sheet-up flex-col overflow-hidden rounded-t-[16px] bg-surface shadow-[0_-10px_34px_rgb(0_0_0/0.22)]"
                 role="dialog"
                 aria-label="目录"
               >
@@ -773,6 +1118,29 @@ export default function ReaderPage() {
                 </div>
               </div>
             </Show>
+            {/* 书签面板 */}
+            <BookmarkPanel
+              open={bmPanelOpen()}
+              bookmarks={bookBookmarks()}
+              currentCid={chapter()?.cid}
+              onClose={() => setBmPanelOpen(false)}
+              onJump={jumpToBookmark}
+              onDelete={(bookmark) => removeBookmark(bookmark.id)}
+            />
+
+            {/* 长按/拖选文本后的自定义菜单 */}
+            <SelectionMenu
+              rootRef={() => areaRef}
+              active={() =>
+                !!book() &&
+                !!layout() &&
+                !menuOpen() &&
+                !tocOpen() &&
+                !bmPanelOpen()
+              }
+              onCopy={(text) => void handleCopyText(text)}
+              onBookmark={(range) => handleBookmarkRange(range)}
+            />
           </div>
         </Show>
       </Show>

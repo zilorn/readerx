@@ -22,6 +22,7 @@ import type { BookFormat, LocalBook, LocalBookChapter } from "./booksTypes";
 import { assignChapterCids, chapterCid } from "./booksTypes";
 import { parseEpubFile } from "./epub";
 import { ensureShelfEntry } from "./store";
+import { clearAllBookmarks, removeBookmarksForBook } from "./bookmarks";
 
 export type ImportSplitChoice =
   | { kind: "auto" }
@@ -287,9 +288,10 @@ export async function importLocalBookFile(file: File): Promise<LocalBook> {
   return book;
 }
 
-/** 删除一本本地书（内容 + 清单） */
+/** 删除一本本地书（内容 + 清单 + 书签） */
 export async function removeLocalBook(id: string): Promise<void> {
   await deleteRemoteBook(id);
+  removeBookmarksForBook(id);
   setBooksState((prev) => prev?.filter((book) => book.id !== id) ?? prev);
 }
 
@@ -319,8 +321,9 @@ export async function clearLocalGroup(groupId: string): Promise<void> {
   );
 }
 
-/** 清空全部本地书籍（不可恢复） */
+/** 清空全部本地书籍（不可恢复，书签一并清空） */
 export async function clearLocalBooks(): Promise<void> {
   await clearRemoteBooks();
+  clearAllBookmarks();
   setBooksState([]);
 }

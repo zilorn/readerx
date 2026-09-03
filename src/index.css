@@ -210,6 +210,22 @@
   }
 }
 
+/* 书签定位/新增后的文字闪亮提示 */
+@keyframes readerx-flash {
+  0% {
+    background-color: var(--accent-weak);
+    background-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
+.readerx-bm-flash {
+  border-radius: 3px;
+  animation: readerx-flash 1.7s ease 0.25s both;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   ::before,

@@ -38,8 +38,23 @@ export interface PaginateLayout {
 /** 一页上的展示片段 */
 export type PageFragment =
   | { kind: "title"; title: string; author: string | null }
-  | { kind: "p"; text: string; indent: boolean; end: boolean }
-  | { kind: "h"; level: number; text: string }
+  | {
+      kind: "p";
+      text: string;
+      indent: boolean;
+      end: boolean;
+      /** 所属正文单元在 chapterUnits 中的序号（书签/定位用） */
+      unit: number;
+      /** 该片段文本在单元原文中的起始字符偏移 */
+      cstart: number;
+    }
+  | {
+      kind: "h";
+      level: number;
+      text: string;
+      unit: number;
+      cstart: number;
+    }
   | { kind: "img"; src: string; alt?: string; w: number; h: number };
 
 export interface PaginatedChapter {
@@ -327,21 +342,23 @@ export function paginateChapter(
   };
 
   /** 放置一段正文（必要时跨页切分；marginPx 为其结束后的段落间距） */
-  const pushParagraph = (text: string, marginPx: number): void => {
+  const pushParagraph = (text: string, marginPx: number, unitIdx: number): void => {
     let rest = text;
     let first = true; // 是否源段落的第一段（决定首行缩进）
     while (rest.length > 0) {
       const remaining = pageHeight - used;
+      // 本片段在源段落中的起始偏移（rest 恒为 text 的后缀）
+      const cstart = text.length - rest.length;
       if (current.length === 0 && remaining < lineHeightPx) {
         // 保护：极小可用高度也不死循环（现实不会触发）
-        current.push({ kind: "p", text: rest, indent: first, end: true });
+        current.push({ kind: "p", text: rest, indent: first, end: true, unit: unitIdx, cstart });
         used = pageHeight;
         return;
       }
       const fullHeight = measurer.heightText(rest, first);
       if (remaining >= fullHeight - 0.5) {
         // 整段（或该页能容纳其全部行）直接收尾；尾部间距随后续内容生效
-        current.push({ kind: "p", text: rest, indent: first, end: true });
+        current.push({ kind: "p", text: rest, indent: first, end: true, unit: unitIdx, cstart });
         used += fullHeight + marginPx;
         return;
       }
@@ -357,12 +374,12 @@ export function paginateChapter(
         continue;
       }
       if (count >= rest.length) {
-        current.push({ kind: "p", text: rest, indent: first, end: true });
+        current.push({ kind: "p", text: rest, indent: first, end: true, unit: unitIdx, cstart });
         used += measurer.heightText(rest, first) + marginPx;
         return;
       }
       const prefix = rest.slice(0, count);
-      current.push({ kind: "p", text: prefix, indent: first, end: false });
+      current.push({ kind: "p", text: prefix, indent: first, end: false, unit: unitIdx, cstart });
       used += measurer.heightText(prefix, first);
       rest = rest.slice(count);
       first = false;
@@ -381,19 +398,19 @@ export function paginateChapter(
   );
 
   const paraMarginPx = em(layout.fontSize, layout.paraSpacingEm);
-  for (const unit of units) {
+  units.forEach((unit, idx) => {
     if (unit.kind === "p") {
-      pushParagraph(unit.text, paraMarginPx);
-      continue;
+      pushParagraph(unit.text, paraMarginPx, idx);
+      return;
     }
     if (unit.kind === "h") {
       const h = measurer.heightHeading(unit.level, unit.text);
       pushAtomic(
-        { kind: "h", level: unit.level, text: unit.text },
+        { kind: "h", level: unit.level, text: unit.text, unit: idx, cstart: 0 },
         h,
         em(layout.fontSize, 0.95),
       );
-      continue;
+      return;
     }
     const natural = imageSizes.get(unit.src) ?? null;
     const disp = imageDisplaySize(layout, natural);
@@ -410,7 +427,7 @@ export function paginateChapter(
         em(layout.fontSize, 1),
       );
     }
-  }
+  });
 
   flush();
   if (pages.length === 0) pages.push(current);
