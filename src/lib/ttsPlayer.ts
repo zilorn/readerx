@@ -124,6 +124,8 @@ export interface TtsPlayer {
 const PREFETCH_DIST = 9;
 /** 批量预热并发数（用户口径：激进、不限速） */
 const WARM_CONCURRENCY = 8;
+/** 连续朗读失败上限：达到该次数后停止朗读并报错（此前逐句跳过继续读） */
+const FAILURE_STREAK_LIMIT = 5;
 
 interface ActiveSource {
   node: AudioBufferSourceNode;
@@ -162,6 +164,8 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
   let audioBytesCache = new Map<string, { mime: string; bytes: Uint8Array }>();
   /** 最近一次失败的真实原因（供 UI 透出，便于无日志环境排查） */
   let lastSynthError: string | null = null;
+  /** 连续朗读失败的句数（成功出声或手动操作后清零） */
+  let failureStreak = 0;
 
   const isNativeMode = (): boolean => currentTtsEngine() === "native";
   const bump = (): number => ++seq;
@@ -194,7 +198,8 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
           if (!nativeWaiting) return;
           clearNativeWait();
           const msg = ev.error ? `语音朗读出错：${ev.error}` : "系统语音出错，请稍后重试";
-          reportError(msg);
+          onSentenceFailure(msg);
+          return;
         }
         // cancel / interrupted / backgroundPause / start：不打断逐句流程，
         // 引擎自行停掉的情况由看门狗兜底，避免整本书卡死。
@@ -312,6 +317,32 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
     ctx.notify?.(msg, true);
   }
 
+  /** 某句真正开始出声（视为成功），连续失败计数清零 */
+  function markSentenceStarted(): void {
+    failureStreak = 0;
+  }
+
+  /** 用户手动起播/重试/切句时清零计数，让新尝试从第 1 次失败重新累计 */
+  function resetFailureStreak(): void {
+    failureStreak = 0;
+  }
+
+  /**
+   * 句级失败统一处理：未达连续失败上限 → 跳过本句继续朗读；
+   * 连续失败达到上限 → 停止朗读并报出最近一次失败的真实原因。
+   */
+  function onSentenceFailure(msg: string): void {
+    failureStreak += 1;
+    if (failureStreak >= FAILURE_STREAK_LIMIT) {
+      failureStreak = 0;
+      reportError(msg);
+      return;
+    }
+    // 确保引擎没有残留旧句在出声，再跳到下一句
+    void stopNativeSpeech();
+    advanceFromCurrent();
+  }
+
   /** 当前句读完 → 下一句 / 下一章 / 定时结束 / 全书完 */
   function advanceFromCurrent(): void {
     const f = focus();
@@ -391,7 +422,7 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
     try {
       await speakNativeSentence(item.text, voice, currentTtsRate());
     } catch (err) {
-      reportError(describeNativeError(err));
+      onSentenceFailure(describeNativeError(err));
       return;
     }
     if (disposed || my !== seq) return;
@@ -401,6 +432,7 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
     }
     nativeWaiting = true;
     setStatus("playing");
+    markSentenceStarted();
     armWatchdog(item.text);
   }
 
@@ -412,7 +444,7 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
     const audio = await ensureAudioBytes(item, my);
     if (disposed || my !== seq) return;
     if (!audio) {
-      reportError(lastSynthError ?? "语音合成失败，请检查自定义源配置与网络");
+      onSentenceFailure(lastSynthError ?? "语音合成失败，请检查自定义源配置与网络");
       return;
     }
     if (pausedRequested) {
@@ -423,7 +455,7 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
     try {
       buffer = await decodeAudio(audio.bytes);
     } catch {
-      reportError("音频解码失败：自定义源需返回可解码的音频（mp3 / wav / ogg）");
+      onSentenceFailure("音频解码失败：自定义源需返回可解码的音频（mp3 / wav / ogg）");
       return;
     }
     if (disposed || my !== seq) return;
@@ -454,10 +486,11 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
       node.start();
     } catch {
       stopActiveSource();
-      reportError("音频播放失败");
+      onSentenceFailure("音频播放失败");
       return;
     }
     setStatus("playing");
+    markSentenceStarted();
     prefetchAhead(my);
   }
 
@@ -559,6 +592,7 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
       }
       const idx = nearestIndexFor(offset());
       pausedRequested = false;
+      resetFailureStreak();
       void playFrom(idx);
     });
   }
@@ -620,6 +654,7 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
       }
       // 原生引擎（无暂停）或暂停发生在解码前：从当前句开头重读
       setError(null);
+      resetFailureStreak();
       void playFrom(f.index);
       return;
     }
@@ -637,6 +672,7 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
 
   function prev(): void {
     if (status() === "stopped") return;
+    resetFailureStreak();
     const f = focus();
     if (!f) return;
     const ni = f.index - 1;
@@ -658,6 +694,7 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
 
   function next(): void {
     if (status() === "stopped") return;
+    resetFailureStreak();
     const f = focus();
     if (!f) return;
     const ni = f.index + 1;
@@ -682,6 +719,7 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
     void resumeAudioContext().catch(() => {});
     void stopNativeSpeech();
     setError(null);
+    resetFailureStreak();
     const f = focus();
     if (!f) return;
     void playFrom(f.index, stayPaused);
