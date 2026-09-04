@@ -1,5 +1,6 @@
-import { lazy, Suspense, Show, createEffect, createMemo, on } from "solid-js";
+import { lazy, Suspense, Show, createEffect, createMemo, on, onMount } from "solid-js";
 import type { Component } from "solid-js";
+import { registerAppScrollEl } from "./lib/appScroll";
 import {
   Router,
   Route,
@@ -49,6 +50,8 @@ const AppShell: Component<RouteSectionProps> = (props) => {
   const isReader = createMemo(() => location.pathname.startsWith("/book/"));
 
   let viewRef: HTMLDivElement | undefined;
+  // 注册唯一的内容滚动容器，供页面（如 WebDAV 导入页）保存/恢复滚动位置
+  onMount(() => registerAppScrollEl(viewRef ?? null));
   // 路由切换后，让滚动容器回到顶部（避免切页后停留在旧滚动位置）
   createEffect(
     on(
