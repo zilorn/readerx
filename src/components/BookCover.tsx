@@ -25,8 +25,6 @@ export function BookCover(props: BookCoverProps) {
       : variant === "row"
         ? "w-[66px] flex-none rounded-lg"
         : "";
-  const glyphSize =
-    variant === "grid" ? "text-[46px]" : variant === "row" ? "text-[28px]" : "text-[36px]";
   return (
     <div
       class={`relative flex aspect-[3/4] select-none flex-col items-center justify-center gap-1.5 overflow-hidden rounded-[10px] text-white shadow-[inset_0_1px_0_rgb(255_255_255/0.22),0_4px_10px_rgb(0_0_0/0.18)] after:pointer-events-none after:absolute after:inset-0 after:bg-[linear-gradient(180deg,rgb(255_255_255/0.16),transparent_34%)] ${variantClass}`}

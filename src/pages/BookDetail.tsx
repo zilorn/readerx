@@ -34,9 +34,7 @@ export default function BookDetailPage() {
         }
       >
         <div class="m-5">
-          <p>
-            {book_title}
-          </p>
+          <p>{book_title()}</p>
         </div>
       </Show>
     </div>

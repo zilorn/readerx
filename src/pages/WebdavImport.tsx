@@ -23,19 +23,30 @@ import {
   ServerIcon,
   SettingsIcon,
 } from "../components/icons";
-import { localBookList } from "../lib/books";
+import {
+  ensureLocalBooksLoaded,
+  localBookList,
+  replaceBookContent,
+  type BookDraft,
+} from "../lib/books";
 import type { LocalBook } from "../lib/booksTypes";
+import {
+  previewBookmarkInheritance,
+  type BookmarkInheritPreview,
+} from "../lib/bookmarks";
 import {
   activeDavServer,
   davEntryImportedBook,
   davReady,
   ensureWebDavLoaded,
+  fetchDavBookDraft,
   formatBytes,
   importDavFile,
   isBookFileName,
   listDavDirectory,
   type DavEntry,
 } from "../lib/webdav";
+import { BookmarkRiskDialog } from "../components/BookmarkRiskDialog";
 import { showToast } from "../lib/toast";
 import { appScrollEl } from "../lib/appScroll";
 
@@ -59,6 +70,13 @@ interface DavBrowseSnapshot {
 }
 
 let pendingBrowseSnapshot: DavBrowseSnapshot | null = null;
+
+/** “重新导入”已确认但书签继承失效：等待用户决定是否仍替换（draft 已拉取，避免二次下载） */
+interface PendingReimportRisk {
+  existing: LocalBook;
+  draft: BookDraft;
+  preview: BookmarkInheritPreview;
+}
 
 /** 当前 dirList 快照对应的 (serverId, path)，用于避免返回后重复解析同一目录 */
 let listedDirKey: string | null = null;
@@ -219,10 +237,14 @@ export default function WebdavImportPage() {
   const [importTotal, setImportTotal] = createSignal(0);
   const [reimportEntry, setReimportEntry] = createSignal<DavEntry | null>(null);
   const [reimporting, setReimporting] = createSignal(false);
+  const [bookmarkRisk, setBookmarkRisk] = createSignal<PendingReimportRisk | null>(null);
+  const [riskImporting, setRiskImporting] = createSignal(false);
   const [keyword, setKeyword] = createSignal(snapshot?.keyword ?? "");
 
   createEffect(() => {
     void ensureWebDavLoaded();
+    // 本地书清单用于“已导入”识别与重新导入，先确保载入
+    void ensureLocalBooksLoaded();
   });
 
   const server = () => activeDavServer();
@@ -436,22 +458,52 @@ export default function WebdavImportPage() {
     setReimportEntry(entry);
   }
 
-  /** 确认重新导入：用服务器最新文件原位替换本地书（保留进度/分组） */
+  /** 确认重新导入：先拉取并解析远程最新文件，预演书签继承；失败时弹窗询问是否仍替换 */
   async function confirmReimport() {
     const srv = server();
     const entry = reimportEntry();
     if (!srv || !entry || reimporting()) return;
     setReimporting(true);
     try {
+      await ensureLocalBooksLoaded();
       const existing = importedByPath()[entry.path];
-      const book = await importDavFile(srv, entry.path, existing);
-      showToast(`已重新导入《${book.title}》`);
+      if (!existing) {
+        setReimportEntry(null);
+        showToast("未找到本地对应的书籍，请刷新目录后重试", true);
+        return;
+      }
+      const draft = await fetchDavBookDraft(srv, entry.path);
+      const preview = await previewBookmarkInheritance(existing, draft.chapters);
       setReimportEntry(null);
+      if (preview.failedCount > 0) {
+        // 书签无法全部随新内容继承：弹窗提示，用户可放弃本次重新导入
+        setBookmarkRisk({ existing, draft, preview });
+        return;
+      }
+      const book = await replaceBookContent(existing, draft);
+      showToast(`已重新导入《${book.title}》`);
     } catch (err) {
       setReimportEntry(null);
       showToast(err instanceof Error ? err.message : "重新导入失败", true);
     } finally {
       setReimporting(false);
+    }
+  }
+
+  /** 书签失效风险弹窗：用户仍决定替换本地内容 */
+  async function confirmProceedWithRisk() {
+    const pending = bookmarkRisk();
+    if (!pending || riskImporting()) return;
+    setRiskImporting(true);
+    try {
+      const book = await replaceBookContent(pending.existing, pending.draft);
+      setBookmarkRisk(null);
+      showToast(`已重新导入《${book.title}》`);
+    } catch (err) {
+      setBookmarkRisk(null);
+      showToast(err instanceof Error ? err.message : "重新导入失败", true);
+    } finally {
+      setRiskImporting(false);
     }
   }
 
@@ -746,7 +798,7 @@ export default function WebdavImportPage() {
                   重新导入《{entry().name}》？
                 </p>
                 <p class="mt-2 text-[12.5px] leading-[1.7] text-text-2">
-                  这本书已导入本地书架。重新导入会用服务器上的最新文件替换本地内容，阅读进度与分组会保留。
+                  这本书已导入本地书架。重新导入会用服务器上的最新文件替换本地内容，阅读进度与分组会保留，书签会尝试随新内容继承。
                 </p>
                 <div class="mt-4 flex items-center gap-2.5">
                   <button
@@ -769,13 +821,29 @@ export default function WebdavImportPage() {
                         class="size-3.5 flex-none animate-spin rounded-full border-2 border-on-accent/40 border-t-on-accent"
                         aria-hidden="true"
                       />
-                      正在导入…
+                      正在检查…
                     </Show>
                   </button>
                 </div>
               </div>
             </div>
           </Portal>
+        )}
+      </Show>
+
+      {/* 重新导入书签继承失效：仍可选择不重新导入 */}
+      <Show when={bookmarkRisk()}>
+        {(pending) => (
+          <BookmarkRiskDialog
+            bookTitle={pending().existing.title}
+            preview={pending().preview}
+            busy={riskImporting()}
+            onCancel={() => {
+              setBookmarkRisk(null);
+              showToast("已取消重新导入");
+            }}
+            onProceed={() => void confirmProceedWithRisk()}
+          />
         )}
       </Show>
     </div>

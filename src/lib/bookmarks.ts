@@ -16,7 +16,7 @@
  */
 import { createSignal } from "solid-js";
 import { readState, writeState } from "./backend";
-import type { LocalBook, LocalBookChapter } from "./booksTypes";
+import { assignChapterCids, type LocalBook, type LocalBookChapter } from "./booksTypes";
 import { chapterUnits, type ReaderBlock } from "./pagination";
 
 const STORAGE_KEY = "readerx.bookmarks";
@@ -330,4 +330,53 @@ export function resolveBookmarkTarget(book: LocalBook, bm: Bookmark): ResolvedTa
     charEnd: match.start + length,
     certain: match.certain,
   };
+}
+
+// ---------------------------------------------------------------------------
+// 书签继承预演（重新导入前）
+// ---------------------------------------------------------------------------
+
+export interface BookmarkInheritPreview {
+  /** 该书现有的书签总数 */
+  total: number;
+  /** 无法在新内容中精确定位（重新导入后将失效/可能跳错）的书签数 */
+  failedCount: number;
+  /** 失效书签的展示节选（最多 3 条，供弹窗提示） */
+  samples: { chapterTitle: string; text: string }[];
+}
+
+/**
+ * 预演“书签继承”：在【即将替换成的新章节】上尝试重新定位该书全部现有书签。
+ * 与阅读时 resolveBookmarkTarget 同一口径：
+ * - 能明确命中（certain）的书签视为可继承（其余保持不变）；
+ * - 找不到或只能就近猜测的计入 failedCount —— 重新导入后它们会失效或跳错。
+ * 只做评估，不修改任何已存数据；导入前调用方可据此提示用户或放弃重新导入。
+ */
+export async function previewBookmarkInheritance(
+  book: LocalBook,
+  nextChapters: LocalBookChapter[],
+): Promise<BookmarkInheritPreview> {
+  await ensureBookmarksLoaded();
+  const list = bookmarksFor(book.id);
+  const total = list.length;
+  if (total === 0) return { total, failedCount: 0, samples: [] };
+
+  // 模拟重新导入写入后的书籍（cid 归一化与 replaceBookContent 落库一致）
+  const virtual: LocalBook = { ...book, chapters: assignChapterCids(nextChapters) };
+
+  let failedCount = 0;
+  const samples: BookmarkInheritPreview["samples"] = [];
+  for (const bm of list) {
+    const target = resolveBookmarkTarget(virtual, bm);
+    if (target?.certain) continue;
+    failedCount++;
+    if (samples.length < 3) {
+      const snippet = bm.text.slice(0, 48);
+      samples.push({
+        chapterTitle: bm.chapterTitle || `第 ${bm.chapterIndex + 1} 章`,
+        text: snippet.length < bm.text.length ? `${snippet}…` : snippet,
+      });
+    }
+  }
+  return { total, failedCount, samples };
 }

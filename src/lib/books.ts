@@ -24,7 +24,7 @@ import type {
   LocalBook,
   LocalBookChapter,
 } from "./booksTypes";
-import { assignChapterCids, chapterCid } from "./booksTypes";
+import { bookSourceOf, assignChapterCids, chapterCid } from "./booksTypes";
 import { parseEpubFile } from "./epub";
 import { ensureShelfEntry } from "./store";
 import { clearAllBookmarks, removeBookmarksForBook } from "./bookmarks";
@@ -307,7 +307,9 @@ export async function commitBookContentUpdate(book: LocalBook): Promise<void> {
 }
 
 /** 用一份新解析出的草稿**原位替换**某本已导入书（同一 id 与书架记录）。
- * 用于 WebDAV「重新导入」：保留来源标记、分组与阅读进度，仅正文/元信息随远程最新内容更新。
+ * 用于「重新导入」（本地同名文件 / WebDAV 长按）：保留来源标记、分组与阅读进度，
+ * 仅正文/元信息随新文件更新；书签记录因同 id 保留，由阅读时按新内容重新定位。
+ * 调用方如需“书签继承”提示，可先用 previewBookmarkInheritance 预演再决定是否落库。
  */
 export async function replaceBookContent(
   existing: LocalBook,
@@ -332,19 +334,47 @@ export async function replaceBookContent(
 }
 
 /**
+ * 解析本地书文件为待导入草稿（不落库）。
+ * 供「先解析 → 检测同名 → 再决定新增/重新导入」的流程使用。
+ */
+export async function parseBookFile(file: File): Promise<BookDraft> {
+  const format = detectBookFormat(file.name);
+  if (!format) throw new Error("仅支持导入 .txt / .epub 文件");
+  return format === "txt"
+    ? await parseTxtFile(file, { kind: "auto" })
+    : await parseEpubFileDraft(file);
+}
+
+/**
+ * 书架中与本次导入“同名”的本地书：
+ * 优先 fileName 完全一致，未命中再按书名一致兜底（排除在线书，避免误匹配网络书籍）。
+ * 候选均按书架现有顺序（最近导入在前）取第一本。
+ */
+export function findSameNameImportedBook(draft: BookDraft): LocalBook | undefined {
+  const candidates = localBookList().filter(
+    (book) => bookSourceOf(book) !== "online",
+  );
+  const byFile = candidates.find((book) => book.fileName === draft.fileName);
+  if (byFile) return byFile;
+  const title = draft.title.trim();
+  if (title) return candidates.find((book) => book.title.trim() === title);
+  return undefined;
+}
+
+/** 把一份已解析草稿作为一本新书落库（本地来源，自动建书架记录） */
+export async function importLocalDraftAsNew(draft: BookDraft): Promise<LocalBook> {
+  const book = await persistBookDraft(draft);
+  ensureShelfEntry(book.id);
+  return book;
+}
+
+/**
  * 直接选择文件后一键导入：TXT 按当前规则自动分章，EPUB 保留全部正文。
  * 不再打开确认页/抽屉，导入结果立即出现在书架。
  */
 export async function importLocalBookFile(file: File): Promise<LocalBook> {
-  const format = detectBookFormat(file.name);
-  if (!format) throw new Error("仅支持导入 .txt / .epub 文件");
-  const draft =
-    format === "txt"
-      ? await parseTxtFile(file, { kind: "auto" })
-      : await parseEpubFileDraft(file);
-  const book = await persistBookDraft(draft);
-  ensureShelfEntry(book.id);
-  return book;
+  const draft = await parseBookFile(file);
+  return importLocalDraftAsNew(draft);
 }
 
 /** 删除一本本地书（内容 + 清单 + 书签） */

@@ -12,7 +12,7 @@ import {
   parseEpubFileDraft,
   parseTxtFile,
   persistBookDraft,
-  replaceBookContent,
+  type BookDraft,
 } from "./books";
 import type { LocalBook } from "./booksTypes";
 import { ensureShelfEntry } from "./store";
@@ -374,25 +374,30 @@ export async function downloadDavFile(
 }
 
 /**
- * 下载并解析一本远程书，直接进入书架。
- * existing 传入时表示“重新导入”：原位替换该书内容（同 id，保留进度与分组）。
+ * 下载并解析一本远程书（不落库）。
+ * 供“重新导入”流程先取到新内容、预演书签继承后再决定是否替换。
  */
-export async function importDavFile(
+export async function fetchDavBookDraft(
   server: DavServer,
   path: string,
-  existing?: LocalBook,
-): Promise<LocalBook> {
+): Promise<BookDraft> {
   const { bytes, fileName } = await downloadDavFile(server, path);
   const format = detectBookFormat(fileName);
   if (!format) throw new Error(`不支持的书籍格式：${fileName}`);
   const file = new File([bytes], fileName, {
     type: format === "epub" ? "application/epub+zip" : "text/plain;charset=utf-8",
   });
-  const draft =
-    format === "txt"
-      ? await parseTxtFile(file, { kind: "auto" })
-      : await parseEpubFileDraft(file);
-  if (existing) return replaceBookContent(existing, draft);
+  return format === "txt"
+    ? await parseTxtFile(file, { kind: "auto" })
+    : await parseEpubFileDraft(file);
+}
+
+/** 下载并解析一本远程书，作为一本新书直接进入书架 */
+export async function importDavFile(
+  server: DavServer,
+  path: string,
+): Promise<LocalBook> {
+  const draft = await fetchDavBookDraft(server, path);
   const book = await persistBookDraft(draft, "webdav");
   ensureShelfEntry(book.id);
   return book;
