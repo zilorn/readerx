@@ -38,11 +38,11 @@ export function BookCover(props: BookCoverProps) {
         {book.format === "online" ? "在线" : book.format.toUpperCase()}
       </span>
       <span
-        class={`relative z-10 font-bold leading-none [text-shadow:0_2px_6px_rgb(0_0_0/0.2)] ${glyphSize}`}
+        class={"relative z-10 font-bold leading-none [text-shadow:0_2px_6px_rgb(0_0_0/0.2)] text-[12px] overflow-hidden line-clamp-5 text-center"}
       >
-        {book.title.charAt(0)}
+        {book.title}
       </span>
-      <span class="relative z-10 max-w-[calc(100%-16px)] overflow-hidden text-ellipsis whitespace-nowrap text-[9.5px] leading-[1.2] text-white/85 tracking-[0.05em]">
+      <span class="relative z-10 max-w-[calc(100%-16px)] overflow-hidden text-ellipsis whitespace-nowrap text-[9.5px] leading-[1.2] text-white/85 tracking-[0.05em] line-clamp-1">
         {book.author}
       </span>
     </div>
