@@ -8,12 +8,14 @@ use crate::models::{
     LocalBook, SourceCallResult, TtsCacheStat,
 };
 use crate::storage;
+use crate::webview_login;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use serde_json::Value;
 use tauri::AppHandle;
 use tauri::Manager;
 use tauri_plugin_fs::FsExt;
+use tauri_plugin_webview_login::LoginOutcome;
 
 #[tauri::command]
 pub async fn readerx_state_get(app: AppHandle, key: String) -> Result<Option<Value>, String> {
@@ -239,6 +241,8 @@ pub async fn readerx_source_call(
         }
         capability_gate(&source, &fn_name)?;
         host::prepare_source(&source)?;
+        // 重启后把该书源已保存的登录 Cookie 注入会话（进程内幂等）
+        let _ = webview_login::seed_source_session(&app, &source.id);
         let budget = if fn_name == "bookContent" {
             engine::DEFAULT_CHAPTER_BUDGET_MS
         } else {
@@ -268,6 +272,8 @@ pub async fn readerx_source_fetch_contents(
             return Err(format!("书源「{}」已禁用正文能力", source.name));
         }
         host::prepare_source(&source)?;
+        // 重启后把该书源已保存的登录 Cookie 注入会话（进程内幂等）
+        let _ = webview_login::seed_source_session(&app, &source.id);
         // 全局用户设置：readerx.onlineConcurrency（一次运行多少书源/并行请求），1-8，默认 3
         let concurrency = storage::read_state(&app, "readerx.onlineConcurrency")
             .ok()
@@ -286,4 +292,52 @@ pub async fn readerx_source_fetch_contents(
     })
     .await
     .map_err(|e| format!("书源正文拉取任务失败: {e}"))?
+}
+
+// ---------------------------------------------------------------------------
+// 书源网页登录（WebView，仅 Android；Cookie 按源持久化）
+// ---------------------------------------------------------------------------
+
+/// 是否支持网页登录（Android 应用内为 true）。
+#[tauri::command]
+pub fn readerx_source_login_supported() -> bool {
+    webview_login::is_supported()
+}
+
+/// 为某个书源打开网页登录浮层（阻塞直到完成/取消/超时）。
+/// `url` 为登录起始页；成功后 Cookie 已持久化并注入该书源会话。
+#[tauri::command]
+pub async fn readerx_source_login_webview(
+    source_id: String,
+    url: String,
+) -> Result<LoginOutcome, String> {
+    spawn_blocking(move || {
+        let url = url.trim().to_string();
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            return Err("仅支持 http/https 的登录地址".to_string());
+        }
+        if source_id.is_empty() || source_id.chars().any(|c| !c.is_ascii_alphanumeric() && c != '-' && c != '_' && c != '.') {
+            return Err("非法的书源 id".to_string());
+        }
+        webview_login::perform(&source_id, &url)
+    })
+    .await
+    .map_err(|e| format!("网页登录任务失败: {e}"))?
+}
+
+/// 清空某个书源已保存的网页登录 Cookie（持久化文件 + 当前会话），返回移除的行数。
+#[tauri::command]
+pub async fn readerx_source_login_clear(app: AppHandle, source_id: String) -> Result<u64, String> {
+    spawn_blocking(move || -> Result<u64, String> {
+        let saved = storage::read_source_login_cookie(&app, &source_id)?;
+        storage::remove_source_login_cookie(&app, &source_id)?;
+        webview_login::unseed(&source_id);
+        let mut removed = 0;
+        if let Some(cookie) = saved {
+            removed += host::http_remove_cookie(&source_id, &cookie);
+        }
+        Ok(removed)
+    })
+    .await
+    .map_err(|e| format!("清除登录 Cookie 任务失败: {e}"))?
 }

@@ -454,3 +454,27 @@ export function TestIcon(p: SvgIconProps) {
     </Icon>
   );
 }
+
+/** 网页登录（地球 + 钥匙） */
+export function GlobeKeyIcon(p: SvgIconProps) {
+  return (
+    <Icon {...p}>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M3.2 12h17.6" />
+      <path d="M12 3a15.4 15.4 0 0 1 3.6 9 15.4 15.4 0 0 1-3.6 9 15.4 15.4 0 0 1-3.6-9A15.4 15.4 0 0 1 12 3z" />
+    </Icon>
+  );
+}
+
+/** 清空（垃圾桶 + 循环箭头） */
+export function ClearIcon(p: SvgIconProps) {
+  return (
+    <Icon {...p}>
+      <path d="M3 6h18" />
+      <path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" />
+      <path d="M6 6l1 14a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-14" />
+      <path d="M10 11v6" />
+      <path d="M14 11v6" />
+    </Icon>
+  );
+}

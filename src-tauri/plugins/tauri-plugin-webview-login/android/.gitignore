@@ -1,0 +1,5 @@
+# Android 构建产物（tauri build.rs 会同步 tauri-api 到这里，且 gradle 会在此编译）
+.tauri/
+build/
+.gradle/
+local.properties

@@ -1,7 +1,7 @@
 import { createSignal, For, onMount, Show } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 import { PageHeader } from "../components/PageHeader";
-import { SaveIcon, TestIcon, TrashIcon } from "../components/icons";
+import { SaveIcon, TestIcon, TrashIcon, GlobeKeyIcon, ClearIcon } from "../components/icons";
 import {
   TEMPLATE_JS,
   blankBookSource,
@@ -13,7 +13,13 @@ import {
   removeBookSource,
   setEditorSourceDraft,
 } from "../lib/bookSources";
-import { callRemoteSource, getRemoteSource } from "../lib/backend";
+import {
+  callRemoteSource,
+  clearSourceLogin,
+  getRemoteSource,
+  isSourceLoginSupported,
+  loginSourceWebview,
+} from "../lib/backend";
 import {
   CAPABILITY_LABELS,
   ENTRY_FUNCTION_META,
@@ -69,8 +75,14 @@ export default function SourceEditorPage() {
   const [testing, setTesting] = createSignal(false);
   const [confirmDelete, setConfirmDelete] = createSignal(false);
 
+  // 网页登录（WebView，仅 Android）
+  const [loginUrl, setLoginUrl] = createSignal(draft().bookSourceUrl);
+  const [loginBusy, setLoginBusy] = createSignal(false);
+  const [loginSupported, setLoginSupported] = createSignal(true);
+
   onMount(() => {
     if (!initial) setEditorSourceDraft(draft());
+    void isSourceLoginSupported().then(setLoginSupported);
   });
 
   function goBack() {
@@ -186,6 +198,34 @@ export default function SourceEditorPage() {
     if (!source) return;
     await navigator.clipboard.writeText(JSON.stringify(source, null, 2)).catch(() => undefined);
     showToast("书源 JSON 已复制");
+  }
+
+  async function onWebLogin() {
+    if (loginBusy()) return;
+    const url = (loginUrl().trim() || bookSourceUrl().trim() || draft().bookSourceUrl).trim();
+    if (!/^https?:\/\/.+/.test(url)) {
+      showToast("请输入合法的 http/https 登录地址", true);
+      return;
+    }
+    setLoginBusy(true);
+    const r = await loginSourceWebview(draft().id, url);
+    setLoginBusy(false);
+    if (r.ok) {
+      showToast(
+        r.count > 0
+          ? `已捕获 ${r.count} 个 Cookie 并保存到该书源`
+          : "登录完成，但没有捕获到 Cookie",
+      );
+    } else if (r.message.includes("取消") || r.message.includes("超时") || r.message.includes("关闭")) {
+      showToast(r.message || "已取消登录");
+    } else {
+      showToast(r.message || "登录失败", true);
+    }
+  }
+
+  async function onClearLogin() {
+    const removed = await clearSourceLogin(draft().id);
+    showToast(removed > 0 ? "已清空登录 Cookie" : "没有保存的登录 Cookie");
   }
 
   const capabilityKeys = (): (keyof BookSourceCapabilities)[] => Object.keys(CAPABILITY_LABELS) as (keyof BookSourceCapabilities)[];
@@ -314,6 +354,45 @@ export default function SourceEditorPage() {
               onInput={(e) => setHeadersText(e.currentTarget.value)}
             />
           </label>
+
+          {/* 网页登录（WebView，仅 Android） */}
+          <div class="space-y-2 rounded-[14px] border border-border bg-surface p-3.5">
+            <div class="flex items-center gap-1.5">
+              <GlobeKeyIcon size={16} class="text-text-2" />
+              <span class="text-[13px] font-semibold text-text-2">网页登录</span>
+              <span class="text-[10.5px] text-text-3">WebView 浮层内完成登录，捕获含 httpOnly 的 Cookie</span>
+            </div>
+            <input
+              class="w-full rounded-[10px] border border-border bg-surface px-3 py-2 font-mono text-[12px] outline-none focus:border-accent"
+              placeholder="https://example.com/login"
+              value={loginUrl()}
+              onInput={(e) => setLoginUrl(e.currentTarget.value)}
+            />
+            <div class="flex items-center gap-2.5">
+              <button
+                class="inline-flex flex-1 items-center justify-center gap-1.5 rounded-xl bg-accent px-3 py-2 text-[12.5px] font-semibold text-on-accent active:scale-[0.98] disabled:opacity-45"
+                disabled={loginBusy() || !loginSupported()}
+                onClick={() => void onWebLogin()}
+              >
+                {loginBusy() ? "登录窗口已打开…" : "打开登录页"}
+              </button>
+              <button
+                class="inline-flex items-center justify-center gap-1.5 rounded-xl bg-surface-2 px-3 py-2 text-[12.5px] font-semibold text-text-2 active:scale-[0.98] disabled:opacity-45"
+                disabled={loginBusy()}
+                onClick={() => void onClearLogin()}
+              >
+                <ClearIcon size={14} />
+                清空登录 Cookie
+              </button>
+            </div>
+            <Show when={!loginSupported()}>
+              <p class="text-[10.5px] leading-[1.5] text-text-3">
+                当前平台不支持网页登录（仅 Android 端可用）；可在代码里用
+                <code class="font-mono"> webview.login(url) </code>
+                触发。
+              </p>
+            </Show>
+          </div>
         </section>
 
         {/* JS 代码 */}

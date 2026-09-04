@@ -82,6 +82,19 @@ export interface SourceCallResult {
   elapsedMs: number;
 }
 
+/** 网页登录（WebView）结果：cookies 为捕获到的 Cookie 文本（含 httpOnly） */
+export interface SourceLoginResult {
+  ok: boolean;
+  /** 最终停留的页面 URL */
+  url: string;
+  /** `k=v; k2=v2` 形式的 Cookie 文本 */
+  cookies: string;
+  /** Cookie 条数 */
+  count: number;
+  /** 可读消息（取消 / 平台不支持 / 错误原因） */
+  message: string;
+}
+
 export interface SourceCallMeta {
   sourceId: string;
   fnName: string;

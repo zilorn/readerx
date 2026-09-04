@@ -3,6 +3,7 @@ mod engine;
 mod host;
 mod models;
 mod storage;
+mod webview_login;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -11,6 +12,12 @@ pub fn run() {
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_tts::init())
+        .plugin(tauri_plugin_webview_login::init())
+        .setup(|app| {
+            // 网页登录桥：把「插件(Android WebView)」接到书源会话/持久化
+            webview_login::install(app.handle().clone());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::greet,
             commands::readerx_state_get,
@@ -29,7 +36,10 @@ pub fn run() {
             commands::readerx_source_put,
             commands::readerx_source_delete,
             commands::readerx_source_call,
-            commands::readerx_source_fetch_contents
+            commands::readerx_source_fetch_contents,
+            commands::readerx_source_login_supported,
+            commands::readerx_source_login_webview,
+            commands::readerx_source_login_clear
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

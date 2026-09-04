@@ -47,6 +47,56 @@
 
 规则惯例：`const resp = await http.get(url); if (!resp.ok) throw new Error("HTTP " + resp.status);`
 
+## `webview`（网页登录，仅 Android）
+
+在 **Android** 应用内弹出原生 WebView 登录浮层（顶部有「取消 / 完成」）。
+点「完成」后宿主收集当前站点的 Cookie（**含 httpOnly**），自动完成两件事：
+
+1. 写入该书源的 HTTP 会话（等价于 `http.setCookie`，之后每次请求自动携带）；
+2. 持久化到该书源独立文件（应用重启后自动注入，**不会**随书源 JSON 导出/分享）。
+
+| 成员 | 说明 |
+| --- | --- |
+| `webview.isSupported()` | 当前平台/环境是否支持网页登录（Android 为 true） |
+| `webview.login(url, opts?)` | 打开 `url` 登录页并**阻塞等待**用户操作，返回结果对象 |
+
+返回对象：
+
+```js
+{
+  ok: true,               // false = 取消 / 超时 / 失败（不抛错，用 ok 分支）
+  url: "https://…",       // 点完成时停留的地址
+  cookies: "sid=…; token=…", // Cookie 文本（含 httpOnly）；ok 时已自动注入并持久化
+  count: 2,               // Cookie 条数
+  message: ""             // 取消/失败原因，如「已取消登录」
+}
+```
+
+`ok:true` 时**无需**再手动 `http.setCookie(...)`——宿主在返回前已处理。
+
+典型用法（发现接口提示未登录时自动拉起登录后重试）：
+
+```js
+async function searchBook(keyword) {
+  let resp = await http.get(BASE + "/search", { headers: { Referer: BASE } });
+  if (resp.status === 401 || resp.status === 403) {
+    const login = await webview.login(BASE + "/user/login");
+    if (!login.ok) throw new Error("该站需要登录：" + login.message);
+    resp = await http.get(BASE + "/search", { headers: { Referer: BASE } });
+  }
+  // …解析 resp
+}
+```
+
+约定与限制：
+
+- `webview.login` 是**同步阻塞**等待（在浮层内完成/取消/超时前不返回），
+  且一次只允许一个登录窗口；已有窗口时新调用返回 `ok:false`。
+- 登录窗口 **15 分钟**无操作会自动关闭并返回 `ok:false`。
+- 目标地址仅支持 `http/https`；非法地址返回 `ok:false`（message 说明）。
+- 桌面 / iOS / 纯浏览器预览：`isSupported()` 为 false，`login` 直接返回 `ok:false`
+  （message 提示当前平台不支持），**不会抛错**，书源代码可自行降级。
+
 ## `html`（CSS 选择器 + 正文清洗）
 
 基于 Rust `scraper`（HTML5 解析 + CSS 选择器子集）。

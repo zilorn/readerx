@@ -6,6 +6,7 @@
 //! - HTML 选择器基于 `scraper`，正文清洗是轻量标签扫描实现（文档中注明为近似结果）。
 
 use crate::models::BookSource;
+use crate::webview_login;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use md5::{Digest as _, Md5};
@@ -384,7 +385,8 @@ pub(crate) fn http_request(source_id: &str, method: &str, raw_url: &str, opts: &
     }
 }
 
-/// http.setCookie：手动追加一行 Cookie 头内容（后续所有请求自动携带）
+/// http.setCookie：手动追加一行 Cookie 头内容（后续所有请求自动携带）。
+/// 与已有行完全相同的文本会被跳过，避免重复累积。
 pub(crate) fn http_set_cookie(source_id: &str, cookie_text: &str) {
     let text = cookie_text.trim().to_string();
     if text.is_empty() {
@@ -395,12 +397,34 @@ pub(crate) fn http_set_cookie(source_id: &str, cookie_text: &str) {
             .extra_cookies
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        if lines.iter().any(|l| l == &text) {
+            return;
+        }
         lines.push(text);
         if lines.len() > MAX_COOKIE_LINES {
             let overflow = lines.len() - MAX_COOKIE_LINES / 2;
             lines.drain(0..overflow);
         }
     }
+}
+
+/// 从会话手动 Cookie 行中移除与给定文本完全相同的行（用于「清空登录 Cookie」）。
+/// 返回移除的行数。
+pub(crate) fn http_remove_cookie(source_id: &str, cookie_text: &str) -> u64 {
+    let text = cookie_text.trim();
+    if text.is_empty() {
+        return 0;
+    }
+    let Ok(state) = source_state(source_id) else {
+        return 0;
+    };
+    let mut lines = state
+        .extra_cookies
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let before = lines.len();
+    lines.retain(|l| l.trim() != text);
+    (before - lines.len()) as u64
 }
 
 pub(crate) fn http_cookies(source_id: &str) -> String {
@@ -716,4 +740,25 @@ pub(crate) fn sha1_hex(text: &str) -> String {
     let mut hasher = Sha1::new();
     hasher.update(text.as_bytes());
     hex_digest(&hasher.finalize())
+}
+
+// ---------------------------------------------------------------------------
+// WebView 登录（书源 JS 引擎调用；编排见 crate::webview_login）
+// ---------------------------------------------------------------------------
+
+/// 平台是否支持网页登录（当前仅 Android）。
+pub(crate) fn webview_login_supported() -> bool {
+    webview_login::is_supported()
+}
+
+/// 打开登录浮层并**阻塞等待**用户完成/取消/超时。
+/// 成功后内部已完成：持久化 + 注入该书源会话（后续 http.* 自动携带 Cookie）。
+/// 返回 JSON 文本 `{ ok, url, cookies, count, message }`（不抛宿主错误）。
+pub(crate) fn webview_login(source_id: &str, url: &str, _opts: &str) -> String {
+    let value = match webview_login::perform(source_id, url) {
+        Ok(outcome) => serde_json::to_value(&outcome)
+            .unwrap_or_else(|_| json!({ "ok": false, "message": "登录结果序列化失败" })),
+        Err(err) => json!({ "ok": false, "message": err }),
+    };
+    serde_json::to_string(&value).unwrap_or_else(|_| error_payload("登录结果序列化失败".into()))
 }

@@ -93,7 +93,27 @@ async function bookContent(chapter, book) {
 
 ## 进阶：需要登录 / Cloudflare / 防盗链
 
-见 [cloudflare.md](./cloudflare.md)；简单经验：
+见 [cloudflare.md](./cloudflare.md) 与 [book-source-api.md](./book-source-api.md) 的 `webview` 段。
+
+**Android 端（推荐）**：在书源编辑页点「网页登录」，应用内弹出 WebView 浮层，
+登录完成后宿主自动捕获该站 Cookie（含 httpOnly）并**持久化到该书源**（重启自动注入），
+之后的搜索/目录/正文请求都会自动带上：
+
+```js
+async function searchBook(keyword) {
+  let resp = await http.get(BASE + "/search", { headers: { Referer: BASE } });
+  if (resp.status === 401 || resp.status === 403) {
+    const login = await webview.login(BASE + "/login"); // Android 应用内浮层
+    if (!login.ok) throw new Error("需要登录：" + login.message);
+    resp = await http.get(BASE + "/search", { headers: { Referer: BASE } });
+  }
+  // …
+}
+```
+
+没有 Android 环境时仍可退而求其次：
+
 - 需要 Referer/UA：写进书源的「默认请求头 / User-Agent」；
-- 需要 Cookie：先在自己浏览器验证登录后，把 `Cookie: …` 粘到默认请求头，或用书源代码里 `http.setCookie`；
+- 需要 Cookie：先在自己浏览器验证登录后，把 `Cookie: …` 粘到默认请求头，或用书源代码里
+  `http.setCookie`；
 - 带鉴权的正文接口通常也在同一源会话里拿 cookie，放在 `bookContent` 前先调一次登录/初始化接口即可。

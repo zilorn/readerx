@@ -139,6 +139,19 @@ fn nv_http_clear_cookies(_: &JsValue, _args: &[JsValue], _context: &mut Context)
     Ok(JsValue::undefined())
 }
 
+fn nv_webview_login_supported(_: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
+    let supported = host::webview_login_supported();
+    ret_string(if supported { "1".to_string() } else { "0".to_string() })
+}
+
+fn nv_webview_login(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let url = args.first().map(|a| arg_string(a, context)).unwrap_or_default();
+    let opts = args.get(1).map(|a| arg_string(a, context)).unwrap_or_default();
+    let out = with_call(|c| host::webview_login(&c.source_id, &url, &opts))
+        .unwrap_or_else(|| "{\"ok\":false,\"message\":\"缺少运行上下文\"}".to_string());
+    ret_string(out)
+}
+
 fn nv_html_query_all(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let html = args.first().map(|a| arg_string(a, context)).unwrap_or_default();
     let sel = args.get(1).map(|a| arg_string(a, context)).unwrap_or_default();
@@ -210,6 +223,8 @@ fn native_registry() -> Vec<(&'static str, usize, NativeFunction)> {
         ("__httpSetCookie", 1, NativeFunction::from_fn_ptr(nv_http_set_cookie)),
         ("__httpCookies", 0, NativeFunction::from_fn_ptr(nv_http_cookies)),
         ("__httpClearCookies", 0, NativeFunction::from_fn_ptr(nv_http_clear_cookies)),
+        ("__webviewLogin", 2, NativeFunction::from_fn_ptr(nv_webview_login)),
+        ("__webviewLoginSupported", 0, NativeFunction::from_fn_ptr(nv_webview_login_supported)),
         ("__htmlQueryAll", 2, NativeFunction::from_fn_ptr(nv_html_query_all)),
         ("__htmlToText", 2, NativeFunction::from_fn_ptr(nv_html_to_text)),
         ("__sleep", 1, NativeFunction::from_fn_ptr(nv_sleep)),
@@ -246,6 +261,12 @@ const PROLOGUE: &str = r#"
     setCookie(text) { __httpSetCookie(String(text)); },
     cookies() { return __rxUnwrap(__httpCookies()); },
     clearCookies() { __httpClearCookies(); }
+  };
+  globalThis.webview = {
+    isSupported() { return __webviewLoginSupported() === "1"; },
+    login(url, opts) {
+      return __rxUnwrap(__webviewLogin(String(url), JSON.stringify(opts || null)));
+    }
   };
   globalThis.html = {
     queryAll(html, selector) { return __rxUnwrap(__htmlQueryAll(String(html), String(selector))); },

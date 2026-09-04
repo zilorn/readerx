@@ -14,6 +14,11 @@ edition = "2021"
 name = "readerx_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# 单一 workspace：主 crate 与书源网页登录插件共享同一 target 目录，
+# 便于 tauri 移动端构建发现插件的 android 工程。
+[workspace]
+members = [".", "plugins/tauri-plugin-webview-login"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -23,6 +28,8 @@ tauri-plugin-opener = "2"
 tauri-plugin-http = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-tts = "0.1"
+# 书源「网页登录」：Android 原生 WebView 登录浮层（仅移动端注册）
+tauri-plugin-webview-login = { path = "plugins/tauri-plugin-webview-login" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"

@@ -12,6 +12,7 @@ import type {
   ChapterContentResult,
   ChapterItem,
   SourceCallResult,
+  SourceLoginResult,
 } from "./bookSourcesTypes";
 
 const tauri = isTauri();
@@ -194,4 +195,57 @@ function toSummary(source: BookSource): BookSourceSummary {
     updateTime: source.updateTime,
     jsLength: source.js.length,
   };
+}
+
+// ---------------------------------------------------------------------------
+// 网页登录（WebView，仅 Android；登录 Cookie 由 Rust 按书源持久化并注入会话）
+// ---------------------------------------------------------------------------
+
+/** 平台是否支持网页登录 */
+export async function isSourceLoginSupported(): Promise<boolean> {
+  if (!tauri) return false;
+  try {
+    return await invoke<boolean>("readerx_source_login_supported");
+  } catch (err) {
+    console.error("[backend] 查询网页登录支持失败", err);
+    return false;
+  }
+}
+
+/**
+ * 打开网页登录浮层并等待用户完成/取消。
+ * 成功后 Cookie 已持久化并注入该书源会话（本次运行后续 http.* 自动携带）。
+ */
+export async function loginSourceWebview(
+  sourceId: string,
+  url: string,
+): Promise<SourceLoginResult> {
+  if (!tauri) {
+    return {
+      ok: false,
+      url,
+      cookies: "",
+      count: 0,
+      message: "网页登录仅在 Android 应用内可用",
+    };
+  }
+  try {
+    return await invoke<SourceLoginResult>("readerx_source_login_webview", {
+      sourceId,
+      url,
+    });
+  } catch (err) {
+    return { ok: false, url, cookies: "", count: 0, message: String(err) };
+  }
+}
+
+/** 清空某个书源已保存的网页登录 Cookie（持久化 + 当前会话）；返回移除的行数 */
+export async function clearSourceLogin(sourceId: string): Promise<number> {
+  if (!tauri) return 0;
+  try {
+    return await invoke<number>("readerx_source_login_clear", { sourceId });
+  } catch (err) {
+    console.error(`[backend] 清除书源 ${sourceId} 登录 Cookie 失败`, err);
+    return 0;
+  }
 }

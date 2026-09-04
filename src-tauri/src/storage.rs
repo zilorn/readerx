@@ -340,5 +340,86 @@ pub(crate) fn delete_book_source(app: &AppHandle, id: &str) -> Result<(), String
     if path.exists() {
         fs::remove_file(&path).map_err(|e| format!("删除书源失败: {e}"))?;
     }
+    // 顺带清掉该书源保存的网页登录 Cookie（独立文件，见 webview_login.rs）
+    remove_source_login_cookie(app, id)?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 书源网页登录 Cookie：<appData>/source_sessions/<id>.json
+// 与书源 JSON 分开放，避免把用户私人 Cookie 带进书源导出/导入。
+// ---------------------------------------------------------------------------
+
+fn ensure_sessions_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = data_root(app)?.join("source_sessions");
+    ensure_dir(&dir)?;
+    Ok(dir)
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SourceLoginCookie {
+    /// 捕获时的最终 URL（信息用途）
+    url: String,
+    /// Cookie 文本（`k=v; k2=v2`，含 httpOnly），注入书源会话时整行使用
+    cookie: String,
+    updated_at: u64,
+}
+
+/// 读取书源已保存的网页登录 Cookie；没有返回 Ok(None)。
+pub(crate) fn read_source_login_cookie(
+    app: &AppHandle,
+    id: &str,
+) -> Result<Option<String>, String> {
+    if !valid_component(id) {
+        return Err("非法的书源 id".to_string());
+    }
+    let path = ensure_sessions_dir(app)?.join(format!("{id}.json"));
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = fs::read_to_string(&path).map_err(|e| format!("读取登录 Cookie 失败: {e}"))?;
+    let data: SourceLoginCookie = serde_json::from_str(&text)
+        .map_err(|e| format!("解析登录 Cookie 失败: {e}"))?;
+    let cookie = data.cookie.trim().to_string();
+    if cookie.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(cookie))
+}
+
+/// 覆盖式保存书源最近一次网页登录捕获到的 Cookie。
+pub(crate) fn write_source_login_cookie(
+    app: &AppHandle,
+    id: &str,
+    url: &str,
+    cookie: &str,
+) -> Result<(), String> {
+    if !valid_component(id) {
+        return Err("非法的书源 id".to_string());
+    }
+    let dir = ensure_sessions_dir(app)?;
+    let path = dir.join(format!("{id}.json"));
+    let data = SourceLoginCookie {
+        url: url.trim().to_string(),
+        cookie: cookie.trim().to_string(),
+        updated_at: SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+    };
+    let text = serde_json::to_string(&data).map_err(|e| format!("序列化登录 Cookie 失败: {e}"))?;
+    fs::write(&path, text).map_err(|e| format!("写入登录 Cookie 失败: {e}"))
+}
+
+/// 删除书源保存的登录 Cookie（存在与否均 Ok）。
+pub(crate) fn remove_source_login_cookie(app: &AppHandle, id: &str) -> Result<(), String> {
+    if !valid_component(id) {
+        return Err("非法的书源 id".to_string());
+    }
+    let dir = ensure_sessions_dir(app)?;
+    let path = dir.join(format!("{id}.json"));
+    if path.exists() {
+        fs::remove_file(&path).map_err(|e| format!("删除登录 Cookie 失败: {e}"))?;
+    }
     Ok(())
 }

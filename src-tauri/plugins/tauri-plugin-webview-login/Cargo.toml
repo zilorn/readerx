@@ -1,0 +1,19 @@
+[package]
+name = "tauri-plugin-webview-login"
+version = "0.1.0"
+description = "Android-only native WebView login overlay for ReaderX book sources"
+edition = "2021"
+build = "build.rs"
+links = "tauri-plugin-webview-login"
+
+[lib]
+name = "tauri_plugin_webview_login"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-plugin = { version = "2", features = ["build"] }
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
