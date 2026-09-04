@@ -242,6 +242,21 @@
   text-underline-offset: 0.2em;
 }
 
+/* 搜索模式：命中词持续高亮（浅），当前查看的命中词更醒目 */
+.readerx-search {
+  border-radius: 3px;
+  background-color: color-mix(in srgb, var(--accent) 16%, transparent);
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+
+.readerx-search-current {
+  border-radius: 3px;
+  background-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   ::before,

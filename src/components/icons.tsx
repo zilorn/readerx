@@ -375,6 +375,16 @@ export function CloudIcon(p: SvgIconProps) {
   );
 }
 
+/** 返回原进度（弧形回转箭头） */
+export function RestoreBackIcon(p: SvgIconProps) {
+  return (
+    <Icon {...p}>
+      <polyline points="1 4 1 10 7 10" />
+      <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+    </Icon>
+  );
+}
+
 /** 书签（丝带）；filled 时实心填充 */
 export function BookmarkIcon(p: SvgIconProps & { filled?: boolean }) {
   if (p.filled) {

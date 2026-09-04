@@ -1,11 +1,14 @@
 /**
  * 全书搜索面板（阅读器内底部抽屉，类似目录）：不占路由历史。
  * 搜索范围：全部 / 仅标题 / 仅正文；
- * 点标题命中由阅读页跳到章首，点正文命中由阅读页跳到精确位置并高亮。
+ * 命中结果以「每条一张卡片」平铺展示；
+ * 点任一结果卡片由阅读页跳到命中位置并进入「搜索模式」逐条查看，
+ * 已在搜索模式时可用 activeIndex 高亮对应卡片并自动滚动到可视区。
  */
 import {
   For,
   Show,
+  createEffect,
   createMemo,
   createSignal,
   onCleanup,
@@ -19,18 +22,24 @@ import {
   type SearchMark,
 } from "../lib/bookSearch";
 
-/** 阅读页内跳转目标：章内正文镜像文本偏移；标题命中传 -1 表示章首 */
-export interface BookSearchJump {
-  chapterIndex: number;
-  start: number;
-  end: number;
+/** 点击某条结果卡片时传给阅读页的信息（含整份命中列表，用于进入搜索模式逐条切换） */
+export interface BookSearchOpenTarget {
+  /** 被点击结果在全量 hits 中的序号（0 起） */
+  index: number;
+  hits: BookSearchHit[];
+  /** 当前生效的搜索词 */
+  term: string;
 }
 
 export interface BookSearchPanelProps {
   open: boolean;
   book: LocalBook | undefined;
+  /** 搜索模式下正在查看的结果序号（0 起）；用于回列表时定位/高亮 */
+  activeIndex?: number | null;
+  /** 打开时是否自动聚焦输入框（默认 true；从搜索模式回列表时传 false 避免弹键盘） */
+  focusInput?: boolean;
   onClose: () => void;
-  onJump: (jump: BookSearchJump) => void;
+  onOpenResult: (target: BookSearchOpenTarget) => void;
 }
 
 interface TextSeg {
@@ -74,50 +83,105 @@ function HighlightText(props: { text: string; marks: SearchMark[] }) {
   );
 }
 
-/** 章内聚合：标题命中单列于分组头，正文命中按出现顺序列出 */
-interface HitGroup {
-  chapterIndex: number;
-  cid: string;
-  title: string;
-  titleHit: BookSearchHit | null;
-  bodyHits: BookSearchHit[];
-}
-
-function groupHits(hits: BookSearchHit[]): HitGroup[] {
-  const groups: HitGroup[] = [];
-  for (const hit of hits) {
-    const last = groups[groups.length - 1];
-    if (!last || last.chapterIndex !== hit.chapterIndex) {
-      groups.push({
-        chapterIndex: hit.chapterIndex,
-        cid: hit.chapterCid,
-        title: hit.chapterTitle,
-        titleHit: null,
-        bodyHits: [],
-      });
-    }
-    const group = groups[groups.length - 1];
-    if (hit.kind === "title") {
-      if (!group.titleHit) group.titleHit = hit;
-    } else {
-      group.bodyHits.push(hit);
-    }
-  }
-  return groups;
-}
-
 const SCOPE_OPTIONS: { value: BookSearchScope; label: string }[] = [
   { value: "all", label: "全部" },
   { value: "title", label: "标题" },
   { value: "body", label: "正文" },
 ];
 
+/** 单条结果卡片：顶部章节信息，下方命中内容 */
+function HitCard(props: {
+  hit: BookSearchHit;
+  hits: BookSearchHit[];
+  term: string;
+  /** 0 起序号 */
+  ordinal: number;
+  active: boolean;
+  onOpen: (target: BookSearchOpenTarget) => void;
+}) {
+  const hit = props.hit;
+  return (
+    <button
+      type="button"
+      data-hit-index={props.ordinal}
+      aria-current={props.active ? "true" : undefined}
+      class="block w-full overflow-hidden rounded-[14px] border text-left transition-colors active:bg-surface-2"
+      classList={{
+        "border-accent/80 bg-accent-weak/50 ring-1 ring-accent/70":
+          props.active,
+        "border-border bg-bg": !props.active,
+      }}
+      onClick={() =>
+        props.onOpen({
+          index: props.ordinal,
+          hits: props.hits,
+          term: props.term,
+        })
+      }
+    >
+      <div class="flex min-w-0 items-center gap-2.5 px-[15px] pt-2.5">
+        <span
+          class="w-11 flex-none truncate text-[11px] tabular-nums"
+          classList={{
+            "text-accent": props.active,
+            "text-text-3": !props.active,
+          }}
+        >
+          {hit.chapterCid}
+        </span>
+        <span
+          class="min-w-0 flex-1 truncate text-[11.5px]"
+          classList={{
+            "text-accent": props.active,
+            "text-text-3": !props.active,
+          }}
+        >
+          {hit.chapterTitle}
+        </span>
+        <Show when={hit.kind === "title"}>
+          <span class="flex-none rounded-full bg-accent-weak px-2 py-0.5 text-[10px] font-semibold text-accent">
+            章标题
+          </span>
+        </Show>
+        <Show when={props.active}>
+          <span class="flex-none rounded-full bg-accent px-2 py-0.5 text-[10px] font-semibold text-on-accent">
+            当前
+          </span>
+        </Show>
+      </div>
+      <div class="px-[15px] pb-3 pt-1.5 text-[13px] leading-[1.75] text-text-2">
+        <Show
+          when={hit.kind === "title"}
+          fallback={
+            <span class="line-clamp-3">
+              <Show when={hit.lead}>
+                <span class="text-text-3">…</span>
+              </Show>
+              <HighlightText text={hit.windowText} marks={hit.marks} />
+              <Show when={hit.trail}>
+                <span class="text-text-3">…</span>
+              </Show>
+            </span>
+          }
+        >
+          <span class="font-semibold text-text">
+            <HighlightText text={hit.windowText} marks={hit.marks} />
+          </span>
+        </Show>
+      </div>
+    </button>
+  );
+}
+
 export function BookSearchPanel(props: BookSearchPanelProps) {
   const [inputText, setInputText] = createSignal("");
   const [query, setQuery] = createSignal("");
   const [scope, setScope] = createSignal<BookSearchScope>("all");
   let inputRef: HTMLInputElement | undefined;
+  let resultListRef: HTMLDivElement | undefined;
   let debounceTimer: number | undefined;
+  let focusTimer: number | undefined;
+  let scrollTimer: number | undefined;
 
   function onInput(value: string): void {
     setInputText(value);
@@ -133,7 +197,22 @@ export function BookSearchPanel(props: BookSearchPanelProps) {
     inputRef?.focus();
   }
 
-  onCleanup(() => window.clearTimeout(debounceTimer));
+  onCleanup(() => {
+    window.clearTimeout(debounceTimer);
+    window.clearTimeout(focusTimer);
+    window.clearTimeout(scrollTimer);
+  });
+
+  // 打开时按需聚焦输入框（默认聚焦；从搜索模式回列表时传 false）
+  createEffect(() => {
+    if (!props.open) {
+      window.clearTimeout(focusTimer);
+      return;
+    }
+    if (props.focusInput === false) return;
+    window.clearTimeout(focusTimer);
+    focusTimer = window.setTimeout(() => inputRef?.focus(), 80);
+  });
 
   const outcome = createMemo(() => {
     const term = query();
@@ -142,30 +221,24 @@ export function BookSearchPanel(props: BookSearchPanelProps) {
     return searchBookText(current, term, scope());
   });
 
-  const groups = createMemo<HitGroup[]>(() =>
-    outcome() ? groupHits(outcome()!.hits) : [],
-  );
+  const hits = createMemo<BookSearchHit[]>(() => outcome()?.hits ?? []);
 
-  const hitCount = createMemo(() => outcome()?.hits.length ?? 0);
+  const hitCount = createMemo(() => hits().length);
 
-  /** 点正文命中（含分组头跳第一处）→ 精确区间；标题命中/章首 → -1 */
-  function requestJump(group: HitGroup, hit?: BookSearchHit): void {
-    if (hit && hit.kind === "body") {
-      props.onJump({
-        chapterIndex: group.chapterIndex,
-        start: hit.start,
-        end: hit.end,
-      });
-    } else {
-      props.onJump({ chapterIndex: group.chapterIndex, start: -1, end: -1 });
+  /** 打开面板（回列表）时，把当前正在查看的结果卡片滚到可视区 */
+  createEffect(() => {
+    if (!props.open || props.activeIndex == null) {
+      window.clearTimeout(scrollTimer);
+      return;
     }
-  }
-
-  /** 分组头：标题命中→章首；否则跳第一处正文命中 */
-  function jumpGroupHeader(group: HitGroup): void {
-    if (group.titleHit) requestJump(group);
-    else if (group.bodyHits.length > 0) requestJump(group, group.bodyHits[0]);
-  }
+    window.clearTimeout(scrollTimer);
+    scrollTimer = window.setTimeout(() => {
+      const el = resultListRef?.querySelector<HTMLElement>(
+        `[data-hit-index="${props.activeIndex}"]`,
+      );
+      el?.scrollIntoView({ block: "center" });
+    }, 120);
+  });
 
   return (
     <Show when={props.open}>
@@ -203,7 +276,6 @@ export function BookSearchPanel(props: BookSearchPanelProps) {
               class="min-w-0 flex-1 bg-transparent py-[8px] text-[14px] text-text outline-none placeholder:text-text-3"
               type="text"
               placeholder="搜索标题或正文"
-              autofocus
               value={inputText()}
               onInput={(event) => onInput(event.currentTarget.value)}
             />
@@ -244,7 +316,10 @@ export function BookSearchPanel(props: BookSearchPanelProps) {
         </div>
 
         <div class="min-h-0 flex-1 overflow-y-auto scrollbar-none">
-          <div class="px-[18px] pb-[max(env(safe-area-inset-bottom),12px)] pt-1">
+          <div
+            ref={resultListRef}
+            class="px-[18px] pb-[max(env(safe-area-inset-bottom),12px)] pt-1"
+          >
             <Show
               when={query()}
               fallback={
@@ -278,73 +353,17 @@ export function BookSearchPanel(props: BookSearchPanelProps) {
                     </span>
                   </Show>
                 </div>
-                <div class="divide-y divide-border overflow-hidden rounded-[16px] border border-border bg-bg">
-                  <For each={groups()}>
-                    {(group) => (
-                      <div>
-                        <button
-                          type="button"
-                          class="flex w-full items-center gap-3 px-[16px] py-[11px] text-left transition-colors active:bg-surface-2"
-                          onClick={() => jumpGroupHeader(group)}
-                        >
-                          <span class="w-12 flex-none text-[11px] tabular-nums text-text-3">
-                            {group.cid}
-                          </span>
-                          <span
-                            class="min-w-0 flex-1 truncate text-[13.5px]"
-                            classList={{
-                              "font-semibold": !!group.titleHit,
-                              "text-text-2": !group.titleHit,
-                            }}
-                          >
-                            <Show when={group.titleHit}>
-                              <HighlightText
-                                text={group.titleHit!.windowText}
-                                marks={group.titleHit!.marks}
-                              />
-                            </Show>
-                            <Show when={!group.titleHit}>
-                              <span>{group.title}</span>
-                            </Show>
-                          </span>
-                          <Show when={group.titleHit}>
-                            <span class="flex-none rounded-full bg-accent-weak px-2 py-0.5 text-[10px] font-semibold text-accent">
-                              章标题
-                            </span>
-                          </Show>
-                          <Show when={!group.titleHit && group.bodyHits.length > 0}>
-                            <span class="flex-none text-[11px] text-text-3 tabular-nums">
-                              {group.bodyHits.length} 处
-                            </span>
-                          </Show>
-                        </button>
-                        <Show when={group.bodyHits.length > 0}>
-                          <div class="divide-y divide-border border-t border-border bg-bg/40">
-                            <For each={group.bodyHits}>
-                              {(hit) => (
-                                <button
-                                  type="button"
-                                  class="block w-full px-[16px] py-[10px] text-left transition-colors active:bg-surface-2"
-                                  onClick={() => requestJump(group, hit)}
-                                >
-                                  <span class="line-clamp-3 text-[13px] leading-[1.7] text-text-2">
-                                    <Show when={hit.lead}>
-                                      <span class="text-text-3">…</span>
-                                    </Show>
-                                    <HighlightText
-                                      text={hit.windowText}
-                                      marks={hit.marks}
-                                    />
-                                    <Show when={hit.trail}>
-                                      <span class="text-text-3">…</span>
-                                    </Show>
-                                  </span>
-                                </button>
-                              )}
-                            </For>
-                          </div>
-                        </Show>
-                      </div>
+                <div class="flex flex-col gap-2.5 pb-2">
+                  <For each={hits()}>
+                    {(hit, idx) => (
+                      <HitCard
+                        hit={hit}
+                        ordinal={idx()}
+                        active={idx() === props.activeIndex}
+                        hits={hits()}
+                        term={query()}
+                        onOpen={props.onOpenResult}
+                      />
                     )}
                   </For>
                 </div>

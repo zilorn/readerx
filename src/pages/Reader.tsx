@@ -12,7 +12,11 @@ import {
 import { useNavigate, useParams } from "@solidjs/router";
 import { LoadingScreen } from "../components/LoadingScreen";
 import { ReaderSettingsSheet } from "../components/ReaderSettingsSheet";
-import { BookSearchPanel, type BookSearchJump } from "../components/BookSearchPanel";
+import {
+  BookSearchPanel,
+  type BookSearchOpenTarget,
+} from "../components/BookSearchPanel";
+import type { BookSearchHit } from "../lib/bookSearch";
 import { BookmarkPanel } from "../components/BookmarkPanel";
 import { SelectionMenu } from "../components/SelectionMenu";
 import { TtsBubble } from "../components/TtsBubble";
@@ -25,6 +29,7 @@ import {
   FollowBackIcon,
   HeadphonesIcon,
   ListIcon,
+  RestoreBackIcon,
   SearchIcon,
   SettingsIcon,
 } from "../components/icons";
@@ -130,8 +135,8 @@ function asCss(record: CssRecord): JSX.CSSProperties {
 // 书签下划线：按单元内字符区间把文本切段渲染
 // ---------------------------------------------------------------------------
 
-/** 标记的视觉语义：书签=下划线，朗读中=浅橙底 */
-export type MarkKind = "bookmark" | "speak";
+/** 标记的视觉语义：书签=下划线，朗读中=浅橙底，搜索模式命中=强调底 */
+export type MarkKind = "bookmark" | "speak" | "search" | "searchCurrent";
 
 /** 单元内被标记覆盖的字符区间（局部于该单元文本） */
 export interface UnitMark {
@@ -154,6 +159,8 @@ interface TextSegment {
   text: string;
   bookmark: boolean;
   speak: boolean;
+  search: boolean;
+  searchCurrent: boolean;
 }
 
 /** 把文本按覆盖区间切段（窗口 [winStart, winStart+text.length) 之外的标记忽略） */
@@ -173,7 +180,7 @@ function splitMarkedText(
     spans.push({ s: s - winStart, e: e - winStart, kind: mark.kind ?? "bookmark" });
   }
   if (spans.length === 0) {
-    return [{ text, bookmark: false, speak: false }];
+    return [{ text, bookmark: false, speak: false, search: false, searchCurrent: false }];
   }
   const points = [0, text.length];
   for (const sp of spans) {
@@ -191,13 +198,17 @@ function splitMarkedText(
     if (b <= a) continue;
     let bookmark = false;
     let speak = false;
+    let search = false;
+    let searchCurrent = false;
     for (const sp of spans) {
       if (sp.e > a && sp.s < b) {
         if (sp.kind === "speak") speak = true;
+        else if (sp.kind === "search") search = true;
+        else if (sp.kind === "searchCurrent") searchCurrent = true;
         else bookmark = true;
       }
     }
-    segments.push({ text: text.slice(a, b), bookmark, speak });
+    segments.push({ text: text.slice(a, b), bookmark, speak, search, searchCurrent });
   }
   return segments;
 }
@@ -215,7 +226,7 @@ function combineMarks(...lists: UnitMark[][]): UnitMark[] {
   return out;
 }
 
-/** 渲染切段：命中书签的片段包下划线 span；朗读中的片段包浅橙底 span */
+/** 渲染切段：命中书签/朗读/搜索标记的片段包对应样式 span */
 function renderMarkedText(
   text: string,
   winStart: number,
@@ -226,19 +237,30 @@ function renderMarkedText(
   if (
     segments.length === 1 &&
     !segments[0].bookmark &&
-    !segments[0].speak
+    !segments[0].speak &&
+    !segments[0].search &&
+    !segments[0].searchCurrent
   ) {
     return segments[0].text;
   }
   return (
     <>
       {segments.map((seg) => {
-        if (!seg.bookmark && !seg.speak) return seg.text;
+        if (
+          !seg.bookmark &&
+          !seg.speak &&
+          !seg.search &&
+          !seg.searchCurrent
+        ) {
+          return seg.text;
+        }
         return (
           <span
             classList={{
               "readerx-bookmark": seg.bookmark,
               "readerx-speak": seg.speak,
+              "readerx-search": seg.search,
+              "readerx-search-current": seg.searchCurrent,
             }}
           >
             {seg.text}
@@ -367,6 +389,21 @@ function ScrollBlock(props: {
 }
 
 // ---------------------------------------------------------------------------
+// 搜索模式会话：从全书搜索结果逐条查看时的上下文
+// ---------------------------------------------------------------------------
+
+interface ReaderSearchSession {
+  /** 当前搜索词 */
+  term: string;
+  /** 打开该书搜索时的全部命中（与结果列表顺序一致） */
+  hits: BookSearchHit[];
+  /** 正在查看的命中序号（0 起） */
+  index: number;
+  /** 进入搜索模式前的阅读位置（章节号 + 章节镜像文本字符偏移） */
+  prev: { ci: number; cid: string; char: number } | null;
+}
+
+// ---------------------------------------------------------------------------
 // 阅读页
 // ---------------------------------------------------------------------------
 
@@ -388,6 +425,9 @@ export default function ReaderPage() {
   const [readerSettingsOpen, setReaderSettingsOpen] = createSignal(false);
   // 全书搜索抽屉（阅读器内，不占路由历史）
   const [bookSearchOpen, setBookSearchOpen] = createSignal(false);
+  // 搜索模式：点中搜索结果后进入，正文持续高亮命中词，点屏中间呼出搜索模式菜单
+  const [searchSession, setSearchSession] =
+    createSignal<ReaderSearchSession | null>(null);
   // 当前阅读位置（章节正文镜像偏移：分页=页首行，滚动=视口顶部），状态栏百分比用
   const [viewOffset, setViewOffset] = createSignal(0);
 
@@ -607,9 +647,46 @@ export default function ReaderPage() {
     return [{ unit: item.unit, s: item.ls, e: item.le, kind: "speak" }];
   });
 
-  /** 正文渲染用：书签下划线 + 朗读高亮的并集 */
+  /** 搜索模式：当前章节内所有命中词（正文）的单元局部区间，当前查看项更醒目 */
+  const searchMarks = createMemo<UnitMark[]>(() => {
+    const s = searchSession();
+    const ch = chapter();
+    const mir = mirror();
+    if (!s || !ch || !mir || s.hits.length === 0) return [];
+    const active = s.hits[s.index];
+    const out: UnitMark[] = [];
+    for (const hit of s.hits) {
+      if (hit.kind !== "body" || hit.chapterCid !== ch.cid) continue;
+      const kind: MarkKind = hit === active ? "searchCurrent" : "search";
+      for (let u = 0; u < mir.unitLength.length; u++) {
+        const len = mir.unitLength[u];
+        if (len <= 0) continue;
+        const base = mir.unitStart[u];
+        const lo = Math.max(hit.start, base);
+        const hi = Math.min(hit.end, base + len);
+        if (hi <= lo) continue;
+        out.push({ unit: u, s: lo - base, e: hi - base, kind });
+      }
+    }
+    out.sort((a, b) => a.unit - b.unit || a.s - b.s || a.e - b.e);
+    return out;
+  });
+
+  /** 当前正在查看的搜索命中（搜索模式菜单展示章节名用） */
+  const currentSearchHit = createMemo<BookSearchHit | null>(() => {
+    const s = searchSession();
+    if (!s) return null;
+    return s.hits[s.index] ?? null;
+  });
+
+  /** 当前命中序号（0 起） */
+  const searchHitIndex = createMemo(() => searchSession()?.index ?? 0);
+  /** 命中总数 */
+  const searchHitTotal = createMemo(() => searchSession()?.hits.length ?? 0);
+
+  /** 正文渲染用：书签下划线 + 朗读高亮 + 搜索命中高亮的并集 */
   const renderMarks = createMemo<UnitMark[]>(() =>
-    combineMarks(unitMarks(), speakMarks()),
+    combineMarks(unitMarks(), speakMarks(), searchMarks()),
   );
 
   // 视图切章（用户翻章 / 引擎自动跨章）后让播放控制器跟随
@@ -838,7 +915,8 @@ export default function ReaderPage() {
     const offsets = pageTopOffsets();
     const pi = pageIdx();
     if (!ch || offsets.length === 0 || pi < 0 || pi >= offsets.length) return;
-    if (resumeTarget() !== null) return; // 精确恢复落定前不覆盖存档位置
+    // 精确恢复落定前不覆盖存档位置；搜索模式浏览命中时不提交位置
+    if (resumeTarget() !== null || searchSession() !== null) return;
     queueLocation(offsets[pi]);
   });
 
@@ -978,7 +1056,8 @@ export default function ReaderPage() {
     const userScrolled = e.isTrusted === true;
     scrollFrame = requestAnimationFrame(() => {
       scrollFrame = 0;
-      if (isPaged() || resumeTarget() !== null) return;
+      if (isPaged() || resumeTarget() !== null || searchSession() !== null)
+        return;
       const root = scrollRef;
       if (!root) return;
       if (
@@ -1000,7 +1079,7 @@ export default function ReaderPage() {
     const ch = chapter();
     const root = scrollRef;
     if (!ch || !root) return;
-    if (resumeTarget() !== null) return;
+    if (resumeTarget() !== null || searchSession() !== null) return;
     void layout();
     queueLocation(visibleCharAtTop(root) ?? 0);
   });
@@ -1051,18 +1130,57 @@ export default function ReaderPage() {
     setMenuOpen(false);
   }
 
-  /** 全书搜索命中跳转：start<0 为章首（标题命中），否则跳到正文精确区间并闪亮 */
-  function jumpFromSearch(jump: BookSearchJump): void {
+  // -------------------------------------------------------------------
+  // 搜索模式：点中全书搜索结果后进入，正文高亮命中词，可逐条切换 / 返回原进度
+  // -------------------------------------------------------------------
+
+  /** 记录进入搜索模式前的阅读位置（章节号 + 章节镜像文本字符偏移） */
+  function capturePreSearchReading(): ReaderSearchSession["prev"] {
+    const ch = chapter();
+    if (!ch) return null;
+    const mir = mirror();
+    let char = 0;
+    if (isPaged()) {
+      const offs = pageTopOffsets();
+      const pi = pageIdx();
+      if (pi >= 0 && pi < offs.length) char = offs[pi];
+    } else {
+      char = visibleCharAtTop(scrollRef!) ?? viewOffset() ?? 0;
+    }
+    if (mir) char = Math.max(0, Math.min(char, mir.text.length));
+    return { ci: chapterIdx(), cid: ch.cid, char };
+  }
+
+  /** 打开一条搜索结果：进入搜索模式并定位（首次进入时记录原阅读位置） */
+  function openSearchResult(target: BookSearchOpenTarget): void {
     const current = book();
-    const target = current?.chapters[jump.chapterIndex];
-    if (!current || !target) return;
+    if (!current || target.hits.length === 0) return;
+    const index = Math.max(0, Math.min(target.index, target.hits.length - 1));
+    const existing = searchSession();
+    const prev = existing?.prev ?? capturePreSearchReading();
     setBookSearchOpen(false);
     setMenuOpen(false);
+    setSearchSession({ term: target.term, hits: target.hits, index, prev });
+    cancelFollowIfActive();
+    locateSearchHit(index);
+  }
 
-    if (jump.start < 0) {
+  /** 定位到当前会话中的第 index 条命中（标题命中→章首；正文命中→精确区间并闪亮） */
+  function locateSearchHit(index: number): void {
+    const s = searchSession();
+    const current = book();
+    if (!s || !current) return;
+    const clamped = Math.max(0, Math.min(index, s.hits.length - 1));
+    if (clamped !== s.index) setSearchSession({ ...s, index: clamped });
+    setPendingFlash(null);
+    const hit = s.hits[clamped];
+    const target = current.chapters[hit.chapterIndex];
+    if (!target) return;
+
+    if (hit.kind !== "body") {
       // 标题命中 → 章首
-      if (jump.chapterIndex !== chapterIdx()) {
-        goToChapter(jump.chapterIndex);
+      if (hit.chapterIndex !== chapterIdx()) {
+        goToChapter(hit.chapterIndex);
       } else if (isPaged()) {
         setPageIdx(0);
       } else if (scrollRef) {
@@ -1071,16 +1189,58 @@ export default function ReaderPage() {
       return;
     }
 
-    if (jump.chapterIndex !== chapterIdx()) goToChapter(jump.chapterIndex);
+    if (hit.chapterIndex !== chapterIdx()) goToChapter(hit.chapterIndex);
     const mir = buildTextMirror(chapterUnits(target));
-    const pos = unitAtGlobalOffset(mir, jump.start);
+    const pos = unitAtGlobalOffset(mir, hit.start);
     if (!pos) return;
     setPendingFlash({
-      chapter: jump.chapterIndex,
+      chapter: hit.chapterIndex,
       unit: pos.unit,
-      charStart: jump.start,
-      charEnd: Math.min(jump.end, mir.text.length),
+      charStart: hit.start,
+      charEnd: Math.min(hit.end, mir.text.length),
     });
+  }
+
+  /** 切换上一个 / 下一个结果项 */
+  function stepSearchHit(dir: 1 | -1): void {
+    const s = searchSession();
+    if (!s) return;
+    const next = s.index + dir;
+    if (next < 0 || next >= s.hits.length) return;
+    locateSearchHit(next);
+  }
+
+  /** 从搜索模式回到搜索结果列表（自动滚动定位到当前结果卡片） */
+  function returnToSearchResults(): void {
+    setMenuOpen(false);
+    setBookSearchOpen(true);
+  }
+
+  /** 关闭搜索模式：退出高亮与搜索菜单，停留在当前页面 */
+  function exitSearchMode(): void {
+    setSearchSession(null);
+    setMenuOpen(false);
+    setBookSearchOpen(false);
+  }
+
+  /** 返回搜索前读到的进度（退出搜索模式并精确回到原位置） */
+  function restorePreSearch(): void {
+    const s = searchSession();
+    if (!s) return;
+    const prev = s.prev;
+    setSearchSession(null);
+    setMenuOpen(false);
+    setBookSearchOpen(false);
+    if (!prev) return;
+    goToChapter(prev.ci);
+    if (prev.char > 0) {
+      const target = book()?.chapters[prev.ci];
+      if (target) setResumeTarget({ cid: target.cid, char: prev.char });
+    } else if (isPaged()) {
+      setPageIdx(0);
+    } else if (scrollRef) {
+      scrollRef.scrollTop = 0;
+    }
   }
 
   /** 左右翻页（含章节边界衔接）；返回是否发生了位移 */
@@ -1570,6 +1730,35 @@ export default function ReaderPage() {
                 class="flex items-center gap-1.5 px-3 pb-2"
                 style={{ "padding-top": `${topbarPadTop()}px` }}
               >
+                {/* 搜索模式：顶部显示当前命中章节，点章节名返回搜索结果列表 */}
+                <Show
+                  when={!searchSession()}
+                  fallback={
+                    <>
+                      <div class="h-10 w-10 flex-none" />
+                      <button
+                        type="button"
+                        aria-label="返回搜索结果列表"
+                        class="flex min-w-0 flex-1 flex-col items-center gap-[1px]"
+                        onClick={returnToSearchResults}
+                      >
+                        <span class="max-w-full truncate text-[10.5px] text-text-3">
+                          {`「${searchSession()?.term ?? ""}」搜索中`}
+                        </span>
+                        <span class="flex max-w-full items-center gap-1 text-[14.5px] font-semibold text-accent">
+                          <span class="min-w-0 truncate">
+                            {currentSearchHit()?.chapterTitle ?? ""}
+                          </span>
+                          <ChevronRightIcon
+                            size={15}
+                            class="flex-none opacity-70"
+                          />
+                        </span>
+                      </button>
+                      <div class="h-10 w-10 flex-none" />
+                    </>
+                  }
+                >
                 <button
                   class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
                   aria-label="返回"
@@ -1635,6 +1824,7 @@ export default function ReaderPage() {
                     <SettingsIcon size={21} />
                   </button>
                 </div>
+                </Show>
               </div>
             </header>
 
@@ -1653,7 +1843,8 @@ export default function ReaderPage() {
                 when={
                   ttsPlayer.status() !== "stopped" &&
                   !tocOpen() &&
-                  !bmPanelOpen()
+                  !bmPanelOpen() &&
+                  !searchSession()
                 }
               >
                 <div class="flex items-center gap-2 px-3 pb-1.5 pt-2">
@@ -1689,6 +1880,53 @@ export default function ReaderPage() {
                 <div
                   class="flex items-center gap-2 px-3.5 pt-2"
                   style={{ "padding-bottom": `${menuBarPadBottom()}px` }}
+                >
+                {/* 搜索模式：底部显示 返回原进度 / 上一条 / x/y / 下一条 / 关闭 */}
+                <Show
+                  when={!searchSession()}
+                  fallback={
+                    <>
+                      <div class="flex w-full items-center gap-1">
+                        <button
+                          class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
+                          aria-label="返回搜索前进度"
+                          onClick={restorePreSearch}
+                        >
+                          <RestoreBackIcon size={19} />
+                        </button>
+                        <div class="flex min-w-0 flex-1 items-center justify-center gap-1">
+                          <button
+                            class="inline-flex h-10 flex-none items-center justify-center gap-1 rounded-[10px] border border-border bg-bg px-2 text-[12.5px] text-text-2 transition-[scale,opacity] duration-100 active:scale-[0.97] disabled:pointer-events-none disabled:opacity-30"
+                            aria-label="上一个结果"
+                            disabled={searchHitIndex() <= 0}
+                            onClick={() => stepSearchHit(-1)}
+                          >
+                            <ChevronLeftIcon size={15} />
+                            上一个
+                          </button>
+                          <span class="w-[3.6em] flex-none text-center text-[12.5px] font-semibold tabular-nums text-accent">
+                            {searchHitIndex() + 1}/{searchHitTotal()}
+                          </span>
+                          <button
+                            class="inline-flex h-10 flex-none items-center justify-center gap-1 rounded-[10px] border border-border bg-bg px-2 text-[12.5px] text-text-2 transition-[scale,opacity] duration-100 active:scale-[0.97] disabled:pointer-events-none disabled:opacity-30"
+                            aria-label="下一个结果"
+                            disabled={searchHitIndex() + 1 >= searchHitTotal()}
+                            onClick={() => stepSearchHit(1)}
+                          >
+                            下一个
+                            <ChevronRightIcon size={15} />
+                          </button>
+                        </div>
+                        <button
+                          class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
+                          aria-label="关闭搜索模式"
+                          onClick={exitSearchMode}
+                        >
+                          <CloseIcon size={20} />
+                        </button>
+                      </div>
+                    </>
+                  }
                 >
                 <button
                   class="inline-flex flex-1 items-center justify-center gap-1.5 rounded-[10px] border border-border bg-bg px-0.5 py-[9px] text-[12.5px] text-text-2 disabled:pointer-events-none disabled:opacity-30"
@@ -1737,6 +1975,7 @@ export default function ReaderPage() {
                   下一章
                   <ChevronRightIcon size={16} />
                 </button>
+                </Show>
                 </div>
               </footer>
             </div>
@@ -1825,7 +2064,7 @@ export default function ReaderPage() {
               onDelete={(bookmark) => removeBookmark(bookmark.id)}
             />
 
-            {/* 长按/拖选文本后的自定义菜单 */}
+            {/* 长按/拖选文本后的自定义菜单（搜索模式下让位给命中高亮） */}
             <SelectionMenu
               rootRef={() => areaRef}
               active={() =>
@@ -1834,7 +2073,8 @@ export default function ReaderPage() {
                 !menuOpen() &&
                 !tocOpen() &&
                 !bmPanelOpen() &&
-                !bookSearchOpen()
+                !bookSearchOpen() &&
+                !searchSession()
               }
               onCopy={(text) => void handleCopyText(text)}
               onBookmark={(range) => handleBookmarkRange(range)}
@@ -1866,12 +2106,14 @@ export default function ReaderPage() {
               onClose={() => setReaderSettingsOpen(false)}
             />
 
-            {/* 全书搜索（阅读器内抽屉，不产生路由历史；命中后在阅读页内跳转高亮） */}
+            {/* 全书搜索（阅读器内抽屉，不产生路由历史；命中后进入搜索模式高亮逐条查看） */}
             <BookSearchPanel
               open={bookSearchOpen()}
               book={book()}
+              activeIndex={searchSession() ? searchHitIndex() : null}
+              focusInput={searchSession() ? false : undefined}
               onClose={() => setBookSearchOpen(false)}
-              onJump={jumpFromSearch}
+              onOpenResult={openSearchResult}
             />
           </div>
         </Show>
