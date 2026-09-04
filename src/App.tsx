@@ -42,6 +42,9 @@ const AppShell: Component<RouteSectionProps> = (props) => {
     () => location.pathname === "/" && shelfSelectingMode(),
   );
 
+  // 阅读页自行管理底部留白与分页高度，不套用统一的滚动区底部留白
+  const isReader = createMemo(() => location.pathname.startsWith("/book/"));
+
   let viewRef: HTMLDivElement | undefined;
   // 路由切换后，让滚动容器回到顶部（避免切页后停留在旧滚动位置）
   createEffect(
@@ -59,6 +62,10 @@ const AppShell: Component<RouteSectionProps> = (props) => {
       <div
         ref={viewRef}
         class="relative min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain scrollbar-none"
+        classList={{
+          // 内容页统一在滚动区底部默认留一点空位（阅读页自行排版，不套用）
+          "pb-4": !isReader(),
+        }}
       >
         <Suspense fallback={<LoadingScreen label="页面加载中…" />}>
           {props.children}

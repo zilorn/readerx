@@ -1,7 +1,9 @@
 /**
  * 分章规则模块：
  * - 内置若干常见“章节标题”正则，按列表顺序尝试；
- * - 某条规则若能切出 >=2 个有效章节即生效，否则继续尝试下一条；
+ * - 某条规则若能切出有效章节即生效，否则继续尝试下一条；
+ *   「简介在前」内置规则命中后，会把开头简介独立成章放最前，
+ *   即使整书正文标题只匹配到一次也不再回退按字数分章；
  * - 全部规则都未命中时回退为“按字数分章”。
  * 用户自定义规则由 Rust 后端持久化，可在分章规则页增删。
  */
@@ -14,6 +16,11 @@ export interface ChapterRule {
   /** 正则源码，统一以 g + i + m 编译（行首 ^ 按行生效） */
   pattern: string;
   builtin: boolean;
+  /**
+   * 仅部分内置规则使用：命中时若标题之前还有真实“简介”文本，
+   * 把简介独立成章置于最前（见 trySplitFrontIntro）。
+   */
+  frontIntro?: boolean;
 }
 
 export interface SplitChapter {
@@ -34,12 +41,24 @@ export const DEFAULT_CHARS_PER_CHAPTER = 3000;
 
 const RULES_KEY = "readerx.chapterRules";
 
+/** 中文章节标题正则（第X章 / 回 / 节），被普通规则与“简介在前”规则共用 */
+const ZH_CHAPTER_PATTERN = String.raw`^\s*第\s*[0-9０-９一二三四五六七八九十百千万零〇两]+\s*[章回节][^\n]{0,60}`;
+
 /** 内置规则：顺序即自动匹配时的尝试顺序 */
 const BUILTIN_RULES: ChapterRule[] = [
   {
+    // 覆盖“开头是一段无标题简介、后面才有 第一章/第二章…”的常见 TXT：
+    // 简介独立成章放最前，而不是因为开头匹配不到标题而回退按字数分章。
+    id: "builtin-zh-prelude",
+    name: "中文章节（开头可带简介）",
+    pattern: ZH_CHAPTER_PATTERN,
+    builtin: true,
+    frontIntro: true,
+  },
+  {
     id: "builtin-zh-chapter",
     name: "中文章节（第X章 / 回 / 节）",
-    pattern: String.raw`^\s*第\s*[0-9０-９一二三四五六七八九十百千万零〇两]+\s*[章回节][^\n]{0,60}`,
+    pattern: ZH_CHAPTER_PATTERN,
     builtin: true,
   },
   {
@@ -241,6 +260,27 @@ function looksLikeTitleBlock(frontMatter: string): boolean {
   );
 }
 
+/** 把简介文本拆成“章节名 + 正文”：
+ * 若开头有“内容简介/文案/楔子…”这类短标行，用它作章节名（标签独占一行时
+ * 从正文去掉，避免重复）；找不到标签则统一叫「开篇」且全文保留。 */
+function splitFrontIntro(frontMatter: string): { title: string; body: string } {
+  const labels =
+    /^(?:内容简介|作品简介|故事简介|故事梗概|内容介绍|内容提要|文案|楔子|引子|序章|序言|前言|卷首语|写在前面|序)$/;
+  const lines = frontMatter.split("\n").map((line) => line.trim()).filter(Boolean);
+  let title = "开篇";
+  const kept: string[] = [];
+  for (const line of lines) {
+    // 允许“内容简介：…”这种标签直接带正文在同一行
+    const label = line.replace(/[:：].*$/, "").trim();
+    if (title === "开篇" && label && label.length <= 12 && labels.test(label)) {
+      title = label;
+      if (line === label) continue; // 标签独占一行：已用作章节名，正文不再重复
+    }
+    kept.push(line);
+  }
+  return { title, body: kept.join("\n") };
+}
+
 /** 单条规则分章；不满足“至少两个有效章节”时返回 null */
 function trySplitByRule(text: string, rule: ChapterRule): RawSplitChapter[] | null {
   let regex: RegExp;
@@ -279,6 +319,56 @@ function trySplitByRule(text: string, rule: ChapterRule): RawSplitChapter[] | nu
   const valid = chapters.filter((chapter) => chapter.body.length >= 80).length;
   // 若多数“章节”几乎没有正文，大概率命中文件开头的目录，放弃该规则
   if (valid === 0 || valid / chapters.length < 0.4) return null;
+  return chapters.filter((chapter) => chapter.body.length > 0);
+}
+
+/**
+ * 「简介在前 · 正文标题后置」分章：
+ * 开头是一段没有标题的简介，后面才出现 第一章/第二章…（甚至全书只有一个正文标题）。
+ * 命中条件：
+ * - 前置存在真实“简介”文本（书名/作者等短行噪音不算）；
+ * - 其后至少匹配到一个章节标题。
+ * 命中时简介独立成章放在最前（标题取“内容简介/文案/楔子”等短标行，否则「开篇」），
+ * 不并入第一章，也不因篇幅短被吞掉；只有 1 个标题章也允许切（简介本身补足一段）。
+ * 若标题章普遍没有正文（目录/分卷空壳），判定不是这种格式，交还后续规则。
+ */
+function trySplitFrontIntro(text: string, headingPattern: string): RawSplitChapter[] | null {
+  let regex: RegExp;
+  try {
+    regex = new RegExp(headingPattern, "gim");
+  } catch {
+    return null;
+  }
+
+  const matches = Array.from(text.matchAll(regex));
+  if (matches.length === 0) return null;
+
+  const firstIndex = matches[0].index ?? 0;
+  const frontMatter = text.slice(0, firstIndex).trim();
+  // 没有前置内容，或前置只是书名/作者/来源短行 → 不是“简介在前”场景，交给普通规则
+  if (!frontMatter || looksLikeTitleBlock(frontMatter)) return null;
+
+  const intro = splitFrontIntro(frontMatter);
+  const chapters: RawSplitChapter[] = [
+    { title: intro.title, body: intro.body },
+  ];
+
+  for (let i = 0; i < matches.length; i++) {
+    const start = matches[i].index ?? 0;
+    const end = i + 1 < matches.length ? (matches[i + 1].index ?? text.length) : text.length;
+    const heading = (matches[i][0] ?? "").trim();
+    const body = text.slice(start + (matches[i][0]?.length ?? 0), end).trim();
+    chapters.push({
+      title: heading.slice(0, 80) || `第${i + 1}节`,
+      body,
+    });
+  }
+
+  const headingChapters = chapters.slice(1);
+  const valid = headingChapters.filter((chapter) => chapter.body.length >= 80).length;
+  // 标题章普遍没有正文 → 更像开头目录/分卷列表，不是正文分章
+  if (valid === 0 || valid / headingChapters.length < 0.4) return null;
+
   return chapters.filter((chapter) => chapter.body.length > 0);
 }
 
@@ -331,7 +421,9 @@ export function splitText(
 ): TextSplitResult {
   const normalized = normalizeLineEndings(text);
   for (const rule of rules) {
-    const raw = trySplitByRule(normalized, rule);
+    const raw = rule.frontIntro
+      ? trySplitFrontIntro(normalized, rule.pattern)
+      : trySplitByRule(normalized, rule);
     if (raw) {
       return {
         mode: "regex",
