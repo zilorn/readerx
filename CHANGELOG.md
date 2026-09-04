@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TTS失败后跳过，连续失败多次（5次）后停止。
 - 封面中，使用书籍全名，而不是首字。
 - 封面可以在epub中取。
+- 当章节内容过多时，阅读器显示正在加载，而不是卡页面。
 
 ## [0.1.1] - 2026-09-04
 

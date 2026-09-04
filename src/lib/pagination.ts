@@ -294,6 +294,26 @@ export function paginateChapter(
   layout: PaginateLayout,
   imageSizes: Map<string, { w: number; h: number } | null>,
 ): PaginatedChapter | null {
+  const steps = paginateChapterSteps(chapter, author, layout, imageSizes);
+  let step = steps.next();
+  while (!step.done) step = steps.next();
+  return step.value;
+}
+
+/**
+ * 章节填页的可挂起序列（生成器）。
+ *
+ * 分页要逐段对隐藏测量容器做真实排版（每段都要强制 layout），超大章节整段同步跑
+ * 会长时间占用主线程、页面直接卡死。这里把填页拆成一段段可挂起的工作：
+ * 每个单元处理完、每页切分完成后 yield 一次，驱动方据此让出主线程渲染/响应；
+ * 同步驱动（paginateChapter）逐次 next 拉到结束，行为与原实现完全一致。
+ */
+export function* paginateChapterSteps(
+  chapter: LocalBookChapter,
+  author: string | null,
+  layout: PaginateLayout,
+  imageSizes: Map<string, { w: number; h: number } | null>,
+): Generator<void, PaginatedChapter | null, void> {
   const pageHeight = layout.pageHeight;
   if (pageHeight <= 0 || layout.textWidth <= 0) return null;
 
@@ -303,134 +323,203 @@ export function paginateChapter(
   }
 
   const measurer = buildMeasurer(layout);
-  const pages: PageFragment[][] = [];
-  let current: PageFragment[] = [];
-  let used = 0; // 下一页块将从该纵向位置开始（含此前尾部间距）
+  try {
+    const pages: PageFragment[][] = [];
+    let current: PageFragment[] = [];
+    let used = 0; // 下一页块将从该纵向位置开始（含此前尾部间距）
 
-  const flush = (): void => {
-    if (current.length > 0) pages.push(current);
-    current = [];
-    used = 0;
-  };
-  const lineHeightPx = layout.fontSize * READING_LINE_HEIGHT;
+    const flush = (): void => {
+      if (current.length > 0) pages.push(current);
+      current = [];
+      used = 0;
+    };
+    const lineHeightPx = layout.fontSize * READING_LINE_HEIGHT;
 
-  /** 放置不可切分的原子块（contentHeight 为内容高，marginPx 为尾部间距） */
-  const pushAtomic = (
-    fragment: PageFragment,
-    contentHeight: number,
-    marginPx: number,
-  ): void => {
-    if (current.length > 0 && used + contentHeight + marginPx > pageHeight + 0.5) {
-      flush();
-    }
-    current.push(fragment);
-    used += contentHeight + marginPx;
-  };
-
-  /** 二分求 text 中高度不超过 availPx 的最长前缀字符数 */
-  const fitPrefix = (text: string, indent: boolean, availPx: number): number => {
-    if (text.length === 0) return 0;
-    if (measurer.heightText(text, indent) <= availPx + 0.5) return text.length;
-    let lo = 0;
-    let hi = text.length;
-    while (lo + 1 < hi) {
-      const mid = (lo + hi) >> 1;
-      if (measurer.heightText(text.slice(0, mid), indent) <= availPx + 0.5) lo = mid;
-      else hi = mid;
-    }
-    return lo;
-  };
-
-  /** 放置一段正文（必要时跨页切分；marginPx 为其结束后的段落间距） */
-  const pushParagraph = (text: string, marginPx: number, unitIdx: number): void => {
-    let rest = text;
-    let first = true; // 是否源段落的第一段（决定首行缩进）
-    while (rest.length > 0) {
-      const remaining = pageHeight - used;
-      // 本片段在源段落中的起始偏移（rest 恒为 text 的后缀）
-      const cstart = text.length - rest.length;
-      if (current.length === 0 && remaining < lineHeightPx) {
-        // 保护：极小可用高度也不死循环（现实不会触发）
-        current.push({ kind: "p", text: rest, indent: first, end: true, unit: unitIdx, cstart });
-        used = pageHeight;
-        return;
-      }
-      const fullHeight = measurer.heightText(rest, first);
-      if (remaining >= fullHeight - 0.5) {
-        // 整段（或该页能容纳其全部行）直接收尾；尾部间距随后续内容生效
-        current.push({ kind: "p", text: rest, indent: first, end: true, unit: unitIdx, cstart });
-        used += fullHeight + marginPx;
-        return;
-      }
-      // 整段放不下：按剩余行高二分，把能放的前缀留本页
-      const avail = Math.max(0, remaining);
-      if (current.length > 0 && avail < lineHeightPx) {
+    /** 放置不可切分的原子块（contentHeight 为内容高，marginPx 为尾部间距） */
+    const pushAtomic = (
+      fragment: PageFragment,
+      contentHeight: number,
+      marginPx: number,
+    ): void => {
+      if (current.length > 0 && used + contentHeight + marginPx > pageHeight + 0.5) {
         flush();
+      }
+      current.push(fragment);
+      used += contentHeight + marginPx;
+    };
+
+    /** 二分求 text 中高度不超过 availPx 的最长前缀字符数 */
+    const fitPrefix = (text: string, indent: boolean, availPx: number): number => {
+      if (text.length === 0) return 0;
+      if (measurer.heightText(text, indent) <= availPx + 0.5) return text.length;
+      let lo = 0;
+      let hi = text.length;
+      while (lo + 1 < hi) {
+        const mid = (lo + hi) >> 1;
+        if (measurer.heightText(text.slice(0, mid), indent) <= availPx + 0.5) lo = mid;
+        else hi = mid;
+      }
+      return lo;
+    };
+
+    /**
+     * 放置一段正文（必要时跨页切分；marginPx 为其结束后的段落间距）。
+     * 每切出一页分片即 yield 一次，让单个超长段落（跨数十页）也能被驱动方分片执行。
+     */
+    const pushParagraph = function* pushParagraph(
+      text: string,
+      marginPx: number,
+      unitIdx: number,
+    ): Generator<void, void, void> {
+      let rest = text;
+      let first = true; // 是否源段落的第一段（决定首行缩进）
+      while (rest.length > 0) {
+        yield;
+        const remaining = pageHeight - used;
+        // 本片段在源段落中的起始偏移（rest 恒为 text 的后缀）
+        const cstart = text.length - rest.length;
+        if (current.length === 0 && remaining < lineHeightPx) {
+          // 保护：极小可用高度也不死循环（现实不会触发）
+          current.push({ kind: "p", text: rest, indent: first, end: true, unit: unitIdx, cstart });
+          used = pageHeight;
+          return;
+        }
+        const fullHeight = measurer.heightText(rest, first);
+        if (remaining >= fullHeight - 0.5) {
+          // 整段（或该页能容纳其全部行）直接收尾；尾部间距随后续内容生效
+          current.push({ kind: "p", text: rest, indent: first, end: true, unit: unitIdx, cstart });
+          used += fullHeight + marginPx;
+          return;
+        }
+        // 整段放不下：按剩余行高二分，把能放的前缀留本页
+        const avail = Math.max(0, remaining);
+        if (current.length > 0 && avail < lineHeightPx) {
+          flush();
+          continue;
+        }
+        const count = fitPrefix(rest, first, avail);
+        if (count <= 0) {
+          flush();
+          continue;
+        }
+        if (count >= rest.length) {
+          current.push({ kind: "p", text: rest, indent: first, end: true, unit: unitIdx, cstart });
+          used += measurer.heightText(rest, first) + marginPx;
+          return;
+        }
+        const prefix = rest.slice(0, count);
+        current.push({ kind: "p", text: prefix, indent: first, end: false, unit: unitIdx, cstart });
+        used += measurer.heightText(prefix, first);
+        rest = rest.slice(count);
+        first = false;
+        flush();
+      }
+    };
+
+    // 章节标题块（内容高含作者行；外框自带 1.05em 尾部间距）
+    const authorDisplay =
+      author && author !== "佚名" ? `${author} 著` : null;
+    const titleHeight = measurer.heightTitle(chapter.title, authorDisplay);
+    pushAtomic(
+      { kind: "title", title: chapter.title, author: authorDisplay },
+      titleHeight,
+      em(layout.fontSize, 1.05),
+    );
+
+    const paraMarginPx = em(layout.fontSize, layout.paraSpacingEm);
+    for (let idx = 0; idx < units.length; idx++) {
+      const unit = units[idx];
+      if (unit.kind === "p") {
+        yield* pushParagraph(unit.text, paraMarginPx, idx);
         continue;
       }
-      const count = fitPrefix(rest, first, avail);
-      if (count <= 0) {
-        flush();
+      if (unit.kind === "h") {
+        const h = measurer.heightHeading(unit.level, unit.text);
+        pushAtomic(
+          { kind: "h", level: unit.level, text: unit.text, unit: idx, cstart: 0 },
+          h,
+          em(layout.fontSize, 0.95),
+        );
         continue;
       }
-      if (count >= rest.length) {
-        current.push({ kind: "p", text: rest, indent: first, end: true, unit: unitIdx, cstart });
-        used += measurer.heightText(rest, first) + marginPx;
-        return;
+      const natural = imageSizes.get(unit.src) ?? null;
+      const disp = imageDisplaySize(layout, natural);
+      if (disp.missing) {
+        pushAtomic(
+          { kind: "img", src: unit.src, alt: unit.alt, w: 0, h: 0 },
+          MISSING_IMAGE_HEIGHT,
+          em(layout.fontSize, 1),
+        );
+      } else {
+        pushAtomic(
+          { kind: "img", src: unit.src, alt: unit.alt, w: disp.w, h: disp.h },
+          disp.h,
+          em(layout.fontSize, 1),
+        );
       }
-      const prefix = rest.slice(0, count);
-      current.push({ kind: "p", text: prefix, indent: first, end: false, unit: unitIdx, cstart });
-      used += measurer.heightText(prefix, first);
-      rest = rest.slice(count);
-      first = false;
-      flush();
+      yield;
     }
+
+    flush();
+    if (pages.length === 0) pages.push(current);
+    return { pages };
+  } finally {
+    measurer.dispose();
+  }
+}
+
+/** 一次进行中的异步分页任务（可放弃，释放隐藏测量容器） */
+export interface PaginateTask {
+  /** 最终分页结果；被 cancel 或排版无效时为 null */
+  readonly promise: Promise<PaginatedChapter | null>;
+  /** 放弃本次分页（取消后 promise 以 null 收尾），幂等 */
+  cancel(): void;
+}
+
+/** 单片连续排版最长占用主线程的时间；超过后让出，浏览器可渲染/响应 */
+const PAGINATE_SLICE_MS = 14;
+
+/**
+ * 以时间分片方式执行章节分页：
+ * 排版按段落/页切分挂起点切成小片，每片超过 PAGINATE_SLICE_MS 就让出主线程
+ * （setTimeout(0)），超大章节既不会一次性卡死页面，也能被 cancel 及时中止。
+ */
+export function startChapterPagination(
+  chapter: LocalBookChapter,
+  author: string | null,
+  layout: PaginateLayout,
+  imageSizes: Map<string, { w: number; h: number } | null>,
+): PaginateTask {
+  const steps = paginateChapterSteps(chapter, author, layout, imageSizes);
+  let cancelled = false;
+  let step = steps.next();
+  const promise = (async () => {
+    try {
+      let lastSliced = performance.now();
+      for (;;) {
+        if (cancelled) {
+          steps.return(null);
+          return null;
+        }
+        if (step.done) return step.value;
+        if (performance.now() - lastSliced >= PAGINATE_SLICE_MS) {
+          await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+          if (cancelled) {
+            steps.return(null);
+            return null;
+          }
+          lastSliced = performance.now();
+        }
+        step = steps.next();
+      }
+    } catch {
+      return null;
+    }
+  })();
+  return {
+    promise,
+    cancel() {
+      cancelled = true;
+    },
   };
-
-  // 章节标题块（内容高含作者行；外框自带 1.05em 尾部间距）
-  const authorDisplay =
-    author && author !== "佚名" ? `${author} 著` : null;
-  const titleHeight = measurer.heightTitle(chapter.title, authorDisplay);
-  pushAtomic(
-    { kind: "title", title: chapter.title, author: authorDisplay },
-    titleHeight,
-    em(layout.fontSize, 1.05),
-  );
-
-  const paraMarginPx = em(layout.fontSize, layout.paraSpacingEm);
-  units.forEach((unit, idx) => {
-    if (unit.kind === "p") {
-      pushParagraph(unit.text, paraMarginPx, idx);
-      return;
-    }
-    if (unit.kind === "h") {
-      const h = measurer.heightHeading(unit.level, unit.text);
-      pushAtomic(
-        { kind: "h", level: unit.level, text: unit.text, unit: idx, cstart: 0 },
-        h,
-        em(layout.fontSize, 0.95),
-      );
-      return;
-    }
-    const natural = imageSizes.get(unit.src) ?? null;
-    const disp = imageDisplaySize(layout, natural);
-    if (disp.missing) {
-      pushAtomic(
-        { kind: "img", src: unit.src, alt: unit.alt, w: 0, h: 0 },
-        MISSING_IMAGE_HEIGHT,
-        em(layout.fontSize, 1),
-      );
-    } else {
-      pushAtomic(
-        { kind: "img", src: unit.src, alt: unit.alt, w: disp.w, h: disp.h },
-        disp.h,
-        em(layout.fontSize, 1),
-      );
-    }
-  });
-
-  flush();
-  if (pages.length === 0) pages.push(current);
-  measurer.dispose();
-  return { pages };
 }

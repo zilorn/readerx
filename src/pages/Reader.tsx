@@ -70,15 +70,16 @@ import {
   decodeImageSize,
   figureStyle,
   headingStyle,
-  paginateChapter,
   paragraphStyle,
   readingBaseStyle,
+  startChapterPagination,
   titleAuthorStyle,
   titleTextStyle,
   titleWrapperStyle,
   type CssRecord,
   type PageFragment,
   type PaginateLayout,
+  type PaginatedChapter,
   type ReaderBlock,
 } from "../lib/pagination";
 import {
@@ -110,6 +111,11 @@ const PAD_X = 24; // 阅读区左右留白
 const PAD_TOP = 14; // 正文顶部留白
 const PAD_BOTTOM_PAGED = 30; // 分页底部留白（容纳页号）
 const PAD_BOTTOM_SCROLL = 28; // 滚动底部留白
+
+// 大章节加载优化阈值与节奏
+const PAGED_BUSY_DELAY_MS = 150; // 分页排版超过该时长才盖“正在加载”（普通章节不闪烁）
+const SCROLL_FIRST_BLOCKS = 160; // 滚动模式首片挂载的正文单元数（先出首屏，避免空首帧）
+const SCROLL_APPEND_BLOCKS = 240; // 滚动模式之后每帧追加的正文单元数
 
 // 安全区（刘海/系统手势条）探针：用 env(safe-area-inset-*) 解析成像素
 let safeInsetsCache: { top: number; bottom: number } | null = null;
@@ -592,8 +598,63 @@ export default function ReaderPage() {
     return ch ? chapterUnits(ch) : [];
   });
 
+  // 滚动模式：正文单元分片挂载数量（0 起逐片增长）。超大章节整章一次建 DOM 会
+  // 长时间卡住首屏，这里先挂一片（≥首屏），之后每帧追加一片，直到整章挂完。
+  const [scrollShown, setScrollShown] = createSignal(0);
+  let scrollChunkToken = 0;
+  let scrollChunkRaf = 0;
+  createEffect(() => {
+    const pagedMode = isPaged();
+    const list = units();
+    if (pagedMode || !chapter() || list.length === 0) {
+      scrollChunkToken++;
+      window.cancelAnimationFrame(scrollChunkRaf);
+      setScrollShown(0);
+      return;
+    }
+    const total = list.length;
+    const token = ++scrollChunkToken;
+    window.cancelAnimationFrame(scrollChunkRaf);
+    // 先在同一帧内挂出首片（普通章节 ≤ 首片即一次挂完，与原先行为一致）
+    setScrollShown(Math.min(SCROLL_FIRST_BLOCKS, total));
+    if (total <= SCROLL_FIRST_BLOCKS) return;
+    const grow = (): void => {
+      if (scrollChunkToken !== token) return;
+      let next = 0;
+      setScrollShown((cur) => {
+        next = Math.min(total, cur + SCROLL_APPEND_BLOCKS);
+        return next;
+      });
+      if (next < total) {
+        scrollChunkRaf = window.requestAnimationFrame(grow);
+      }
+    };
+    scrollChunkRaf = window.requestAnimationFrame(grow);
+    onCleanup(() => {
+      scrollChunkToken++;
+      window.cancelAnimationFrame(scrollChunkRaf);
+    });
+  });
+
   // 章节文本镜像（单元文本按序拼接 + 单元起始偏移），书签偏移换算基准
   const mirror = createMemo(() => buildTextMirror(units()));
+
+  // 滚动模式精确恢复进度期间正文保持隐藏：若恢复目标所在分片尚未挂载，盖“正在加载”
+  // （分片追加会驱动本 memo 重算；目标挂出后 applyResume 立即落位并解除隐藏）
+  const scrollResumePending = createMemo(() => {
+    if (isPaged()) return false;
+    const target = resumeTarget();
+    if (!target) return false;
+    const shown = scrollShown();
+    const mir = mirror();
+    if (!mir || mir.text.length === 0) return true;
+    const pos = unitAtGlobalOffset(mir, target.char);
+    if (!pos) {
+      // 存档偏移落在正文末尾边界：需等整章挂完才能滚到底
+      return shown < units().length;
+    }
+    return pos.unit >= shown;
+  });
 
   // 本书记签（按位置排序，响应式）
   const bookBookmarks = createMemo(() => sortedBookmarks(bookId()));
@@ -819,23 +880,45 @@ export default function ReaderPage() {
   });
 
   // -------------------------------------------------------------------
-  // 分页结果：图片解码完成后重算
+  // 分页结果：图片解码后做时间分片排版，避免超大章节整章同步测量卡死页面；
+  // 排版超过阈值仍未见结果时盖一层“正在加载”，替代长时间空白/无响应。
   // -------------------------------------------------------------------
-  const [paged, setPaged] = createSignal<ReturnType<typeof paginateChapter>>(null);
+  const [paged, setPaged] = createSignal<PaginatedChapter | null>(null);
+  const [pagedBusy, setPagedBusy] = createSignal(false);
+  let pagedBusyTimer: number | undefined;
+  function armPagedBusy(): void {
+    if (pagedBusyTimer !== undefined) return;
+    pagedBusyTimer = window.setTimeout(() => setPagedBusy(true), PAGED_BUSY_DELAY_MS);
+  }
+  function disarmPagedBusy(): void {
+    if (pagedBusyTimer !== undefined) {
+      window.clearTimeout(pagedBusyTimer);
+      pagedBusyTimer = undefined;
+    }
+    setPagedBusy(false);
+  }
+  let paginateTask: ReturnType<typeof startChapterPagination> | null = null;
   createEffect(() => {
     const mode = isPaged();
     const ch = chapter();
     const geo = layout();
+    paginateTask?.cancel();
+    paginateTask = null;
+    disarmPagedBusy();
     if (!mode || !ch || !geo) {
       setPaged(null);
       return;
     }
     setPaged(null);
-    let cancelled = false;
+    let dropped = false;
     onCleanup(() => {
-      cancelled = true;
+      dropped = true;
+      paginateTask?.cancel();
+      paginateTask = null;
+      disarmPagedBusy();
     });
     const author = book()?.author ?? null;
+    armPagedBusy();
     void (async () => {
       const sizes = new Map<string, { w: number; h: number } | null>();
       const imageUnits = chapterUnits(ch).filter((u) => u.kind === "img");
@@ -846,9 +929,14 @@ export default function ReaderPage() {
           ),
         ),
       );
-      if (cancelled || !isPaged() || chapter() !== ch) return;
-      const result = paginateChapter(ch, author, geo, sizes);
-      if (!result || cancelled || !isPaged() || chapter() !== ch) return;
+      if (dropped || !isPaged() || chapter() !== ch) return;
+      const task = startChapterPagination(ch, author, geo, sizes);
+      paginateTask = task;
+      const result = await task.promise;
+      if (paginateTask === task) paginateTask = null;
+      if (dropped || !isPaged() || chapter() !== ch) return;
+      disarmPagedBusy();
+      if (!result) return;
       // 回翻“上一章末页”的挂起目标在此落地（无论新旧章页数是否相同）
       if (wantLastPage) {
         wantLastPage = false;
@@ -1607,7 +1695,9 @@ export default function ReaderPage() {
     });
   }
 
-  // 等待章节/分页就绪后，把书签字符区间滚动到可见并短暂高亮
+  // 等待章节/分页就绪后，把书签字符区间滚动到可见并短暂高亮。
+  // 滚动模式下正文分片挂载：目标单元所在分片未挂出时保持等待（依赖 scrollShown
+  // 在后续分片追加时重新触发本 effect），直到目标单元出现再定位。
   createEffect(() => {
     const p = pendingFlash();
     if (!p) return;
@@ -1630,6 +1720,9 @@ export default function ReaderPage() {
         setPageIdx(page);
         return;
       }
+    } else if (scrollRef && !scrollRef.querySelector(`[data-u="${p.unit}"]`)) {
+      void scrollShown(); // 目标分片未挂载：等滚动分段渲染继续追加后重试
+      return;
     }
     window.cancelAnimationFrame(flashRaf);
     flashRaf = window.requestAnimationFrame(() => {
@@ -1758,7 +1851,7 @@ export default function ReaderPage() {
                           : null
                       }
                     />
-                    <For each={units()}>
+                    <For each={units().slice(0, scrollShown())}>
                       {(block, idx) => (
                         <ScrollBlock
                           layout={layout()!}
@@ -1771,6 +1864,24 @@ export default function ReaderPage() {
                   </div>
                 </div>
               </Show>
+            </Show>
+
+            {/* 大章节加载中：先给“正在加载”，避免长时间空白 / 页面无响应。
+                分页模式 = 分片排版未就绪；滚动模式 = 精确恢复目标分片尚未挂载 */}
+            <Show
+              when={
+                (isPaged() && pagedBusy() && !paged()) ||
+                (!isPaged() && scrollResumePending())
+              }
+            >
+              <div
+                class="absolute inset-0 z-[16] bg-bg"
+                onPointerDown={(e) => e.stopPropagation()}
+                onPointerUp={(e) => e.stopPropagation()}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <LoadingScreen label="正在加载…" />
+              </div>
             </Show>
 
             {/* 在线书正文缺失：获取章节 gate（阻挡翻页直到正文就绪/失败可重试） */}
