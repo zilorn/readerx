@@ -36,11 +36,26 @@ export function chapterCid(index: number): string {
   return `c${String(index + 1).padStart(4, "0")}`;
 }
 
-/** 为缺失 cid 的章节补上稳定 cid（幂等，不改动已有 cid） */
+/**
+ * 归一化章节 cid（幂等，仅在有缺失或重复时产生新数组）：
+ * - 为缺失 cid 的章节按下标补上稳定 cid；
+ * - 修复历史导入遗留的重复 cid（旧 EPUB 解析曾让每个 spine 文档都从
+ *   c0001 编号）：保留首个出现的 cid，后续重复者改排为未占用的新 cid。
+ *   仅改重复项，不影响已有唯一 cid 锚定的进度/书签。
+ */
 export function assignChapterCids(chapters: LocalBookChapter[]): LocalBookChapter[] {
+  const seen = new Set<string>();
+  let nextFree = 0;
+  const unusedCid = (): string => {
+    let cid = chapterCid(nextFree);
+    while (seen.has(cid)) cid = chapterCid(++nextFree);
+    return cid;
+  };
   return chapters.map((chapter, index) => {
     const cid = chapter.cid || chapterCid(index);
-    return cid === chapter.cid ? chapter : { ...chapter, cid };
+    const uniqueCid = cid && !seen.has(cid) ? cid : unusedCid();
+    seen.add(uniqueCid);
+    return uniqueCid === chapter.cid ? chapter : { ...chapter, cid: uniqueCid };
   });
 }
 

@@ -276,11 +276,15 @@ function renderBlocks(
  * - 首个标题（任意级）作为章节名，不再进入正文，避免重复；
  * - 之后 h1/h2 作为新章边界；h3+ 保留为章内副标题；
  * - 开篇与章节名重复的短句会被收掉（避免正文重复标题）。
+ *
+ * cidStart 为本份文档之前整本书已产出的章节数：cid 按全书顺序编号，
+ * 避免每个 spine 文档都从 c0001 重新开始导致 cid 重复。
  */
 function buildDocumentChapters(
   blocks: ChapterBlock[],
   docTitle: string,
   fallbackTitle: string,
+  cidStart: number,
 ): LocalBookChapter[] {
   const chapters: LocalBookChapter[] = [];
   let title = "";
@@ -290,7 +294,7 @@ function buildDocumentChapters(
   const commit = () => {
     if (body.length === 0 && paragraphs.length === 0) return;
     chapters.push({
-      cid: chapterCid(chapters.length),
+      cid: chapterCid(cidStart + chapters.length),
       title: title || docTitle || fallbackTitle,
       paragraphs,
       blocks: body,
@@ -456,7 +460,9 @@ export async function parseEpubFile(file: File): Promise<ParsedEpub> {
       .forEach((el) => el.remove());
     const docTitle = firstText(doc, "title") || `第 ${index} 节`;
     const blocks = renderBlocks(container, getImageSrc);
-    chapters.push(...buildDocumentChapters(blocks, docTitle, `第 ${index} 节`));
+    chapters.push(
+      ...buildDocumentChapters(blocks, docTitle, `第 ${index} 节`, chapters.length),
+    );
   }
 
   if (chapters.length === 0) {

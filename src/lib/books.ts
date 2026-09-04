@@ -72,7 +72,7 @@ export function ensureLocalBooksLoaded(): Promise<void> {
     ensurePromise = (async () => {
       try {
         const all = await listRemoteBooks();
-        // 兼容旧书库：为缺失 cid 的章节补上，并回写后端
+        // 兼容旧书库：为缺失/重复 cid 的章节补齐或修正，并回写后端
         const migrated = all.map((book) => {
           const chapters = assignChapterCids(book.chapters);
           const changed = chapters.some(
