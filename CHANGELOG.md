@@ -14,11 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - webdav中直接点击阅读，返回后，失去状态数据的问题。
+- tts跟读后翻页异常问题。
+- 自动跟读跨章定位异常的问题。
 
 ### Changed
 
 - TTS失败后跳过，连续失败多次（5次）后停止。
 - 封面中，使用书籍全名，而不是首字。
+- 封面可以在epub中取。
 
 ## [0.1.1] - 2026-09-04
 

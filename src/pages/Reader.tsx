@@ -752,10 +752,14 @@ export default function ReaderPage() {
     combineMarks(unitMarks(), speakMarks(), searchMarks()),
   );
 
-  // 视图切章（用户翻章 / 引擎自动跨章）后让播放控制器跟随
+  // 视图切章（用户翻章 / 引擎自动跨章）后让播放控制器跟随。
+  // 翻页跨章浏览（browse）不打断语音：语音继续读原章，读完再由引擎自动跨章；
+  // 引擎自动跨章 / 定点跳章（目录/书签等）才在切章时重锚朗读句。
   createEffect(() => {
     void chapterIdx();
-    ttsPlayer.noteViewChapter();
+    const browse = browseChapterPending;
+    browseChapterPending = false;
+    ttsPlayer.noteViewChapter(browse);
   });
 
   /** 把某朗读句滚动到可见（分页翻页 / 滚动定位），返回是否已就位 */
@@ -898,6 +902,8 @@ export default function ReaderPage() {
 
   // 需要跳转到上一章最后一页时置位（回翻/工具栏上一章）
   let wantLastPage = false;
+  /** 本次切章是否由“翻页跨章浏览”触发（浏览不应打断听书语音） */
+  let browseChapterPending = false;
 
   // 几何/字号变化导致同章重排时，按比例保留阅读位置
   createEffect(
@@ -1176,11 +1182,13 @@ export default function ReaderPage() {
   // 翻页 / 章节跳转
   // -------------------------------------------------------------------
 
-  function goToChapter(idx: number): void {
+  /** 切章。browse=true 表示翻页/相邻章节浏览，不打断听书语音 */
+  function goToChapter(idx: number, browse = false): void {
     const current = book();
     if (!current) return;
     const clamped = Math.max(0, Math.min(idx, current.chapters.length - 1));
     if (clamped === chapterIdx()) return;
+    if (browse) browseChapterPending = true;
     setChapterIdx(clamped);
     setPageIdx(0);
     setViewOffset(0);
@@ -1320,8 +1328,9 @@ export default function ReaderPage() {
         return true;
       }
       if (!isLastChapter()) {
+        // 先解除跟读跟随再翻页（同翻章内页面的处理一致）；跨章浏览不打断语音
         cancelFollowIfActive();
-        goToChapter(chapterIdx() + 1);
+        goToChapter(chapterIdx() + 1, true);
         return true;
       }
       return false;
@@ -1334,7 +1343,7 @@ export default function ReaderPage() {
     if (!isFirstChapter()) {
       cancelFollowIfActive();
       wantLastPage = true;
-      goToChapter(chapterIdx() - 1);
+      goToChapter(chapterIdx() - 1, true);
       return true;
     }
     return false;
@@ -2078,9 +2087,10 @@ export default function ReaderPage() {
                     if (isPaged()) {
                       if (!isFirstChapter()) {
                         wantLastPage = true;
-                        goToChapter(chapterIdx() - 1);
+                        goToChapter(chapterIdx() - 1, true);
                       }
                     } else if (!isFirstChapter()) {
+                      browseChapterPending = true;
                       setChapterIdx((c) => c - 1);
                       setViewOffset(0);
                     }
@@ -2107,8 +2117,9 @@ export default function ReaderPage() {
                   disabled={isLastChapter()}
                   onClick={() => {
                     if (isPaged()) {
-                      if (!isLastChapter()) goToChapter(chapterIdx() + 1);
+                      if (!isLastChapter()) goToChapter(chapterIdx() + 1, true);
                     } else if (!isLastChapter()) {
+                      browseChapterPending = true;
                       setChapterIdx((c) => c + 1);
                       setViewOffset(0);
                     }

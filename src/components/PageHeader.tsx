@@ -17,7 +17,7 @@ interface PageHeaderProps {
 /** 通用页头（吸顶；次级页传入 onBack 显示返回键） */
 export function PageHeader(props: PageHeaderProps) {
   return (
-    <header class="sticky top-0 z-20 bg-topbar-bg pt-[max(env(safe-area-inset-top),8px)] backdrop-blur-[14px]">
+    <header class="sticky top-0 z-20 bg-topbar-bg pt-[max(env(safe-area-inset-top),8px)] backdrop-blur-[14px] select-none">
       <div class="flex items-center justify-between gap-3 px-[18px] pb-0.5 pt-2">
         <Show when={props.onBack}>
           <button

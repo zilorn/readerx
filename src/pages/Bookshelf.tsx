@@ -369,7 +369,7 @@ export default function BookshelfPage() {
   const selectedCount = () => selectedIds().length;
 
   return (
-    <div class="page relative">
+    <div class="page relative select-none">
       <PageHeader
         title={selecting() ? "选中书籍" : "书架"}
         subtitle={

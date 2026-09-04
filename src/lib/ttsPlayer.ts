@@ -12,7 +12,9 @@
  *   章节播完自动切下一章（读完整本书），定时（分钟 / 本章结束）自动停止；
  * - 预热：HTTP 引擎下，阅读页空闲会预热当前章节窗口；也可 warmBook 批量把
  *   整本书逐句合成进按书籍的磁盘缓存（同书同声源下次直接命中，不再请求）。
- * - 视图章节由外部（阅读页）驱动：外部翻章时调用 noteViewChapter() 跟随。
+ * - 视图章节由外部（阅读页）驱动：引擎自动跨章用 jumpChapter + navigateChapter
+ *   落视图；用户翻页跨章浏览时以 browse=true 通知，语音不被打断、继续读原章，
+ *   待原章播完再自动进入下一章。
  *
  * 实例与阅读页同生命周期；dispose() 负责清理监听、计时器与 WebAudio 节点。
  */
@@ -108,8 +110,11 @@ export interface TtsPlayer {
   setVoice: (voiceId: string) => void;
   setEngine: (engine: TtsEngine) => void;
   setTimer: (mode: TtsTimerMode, minutes?: number) => void;
-  /** 视图章节变化时调用（阅读页 createEffect(chapterIdx)） */
-  noteViewChapter: () => void;
+  /**
+   * 视图章节变化时调用（阅读页 createEffect(chapterIdx)）。
+   * browse=true 表示用户翻页浏览到了其它章节：语音不被中断，继续读当前章。
+   */
+  noteViewChapter: (browse?: boolean) => void;
   /** 停止状态下预热当前章节窗口（HTTP 源写盘缓存） */
   warmup: () => void;
   /**
@@ -507,9 +512,13 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
     }
   }
 
-  /** 跨章跳转（引擎主动切章）。落章后由 noteViewChapter() 续播 */
+  /**
+   * 跨章跳转（引擎主动切章，如本章播完 / 上一句下一句跨章）。
+   * 视图已在目标章（用户在浏览期间语音读完了本章）时不重复导航视图，
+   * 直接在本章内部切换朗读内容；否则先落视图章再切。
+   */
   function jumpChapter(target: number, pref: "first" | "last"): void {
-    if (target < 0 || target >= ctx.chapterCount() || target === ctx.chapterIndex()) return;
+    if (target < 0 || target >= ctx.chapterCount()) return;
     pendingAutoNav = target;
     autoStartPref = pref;
     void bump();
@@ -517,14 +526,23 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
     clearNativeWait();
     stopActiveSource();
     void stopNativeSpeech();
-    ctx.navigateChapter(target);
+    if (target !== ctx.chapterIndex()) {
+      ctx.navigateChapter(target);
+    }
     // 立即同步（阅读页的 chapterIdx 已更新；重复调用会被幂等拦截）
     noteViewChapter();
   }
 
-  /** 视图章节变化：引擎跟随。自动跨章继续播放；手动翻章则从阅读位置续播 */
-  function noteViewChapter(): void {
+  /**
+   * 视图章节变化：引擎跟随。
+   * - 引擎自动跨章（pendingAutoNav）→ 在新章从头/末尾续播；
+   * - browse=true：用户浏览（翻页跨章）所致，不打断语音、继续读原章，
+   *   等原章播完再由 jumpChapter 自动进入下一章；
+   * - 其它手动翻章（目录/书签/上一章下一章按钮）→ 从目标章阅读位置续播。
+   */
+  function noteViewChapter(browse = false): void {
     if (disposed || status() === "stopped") return;
+    if (browse) return; // 用户翻页浏览到其它章节：播放不受影响
     const vi = ctx.chapterIndex();
     const auto = pendingAutoNav === vi;
     if (auto) {
