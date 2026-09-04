@@ -1,0 +1,183 @@
+# ReaderX Android 自动发版
+#
+# 触发：推送形如 v* 的 tag 时触发（按惯例 tag 打在 main 分支的提交上），
+#       例如 `git tag v1.2.3 && git push origin v1.2.3`。
+# 版本号：以 tag 名称为准（v1.2.3 -> 1.2.3）。
+#
+# 前置约定（发版前需在 main 上完成并提交）：
+#   1. 仓库版本号与 tag 保持一致：
+#        node scripts/bump-version.mjs 1.2.3        # 同步 package.json/tauri.conf.json/Cargo.toml/Cargo.lock
+#   2. CHANGELOG.md 中已写好对应区块，例如：
+#        ## [1.2.3] - 2026-09-04
+# 工作流会校验以上两项，不一致直接失败，避免发布版本错乱的包。
+#
+# 签名（首次使用前配置一次）：
+#   生成 keystore（key 与 store 口令建议不同）：
+#     keytool -genkey -v -keystore readerx-release.keystore \
+#       -alias readerx -keyalg RSA -keysize 2048 -validity 10000
+#   在 Settings -> Secrets and variables -> Actions 配置：
+#     ANDROID_KEYSTORE_BASE64    # keystore 文件 base64：base64 -w0 readerx-release.keystore
+#     ANDROID_KEYSTORE_PASSWORD  # store 口令
+#     ANDROID_KEY_ALIAS          # 别名（示例 readerx）
+#     ANDROID_KEY_PASSWORD       # key 口令
+#
+# 产物：单个 universal（全 ABI）签名 APK，直接作为该 tag 的 GitHub Release asset 发布，
+#       Release body 取 CHANGELOG.md 中与版本号对应的区块。
+
+name: Release Android
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release-android:
+    name: Build & publish Android APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      TAG: ${{ github.ref_name }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # tag 与仓库版本一致性：tag v1.2.3 要求 src-tauri/tauri.conf.json 版本同为 1.2.3，
+      # 这样打出的 APK 内版本号、Android versionName/versionCode 才与 Release 一致。
+      - name: Validate tag against committed version
+        run: |
+          VERSION="${TAG#v}"
+          if [ -z "$VERSION" ] || [ "$VERSION" = "$TAG" ]; then
+            echo "::error::tag 必须以 v 开头（如 v1.2.3），当前 tag：${TAG}"
+            exit 1
+          fi
+          CONFIG_VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          if [ "$CONFIG_VERSION" != "$VERSION" ]; then
+            echo "::error::tag ${TAG} 对应版本 ${VERSION}，但仓库版本为 ${CONFIG_VERSION}。"
+            echo "::error::请先在 main 上执行 node scripts/bump-version.mjs ${VERSION} 并提交，再打 tag。"
+            exit 1
+          fi
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          echo "Building release ${TAG} (app version ${VERSION})"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Rust toolchain with Android targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # GitHub 托管的 runner 预装了 Android SDK/NDK；选最高版本的 NDK 并导出，
+      # tauri CLI 的 ensure_ndk 会优先读取 NDK_HOME（CI 下不会自行下载 NDK）。
+      - name: Resolve Android SDK / NDK
+        run: |
+          ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          echo "ANDROID_HOME=${ANDROID_HOME}" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=${ANDROID_HOME}" >> "$GITHUB_ENV"
+          NDK_DIR="$(find "${ANDROID_HOME}/ndk" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -V | tail -n 1)"
+          if [ -z "$NDK_DIR" ]; then
+            echo "::error::未在 ${ANDROID_HOME}/ndk 下找到 NDK，请先安装 NDK 或在 Actions runner 中配置。"
+            exit 1
+          fi
+          echo "NDK_HOME=${NDK_DIR}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=${NDK_DIR}" >> "$GITHUB_ENV"
+          echo "Using NDK: ${NDK_DIR}"
+
+      # 仓库里 gradle.properties 提交了本机路径 org.gradle.java.home，替换为 runner 的 JDK。
+      - name: Point Gradle at runner JDK
+        run: |
+          sed -i "s|^org\.gradle\.java\.home=.*|org.gradle.java.home=${JAVA_HOME}|" src-tauri/gen/android/gradle.properties
+          grep '^org.gradle.java.home' src-tauri/gen/android/gradle.properties
+
+      - name: Configure Android signing (secrets)
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "$KEYSTORE_B64" ] || [ -z "$KEYSTORE_PASSWORD" ] || [ -z "$KEY_ALIAS" ] || [ -z "$KEY_PASSWORD" ]; then
+            echo "::error::缺少签名 secrets。请在仓库 Settings -> Secrets and variables -> Actions 配置"
+            echo "::error::ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS / ANDROID_KEY_PASSWORD。"
+            exit 1
+          fi
+          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/android-release.keystore"
+          {
+            echo "keyAlias=${KEY_ALIAS}"
+            echo "password=${KEY_PASSWORD}"
+            echo "storePassword=${KEYSTORE_PASSWORD}"
+            echo "storeFile=${RUNNER_TEMP}/android-release.keystore"
+          } > src-tauri/gen/android/keystore.properties
+          echo "Signing configured for alias ${KEY_ALIAS}"
+
+      - name: Build signed universal release APK
+        run: pnpm tauri android build --apk --ci
+        timeout-minutes: 90
+
+      - name: Prepare APK artifact
+        id: apk
+        run: |
+          set -euo pipefail
+          APK_DIR="src-tauri/gen/android/app/build/outputs/apk/universal/release"
+          if [ -f "${APK_DIR}/app-universal-release-unsigned.apk" ]; then
+            echo "::error::产物未签名（app-universal-release-unsigned.apk）。请检查签名步骤与 app/build.gradle.kts 的 signingConfigs。"
+            exit 1
+          fi
+          APK="$(ls "${APK_DIR}"/app-universal-release.apk 2>/dev/null || find "${APK_DIR}" -maxdepth 1 -name '*.apk' | head -n 1)"
+          if [ -z "$APK" ]; then
+            echo "::error::未找到 release APK。"
+            exit 1
+          fi
+          cp "$APK" "$RUNNER_TEMP/readerx-${VERSION}.apk"
+          echo "APK=$APK" >> "$GITHUB_ENV"
+          echo "APK artifact: ${APK}"
+
+      - name: Extract release notes from CHANGELOG.md
+        run: |
+          node scripts/release-notes.mjs "${VERSION}" > "$RUNNER_TEMP/release-notes.md"
+          echo "--- release notes ---"
+          cat "$RUNNER_TEMP/release-notes.md"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PRERELEASE=""
+          case "${VERSION}" in
+            *-*) PRERELEASE="--prerelease" ;;
+          esac
+          gh release create "${TAG}" \
+            "$RUNNER_TEMP/readerx-${VERSION}.apk" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${TAG}" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
+            ${PRERELEASE}
+          echo "Released ${TAG} with readerx-${VERSION}.apk"

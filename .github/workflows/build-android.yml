@@ -1,0 +1,91 @@
+# ReaderX Android 普通构建（不发布）
+#
+# 用途：手动触发，构建 debug 版 universal APK（自动用 debug 证书签名，可直接安装），
+#       打包为 Actions artifact 供下载；不生成 GitHub Release、不做 release 签名。
+#
+# 使用：Actions -> 左侧选本工作流 -> Run workflow（可指定分支/tag）。
+
+name: Build Android (debug, no publish)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-android-debug:
+    name: Build debug universal APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Rust toolchain with Android targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # 与 release 工作流相同的 Android SDK/NDK 探测：选最高版本 NDK 并导出，
+      # tauri CLI 的 ensure_ndk 会优先读取 NDK_HOME（CI 下不会自行下载 NDK）。
+      - name: Resolve Android SDK / NDK
+        run: |
+          ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          echo "ANDROID_HOME=${ANDROID_HOME}" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=${ANDROID_HOME}" >> "$GITHUB_ENV"
+          NDK_DIR="$(find "${ANDROID_HOME}/ndk" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -V | tail -n 1)"
+          if [ -z "$NDK_DIR" ]; then
+            echo "::error::未在 ${ANDROID_HOME}/ndk 下找到 NDK，请先安装 NDK 或在 Actions runner 中配置。"
+            exit 1
+          fi
+          echo "NDK_HOME=${NDK_DIR}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=${NDK_DIR}" >> "$GITHUB_ENV"
+          echo "Using NDK: ${NDK_DIR}"
+
+      # 仓库里 gradle.properties 提交了本机路径 org.gradle.java.home，替换为 runner 的 JDK。
+      - name: Point Gradle at runner JDK
+        run: |
+          sed -i "s|^org\.gradle\.java\.home=.*|org.gradle.java.home=${JAVA_HOME}|" src-tauri/gen/android/gradle.properties
+          grep '^org.gradle.java.home' src-tauri/gen/android/gradle.properties
+
+      - name: Build debug universal APK
+        run: pnpm tauri android build --apk --debug --ci
+        timeout-minutes: 90
+
+      - name: Verify APK output
+        run: |
+          find src-tauri/gen/android/app/build/outputs/apk -name '*.apk' -exec ls -lh {} \;
+
+      - name: Upload APK artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: readerx-android-debug
+          path: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
