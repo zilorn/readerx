@@ -19,36 +19,20 @@ import {
   SOURCE_PARALLEL_MAX,
   SOURCE_PARALLEL_MIN,
   currentSourceParallel,
-  setSourceParallel,
-  FONT_MAX,
-  FONT_MIN,
-  PARA_SPACING_MAX,
-  PARA_SPACING_MIN,
-  PARA_SPACING_STEP,
-  currentFontSize,
-  currentPageMode,
-  currentParaSpacing,
   currentTheme,
   resetReadingProgress,
-  setFontSize,
-  setPageMode,
-  setParaSpacing,
+  setSourceParallel,
   setTheme,
-  type PageMode,
   type ThemeMode,
 } from "../lib/store";
 import { initGroups } from "../lib/groups";
 import { appVersion, loadAppVersion } from "../lib/version";
+import { ReadingSettingsRows } from "../components/ReadingSettingsRows";
 
 const THEME_OPTIONS: { value: ThemeMode; label: string }[] = [
   { value: "light", label: "浅色" },
   { value: "dark", label: "深色" },
   { value: "sepia", label: "护眼" },
-];
-
-const PAGE_MODE_OPTIONS: { value: PageMode; label: string }[] = [
-  { value: "paged", label: "左右翻页" },
-  { value: "scroll", label: "上下滚动" },
 ];
 
 const GITHUB_URL = "https://github.com/zilorn/readerx";
@@ -180,78 +164,7 @@ export default function SettingsPage() {
             阅读
           </h2>
           <div class="divide-y divide-border overflow-hidden rounded-[14px] border border-border bg-surface">
-            <div class="flex w-full cursor-default items-center gap-3 px-4 py-[13px] text-left">
-              <span class="flex min-w-0 flex-1 flex-col gap-0.5">
-                <span class="text-[14.5px] font-medium">正文字号</span>
-              </span>
-              <div class="flex flex-none items-center gap-2.5">
-                <button
-                  class="grid h-[34px] w-[34px] place-items-center rounded-lg border border-border text-[13px] font-bold text-text-2 disabled:opacity-35"
-                  aria-label="减小正文字号"
-                  disabled={currentFontSize() <= FONT_MIN}
-                  onClick={() => setFontSize(currentFontSize() - 1)}
-                >
-                  A−
-                </button>
-                <span class="min-w-[46px] text-center text-[13.5px] font-semibold tabular-nums">
-                  {currentFontSize()}px
-                </span>
-                <button
-                  class="grid h-[34px] w-[34px] place-items-center rounded-lg border border-border text-[13px] font-bold text-text-2 disabled:opacity-35"
-                  aria-label="增大正文字号"
-                  disabled={currentFontSize() >= FONT_MAX}
-                  onClick={() => setFontSize(currentFontSize() + 1)}
-                >
-                  A+
-                </button>
-              </div>
-            </div>
-            <div class="flex w-full cursor-default items-center gap-3 px-4 py-[13px] text-left">
-              <span class="flex min-w-0 flex-1 flex-col gap-0.5">
-                <span class="text-[14.5px] font-medium">段落间距</span>
-                <span class="text-[11.5px] text-text-3">正文段落之间的留白</span>
-              </span>
-              <div class="flex flex-none items-center gap-3">
-                <span class="min-w-[42px] text-right text-[13px] font-semibold tabular-nums">
-                  {currentParaSpacing().toFixed(2)}
-                </span>
-                <input
-                  type="range"
-                  class="accent-accent"
-                  min={PARA_SPACING_MIN}
-                  max={PARA_SPACING_MAX}
-                  step={PARA_SPACING_STEP}
-                  value={currentParaSpacing()}
-                  aria-label="段落间距"
-                  onInput={(e) => setParaSpacing(Number(e.currentTarget.value))}
-                />
-              </div>
-            </div>
-            <div class="flex w-full cursor-default items-center gap-3 px-4 py-[13px] text-left">
-              <span class="flex min-w-0 flex-1 flex-col gap-0.5">
-                <span class="text-[14.5px] font-medium">翻页方式</span>
-              </span>
-              <div
-                class="flex flex-none gap-0.5 rounded-[10px] bg-surface-2 p-[3px]"
-                role="radiogroup"
-                aria-label="翻页方式"
-              >
-                {PAGE_MODE_OPTIONS.map((opt) => (
-                  <button
-                    role="radio"
-                    aria-checked={currentPageMode() === opt.value}
-                    class="inline-flex items-center whitespace-nowrap rounded-lg px-[11px] py-[7px] text-[12.5px] text-text-2 transition-all duration-150"
-                    classList={{
-                      "bg-surface font-semibold text-text shadow-sm shadow-black/15":
-                        currentPageMode() === opt.value,
-                    }}
-                    onClick={() => setPageMode(opt.value)}
-                  >
-                    {opt.label}
-                  </button>
-                ))}
-              </div>
-            </div>
+            <ReadingSettingsRows />
           </div>
         </section>
 

@@ -1,6 +1,8 @@
 /**
  * 阅读设置底部抽屉（入口：阅读菜单顶栏的齿轮按钮）：
- * 调整阅读页底部状态栏的显示（开/关）与进度百分比口径（整本书 / 当前章节）。
+ * - 顶部为与「设置」页共用的阅读设置（正文字号 / 段落间距 / 翻页方式），
+ *   由 ReadingSettingsRows 提供，改动一处两处同步；
+ * - 下方调整阅读页底部状态栏的显示（开/关）与进度百分比口径（整本书 / 当前章节）。
  * 状态栏本体渲染在 Reader.tsx 阅读区底部，此处只改全局偏好。
  */
 import { For, Show, type JSX } from "solid-js";
@@ -12,6 +14,7 @@ import {
   type ProgressScope,
 } from "../lib/store";
 import { CloseIcon, RefreshIcon, SettingsIcon } from "./icons";
+import { ReadingSettingsRows } from "./ReadingSettingsRows";
 
 export interface ReaderSettingsSheetProps {
   open: boolean;
@@ -84,52 +87,59 @@ export function ReaderSettingsSheet(props: ReaderSettingsSheetProps) {
         </div>
 
         <div class="min-h-0 flex-1 overflow-y-auto px-4 pb-[calc(20px+env(safe-area-inset-bottom))] pt-3 scrollbar-none">
+          {/* 与「设置」页共用的阅读设置（字号 / 段落间距 / 翻页方式） */}
           <Card>
-            <div class="flex w-full items-center gap-3 px-4 py-[13px] text-left">
-              <span class="flex min-w-0 flex-1 flex-col gap-0.5">
-                <span class="text-[14.5px] font-medium">底部状态栏</span>
-                <span class="text-[11.5px] text-text-3">
-                  阅读时在正文底部常驻显示章节名与阅读进度
-                </span>
-              </span>
-              <ToggleSwitch
-                on={currentStatusBarEnabled()}
-                label="底部状态栏"
-                onChange={() => setStatusBarEnabled(!currentStatusBarEnabled())}
-              />
-            </div>
-            <div class="flex w-full items-center gap-3 px-4 py-[13px] text-left">
-              <span class="flex min-w-0 flex-1 flex-col gap-0.5">
-                <span class="text-[14.5px] font-medium">进度百分比口径</span>
-                <span class="text-[11.5px] text-text-3">状态栏百分比按哪个范围统计</span>
-              </span>
-              <div
-                class="flex flex-none gap-0.5 rounded-[10px] bg-surface-2 p-[3px]"
-                role="radiogroup"
-                aria-label="进度百分比口径"
-              >
-                <For each={SCOPE_OPTIONS}>
-                  {(opt) => {
-                    const active = () => currentProgressScope() === opt.value;
-                    return (
-                      <button
-                        role="radio"
-                        aria-checked={active()}
-                        class="cursor-pointer whitespace-nowrap rounded-lg px-[11px] py-[7px] text-[12.5px] text-text-2 transition-all duration-150"
-                        classList={{
-                          "bg-surface font-semibold text-text shadow-sm shadow-black/15":
-                            active(),
-                        }}
-                        onClick={() => setProgressScope(opt.value)}
-                      >
-                        {opt.label}
-                      </button>
-                    );
-                  }}
-                </For>
-              </div>
-            </div>
+            <ReadingSettingsRows />
           </Card>
+
+          <div class="mt-3">
+            <Card>
+              <div class="flex w-full items-center gap-3 px-4 py-[13px] text-left">
+                <span class="flex min-w-0 flex-1 flex-col gap-0.5">
+                  <span class="text-[14.5px] font-medium">底部状态栏</span>
+                  <span class="text-[11.5px] text-text-3">
+                    阅读时在正文底部常驻显示章节名与阅读进度
+                  </span>
+                </span>
+                <ToggleSwitch
+                  on={currentStatusBarEnabled()}
+                  label="底部状态栏"
+                  onChange={() => setStatusBarEnabled(!currentStatusBarEnabled())}
+                />
+              </div>
+              <div class="flex w-full items-center gap-3 px-4 py-[13px] text-left">
+                <span class="flex min-w-0 flex-1 flex-col gap-0.5">
+                  <span class="text-[14.5px] font-medium">进度百分比口径</span>
+                  <span class="text-[11.5px] text-text-3">状态栏百分比按哪个范围统计</span>
+                </span>
+                <div
+                  class="flex flex-none gap-0.5 rounded-[10px] bg-surface-2 p-[3px]"
+                  role="radiogroup"
+                  aria-label="进度百分比口径"
+                >
+                  <For each={SCOPE_OPTIONS}>
+                    {(opt) => {
+                      const active = () => currentProgressScope() === opt.value;
+                      return (
+                        <button
+                          role="radio"
+                          aria-checked={active()}
+                          class="cursor-pointer whitespace-nowrap rounded-lg px-[11px] py-[7px] text-[12.5px] text-text-2 transition-all duration-150"
+                          classList={{
+                            "bg-surface font-semibold text-text shadow-sm shadow-black/15":
+                              active(),
+                          }}
+                          onClick={() => setProgressScope(opt.value)}
+                        >
+                          {opt.label}
+                        </button>
+                      );
+                    }}
+                  </For>
+                </div>
+              </div>
+            </Card>
+          </div>
 
           {/* 在线书：强制重新获取当前章节正文 */}
           <Show when={props.onlineReload}>
