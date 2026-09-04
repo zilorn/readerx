@@ -37,6 +37,7 @@ import {
   ChevronRightIcon,
   CloseIcon,
   DownloadIcon,
+  FileTextIcon,
   FollowBackIcon,
   HeadphonesIcon,
   ListIcon,
@@ -546,6 +547,17 @@ export default function ReaderPage() {
   const remoteGateFailedText = createMemo(() => {
     const f = remoteRun().failed.find((x) => x.index === chapterIdx());
     return f?.error ?? "未知错误";
+  });
+
+  /**
+   * 在线书当前章：已获取过但正文为空（拉取成功却未解析出任何内容）。
+   * 与 remoteMissing 互斥：此处章节已被标记为“已拉取”，只是正文是空的。
+   */
+  const remoteBodyEmpty = createMemo(() => {
+    if (!isRemoteBook()) return false;
+    const ch = chapter();
+    if (!ch || !chapterHasContent(ch)) return false;
+    return chapterUnits(ch).length === 0;
   });
 
   /** 阅读设置「重新加载本章」：在线书清掉当前章缓存后从书源强制重取 */
@@ -1960,6 +1972,63 @@ export default function ReaderPage() {
                       </button>
                     </div>
                   </Show>
+                </div>
+              </div>
+            </Show>
+
+            {/* 在线书正文为空：已获取但无正文，提示并提供重新加载 / 下一章 */}
+            <Show when={remoteBodyEmpty()}>
+              <div
+                class="absolute inset-0 z-[18] grid place-items-center px-8"
+                style={{ background: "var(--bg)" }}
+                onPointerDown={(e) => e.stopPropagation()}
+                onPointerUp={(e) => e.stopPropagation()}
+                onClick={(e) => e.stopPropagation()}
+                role="alert"
+              >
+                <div class="flex w-full max-w-[300px] flex-col items-center gap-3 text-center">
+                  <span class="grid h-11 w-11 place-items-center rounded-full bg-surface-2 text-text-3">
+                    <FileTextIcon size={22} />
+                  </span>
+                  <p class="text-[14px] font-semibold text-text-2">本章正文为空</p>
+                  <p class="text-[12px] leading-[1.6] text-text-3">
+                    已从书源获取，但没有解析出正文，可能章节本身为空或需刷新重取
+                  </p>
+                  <div class="mt-1 flex w-full items-center justify-center gap-3">
+                    <Show
+                      when={!isLastChapter()}
+                      fallback={
+                        <button
+                          class="rounded-xl bg-surface-2 px-4 py-2.5 text-[13px] font-semibold text-text-2 active:scale-[0.97]"
+                          onClick={() => {
+                            cancelOnlineRun(bookId());
+                            goBack();
+                          }}
+                        >
+                          返回书架
+                        </button>
+                      }
+                    >
+                      <button
+                        class="rounded-xl bg-surface-2 px-4 py-2.5 text-[13px] font-semibold text-text-2 active:scale-[0.97]"
+                        onClick={() => {
+                          goToChapter(chapterIdx() + 1);
+                          cancelFollowIfActive();
+                        }}
+                      >
+                        下一章
+                      </button>
+                    </Show>
+                    <button
+                      class="rounded-xl bg-accent px-4 py-2.5 text-[13px] font-semibold text-on-accent active:scale-[0.97] disabled:pointer-events-none disabled:opacity-50"
+                      disabled={remoteRun().busy}
+                      onClick={() => {
+                        void reloadCurrentChapter();
+                      }}
+                    >
+                      {remoteRun().busy ? "下载中…" : "重新加载本章"}
+                    </button>
+                  </div>
                 </div>
               </div>
             </Show>

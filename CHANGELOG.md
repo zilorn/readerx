@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 书籍详情页。
 - 目录（TOC）显示章节下载状态。
 - 阅读设置里新增「重新加载本章」（仅在线书显示该入口）。
+- 在线书获取失败后提示用户并提供重新加载入口。
 
 ### Fixed
 
