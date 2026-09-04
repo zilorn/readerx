@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 书源「网页登录」：Android 端在应用内 WebView 浮层登录后自动捕获站点 Cookie（含 httpOnly）并按书源持久化（重启自动注入，不随书源 JSON 导出）；书源 JS 引擎开放 `webview.login(url)` / `webview.isSupported()` 宿主 API，书源编辑页提供「网页登录 / 清空登录 Cookie」入口。桌面/iOS 不支持时返回 `ok:false` 且不抛错。
 - 导入本地同名文件时可选择重新导入（替换书架中同名书，尝试继承阅读进度/分组/书签）或作为新书加入；重新导入前预演书签继承，部分书签无法继承时提示并可放弃重新导入。WebDAV 长按重新导入同样增加该提示与放弃选项。
 - 书籍详情页。
+- 目录（TOC）显示章节下载状态。
+- 阅读设置里新增「重新加载本章」（仅在线书显示该入口）。
 
 ### Fixed
 

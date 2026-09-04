@@ -11,11 +11,16 @@ import {
   setStatusBarEnabled,
   type ProgressScope,
 } from "../lib/store";
-import { CloseIcon, SettingsIcon } from "./icons";
+import { CloseIcon, RefreshIcon, SettingsIcon } from "./icons";
 
 export interface ReaderSettingsSheetProps {
   open: boolean;
   onClose: () => void;
+  /** 在线书「重新加载本章」：提供即在设置中显示该入口（下载进行中时 disabled） */
+  onlineReload?: {
+    disabled: boolean;
+    onReload: () => void;
+  };
 }
 
 /** iOS 风格小开关（勿命名 Switch：与 Solid 内置流程组件重名会被编译器接管） */
@@ -125,6 +130,35 @@ export function ReaderSettingsSheet(props: ReaderSettingsSheetProps) {
               </div>
             </div>
           </Card>
+
+          {/* 在线书：强制重新获取当前章节正文 */}
+          <Show when={props.onlineReload}>
+            <div class="mt-3">
+              <Card>
+                <button
+                  type="button"
+                  class="flex w-full items-center gap-3 px-4 py-[13px] text-left transition-[background-color,opacity] duration-150 disabled:pointer-events-none disabled:opacity-45 active:bg-surface-2"
+                  disabled={props.onlineReload?.disabled}
+                  onClick={() => props.onlineReload?.onReload()}
+                >
+                  <span class="grid h-9 w-9 flex-none place-items-center rounded-[10px] bg-surface-2 text-accent">
+                    <RefreshIcon size={18} />
+                  </span>
+                  <span class="flex min-w-0 flex-1 flex-col gap-0.5">
+                    <span class="text-[14.5px] font-medium">重新加载本章</span>
+                    <span class="text-[11.5px] text-text-3">
+                      <Show
+                        when={!props.onlineReload?.disabled}
+                        fallback="有章节下载进行中，完成后可重新加载"
+                      >
+                        从书源重新获取当前章节正文
+                      </Show>
+                    </span>
+                  </span>
+                </button>
+              </Card>
+            </div>
+          </Show>
         </div>
       </div>
     </Show>

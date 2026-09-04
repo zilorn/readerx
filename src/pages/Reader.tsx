@@ -20,6 +20,7 @@ import {
   downloadRemainingChapters,
   ensureReadingWindow,
   onlineRunState,
+  reloadChapterContent,
 } from "../lib/online";
 import {
   BookSearchPanel,
@@ -524,6 +525,12 @@ export default function ReaderPage() {
   const remoteRun = createMemo(() => onlineRunState(bookId()));
   const [downloadOpen, setDownloadOpen] = createSignal(false);
 
+  /** 在线书拉取中仍待获取的章节下标集合（目录“下载中”徽标用；空闲为 null） */
+  const remotePendingSet = createMemo(() => {
+    const run = remoteRun();
+    return run.busy && run.pending.length > 0 ? new Set(run.pending) : null;
+  });
+
   /** 当前章正文缺失（需覆盖层等待/重试） */
   const remoteMissing = createMemo(() => {
     if (!isRemoteBook()) return false;
@@ -540,6 +547,20 @@ export default function ReaderPage() {
     const f = remoteRun().failed.find((x) => x.index === chapterIdx());
     return f?.error ?? "未知错误";
   });
+
+  /** 阅读设置「重新加载本章」：在线书清掉当前章缓存后从书源强制重取 */
+  async function reloadCurrentChapter(): Promise<void> {
+    const current = book();
+    if (!current || !isOnlineBook(current)) return;
+    if (remoteRun().busy) return; // 其它拉取进行中（入口已禁用，双保险）
+    setReaderSettingsOpen(false);
+    setMenuOpen(false);
+    // 重载后回到本章开头（旧正文的偏移/页码已无意义）
+    setResumeTarget(null);
+    setPageIdx(0);
+    setViewOffset(0);
+    await reloadChapterContent(current.id, chapterIdx());
+  }
 
   // 进入/切换章节时：若窗口内存在缺正文章节则后台预取（当前章失败过的不自动重试）
   createEffect(() => {
@@ -2289,6 +2310,10 @@ export default function ReaderPage() {
                   <For each={book()!.chapters}>
                     {(item, idx) => {
                       const active = idx() === chapterIdx();
+                      // 在线书：尚未缓存正文的章节在目录标“下载”，正在拉取的标“下载中”
+                      const downloading = remotePendingSet()?.has(idx()) ?? false;
+                      const needsDownload =
+                        isRemoteBook() && !downloading && !chapterHasContent(item);
                       return (
                         <button
                           class={`flex w-full items-center gap-3 px-[18px] py-[11px] text-left text-[13.5px] transition-colors active:bg-surface-2 ${
@@ -2307,11 +2332,23 @@ export default function ReaderPage() {
                             {item.cid}
                           </span>
                           <span class="min-w-0 flex-1 truncate">{item.title}</span>
-                          {active && (
-                            <span class="flex-none rounded-full bg-accent px-2 py-0.5 text-[10px] text-on-accent">
-                              当前
-                            </span>
-                          )}
+                          <span class="flex flex-none items-center gap-1.5">
+                            <Show when={downloading}>
+                              <span class="flex-none rounded-full border border-accent/50 px-2 py-0.5 text-[10px] text-accent">
+                                下载中
+                              </span>
+                            </Show>
+                            <Show when={needsDownload}>
+                              <span class="flex-none rounded-full bg-surface-2 px-2 py-0.5 text-[10px] text-text-3">
+                                下载
+                              </span>
+                            </Show>
+                            <Show when={active}>
+                              <span class="rounded-full bg-accent px-2 py-0.5 text-[10px] text-on-accent">
+                                当前
+                              </span>
+                            </Show>
+                          </span>
                         </button>
                       );
                     }}
@@ -2369,6 +2406,16 @@ export default function ReaderPage() {
             <ReaderSettingsSheet
               open={readerSettingsOpen()}
               onClose={() => setReaderSettingsOpen(false)}
+              onlineReload={
+                isRemoteBook()
+                  ? {
+                      disabled: remoteRun().busy,
+                      onReload: () => {
+                        void reloadCurrentChapter();
+                      },
+                    }
+                  : undefined
+              }
             />
 
             {/* 在线书：批量下载正文 */}

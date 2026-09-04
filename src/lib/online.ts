@@ -197,6 +197,8 @@ export interface OnlineRunState {
   total: number;
   done: number;
   failed: { index: number; error: string }[];
+  /** 本次拉取中仍待获取（含正在获取）的章节下标，取到正文后即移出 */
+  pending: number[];
   cancelled: boolean;
 }
 
@@ -210,6 +212,7 @@ export function onlineRunState(bookId: string): OnlineRunState {
       total: 0,
       done: 0,
       failed: [],
+      pending: [],
       cancelled: false,
     }
   );
@@ -221,7 +224,10 @@ export function cancelOnlineRun(bookId: string): void {
   cancellations.add(bookId);
   const current = runMap()[bookId];
   if (current) {
-    setRunMap({ ...runMap(), [bookId]: { ...current, cancelled: true } });
+    setRunMap({
+      ...runMap(),
+      [bookId]: { ...current, cancelled: true, pending: [] },
+    });
   }
 }
 
@@ -232,6 +238,7 @@ function patchRun(bookId: string, patch: Partial<OnlineRunState>): void {
     total: 0,
     done: 0,
     failed: [],
+    pending: [],
     cancelled: false,
   };
   setRunMap({ ...runMap(), [bookId]: { ...current, ...patch } });
@@ -268,7 +275,7 @@ async function runFetch(
   }
   targets = targets.filter((i) => i >= 0 && !chapterHasContent(chapters[i]));
   if (targets.length === 0) {
-    patchRun(bookId, { phase: "idle", busy: false, total: 0, done: 0 });
+    patchRun(bookId, { phase: "idle", busy: false, total: 0, done: 0, pending: [] });
     return;
   }
 
@@ -279,6 +286,7 @@ async function runFetch(
     total: targets.length,
     done: 0,
     failed: [],
+    pending: [...targets],
     cancelled: false,
   });
   const failed: { index: number; error: string }[] = [];
@@ -319,13 +327,23 @@ async function runFetch(
     });
     done += results.length;
     await commitBookContentUpdate(nextBook);
-    patchRun(bookId, { done: Math.min(done, targets.length), failed: [...failed] });
+    const remaining = targets.slice(start + slice.length);
+    patchRun(bookId, {
+      done: Math.min(done, targets.length),
+      failed: [...failed],
+      pending: remaining,
+    });
     onProgress?.(runMap()[bookId] ?? onlineRunState(bookId));
   }
 
   const cancelled = cancellations.has(bookId);
   cancellations.delete(bookId);
-  patchRun(bookId, { phase: "idle", busy: false, cancelled });
+  patchRun(bookId, {
+    phase: "idle",
+    busy: false,
+    pending: [],
+    cancelled,
+  });
 }
 
 /** 阅读窗口预取：确保 [idx-WINDOW, idx+WINDOW] 内章节有正文 */
@@ -353,4 +371,25 @@ export async function downloadRemainingChapters(
   const book = localBookById(bookId);
   if (!book || !isOnlineBook(book)) return;
   await runFetch(bookId, null, "download", onProgress);
+}
+
+/**
+ * 强制重新获取单个章节正文（阅读设置「重新加载本章」）：
+ * 先清掉该章已缓存的正文（含“已拉取但为空”的标记），再单独重拉一次并落盘。
+ * 有其它拉取任务正在进行时不动作（UI 端已据此禁用入口）。
+ */
+export async function reloadChapterContent(
+  bookId: string,
+  chapterIndex: number,
+): Promise<void> {
+  if (onlineRunBusy(bookId)) return;
+  const book = localBookById(bookId);
+  if (!book || !isOnlineBook(book)) return;
+  const next = structuredClone(book);
+  const chapter = next.chapters[chapterIndex];
+  if (!chapter || !chapter.url) return;
+  chapter.paragraphs = [];
+  chapter.blocks = undefined;
+  await commitBookContentUpdate(next);
+  await runFetch(bookId, [chapterIndex], "window");
 }

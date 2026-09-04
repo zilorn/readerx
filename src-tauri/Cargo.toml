@@ -1,6 +1,6 @@
 [package]
 name = "readerx"
-version = "0.1.2-beta.2"
+version = "0.1.2-beta.4"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -48,6 +48,8 @@ lto = true
 opt-level = 3
 panic = "abort"
 strip = true
+
+
 
 
 
