@@ -12,6 +12,7 @@ import {
 import { useNavigate, useParams } from "@solidjs/router";
 import { LoadingScreen } from "../components/LoadingScreen";
 import { ReaderSettingsSheet } from "../components/ReaderSettingsSheet";
+import { BookSearchPanel, type BookSearchJump } from "../components/BookSearchPanel";
 import { BookmarkPanel } from "../components/BookmarkPanel";
 import { SelectionMenu } from "../components/SelectionMenu";
 import { TtsBubble } from "../components/TtsBubble";
@@ -24,6 +25,7 @@ import {
   FollowBackIcon,
   HeadphonesIcon,
   ListIcon,
+  SearchIcon,
   SettingsIcon,
 } from "../components/icons";
 import {
@@ -384,6 +386,8 @@ export default function ReaderPage() {
   const [tocOpen, setTocOpen] = createSignal(false);
   const [bmPanelOpen, setBmPanelOpen] = createSignal(false);
   const [readerSettingsOpen, setReaderSettingsOpen] = createSignal(false);
+  // 全书搜索抽屉（阅读器内，不占路由历史）
+  const [bookSearchOpen, setBookSearchOpen] = createSignal(false);
   // 当前阅读位置（章节正文镜像偏移：分页=页首行，滚动=视口顶部），状态栏百分比用
   const [viewOffset, setViewOffset] = createSignal(0);
 
@@ -728,7 +732,8 @@ export default function ReaderPage() {
       !menuOpen() &&
       !tocOpen() &&
       !bmPanelOpen() &&
-      !readerSettingsOpen(),
+      !readerSettingsOpen() &&
+      !bookSearchOpen(),
   );
 
   /** 整本书进度百分比（按章节正文累计字符） */
@@ -1046,6 +1051,38 @@ export default function ReaderPage() {
     setMenuOpen(false);
   }
 
+  /** 全书搜索命中跳转：start<0 为章首（标题命中），否则跳到正文精确区间并闪亮 */
+  function jumpFromSearch(jump: BookSearchJump): void {
+    const current = book();
+    const target = current?.chapters[jump.chapterIndex];
+    if (!current || !target) return;
+    setBookSearchOpen(false);
+    setMenuOpen(false);
+
+    if (jump.start < 0) {
+      // 标题命中 → 章首
+      if (jump.chapterIndex !== chapterIdx()) {
+        goToChapter(jump.chapterIndex);
+      } else if (isPaged()) {
+        setPageIdx(0);
+      } else if (scrollRef) {
+        scrollRef.scrollTop = 0;
+      }
+      return;
+    }
+
+    if (jump.chapterIndex !== chapterIdx()) goToChapter(jump.chapterIndex);
+    const mir = buildTextMirror(chapterUnits(target));
+    const pos = unitAtGlobalOffset(mir, jump.start);
+    if (!pos) return;
+    setPendingFlash({
+      chapter: jump.chapterIndex,
+      unit: pos.unit,
+      charStart: jump.start,
+      charEnd: Math.min(jump.end, mir.text.length),
+    });
+  }
+
   /** 左右翻页（含章节边界衔接）；返回是否发生了位移 */
   function turnPage(dir: 1 | -1): boolean {
     if (!isPaged()) return false;
@@ -1182,7 +1219,7 @@ export default function ReaderPage() {
   onMount(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
-      if (menuOpen() || tocOpen() || !isPaged()) return;
+      if (menuOpen() || tocOpen() || bookSearchOpen() || !isPaged()) return;
       const dir = e.key === "ArrowRight" ? 1 : -1;
       animDir = dir;
       if (turnPage(dir)) animTriggered = true;
@@ -1724,6 +1761,17 @@ export default function ReaderPage() {
                   </span>
                   <button
                     class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
+                    aria-label="全书搜索"
+                    onClick={() => {
+                      setTocOpen(false);
+                      setMenuOpen(false);
+                      setBookSearchOpen(true);
+                    }}
+                  >
+                    <SearchIcon size={21} />
+                  </button>
+                  <button
+                    class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
                     aria-label="关闭目录"
                     onClick={() => setTocOpen(false)}
                   >
@@ -1785,7 +1833,8 @@ export default function ReaderPage() {
                 !!layout() &&
                 !menuOpen() &&
                 !tocOpen() &&
-                !bmPanelOpen()
+                !bmPanelOpen() &&
+                !bookSearchOpen()
               }
               onCopy={(text) => void handleCopyText(text)}
               onBookmark={(range) => handleBookmarkRange(range)}
@@ -1815,6 +1864,14 @@ export default function ReaderPage() {
             <ReaderSettingsSheet
               open={readerSettingsOpen()}
               onClose={() => setReaderSettingsOpen(false)}
+            />
+
+            {/* 全书搜索（阅读器内抽屉，不产生路由历史；命中后在阅读页内跳转高亮） */}
+            <BookSearchPanel
+              open={bookSearchOpen()}
+              book={book()}
+              onClose={() => setBookSearchOpen(false)}
+              onJump={jumpFromSearch}
             />
           </div>
         </Show>
