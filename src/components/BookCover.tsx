@@ -23,7 +23,8 @@ export function BookCover(props: BookCoverProps) {
   const book = createMemo(() => localBookById(props.bookId));
   const showCover = createMemo(() => {
     const b = book();
-    return !!b && b.format === "epub" && !!b.cover && !imgFailed();
+    // 有真实封面即展示（EPUB 导入提取或详情页用户设置的自定义封面）
+    return !!b && !!b.cover && !imgFailed();
   });
 
   // 同一本书重新导入/数据刷新产生新记录实例时，重置上一次的加载失败状态以便重试

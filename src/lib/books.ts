@@ -39,6 +39,8 @@ export interface BookDraft {
   format: BookFormat;
   title: string;
   author: string;
+  /** 简介（EPUB 的 dc:description / 在线书源附带；TXT 缺省，导入后可在详情页补录） */
+  intro?: string;
   fileName: string;
   size: number;
   hue: number;
@@ -172,6 +174,7 @@ function toDraft(
   splitDesc: string,
   chapters: LocalBookChapter[],
   cover?: string,
+  intro?: string,
 ): BookDraft {
   const totalChars = chapters.reduce(
     (sum, chapter) =>
@@ -184,10 +187,12 @@ function toDraft(
   if (totalChars === 0 && !hasImage) {
     throw new Error("没有读取到可阅读的正文内容");
   }
+  const trimmedIntro = intro?.trim();
   return {
     format,
     title: title.trim() || titleFromFileName(file.name),
     author: author.trim() || "佚名",
+    ...(trimmedIntro ? { intro: trimmedIntro } : {}),
     fileName: file.name,
     size: file.size,
     hue: hueFromTitle(title.trim() || file.name),
@@ -257,6 +262,7 @@ export async function parseEpubFileDraft(
     `按 EPUB 目录结构（${parsed.chapters.length} 章）`,
     parsed.chapters,
     parsed.cover,
+    parsed.intro,
   );
 }
 
@@ -269,6 +275,7 @@ export async function persistBookDraft(
     id: newBookId(),
     title: draft.title.trim() || titleFromFileName(draft.fileName),
     author: draft.author.trim() || "佚名",
+    ...(draft.intro ? { intro: draft.intro } : {}),
     format: draft.format,
     fileName: draft.fileName,
     size: draft.size,
@@ -312,6 +319,36 @@ export async function commitBookContentUpdate(book: LocalBook): Promise<void> {
   setBooksState((prev) => prev?.map((b) => (b.id === book.id ? book : b)) ?? prev);
 }
 
+/**
+ * 书籍元信息补丁（书籍详情页「编辑」用）：
+ * - title / author / intro：缺省字段表示不改动；
+ * - cover：undefined 不改动，null 清除自定义封面（回退程序化封面），
+ *   data URL 则替换封面。书名 / 作者留空时回落默认值，保持全库一致。
+ */
+export interface BookInfoPatch {
+  title?: string;
+  author?: string;
+  intro?: string;
+  cover?: string | null;
+}
+
+export async function updateBookInfo(id: string, patch: BookInfoPatch): Promise<void> {
+  const book = localBookById(id);
+  if (!book) return;
+  const next: LocalBook = { ...book };
+  if (patch.title !== undefined) next.title = patch.title.trim() || "未命名书籍";
+  if (patch.author !== undefined) next.author = patch.author.trim() || "佚名";
+  if (patch.intro !== undefined) {
+    const intro = patch.intro.trim();
+    next.intro = intro || undefined;
+  }
+  if (patch.cover !== undefined) {
+    next.cover = patch.cover ?? undefined;
+  }
+  await saveRemoteBook(next);
+  setBooksState((prev) => prev?.map((b) => (b.id === id ? next : b)) ?? prev);
+}
+
 /** 用一份新解析出的草稿**原位替换**某本已导入书（同一 id 与书架记录）。
  * 用于「重新导入」（本地同名文件 / WebDAV 长按）：保留来源标记、分组与阅读进度，
  * 仅正文/元信息随新文件更新；书签记录因同 id 保留，由阅读时按新内容重新定位。
@@ -325,6 +362,8 @@ export async function replaceBookContent(
     ...existing,
     title: draft.title.trim() || titleFromFileName(draft.fileName),
     author: draft.author.trim() || "佚名",
+    // 文件自身不带简介（如 TXT）时保留原书简介，避免「重新导入」丢字
+    ...(draft.intro ? { intro: draft.intro } : {}),
     format: draft.format,
     fileName: draft.fileName,
     size: draft.size,

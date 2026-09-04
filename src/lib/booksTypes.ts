@@ -72,6 +72,8 @@ export interface LocalBook {
   id: string;
   title: string;
   author: string;
+  /** 书籍简介（导入时 EPUB/在线书若带简介会自动带入，可在书籍详情页编辑） */
+  intro?: string;
   format: BookFormat;
   fileName: string;
   /** 文件字节数 */

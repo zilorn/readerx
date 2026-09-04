@@ -10,10 +10,13 @@
 import { unzipSync } from "fflate";
 import type { ChapterBlock, LocalBookChapter } from "./booksTypes";
 import { chapterCid } from "./booksTypes";
+import { makeCoverThumb } from "./coverImage";
 
 export interface ParsedEpub {
   title: string;
   author: string;
+  /** OPF metadata 中的内容简介（dc:description） */
+  intro?: string;
   chapters: LocalBookChapter[];
   /** 封面缩略图（data URL）；OPF 未声明封面时为 undefined */
   cover?: string;
@@ -384,55 +387,7 @@ function bytesToBase64(bytes: Uint8Array): string {
 
 // ---------------------------------------------------------------------------
 // 封面提取
-
-/** 封面缩略图的长边像素上限（避免把整张原图塞进书籍 JSON） */
-const COVER_MAX_EDGE = 600;
-
-function dataUrlMime(dataUrl: string): string {
-  const match = /^data:([^;,]+)/.exec(dataUrl);
-  return match ? match[1] : "";
-}
-
-function loadImageElement(src: string): Promise<HTMLImageElement> {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => resolve(img);
-    img.onerror = () => reject(new Error("封面图片解码失败"));
-    img.src = src;
-  });
-}
-
-/**
- * 把封面图等比缩小为 COVER_MAX_EDGE 以内的 JPEG 缩略图 data URL。
- * SVG / GIF 等无法安全重采样为位图的格式直接原样返回；
- * 任何解码失败都退回原图，绝不因封面问题中断导入。
- */
-async function makeCoverThumb(dataUrl: string): Promise<string> {
-  const mime = dataUrlMime(dataUrl);
-  if (mime !== "image/jpeg" && mime !== "image/png" && mime !== "image/webp") {
-    return dataUrl;
-  }
-  try {
-    const img = await loadImageElement(dataUrl);
-    const { naturalWidth: width, naturalHeight: height } = img;
-    if (!width || !height) return dataUrl;
-    const scale = Math.min(1, COVER_MAX_EDGE / Math.max(width, height));
-    if (scale === 1) return dataUrl;
-    const canvas = document.createElement("canvas");
-    canvas.width = Math.max(1, Math.round(width * scale));
-    canvas.height = Math.max(1, Math.round(height * scale));
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return dataUrl;
-    // 半透明 PNG 先垫白底再统一 JPEG 输出，控制书籍 JSON 体积
-    ctx.fillStyle = "#ffffff";
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-    const thumb = canvas.toDataURL("image/jpeg", 0.82);
-    return thumb.startsWith("data:image/jpeg") ? thumb : dataUrl;
-  } catch {
-    return dataUrl;
-  }
-}
+// ---------------------------------------------------------------------------
 
 /**
  * 定位 EPUB 声明的封面清单项 id：
@@ -485,6 +440,7 @@ export async function parseEpubFile(file: File): Promise<ParsedEpub> {
     firstNamespaceText(opfDoc, "title") ||
     (file.name.replace(/\.(epub|equb)$/i, "").trim() || "未命名");
   const author = firstNamespaceText(opfDoc, "creator") || "佚名";
+  const intro = firstNamespaceText(opfDoc, "description") || undefined;
 
   const manifest = new Map<string, { href: string; mediaType: string; properties: string }>();
   const manifestByHref = new Map<string, string>();
@@ -563,5 +519,11 @@ export async function parseEpubFile(file: File): Promise<ParsedEpub> {
     }
   }
 
-  return { title, author, chapters, ...(cover ? { cover } : {}) };
+  return {
+    title,
+    author,
+    ...(intro ? { intro } : {}),
+    chapters,
+    ...(cover ? { cover } : {}),
+  };
 }

@@ -169,6 +169,7 @@ export async function addOnlineBookToShelf(
     id: newBookId(),
     title: item.bookName.trim() || "未命名书籍",
     author: (item.author ?? "").trim() || "佚名",
+    ...(item.intro?.trim() ? { intro: item.intro.trim() } : {}),
     format: "online",
     fileName: `${(item.bookName || "online").slice(0, 60)}.txt`,
     size: 0,

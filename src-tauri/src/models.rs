@@ -59,6 +59,9 @@ pub struct LocalBook {
     pub id: String,
     pub title: String,
     pub author: String,
+    /// 书籍简介（导入时 EPUB/在线书若带简介自动带入；详情页可编辑）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intro: Option<String>,
     pub format: String,
     pub file_name: String,
     pub size: u64,

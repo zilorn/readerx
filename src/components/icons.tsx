@@ -243,6 +243,18 @@ export function EditIcon(p: SvgIconProps) {
   );
 }
 
+/** 图片（封面占位） */
+export function ImageIcon(p: SvgIconProps) {
+  return (
+    <Icon {...p}>
+      <rect x="3" y="4" width="18" height="16" rx="2.5" />
+      <circle cx="9" cy="10" r="1.7" />
+      <path d="m5.2 17.5 4.5-4.5a1.6 1.6 0 0 1 2.3 0l2.8 2.8" />
+      <path d="m14.5 17.5 1.3-1.3a1.6 1.6 0 0 1 2.3 0l.7.7" />
+    </Icon>
+  );
+}
+
 /** 复制（双层矩形） */
 export function CopyIcon(p: SvgIconProps) {
   return (
