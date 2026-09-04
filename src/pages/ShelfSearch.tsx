@@ -189,15 +189,7 @@ export default function ShelfSearchPage() {
                           openBook(book.id);
                         }}
                       >
-                        <BookCover
-                          book={{
-                            title: book.title,
-                            author: book.author,
-                            hue: book.hue,
-                            format: book.format,
-                          }}
-                          variant="row"
-                        />
+                        <BookCover bookId={book.id} variant="row" />
                         <span class="flex min-w-0 flex-1 flex-col gap-[3px]">
                           <span class="truncate text-[14.5px] font-semibold">
                             {book.title}

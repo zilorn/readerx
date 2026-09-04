@@ -144,10 +144,7 @@ function BookCard(props: {
       onKeyDown={onKeyDown}
     >
       <div class="relative w-full rounded-[10px]">
-        <BookCover
-          book={{ title: book.title, author: book.author, hue: book.hue, format: book.format }}
-          variant="grid"
-        />
+        <BookCover bookId={book.id} variant="grid" />
         <Show when={props.selectMode && props.selected}>
           <span class="absolute right-[5px] top-[5px] z-[2] grid h-[26px] w-[26px] animate-pop-in place-items-center rounded-full bg-accent text-on-accent shadow-md">
             <CheckIcon size={15} />

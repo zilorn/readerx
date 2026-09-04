@@ -79,6 +79,8 @@ export interface LocalBook {
   importedAt: number;
   /** 程序化封面基准色相（0-360） */
   hue: number;
+  /** EPUB 封面缩略图（data URL，导入时从 EPUB 提取；无封面不存） */
+  cover?: string;
   /** 分章方式描述，如“中文章节标题 / 按字数分章” */
   splitDesc: string;
   chapters: LocalBookChapter[];

@@ -15,6 +15,8 @@ export interface ParsedEpub {
   title: string;
   author: string;
   chapters: LocalBookChapter[];
+  /** 封面缩略图（data URL）；OPF 未声明封面时为 undefined */
+  cover?: string;
 }
 
 function decodeText(bytes: Uint8Array): string {
@@ -381,6 +383,80 @@ function bytesToBase64(bytes: Uint8Array): string {
 }
 
 // ---------------------------------------------------------------------------
+// 封面提取
+
+/** 封面缩略图的长边像素上限（避免把整张原图塞进书籍 JSON） */
+const COVER_MAX_EDGE = 600;
+
+function dataUrlMime(dataUrl: string): string {
+  const match = /^data:([^;,]+)/.exec(dataUrl);
+  return match ? match[1] : "";
+}
+
+function loadImageElement(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error("封面图片解码失败"));
+    img.src = src;
+  });
+}
+
+/**
+ * 把封面图等比缩小为 COVER_MAX_EDGE 以内的 JPEG 缩略图 data URL。
+ * SVG / GIF 等无法安全重采样为位图的格式直接原样返回；
+ * 任何解码失败都退回原图，绝不因封面问题中断导入。
+ */
+async function makeCoverThumb(dataUrl: string): Promise<string> {
+  const mime = dataUrlMime(dataUrl);
+  if (mime !== "image/jpeg" && mime !== "image/png" && mime !== "image/webp") {
+    return dataUrl;
+  }
+  try {
+    const img = await loadImageElement(dataUrl);
+    const { naturalWidth: width, naturalHeight: height } = img;
+    if (!width || !height) return dataUrl;
+    const scale = Math.min(1, COVER_MAX_EDGE / Math.max(width, height));
+    if (scale === 1) return dataUrl;
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(width * scale));
+    canvas.height = Math.max(1, Math.round(height * scale));
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return dataUrl;
+    // 半透明 PNG 先垫白底再统一 JPEG 输出，控制书籍 JSON 体积
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    const thumb = canvas.toDataURL("image/jpeg", 0.82);
+    return thumb.startsWith("data:image/jpeg") ? thumb : dataUrl;
+  } catch {
+    return dataUrl;
+  }
+}
+
+/**
+ * 定位 EPUB 声明的封面清单项 id：
+ * EPUB3 用 manifest item 的 properties="cover-image"；
+ * EPUB2 用 metadata 里的 <meta name="cover" content="…">。
+ */
+function findCoverManifestId(opfDoc: Document): string | null {
+  for (const item of Array.from(opfDoc.querySelectorAll("manifest > item"))) {
+    const properties = item.getAttribute("properties") ?? "";
+    if (properties.split(/\s+/).includes("cover-image")) {
+      const id = item.getAttribute("id");
+      if (id) return id;
+    }
+  }
+  for (const meta of Array.from(opfDoc.getElementsByTagNameNS("*", "meta"))) {
+    if ((meta.getAttribute("name") ?? "").toLowerCase() === "cover") {
+      const content = meta.getAttribute("content");
+      if (content) return content;
+    }
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // 入口
 
 export async function parseEpubFile(file: File): Promise<ParsedEpub> {
@@ -468,5 +544,24 @@ export async function parseEpubFile(file: File): Promise<ParsedEpub> {
   if (chapters.length === 0) {
     throw new Error("EPUB 中没有解析出可读章节，请确认文件未加密");
   }
-  return { title, author, chapters };
+
+  // 封面：优先 EPUB3 manifest properties="cover-image"，其次 EPUB2 meta name="cover"
+  // 仅接受真正的图片条目（个别 EPUB 会把 properties="cover-image" 标到 XHTML 上）
+  const coverManifestId = findCoverManifestId(opfDoc);
+  let cover: string | undefined;
+  const coverItem = coverManifestId ? manifest.get(coverManifestId) : undefined;
+  if (coverItem) {
+    const coverKey = resolvePath(opfDir, coverItem.href);
+    const mediaType =
+      (manifestByHref.get(coverKey) || mimeFromPath(coverKey)) || "application/octet-stream";
+    if (mediaType.startsWith("image/")) {
+      const coverBytes = entries[coverKey];
+      if (coverBytes) {
+        const dataUrl = `data:${mediaType};base64,${bytesToBase64(coverBytes)}`;
+        cover = await makeCoverThumb(dataUrl);
+      }
+    }
+  }
+
+  return { title, author, chapters, ...(cover ? { cover } : {}) };
 }

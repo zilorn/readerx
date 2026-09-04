@@ -1313,26 +1313,28 @@ export default function ReaderPage() {
     const idx = pageIdx();
     if (dir > 0) {
       if (idx + 1 < total) {
-        setPageIdx(idx + 1);
+        // 先解除跟读跟随再翻页：若翻页后才取消，朗读句的自动跟随仍可能
+        // 在同一轮把页面拉回朗读句所在页，导致本次手动翻页“无效”（需翻两次）
         cancelFollowIfActive();
+        setPageIdx(idx + 1);
         return true;
       }
       if (!isLastChapter()) {
-        goToChapter(chapterIdx() + 1);
         cancelFollowIfActive();
+        goToChapter(chapterIdx() + 1);
         return true;
       }
       return false;
     }
     if (idx > 0) {
-      setPageIdx(idx - 1);
       cancelFollowIfActive();
+      setPageIdx(idx - 1);
       return true;
     }
     if (!isFirstChapter()) {
+      cancelFollowIfActive();
       wantLastPage = true;
       goToChapter(chapterIdx() - 1);
-      cancelFollowIfActive();
       return true;
     }
     return false;

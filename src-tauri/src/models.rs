@@ -65,6 +65,9 @@ pub struct LocalBook {
     pub imported_at: u64,
     pub hue: u32,
     pub split_desc: String,
+    /// EPUB 封面缩略图（data URL，导入时从 EPUB 提取）；无封面时为 None
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cover: Option<String>,
     pub chapters: Vec<LocalBookChapter>,
     /// 所属书架分组 id；未分组时为 null
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -45,6 +45,8 @@ export interface BookDraft {
   splitDesc: string;
   chapters: LocalBookChapter[];
   totalChars: number;
+  /** EPUB 封面缩略图（data URL）；TXT 或无封面时缺省 */
+  cover?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -169,6 +171,7 @@ function toDraft(
   author: string,
   splitDesc: string,
   chapters: LocalBookChapter[],
+  cover?: string,
 ): BookDraft {
   const totalChars = chapters.reduce(
     (sum, chapter) =>
@@ -191,6 +194,7 @@ function toDraft(
     splitDesc,
     chapters,
     totalChars,
+    ...(cover ? { cover } : {}),
   };
 }
 
@@ -252,6 +256,7 @@ export async function parseEpubFileDraft(
     overrides?.author ?? parsed.author,
     `按 EPUB 目录结构（${parsed.chapters.length} 章）`,
     parsed.chapters,
+    parsed.cover,
   );
 }
 
@@ -271,6 +276,7 @@ export async function persistBookDraft(
     hue: draft.hue,
     splitDesc: draft.splitDesc,
     chapters: assignChapterCids(draft.chapters),
+    cover: draft.cover,
     // 只有 WebDAV 导入需要落盘来源标记；本地导入不写字段（读取时缺省为本地）
     ...(source === "webdav" ? { source: "webdav" as const } : {}),
   };
@@ -325,6 +331,7 @@ export async function replaceBookContent(
     hue: draft.hue,
     splitDesc: draft.splitDesc,
     chapters: assignChapterCids(draft.chapters),
+    cover: draft.cover,
     importedAt: Date.now(),
   };
   invalidateBookLengths(next.id);
