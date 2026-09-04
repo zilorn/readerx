@@ -1275,6 +1275,18 @@ export default function ReaderPage() {
     return false;
   }
 
+  /**
+   * 用户主动翻页（点按左右区 / 横滑 / 方向键）的统一入口。
+   * 必须在变更页码**之前**置位动画方向与触发标记：分页动画由页码变化驱动，
+   * 若在 turnPage 之后才置位，首次翻页（页面由 0 变化时）会因触发标记尚未生效而丢失动画。
+   * 翻页未发生（章节边界）时复位标记，避免污染下一次重排/落位。
+   */
+  function userFlip(dir: 1 | -1): void {
+    animDir = dir;
+    animTriggered = true;
+    if (!turnPage(dir)) animTriggered = false;
+  }
+
   function goBack(): void {
     if (window.history.length > 1) navigate(-1);
     else navigate("/");
@@ -1332,8 +1344,7 @@ export default function ReaderPage() {
 
     // 横向滑动翻页
     if (isPaged() && moved >= 56 && Math.abs(dx) > Math.abs(dy)) {
-      animDir = dx < 0 ? 1 : -1;
-      if (turnPage(animDir)) animTriggered = true;
+      userFlip(dx < 0 ? 1 : -1);
       return;
     }
     if (moved >= 12) return; // 纵向拖动等：不处理
@@ -1345,11 +1356,9 @@ export default function ReaderPage() {
       return;
     }
     if (x < rect.width / 3) {
-      animDir = -1;
-      if (turnPage(-1)) animTriggered = true;
+      userFlip(-1);
     } else if (x > (rect.width * 2) / 3) {
-      animDir = 1;
-      if (turnPage(1)) animTriggered = true;
+      userFlip(1);
     } else {
       setMenuOpen(true);
     }
@@ -1380,9 +1389,7 @@ export default function ReaderPage() {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
       if (menuOpen() || tocOpen() || bookSearchOpen() || !isPaged()) return;
-      const dir = e.key === "ArrowRight" ? 1 : -1;
-      animDir = dir;
-      if (turnPage(dir)) animTriggered = true;
+      userFlip(e.key === "ArrowRight" ? 1 : -1);
     };
     window.addEventListener("keydown", onKey);
     onCleanup(() => window.removeEventListener("keydown", onKey));
