@@ -14,10 +14,12 @@ import {
   BookOpenIcon,
   CheckIcon,
   ChevronLeftIcon,
+  CloseIcon,
   CloudIcon,
   FileTextIcon,
   FolderIcon,
   RefreshIcon,
+  SearchIcon,
   ServerIcon,
   SettingsIcon,
 } from "../components/icons";
@@ -37,6 +39,11 @@ import {
 import { showToast } from "../lib/toast";
 
 let reloadSeq = 0;
+
+/** 条目名是否包含搜索词（小写不区分大小写；空词放行全部） */
+function nameMatchesQuery(name: string, query: string): boolean {
+  return !query || name.toLowerCase().includes(query);
+}
 
 /** 未导入书籍的文件行：点击切换勾选，供底部批量导入 */
 function SelectableBookRow(props: {
@@ -168,6 +175,7 @@ export default function WebdavImportPage() {
   const [importTotal, setImportTotal] = createSignal(0);
   const [reimportEntry, setReimportEntry] = createSignal<DavEntry | null>(null);
   const [reimporting, setReimporting] = createSignal(false);
+  const [keyword, setKeyword] = createSignal("");
 
   createEffect(() => {
     void ensureWebDavLoaded();
@@ -182,6 +190,7 @@ export default function WebdavImportPage() {
     const seq = ++reloadSeq;
     setImporting(false);
     setSelected({});
+    setKeyword("");
     setError(null);
     setLoading(true);
     setDirList(null);
@@ -210,11 +219,17 @@ export default function WebdavImportPage() {
     void loadDir();
   });
 
+  const q = createMemo(() => keyword().trim().toLowerCase());
+
   const dirs = createMemo<DavEntry[]>(() =>
-    (dirList() ?? []).filter((e) => e.isDir),
+    (dirList() ?? []).filter(
+      (e) => e.isDir && nameMatchesQuery(e.name, q()),
+    ),
   );
   const files = createMemo<DavEntry[]>(() =>
-    (dirList() ?? []).filter((e) => !e.isDir && isBookFileName(e.name)),
+    (dirList() ?? []).filter(
+      (e) => !e.isDir && isBookFileName(e.name) && nameMatchesQuery(e.name, q()),
+    ),
   );
 
   /** 远程书文件 → 本地已存在的同名书（按文件名匹配，远端有更新也识别为已导入） */
@@ -250,13 +265,32 @@ export default function WebdavImportPage() {
       importableFiles().every((f) => selected()[f.path]),
   );
 
+  // 搜索词过滤后，剔除已不在可见列表中的勾选，保证全选 / 计数与所见一致
+  createEffect(() => {
+    const visible = importableFiles();
+    const visibleSet = new Set(visible.map((f) => f.path));
+    setSelected((prev) => {
+      const keys = Object.keys(prev);
+      if (keys.length === 0) return prev;
+      let changed = false;
+      const next: Record<string, boolean> = {};
+      for (const key of keys) {
+        if (visibleSet.has(key)) next[key] = prev[key];
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
+  });
+
   function enterDir(entry: DavEntry) {
+    setKeyword("");
     setPath(entry.path);
   }
 
   function goUp() {
     const dir = path();
     const idx = dir.lastIndexOf("/");
+    setKeyword("");
     setPath(idx < 0 ? "" : dir.slice(0, idx));
   }
 
@@ -347,6 +381,7 @@ export default function WebdavImportPage() {
   }
 
   function onActivate() {
+    setKeyword("");
     setPath("");
   }
 
@@ -367,7 +402,80 @@ export default function WebdavImportPage() {
             <SettingsIcon />
           </button>
         }
-      />
+      >
+        {/* 浏览目录时吸顶的工具条：导航 / 搜索过滤 / 数量与全选 */}
+        <Show when={dirList() !== null}>
+          <div class="flex flex-col gap-2.5 px-[18px] pb-2.5 pt-1.5">
+            {/* 导航：上级 / 路径 / 刷新 */}
+            <div class="flex items-center gap-2">
+              <button
+                class="grid h-9 w-9 flex-none place-items-center rounded-[10px] text-text-2 transition-colors disabled:opacity-35 active:bg-surface-2"
+                aria-label="返回上级目录"
+                disabled={!path()}
+                onClick={goUp}
+              >
+                <ChevronLeftIcon size={19} />
+              </button>
+              <div class="flex min-w-0 flex-1 items-center gap-1.5 rounded-[10px] border border-border bg-surface px-3 py-[8px]">
+                <FolderIcon size={15} class="flex-none text-accent" />
+                <span class="truncate text-[13px] font-medium text-text-2">
+                  {pathLabel()}
+                </span>
+              </div>
+              <button
+                class="grid h-9 w-9 flex-none place-items-center rounded-[10px] text-text-2 transition-colors active:bg-surface-2"
+                aria-label="刷新当前目录"
+                onClick={() => void loadDir()}
+              >
+                <RefreshIcon size={17} class={loading() ? "animate-spin" : undefined} />
+              </button>
+            </div>
+
+            {/* 搜索当前目录：按名称即时过滤文件夹与书文件 */}
+            <div class="flex items-center gap-2 rounded-[12px] border border-border bg-surface px-3 transition-colors focus-within:border-accent">
+              <SearchIcon size={17} class="flex-none text-text-3" />
+              <input
+                class="min-w-0 flex-1 bg-transparent py-[8px] text-[14px] text-text outline-none placeholder:text-text-3"
+                type="text"
+                placeholder="搜索本目录"
+                aria-label="搜索当前目录中的文件夹与书籍"
+                value={keyword()}
+                onInput={(e) => setKeyword(e.currentTarget.value)}
+              />
+              <Show when={keyword()}>
+                <button
+                  class="grid h-6 w-6 flex-none place-items-center rounded-full text-text-3 transition-colors active:bg-surface-2"
+                  type="button"
+                  aria-label="清空搜索词"
+                  onClick={() => setKeyword("")}
+                >
+                  <CloseIcon size={15} />
+                </button>
+              </Show>
+            </div>
+
+            {/* 可选文件工具行 */}
+            <Show when={files().length > 0}>
+              <div class="flex items-center justify-between px-0.5">
+                <span class="text-[12px] text-text-3">
+                  {importableFiles().length} 本可导入
+                  <Show when={importedFiles().length > 0}>
+                    <span>，已导入 {importedFiles().length} 本</span>
+                  </Show>
+                </span>
+                <Show when={importableFiles().length > 0}>
+                  <button
+                    class="text-[12.5px] font-medium text-accent"
+                    onClick={toggleSelectAll}
+                  >
+                    {allFilesSelected() ? "取消全选" : "全选本目录"}
+                  </button>
+                </Show>
+              </div>
+            </Show>
+          </div>
+        </Show>
+      </PageHeader>
 
       <div
         class="flex flex-col px-[18px] pt-1"
@@ -423,63 +531,23 @@ export default function WebdavImportPage() {
                 </Show>
               }
             >
-              {/* 导航：上级 / 路径 / 刷新 */}
-              <div class="flex items-center gap-2">
-                <button
-                  class="grid h-9 w-9 flex-none place-items-center rounded-[10px] text-text-2 transition-colors disabled:opacity-35 active:bg-surface-2"
-                  aria-label="返回上级目录"
-                  disabled={!path()}
-                  onClick={goUp}
-                >
-                  <ChevronLeftIcon size={19} />
-                </button>
-                <div class="flex min-w-0 flex-1 items-center gap-1.5 rounded-[10px] border border-border bg-surface px-3 py-[8px]">
-                  <FolderIcon size={15} class="flex-none text-accent" />
-                  <span class="truncate text-[13px] font-medium text-text-2">
-                    {pathLabel()}
-                  </span>
-                </div>
-                <button
-                  class="grid h-9 w-9 flex-none place-items-center rounded-[10px] text-text-2 transition-colors active:bg-surface-2"
-                  aria-label="刷新当前目录"
-                  onClick={() => void loadDir()}
-                >
-                  <RefreshIcon size={17} class={loading() ? "animate-spin" : undefined} />
-                </button>
-              </div>
-
-              {/* 可选文件工具行 */}
-              <Show when={files().length > 0}>
-                <div class="flex items-center justify-between px-0.5 py-2">
-                  <span class="text-[12px] text-text-3">
-                    {importableFiles().length} 本可导入
-                    <Show when={importedFiles().length > 0}>
-                      <span>，已导入 {importedFiles().length} 本</span>
-                    </Show>
-                  </span>
-                  <Show when={importableFiles().length > 0}>
-                    <button
-                      class="text-[12.5px] font-medium text-accent"
-                      onClick={toggleSelectAll}
-                    >
-                      {allFilesSelected() ? "取消全选" : "全选本目录"}
-                    </button>
-                  </Show>
-                </div>
-                <Show when={importedFiles().length > 0}>
-                  <p class="px-0.5 pb-1 text-[11.5px] leading-[1.6] text-text-3">
-                    已导入的书：点击直接阅读，长按可重新导入
-                  </p>
-                </Show>
+              <Show when={files().length > 0 && importedFiles().length > 0}>
+                <p class="px-0.5 pb-1 text-[11.5px] leading-[1.6] text-text-3">
+                  已导入的书：点击直接阅读，长按可重新导入
+                </p>
               </Show>
 
               <Show
                 when={dirs().length > 0 || files().length > 0}
                 fallback={
                   <div class="flex flex-col items-center gap-1 px-6 py-12 text-center text-text-3">
-                    <FolderIcon size={44} class="mb-1.5" />
+                    <Show when={q()} fallback={<FolderIcon size={44} class="mb-1.5" />}>
+                      <SearchIcon size={44} class="mb-1.5" />
+                    </Show>
                     <p class="text-[13.5px] font-medium text-text-2">
-                      当前目录没有可导入的内容
+                      {q()
+                        ? "未找到匹配的内容"
+                        : "当前目录没有可导入的内容"}
                     </p>
                   </div>
                 }
