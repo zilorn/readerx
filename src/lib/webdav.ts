@@ -50,14 +50,16 @@ const ACTIVE_KEY = "readerx.webdavActive";
 
 const [servers, setServersSignal] = createSignal<DavServer[]>([]);
 const [activeId, setActiveIdSignal] = createSignal<string | null>(null);
-let loaded = false;
+/** 配置是否已从后端读完（响应式：就绪后 UI 才从“读取配置…”切到内容） */
+const [loadedSignal, setLoaded] = createSignal(false);
+let loadingPromise: Promise<void> | null = null;
 
 export function davServers(): DavServer[] {
   return servers();
 }
 
 export function davReady(): boolean {
-  return loaded;
+  return loadedSignal();
 }
 
 export function davActiveId(): string | null {
@@ -73,27 +75,34 @@ export function davServerById(id: string): DavServer | undefined {
   return servers().find((s) => s.id === id);
 }
 
-/** 页面首次需要配置时调用（幂等） */
-export async function ensureWebDavLoaded(): Promise<void> {
-  if (loaded) return;
-  loaded = true;
-  const [stored, storedActive] = await Promise.all([
-    readState<DavServer[]>(SERVERS_KEY),
-    readState<string>(ACTIVE_KEY),
-  ]);
-  if (Array.isArray(stored)) {
-    setServersSignal(
-      stored
-        .filter((s) => s && typeof s.id === "string" && typeof s.url === "string")
-        .sort((a, b) => a.createdAt - b.createdAt),
-    );
-  }
-  if (
-    typeof storedActive === "string" &&
-    servers().some((s) => s.id === storedActive)
-  ) {
-    setActiveIdSignal(storedActive);
-  }
+/**
+ * 页面首次需要配置时调用（幂等）。
+ * 全部读完后才置 loadedSignal，且它本身是响应式的：
+ * 首次进入页面时“读取配置…”屏会因信号翻转被替换为真实内容。
+ */
+export function ensureWebDavLoaded(): Promise<void> {
+  if (loadedSignal()) return Promise.resolve();
+  loadingPromise ??= (async () => {
+    const [stored, storedActive] = await Promise.all([
+      readState<DavServer[]>(SERVERS_KEY),
+      readState<string>(ACTIVE_KEY),
+    ]);
+    if (Array.isArray(stored)) {
+      setServersSignal(
+        stored
+          .filter((s) => s && typeof s.id === "string" && typeof s.url === "string")
+          .sort((a, b) => a.createdAt - b.createdAt),
+      );
+    }
+    if (
+      typeof storedActive === "string" &&
+      servers().some((s) => s.id === storedActive)
+    ) {
+      setActiveIdSignal(storedActive);
+    }
+    setLoaded(true);
+  })();
+  return loadingPromise;
 }
 
 function persistServers(): void {
