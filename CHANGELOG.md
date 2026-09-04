@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - TTS失败后跳过，连续失败多次（5次）后停止。
+- 封面中，使用书籍全名，而不是首字。
 
 ## [0.1.1] - 2026-09-04
 

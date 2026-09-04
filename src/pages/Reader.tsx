@@ -615,6 +615,10 @@ export default function ReaderPage() {
     return out;
   });
 
+  function toBookDetailPage() {
+    navigate(`/detail/${bookId()}`)
+  }
+
   // -------------------------------------------------------------------
   // 听书：播放控制器（逐句合成），朗读高亮 + 跟随阅读位置
   // -------------------------------------------------------------------
@@ -1892,7 +1896,7 @@ export default function ReaderPage() {
                   <ChevronLeftIcon />
                 </button>
                 <div class="flex min-w-0 flex-1 flex-col items-center gap-[1px]">
-                  <span class="max-w-full truncate text-[14.5px] font-semibold">
+                  <span class="max-w-full truncate text-[14.5px] font-semibold" onClick={toBookDetailPage}>
                     {book()!.title}
                   </span>
                   <span class="max-w-full truncate text-[10.5px] text-text-3">
