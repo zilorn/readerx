@@ -1,13 +1,20 @@
 /** 本地书籍的共享类型定义 */
 
-export type BookFormat = "txt" | "epub";
+export type BookFormat = "txt" | "epub" | "online";
 
-/** 书籍导入来源：webdav 导入带 "webdav" 标记，其余视为本地导入 */
-export type BookSource = "local" | "webdav";
+/** 书籍导入来源：webdav 导入带 "webdav" 标记；在线书为 "online"，其余视为本地导入 */
+export type BookSource = "local" | "webdav" | "online";
 
 /** 归一化书籍来源：旧数据未存 source 字段时视为本地导入 */
 export function bookSourceOf(book: Pick<LocalBook, "source">): BookSource {
-  return book.source === "webdav" ? "webdav" : "local";
+  if (book.source === "webdav") return "webdav";
+  if (book.source === "online") return "online";
+  return "local";
+}
+
+/** 在线书可用；是否曾经完整下载过（有正文缓存章节数大于 0） */
+export function isOnlineBook(book: Pick<LocalBook, "source" | "bookSourceId">): boolean {
+  return book.source === "online" && !!book.bookSourceId;
 }
 
 /**
@@ -29,6 +36,8 @@ export interface LocalBookChapter {
   paragraphs: string[];
   /** 结构化正文块。TXT 或旧数据缺失时 Reader 退回 paragraphs */
   blocks?: ChapterBlock[];
+  /** 在线书：书源侧章节地址（bookToc 返回的 chapterUrl） */
+  url?: string;
 }
 
 /** 生成章节 cid：下标 0 → c0001 */
@@ -77,6 +86,10 @@ export interface LocalBook {
   groupId?: string | null;
   /** 导入来源：WebDAV 导入为 "webdav"；本地导入或旧数据缺失时不写此字段 */
   source?: BookSource;
+  /** 在线书：来源书源 id（书源删除后书籍保留，仅失去更新能力） */
+  bookSourceId?: string;
+  /** 在线书：书源侧全书地址（与 bookSourceId 一起构成稳定身份） */
+  bookUrl?: string;
 }
 
 export function totalChars(book: Pick<LocalBook, "chapters">): number {

@@ -284,7 +284,29 @@ export async function persistBookDraft(
 }
 
 /**
- * 用一份新解析出的草稿**原位替换**某本已导入书（同一 id 与书架记录）。
+ * 把一本已组装完整的书直接加入书架（在线书「加入书架」用）。
+ * 与 persistBookDraft 不同：不经过分章/文件导入流程，作者/格式/章节由调用方给出。
+ */
+export async function addBookRecord(book: LocalBook): Promise<void> {
+  await saveRemoteBook(book);
+  ensureShelfEntry(book.id);
+  setBooksState((prev) => {
+    const next = [...(prev ?? []).filter((b) => b.id !== book.id), book];
+    next.sort((a, b) => b.importedAt - a.importedAt);
+    return next;
+  });
+}
+
+/**
+ * 保存单本的内容/元信息更新并响应式替换书架中的同一本。
+ * 在线书逐批落盘章节正文时使用（整书 JSON 覆盖写）。
+ */
+export async function commitBookContentUpdate(book: LocalBook): Promise<void> {
+  await saveRemoteBook(book);
+  setBooksState((prev) => prev?.map((b) => (b.id === book.id ? book : b)) ?? prev);
+}
+
+/** 用一份新解析出的草稿**原位替换**某本已导入书（同一 id 与书架记录）。
  * 用于 WebDAV「重新导入」：保留来源标记、分组与阅读进度，仅正文/元信息随远程最新内容更新。
  */
 export async function replaceBookContent(

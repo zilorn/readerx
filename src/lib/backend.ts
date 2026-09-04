@@ -5,11 +5,20 @@
  */
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import type { LocalBook } from "./booksTypes";
+import type {
+  BookItem,
+  BookSource,
+  BookSourceSummary,
+  ChapterContentResult,
+  ChapterItem,
+  SourceCallResult,
+} from "./bookSourcesTypes";
 
 const tauri = isTauri();
 
 const memoryState = new Map<string, unknown>();
 const memoryBooks = new Map<string, LocalBook>();
+const memorySources = new Map<string, BookSource>();
 
 /** 读取一条状态（readerx.* 前缀）；不存在或纯浏览器环境返回 null */
 export async function readState<T>(key: string): Promise<T | null> {
@@ -91,4 +100,98 @@ export async function readLicenseText(): Promise<string | null> {
     console.error("[backend] 读取开源许可失败", err);
     return null;
   }
+}
+
+// ---------------------------------------------------------------------------
+// 书源（Book Source）
+// ---------------------------------------------------------------------------
+
+export async function listRemoteSources(): Promise<BookSourceSummary[]> {
+  if (!tauri) return [...memorySources.values()].map((s) => toSummary(s));
+  try {
+    return await invoke<BookSourceSummary[]>("readerx_sources_list");
+  } catch (err) {
+    console.error("[backend] 读取书源列表失败", err);
+    return [];
+  }
+}
+
+export async function getRemoteSource(id: string): Promise<BookSource | null> {
+  if (!tauri) return memorySources.get(id) ?? null;
+  try {
+    return await invoke<BookSource | null>("readerx_source_get", { id });
+  } catch (err) {
+    console.error(`[backend] 读取书源 ${id} 失败`, err);
+    return null;
+  }
+}
+
+export async function saveRemoteSource(source: BookSource): Promise<void> {
+  if (!tauri) {
+    memorySources.set(source.id, source);
+    return;
+  }
+  await invoke("readerx_source_put", { source });
+}
+
+export async function deleteRemoteSource(id: string): Promise<void> {
+  if (!tauri) {
+    memorySources.delete(id);
+    return;
+  }
+  await invoke("readerx_source_delete", { id });
+}
+
+/** 执行一次书源入口函数；浏览器开发环境返回错误结果 */
+export async function callRemoteSource(
+  sourceId: string,
+  fnName: string,
+  args: unknown,
+): Promise<SourceCallResult> {
+  if (!tauri) {
+    return { ok: false, error: "书源功能仅在应用内可用", logs: [], elapsedMs: 0 };
+  }
+  try {
+    return await invoke<SourceCallResult>("readerx_source_call", {
+      sourceId,
+      fnName,
+      args,
+    });
+  } catch (err) {
+    return { ok: false, error: String(err), logs: [], elapsedMs: 0 };
+  }
+}
+
+/** 批量拉取正文（内部并行上限由用户全局“书源并发”设置决定） */
+export async function fetchRemoteChapterContents(
+  sourceId: string,
+  book: BookItem,
+  chapters: ChapterItem[],
+): Promise<ChapterContentResult[]> {
+  if (!tauri) return [];
+  try {
+    return await invoke<ChapterContentResult[]>("readerx_source_fetch_contents", {
+      sourceId,
+      book,
+      chapters,
+    });
+  } catch (err) {
+    console.error("[backend] 拉取正文失败", err);
+    return [];
+  }
+}
+
+function toSummary(source: BookSource): BookSourceSummary {
+  return {
+    schemaVersion: source.schemaVersion,
+    id: source.id,
+    name: source.name,
+    bookSourceUrl: source.bookSourceUrl,
+    author: source.author,
+    version: source.version,
+    enabled: source.enabled,
+    capabilities: source.capabilities,
+    updateTime: source.updateTime,
+    jsLength: source.js.length,
+  };
 }

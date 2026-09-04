@@ -35,7 +35,7 @@ export function BookCover(props: BookCoverProps) {
       aria-label={props.label ?? `${book.title}封面`}
     >
       <span class="absolute left-1.5 top-1.5 z-10 rounded-full bg-black/30 px-[5px] py-[2.5px] text-[9px] leading-none tracking-[0.08em]">
-        {book.format.toUpperCase()}
+        {book.format === "online" ? "在线" : book.format.toUpperCase()}
       </span>
       <span
         class={`relative z-10 font-bold leading-none [text-shadow:0_2px_6px_rgb(0_0_0/0.2)] ${glyphSize}`}

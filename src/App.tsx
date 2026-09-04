@@ -21,6 +21,9 @@ const SettingsPage = lazy(() => import("./pages/Settings"));
 const ChapterRulesPage = lazy(() => import("./pages/ChapterRules"));
 const TtsCachePage = lazy(() => import("./pages/TtsCache"));
 const ReaderPage = lazy(() => import("./pages/Reader"));
+const BookSourcesPage = lazy(() => import("./pages/BookSources"));
+const SourceEditorPage = lazy(() => import("./pages/SourceEditor"));
+const OnlineBookPage = lazy(() => import("./pages/OnlineBook"));
 const NotFoundPage = lazy(() => import("./pages/NotFound"));
 
 /**
@@ -108,6 +111,9 @@ function App() {
       <Route path="/chapter-rules" component={ChapterRulesPage} />
       <Route path="/tts-cache" component={TtsCachePage} />
       <Route path="/book/:id" component={ReaderPage} />
+      <Route path="/sources" component={BookSourcesPage} />
+      <Route path="/source-editor" component={SourceEditorPage} />
+      <Route path="/online/:key" component={OnlineBookPage} />
       <Route path="*404" component={NotFoundPage} />
     </Router>
   );

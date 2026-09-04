@@ -3,7 +3,7 @@
 //! - 本地书籍按 id 存为独立 JSON 文件。
 //! 全部为同步磁盘 I/O，仅对 `commands` 暴露；WebView 侧只通过 command 访问。
 
-use crate::models::{LocalBook, TtsCacheStat};
+use crate::models::{BookSource, LocalBook, TtsCacheStat};
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -272,6 +272,73 @@ pub(crate) fn clear_tts_cache(app: &AppHandle, book_id: Option<&str>) -> Result<
                 fs::remove_dir_all(&root).map_err(|e| format!("清除听书缓存失败: {e}"))?;
             }
         }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 书源：<appData>/book_sources/<id>.json（一个书源一个文件）
+// ---------------------------------------------------------------------------
+
+fn ensure_sources_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = data_root(app)?.join("book_sources");
+    ensure_dir(&dir)?;
+    Ok(dir)
+}
+
+pub(crate) fn put_book_source(app: &AppHandle, source: &BookSource) -> Result<(), String> {
+    if !valid_component(&source.id) {
+        return Err("非法的书源 id".to_string());
+    }
+    let dir = ensure_sources_dir(app)?;
+    let path = dir.join(format!("{}.json", source.id));
+    let text = serde_json::to_string_pretty(source).map_err(|e| format!("序列化书源失败: {e}"))?;
+    fs::write(&path, text).map_err(|e| format!("写入书源失败: {e}"))
+}
+
+/// 读取单个书源；不存在返回 Ok(None)
+pub(crate) fn get_book_source(app: &AppHandle, id: &str) -> Result<Option<BookSource>, String> {
+    if !valid_component(id) {
+        return Err("非法的书源 id".to_string());
+    }
+    let dir = ensure_sources_dir(app)?;
+    let path = dir.join(format!("{id}.json"));
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = fs::read_to_string(&path).map_err(|e| format!("读取书源失败: {e}"))?;
+    let source = serde_json::from_str(&text).map_err(|e| format!("解析书源失败: {e}"))?;
+    Ok(Some(source))
+}
+
+/// 列出全部书源（含 js，供引擎使用）；调用方需要摘要时再裁剪
+pub(crate) fn list_book_sources(app: &AppHandle) -> Result<Vec<BookSource>, String> {
+    let dir = ensure_sources_dir(app)?;
+    let mut sources = Vec::new();
+    let entries = fs::read_dir(&dir).map_err(|e| format!("读取书源目录失败: {e}"))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        if let Ok(text) = fs::read_to_string(&path) {
+            if let Ok(source) = serde_json::from_str::<BookSource>(&text) {
+                sources.push(source);
+            }
+        }
+    }
+    sources.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
+    Ok(sources)
+}
+
+pub(crate) fn delete_book_source(app: &AppHandle, id: &str) -> Result<(), String> {
+    if !valid_component(id) {
+        return Err("非法的书源 id".to_string());
+    }
+    let dir = ensure_sources_dir(app)?;
+    let path = dir.join(format!("{id}.json"));
+    if path.exists() {
+        fs::remove_file(&path).map_err(|e| format!("删除书源失败: {e}"))?;
     }
     Ok(())
 }

@@ -1,4 +1,6 @@
 mod commands;
+mod engine;
+mod host;
 mod models;
 mod storage;
 
@@ -21,7 +23,13 @@ pub fn run() {
             commands::readerx_tts_cache_get,
             commands::readerx_tts_cache_stats,
             commands::readerx_tts_cache_clear,
-            commands::readerx_license_text
+            commands::readerx_license_text,
+            commands::readerx_sources_list,
+            commands::readerx_source_get,
+            commands::readerx_source_put,
+            commands::readerx_source_delete,
+            commands::readerx_source_call,
+            commands::readerx_source_fetch_contents
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

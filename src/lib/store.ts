@@ -21,6 +21,7 @@ const PARA_SPACING_KEY = "readerx.paragraphSpacing";
 const PAGE_MODE_KEY = "readerx.pageMode";
 const STATUS_BAR_KEY = "readerx.statusBar";
 const PROGRESS_SCOPE_KEY = "readerx.progressScope";
+const SOURCE_PARALLEL_KEY = "readerx.onlineConcurrency";
 
 export const FONT_MIN = 15;
 export const FONT_MAX = 28;
@@ -51,7 +52,7 @@ let initialized = false;
 export async function initReaderState(): Promise<void> {
   if (initialized) return;
   initialized = true;
-  const [storedTheme, storedShelf, storedFont, storedSpacing, storedPageMode, storedStatusBar, storedScope] =
+  const [storedTheme, storedShelf, storedFont, storedSpacing, storedPageMode, storedStatusBar, storedScope, storedSourceParallel] =
     await Promise.all([
       readState<string>(THEME_KEY),
       readState<Record<string, ShelfEntry>>(SHELF_KEY),
@@ -60,6 +61,7 @@ export async function initReaderState(): Promise<void> {
       readState<PageMode>(PAGE_MODE_KEY),
       readState<boolean>(STATUS_BAR_KEY),
       readState<ProgressScope>(PROGRESS_SCOPE_KEY),
+      readState<number>(SOURCE_PARALLEL_KEY),
     ]);
 
   // 未保存过偏好时默认护眼(sepia)，不再跟随系统深浅色
@@ -84,6 +86,9 @@ export async function initReaderState(): Promise<void> {
   }
   if (storedScope === "book" || storedScope === "chapter") {
     setProgressScopeSignal(storedScope);
+  }
+  if (typeof storedSourceParallel === "number" && Number.isFinite(storedSourceParallel)) {
+    setSourceParallelSignal(clampSourceParallel(storedSourceParallel));
   }
 }
 
@@ -315,6 +320,35 @@ function persistProgressScope(scope: ProgressScope): void {
 export function setProgressScope(scope: ProgressScope): void {
   setProgressScopeSignal(scope);
   persistProgressScope(scope);
+}
+
+// ---------------------------------------------------------------------------
+// 书源并发（全局用户设置）：一次搜索同时运行多少个书源 / 单源并行请求上限
+// ---------------------------------------------------------------------------
+
+export const SOURCE_PARALLEL_MIN = 1;
+export const SOURCE_PARALLEL_MAX = 8;
+export const SOURCE_PARALLEL_DEFAULT = 3;
+
+const [sourceParallel, setSourceParallelSignal] = createSignal<number>(SOURCE_PARALLEL_DEFAULT);
+let sourceParallelWriteQueue: Promise<void> = Promise.resolve();
+
+function clampSourceParallel(value: number): number {
+  return Math.min(SOURCE_PARALLEL_MAX, Math.max(SOURCE_PARALLEL_MIN, Math.round(value)));
+}
+
+/** 响应式书源并发数（同时运行的书源数量） */
+export function currentSourceParallel(): number {
+  return sourceParallel();
+}
+
+/** 调整书源并发并持久化 */
+export function setSourceParallel(value: number): void {
+  const next = clampSourceParallel(value);
+  setSourceParallelSignal(next);
+  sourceParallelWriteQueue = sourceParallelWriteQueue.then(() =>
+    writeState(SOURCE_PARALLEL_KEY, next),
+  );
 }
 
 // ---------------------------------------------------------------------------

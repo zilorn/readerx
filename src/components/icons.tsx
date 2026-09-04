@@ -409,3 +409,36 @@ export function BookmarkIcon(p: SvgIconProps & { filled?: boolean }) {
     </Icon>
   );
 }
+
+/** 书源（堆叠图层 / 数据源） */
+export function SourceIcon(p: SvgIconProps) {
+  return (
+    <Icon {...p}>
+      <path d="M4 7l8-4 8 4-8 4-8-4z" />
+      <path d="M4 12.5l8 4 8-4" />
+      <path d="M4 18l8 4 8-4" />
+    </Icon>
+  );
+}
+
+/** 保存（软盘） */
+export function SaveIcon(p: SvgIconProps) {
+  return (
+    <Icon {...p}>
+      <path d="M5 3h11l5 5v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z" />
+      <path d="M8 3v5h7V3" />
+      <rect x="7" y="13" width="10" height="8" rx="1" />
+    </Icon>
+  );
+}
+
+/** 测试（烧瓶） */
+export function TestIcon(p: SvgIconProps) {
+  return (
+    <Icon {...p}>
+      <path d="M9 3h6" />
+      <path d="M10 3v5.5L4.8 17a2 2 0 0 0 1.8 3h10.8a2 2 0 0 0 1.8-3L14 8.5V3" />
+      <path d="M7.5 15h9" />
+    </Icon>
+  );
+}

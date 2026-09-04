@@ -9,12 +9,17 @@ import {
   GitHubIcon,
   HeadphonesIcon,
   RegexIcon,
+  SourceIcon,
   TrashIcon,
 } from "../components/icons";
 import { PageHeader } from "../components/PageHeader";
 import { LicenseSheet } from "../components/LicenseSheet";
 import { GroupManager } from "../components/GroupManager";
 import {
+  SOURCE_PARALLEL_MAX,
+  SOURCE_PARALLEL_MIN,
+  currentSourceParallel,
+  setSourceParallel,
   FONT_MAX,
   FONT_MIN,
   PARA_SPACING_MAX,
@@ -245,6 +250,50 @@ export default function SettingsPage() {
                     {opt.label}
                   </button>
                 ))}
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* 书源 */}
+        <section class="mb-6">
+          <h2 class="mx-1 mb-2 text-[12.5px] font-medium tracking-[0.04em] text-text-3">
+            书源
+          </h2>
+          <div class="divide-y divide-border overflow-hidden rounded-[14px] border border-border bg-surface">
+            <Row
+              icon={<SourceIcon size={18} />}
+              label="书源管理"
+              desc="管理在线书来源与书源功能开关"
+              onClick={() => navigate("/sources")}
+            >
+              <ChevronRightIcon size={18} class="flex-none text-text-3" />
+            </Row>
+            <div class="flex w-full cursor-default items-center gap-3 px-4 py-[13px] text-left">
+              <span class="flex min-w-0 flex-1 flex-col gap-0.5">
+                <span class="text-[14.5px] font-medium">书源并发</span>
+                <span class="text-[11.5px] text-text-3">一次搜索同时运行多少个书源</span>
+              </span>
+              <div class="flex flex-none items-center gap-1">
+                <button
+                  class="grid h-8 w-8 place-items-center rounded-lg border border-border text-[13px] font-bold text-text-2 disabled:opacity-35"
+                  aria-label="减小书源并发"
+                  disabled={currentSourceParallel() <= SOURCE_PARALLEL_MIN}
+                  onClick={() => setSourceParallel(currentSourceParallel() - 1)}
+                >
+                  −
+                </button>
+                <span class="min-w-[44px] text-center text-[13.5px] font-semibold tabular-nums">
+                  {currentSourceParallel()}
+                </span>
+                <button
+                  class="grid h-8 w-8 place-items-center rounded-lg border border-border text-[13px] font-bold text-text-2 disabled:opacity-35"
+                  aria-label="增大书源并发"
+                  disabled={currentSourceParallel() >= SOURCE_PARALLEL_MAX}
+                  onClick={() => setSourceParallel(currentSourceParallel() + 1)}
+                >
+                  +
+                </button>
               </div>
             </div>
           </div>

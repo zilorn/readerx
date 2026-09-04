@@ -1,6 +1,6 @@
 [package]
 name = "readerx"
-version = "0.1.0-beta.1"
+version = "0.1.0"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -26,6 +26,12 @@ tauri-plugin-tts = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
+boa_engine = { version = "0.22", default-features = false }
+scraper = "0.27"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "cookies", "gzip", "json", "rustls-tls"] }
+encoding_rs = "0.8"
+md-5 = "0.10"
+sha1 = "0.10"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
@@ -35,4 +41,5 @@ lto = true
 opt-level = 3
 panic = "abort"
 strip = true
+
 

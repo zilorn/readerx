@@ -12,6 +12,15 @@ import {
 import { useNavigate, useParams } from "@solidjs/router";
 import { LoadingScreen } from "../components/LoadingScreen";
 import { ReaderSettingsSheet } from "../components/ReaderSettingsSheet";
+import { isOnlineBook } from "../lib/booksTypes";
+import {
+  LAZY_WINDOW,
+  cancelOnlineRun,
+  chapterHasContent,
+  downloadRemainingChapters,
+  ensureReadingWindow,
+  onlineRunState,
+} from "../lib/online";
 import {
   BookSearchPanel,
   type BookSearchOpenTarget,
@@ -26,9 +35,11 @@ import {
   ChevronLeftIcon,
   ChevronRightIcon,
   CloseIcon,
+  DownloadIcon,
   FollowBackIcon,
   HeadphonesIcon,
   ListIcon,
+  RefreshIcon,
   RestoreBackIcon,
   SearchIcon,
   SettingsIcon,
@@ -495,6 +506,54 @@ export default function ReaderPage() {
     const current = book();
     return current ? chapterIdx() + 1 >= current.chapters.length : true;
   };
+
+  // -------------------------------------------------------------------
+  // 在线书：按「当前章 ±5」窗口懒加载正文 + 缺失章节 gate 覆盖层 + 下载面板
+  // -------------------------------------------------------------------
+
+  const isRemoteBook = createMemo(() => {
+    const current = book();
+    return !!current && isOnlineBook(current);
+  });
+  const remoteRun = createMemo(() => onlineRunState(bookId()));
+  const [downloadOpen, setDownloadOpen] = createSignal(false);
+
+  /** 当前章正文缺失（需覆盖层等待/重试） */
+  const remoteMissing = createMemo(() => {
+    if (!isRemoteBook()) return false;
+    const ch = chapter();
+    return !!ch && !chapterHasContent(ch);
+  });
+  /** 当前章是否已有失败记录（不自动重试，给重试按钮） */
+  const remoteGateFailed = createMemo(() => {
+    const idx = chapterIdx();
+    return remoteRun().failed.some((f) => f.index === idx);
+  });
+  /** 覆盖层失败详情文本 */
+  const remoteGateFailedText = createMemo(() => {
+    const f = remoteRun().failed.find((x) => x.index === chapterIdx());
+    return f?.error ?? "未知错误";
+  });
+
+  // 进入/切换章节时：若窗口内存在缺正文章节则后台预取（当前章失败过的不自动重试）
+  createEffect(() => {
+    const current = book();
+    if (!current || !isOnlineBook(current)) return;
+    const idx = chapterIdx();
+    void current.chapters.length;
+    const run = onlineRunState(current.id);
+    void run.busy;
+    void run.phase;
+    if (run.busy || run.phase !== "idle") return;
+    const needAny = current.chapters.some(
+      (c, i) =>
+        Math.abs(i - idx) <= LAZY_WINDOW &&
+        !chapterHasContent(c) &&
+        !run.failed.some((f) => f.index === i),
+    );
+    if (!needAny) return;
+    void ensureReadingWindow(current.id, idx);
+  });
 
   // 阅读区几何（分页排版依赖真实尺寸；书就绪且元素挂载后测量）
   const [area, setArea] = createSignal({ w: 0, h: 0 });
@@ -1699,6 +1758,65 @@ export default function ReaderPage() {
               </Show>
             </Show>
 
+            {/* 在线书正文缺失：获取章节 gate（阻挡翻页直到正文就绪/失败可重试） */}
+            <Show when={remoteMissing()}>
+              <div
+                class="absolute inset-0 z-[18] grid place-items-center px-8"
+                style={{ background: "var(--bg)" }}
+                onPointerDown={(e) => e.stopPropagation()}
+                onPointerUp={(e) => e.stopPropagation()}
+                onClick={(e) => e.stopPropagation()}
+                role="alert"
+              >
+                <div class="flex w-full max-w-[300px] flex-col items-center gap-3 text-center">
+                  <Show
+                    when={remoteGateFailed() || remoteRun().cancelled}
+                    fallback={
+                      <>
+                        <span class="grid h-11 w-11 place-items-center rounded-full bg-surface-2 text-accent">
+                          <RefreshIcon size={22} class="animate-spin [animation-duration:1.2s]" />
+                        </span>
+                        <p class="text-[14px] font-semibold text-text-2">正在获取章节正文…</p>
+                        <p class="text-[12px] leading-[1.6] text-text-3">
+                          <Show when={remoteRun().total > 0}>
+                            窗口预取 {remoteRun().done} / {remoteRun().total}
+                            <br />
+                          </Show>
+                          已缓存的章节仍可正常阅读
+                        </p>
+                      </>
+                    }
+                  >
+                    <p class="text-[14px] font-semibold text-text-2">
+                      {remoteRun().cancelled ? "获取已取消" : "章节获取失败"}
+                    </p>
+                    <p class="max-h-24 w-full overflow-y-auto break-all rounded-[10px] bg-danger-weak px-3 py-2 text-[11.5px] leading-[1.5] text-danger">
+                      {remoteGateFailedText()}
+                    </p>
+                    <div class="mt-1 flex w-full items-center justify-center gap-3">
+                      <button
+                        class="rounded-xl bg-surface-2 px-4 py-2.5 text-[13px] font-semibold text-text-2 active:scale-[0.97]"
+                        onClick={() => {
+                          cancelOnlineRun(bookId());
+                          goBack();
+                        }}
+                      >
+                        返回书架
+                      </button>
+                      <button
+                        class="rounded-xl bg-accent px-4 py-2.5 text-[13px] font-semibold text-on-accent active:scale-[0.97]"
+                        onClick={() => {
+                          void ensureReadingWindow(bookId(), chapterIdx());
+                        }}
+                      >
+                        重试获取
+                      </button>
+                    </div>
+                  </Show>
+                </div>
+              </div>
+            </Show>
+
             {/* 底部阅读状态栏：章节名 + 阅读进度（呼出菜单/抽屉时隐藏，避免遮挡） */}
             <Show when={statusShown()}>
               <div
@@ -1782,6 +1900,18 @@ export default function ReaderPage() {
                   </span>
                 </div>
                 <div class="flex flex-none items-center gap-1">
+                  <Show when={isRemoteBook()}>
+                    <button
+                      class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
+                      aria-label="下载正文"
+                      onClick={() => {
+                        setDownloadOpen(true);
+                        setMenuOpen(false);
+                      }}
+                    >
+                      <DownloadIcon size={21} />
+                    </button>
+                  </Show>
                   <button
                     class="grid h-10 w-10 flex-none place-items-center rounded-xl transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
                     classList={{
@@ -2112,6 +2242,108 @@ export default function ReaderPage() {
               open={readerSettingsOpen()}
               onClose={() => setReaderSettingsOpen(false)}
             />
+
+            {/* 在线书：批量下载正文 */}
+            <Show when={downloadOpen()}>
+              <div
+                class="fixed inset-0 z-40 animate-sheet-fade bg-black/45 backdrop-blur-[2px]"
+                onClick={() => setDownloadOpen(false)}
+              />
+              <div
+                class="fixed inset-x-0 bottom-0 z-[41] mx-auto flex max-h-[70%] max-w-[480px] animate-sheet-up flex-col overflow-hidden rounded-t-[16px] bg-surface shadow-[0_-10px_34px_rgb(0_0_0/0.22)]"
+                role="dialog"
+                aria-label="下载正文"
+              >
+                <div class="flex flex-none items-center gap-2.5 border-b border-border px-4 py-3">
+                  <span class="text-[15px] font-bold">下载正文</span>
+                  <span class="flex-1 text-xs text-text-3">
+                    {book()!.chapters.length} 章 · 已下载{" "}
+                    {book()!.chapters.filter((c) => chapterHasContent(c)).length} 章
+                  </span>
+                  <button
+                    class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
+                    aria-label="关闭"
+                    onClick={() => setDownloadOpen(false)}
+                  >
+                    <CloseIcon />
+                  </button>
+                </div>
+                <div class="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-4">
+                  <p class="text-[12px] leading-[1.7] text-text-3">
+                    平时阅读只按需缓存「当前章前后 5 章」；这里可把全书正文批量下载到本机，之后断网也能读。
+                    请求并行度跟随全局「书源并发」设置（设置 → 书源）。
+                  </p>
+                  <Show when={remoteRun().busy}>
+                    <div class="rounded-[12px] bg-surface-2 px-3.5 py-3">
+                      <div class="flex items-center justify-between text-[12px]">
+                        <span class="font-semibold text-text-2">
+                          {remoteRun().phase === "window" ? "窗口预取中…" : "批量下载中…"}
+                        </span>
+                        <span class="tabular-nums text-text-3">
+                          {remoteRun().done} / {remoteRun().total}
+                        </span>
+                      </div>
+                      <div class="mt-2 h-1.5 overflow-hidden rounded-full bg-bg">
+                        <div
+                          class="h-full rounded-full bg-accent transition-[width] duration-150"
+                          style={{
+                            width: `${
+                              remoteRun().total > 0
+                                ? Math.min(100, (remoteRun().done / remoteRun().total) * 100)
+                                : 0
+                            }%`,
+                          }}
+                        />
+                      </div>
+                      {remoteRun().failed.length > 0 && (
+                        <p class="mt-1.5 text-[11px] text-danger">
+                          {remoteRun().failed.length} 章失败
+                        </p>
+                      )}
+                    </div>
+                  </Show>
+                  <Show when={!remoteRun().busy && remoteRun().failed.length > 0}>
+                    <p class="rounded-[10px] bg-danger-weak px-3 py-2 text-[11.5px] leading-[1.5] text-danger">
+                      上次有 {remoteRun().failed.length} 章未下载成功，可重试。
+                    </p>
+                  </Show>
+                  <div class="flex gap-2.5 pt-0.5">
+                    <Show when={remoteRun().busy}>
+                      <button
+                        class="flex-1 rounded-xl bg-surface-2 px-4 py-2.5 text-[13.5px] font-semibold text-text-2 active:scale-[0.98]"
+                        onClick={() => cancelOnlineRun(bookId())}
+                      >
+                        停止下载
+                      </button>
+                    </Show>
+                    <button
+                      class="flex-1 rounded-xl bg-accent px-4 py-2.5 text-[13.5px] font-semibold text-on-accent shadow-lg shadow-accent/25 active:scale-[0.98]"
+                      disabled={remoteRun().busy}
+                      classList={{ "opacity-50": remoteRun().busy }}
+                      onClick={() => {
+                        void (async () => {
+                          const bookIdNow = bookId();
+                          await downloadRemainingChapters(bookIdNow);
+                          const st = onlineRunState(bookIdNow);
+                          if (st.cancelled) return;
+                          const count = st.done;
+                          if (st.failed.length === 0 && count > 0) {
+                            showToast(`下载完成：${count} 章正文已缓存`);
+                          } else if (st.failed.length > 0) {
+                            showToast(`下载完成 ${count} 章，${st.failed.length} 章失败`, true);
+                          }
+                        })();
+                      }}
+                    >
+                      {remoteRun().busy ? "下载中…" : "下载剩余全部"}
+                    </button>
+                  </div>
+                  <p class="pb-1 text-center text-[11px] text-text-3">
+                    下载内容同样保存在本机书库，删除书籍时一并清除
+                  </p>
+                </div>
+              </div>
+            </Show>
 
             {/* 全书搜索（阅读器内抽屉，不产生路由历史；命中后进入搜索模式高亮逐条查看） */}
             <BookSearchPanel

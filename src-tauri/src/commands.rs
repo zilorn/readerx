@@ -1,7 +1,12 @@
 //! 供 WebView 调用的 Tauri command 处理器。
 //! 仅负责承接 invoke 参数、把同步 I/O 放到 blocking 线程池，不直接触碰磁盘。
 
-use crate::models::{CachedAudio, LocalBook, TtsCacheStat};
+use crate::engine;
+use crate::host;
+use crate::models::{
+    BookItem, BookSource, BookSourceSummary, ChapterContentResult, ChapterItem, CachedAudio,
+    LocalBook, SourceCallResult, TtsCacheStat,
+};
 use crate::storage;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
@@ -135,4 +140,150 @@ pub async fn readerx_license_text(app: AppHandle) -> Result<String, String> {
 #[tauri::command]
 pub fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
+}
+
+// ---------------------------------------------------------------------------
+// 书源（Book Source）
+// ---------------------------------------------------------------------------
+
+/// 列出全部书源（摘要，不含 js 正文）
+#[tauri::command]
+pub async fn readerx_sources_list(app: AppHandle) -> Result<Vec<BookSourceSummary>, String> {
+    spawn_blocking(move || {
+        let sources = storage::list_book_sources(&app)?;
+        Ok(sources.into_iter().map(|s| s.to_summary()).collect::<Vec<_>>())
+    })
+    .await
+    .map_err(|e| format!("书源列表读取任务失败: {e}"))?
+}
+
+/// 读取单个书源（含 js，供编辑）
+#[tauri::command]
+pub async fn readerx_source_get(app: AppHandle, id: String) -> Result<Option<BookSource>, String> {
+    spawn_blocking(move || storage::get_book_source(&app, &id))
+        .await
+        .map_err(|e| format!("书源读取任务失败: {e}"))?
+}
+
+fn validate_source(source: &BookSource) -> Result<(), String> {
+    if source.name.trim().is_empty() {
+        return Err("书源名称不能为空".to_string());
+    }
+    if source.name.trim().chars().count() > 60 {
+        return Err("书源名称过长（最多 60 字）".to_string());
+    }
+    if source.book_source_url.trim().is_empty() {
+        return Err("书源站点地址不能为空".to_string());
+    }
+    if source.js.trim().is_empty() {
+        return Err("书源 JS 代码不能为空".to_string());
+    }
+    if source.js.chars().count() > 2_000_000 {
+        return Err("书源 JS 代码过大（超过 200 万字符）".to_string());
+    }
+    Ok(())
+}
+
+/// 新建 / 覆盖保存一个书源
+#[tauri::command]
+pub async fn readerx_source_put(app: AppHandle, source: BookSource) -> Result<(), String> {
+    spawn_blocking(move || {
+        validate_source(&source)?;
+        storage::put_book_source(&app, &source)
+    })
+    .await
+    .map_err(|e| format!("书源写入任务失败: {e}"))?
+}
+
+/// 删除一个书源
+#[tauri::command]
+pub async fn readerx_source_delete(app: AppHandle, id: String) -> Result<(), String> {
+    spawn_blocking(move || storage::delete_book_source(&app, &id))
+        .await
+        .map_err(|e| format!("书源删除任务失败: {e}"))?
+}
+
+/// 入口函数 → 能力开关 映射（调用前校验对应能力已启用）
+fn capability_gate(source: &BookSource, fn_name: &str) -> Result<(), String> {
+    if !engine::ENTRY_FUNCTIONS.contains(&fn_name) {
+        return Err(format!("不支持的书源函数: {fn_name}"));
+    }
+    let caps = &source.capabilities;
+    let enabled = match fn_name {
+        "searchBook" => caps.search,
+        "discoverBooks" | "discoverCategories" => caps.discover,
+        "bookDetail" => caps.detail,
+        "bookToc" => caps.toc,
+        "bookContent" => caps.content,
+        _ => true, // ENTRY_FUNCTIONS 已过滤
+    };
+    if !enabled {
+        return Err(format!("书源「{}」已禁用「{fn_name}」能力", source.name));
+    }
+    Ok(())
+}
+
+/// 执行一次书源入口函数（搜索 / 发现 / 详情 / 目录 / 正文）
+#[tauri::command]
+pub async fn readerx_source_call(
+    app: AppHandle,
+    source_id: String,
+    fn_name: String,
+    args: serde_json::Value,
+) -> Result<SourceCallResult, String> {
+    spawn_blocking(move || -> Result<SourceCallResult, String> {
+        let source = storage::get_book_source(&app, &source_id)?
+            .ok_or_else(|| "书源不存在".to_string())?;
+        if !source.enabled {
+            return Err("书源已禁用".to_string());
+        }
+        capability_gate(&source, &fn_name)?;
+        host::prepare_source(&source)?;
+        let budget = if fn_name == "bookContent" {
+            engine::DEFAULT_CHAPTER_BUDGET_MS
+        } else {
+            engine::DEFAULT_CALL_BUDGET_MS
+        };
+        engine::call_source_function(&source.id, &source.js, &fn_name, &args, budget)
+    })
+    .await
+    .map_err(|e| format!("书源调用任务失败: {e}"))?
+}
+
+/// 批量拉取正文（按用户“书源并发”设置控制单源内部并行请求数）
+#[tauri::command]
+pub async fn readerx_source_fetch_contents(
+    app: AppHandle,
+    source_id: String,
+    book: BookItem,
+    chapters: Vec<ChapterItem>,
+) -> Result<Vec<ChapterContentResult>, String> {
+    spawn_blocking(move || -> Result<Vec<ChapterContentResult>, String> {
+        let source = storage::get_book_source(&app, &source_id)?
+            .ok_or_else(|| "书源不存在".to_string())?;
+        if !source.enabled {
+            return Err("书源已禁用".to_string());
+        }
+        if !source.capabilities.content {
+            return Err(format!("书源「{}」已禁用正文能力", source.name));
+        }
+        host::prepare_source(&source)?;
+        // 全局用户设置：readerx.onlineConcurrency（一次运行多少书源/并行请求），1-8，默认 3
+        let concurrency = storage::read_state(&app, "readerx.onlineConcurrency")
+            .ok()
+            .flatten()
+            .and_then(|v| v.as_u64())
+            .unwrap_or(3)
+            .clamp(1, 8) as usize;
+        engine::fetch_chapter_contents(
+            &source.id,
+            &source.js,
+            &book,
+            &chapters,
+            concurrency,
+            engine::DEFAULT_CHAPTER_BUDGET_MS,
+        )
+    })
+    .await
+    .map_err(|e| format!("书源正文拉取任务失败: {e}"))?
 }
