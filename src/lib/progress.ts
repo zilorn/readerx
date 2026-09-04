@@ -79,6 +79,11 @@ function lengthsOf(book: LocalBook): Lengths {
   return entry;
 }
 
+/** 书籍正文被替换（WebDAV 重新导入）后失效其累计字符缓存 */
+export function invalidateBookLengths(bookId: string): void {
+  lengthsCache.delete(bookId);
+}
+
 /**
  * 整书阅读百分比（0–100，正文字符口径）。
  * charOffset 缺省（旧数据只记了章节）按“章节开头”计。

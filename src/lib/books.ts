@@ -28,6 +28,7 @@ import { assignChapterCids, chapterCid } from "./booksTypes";
 import { parseEpubFile } from "./epub";
 import { ensureShelfEntry } from "./store";
 import { clearAllBookmarks, removeBookmarksForBook } from "./bookmarks";
+import { invalidateBookLengths } from "./progress";
 
 export type ImportSplitChoice =
   | { kind: "auto" }
@@ -280,6 +281,32 @@ export async function persistBookDraft(
     return next;
   });
   return book;
+}
+
+/**
+ * 用一份新解析出的草稿**原位替换**某本已导入书（同一 id 与书架记录）。
+ * 用于 WebDAV「重新导入」：保留来源标记、分组与阅读进度，仅正文/元信息随远程最新内容更新。
+ */
+export async function replaceBookContent(
+  existing: LocalBook,
+  draft: BookDraft,
+): Promise<LocalBook> {
+  const next: LocalBook = {
+    ...existing,
+    title: draft.title.trim() || titleFromFileName(draft.fileName),
+    author: draft.author.trim() || "佚名",
+    format: draft.format,
+    fileName: draft.fileName,
+    size: draft.size,
+    hue: draft.hue,
+    splitDesc: draft.splitDesc,
+    chapters: assignChapterCids(draft.chapters),
+    importedAt: Date.now(),
+  };
+  invalidateBookLengths(next.id);
+  await saveRemoteBook(next);
+  setBooksState((prev) => prev?.map((b) => (b.id === next.id ? next : b)) ?? prev);
+  return next;
 }
 
 /**

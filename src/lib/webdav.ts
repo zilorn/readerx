@@ -12,6 +12,7 @@ import {
   parseEpubFileDraft,
   parseTxtFile,
   persistBookDraft,
+  replaceBookContent,
 } from "./books";
 import type { LocalBook } from "./booksTypes";
 import { ensureShelfEntry } from "./store";
@@ -363,10 +364,14 @@ export async function downloadDavFile(
   return { bytes, fileName };
 }
 
-/** 下载并解析一本远程书，直接进入书架 */
+/**
+ * 下载并解析一本远程书，直接进入书架。
+ * existing 传入时表示“重新导入”：原位替换该书内容（同 id，保留进度与分组）。
+ */
 export async function importDavFile(
   server: DavServer,
   path: string,
+  existing?: LocalBook,
 ): Promise<LocalBook> {
   const { bytes, fileName } = await downloadDavFile(server, path);
   const format = detectBookFormat(fileName);
@@ -378,7 +383,20 @@ export async function importDavFile(
     format === "txt"
       ? await parseTxtFile(file, { kind: "auto" })
       : await parseEpubFileDraft(file);
+  if (existing) return replaceBookContent(existing, draft);
   const book = await persistBookDraft(draft, "webdav");
   ensureShelfEntry(book.id);
   return book;
+}
+
+/**
+ * 判定某远程书文件是否已在本地书架。
+ * 按文件名匹配即可：远端文件更新（大小/内容变化）也应识别为已导入，
+ * 以便点击阅读 / 长按重新导入，而不是当作新书重复导入。
+ */
+export function davEntryImportedBook(
+  entry: DavEntry,
+  books: LocalBook[],
+): LocalBook | undefined {
+  return books.find((book) => book.fileName === entry.name);
 }
