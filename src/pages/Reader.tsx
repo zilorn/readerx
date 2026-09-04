@@ -1259,6 +1259,33 @@ export default function ReaderPage() {
     showToast("已添加书签");
   }
 
+  /** 选区「朗读」：从选区起点所在句子开始朗读（起点无正文锚点时回退章首起读） */
+  function handleSpeakFromRange(range: Range): void {
+    // 收起原生选区（同时隐藏选择菜单），交给朗读句高亮展示
+    window.getSelection()?.removeAllRanges();
+    const ch = chapter();
+    if (!ch) return;
+    const mir = mirror();
+    if (mir.text.length > 0) {
+      const anchor = dataAnchorOf(range.startContainer);
+      if (anchor) {
+        const base = mir.unitStart[anchor.unit] ?? -1;
+        if (base >= 0) {
+          const os = charOffsetInElement(
+            anchor.el,
+            range.startContainer,
+            range.startOffset,
+          );
+          const offset = Math.min(mir.text.length, base + anchor.cstart + os);
+          ttsPlayer.startFromChar(offset);
+          return;
+        }
+      }
+    }
+    // 选中内容没有正文锚点（如章节标题）：从本章开头读起
+    ttsPlayer.startFromChar(-1);
+  }
+
   // -------------------------------------------------------------------
   // 书签跳转：解析 → 切章/翻页 → 定位高亮
   // -------------------------------------------------------------------
@@ -1762,6 +1789,7 @@ export default function ReaderPage() {
               }
               onCopy={(text) => void handleCopyText(text)}
               onBookmark={(range) => handleBookmarkRange(range)}
+              onSpeak={(range) => handleSpeakFromRange(range)}
             />
 
             {/* 听书设置（引擎 / 音色 / 自定义源 / 倍速 / 定时） */}

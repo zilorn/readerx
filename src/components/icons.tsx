@@ -253,6 +253,17 @@ export function CopyIcon(p: SvgIconProps) {
   );
 }
 
+/** 喇叭（朗读本句） */
+export function SpeakerIcon(p: SvgIconProps) {
+  return (
+    <Icon {...p}>
+      <path d="M11 4.7 5.8 8.6H3.4v6.8h2.4L11 19.3z" />
+      <path d="M15.8 9.4l4 5.2" />
+      <path d="M19.8 9.4l-4 5.2" />
+    </Icon>
+  );
+}
+
 /** 耳机（听书） */
 export function HeadphonesIcon(p: SvgIconProps) {
   return (

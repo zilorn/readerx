@@ -95,6 +95,11 @@ export interface TtsPlayer {
   voiceName: () => string;
   error: () => string | null;
   start: () => void;
+  /**
+   * 从当前视图章节内、镜像偏移 charOffset 所在句子开始朗读
+   * （选中文字菜单的「朗读」）；若正在朗读/暂停/出错会先停旧会话再按该句起播。
+   */
+  startFromChar: (charOffset: number) => void;
   stop: () => void;
   togglePlay: () => void;
   prev: () => void;
@@ -528,8 +533,8 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
     void playFrom(idx, stayPaused);
   }
 
-  /** 从头（阅读位置附近）开始 / 状态为 error 时重新开始 */
-  function startFromView(): void {
+  /** 起播当前视图章节：从 offset() 所在句子开始（null/不可用回退章首）。仅停止态可用 */
+  function startFrom(offset: () => number | null): void {
     if (disposed) return;
     if (status() !== "stopped") return;
     const vi = ctx.chapterIndex();
@@ -552,10 +557,22 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
         }
         return;
       }
-      const idx = nearestIndexFor(ctx.readingOffset?.() ?? null);
+      const idx = nearestIndexFor(offset());
       pausedRequested = false;
       void playFrom(idx);
     });
+  }
+
+  /** 从头（阅读位置附近）开始 / 状态为 error 时重新开始 */
+  function startFromView(): void {
+    startFrom(() => ctx.readingOffset?.() ?? null);
+  }
+
+  /** 选中文字菜单「朗读」：从当前视图章节内 charOffset 所在句子起播 */
+  function startFromChar(charOffset: number): void {
+    if (disposed) return;
+    if (status() !== "stopped") stop();
+    startFrom(() => charOffset);
   }
 
   function stop(): void {
@@ -828,6 +845,7 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
     voiceName: voiceNameForEngine,
     error,
     start: startFromView,
+    startFromChar,
     stop,
     togglePlay,
     prev,

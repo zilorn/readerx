@@ -2,18 +2,12 @@
  * 阅读页长按/拖选文本后的自定义菜单（替换原生菜单/右键菜单观感）。
  *
  * - 阻止原生弹出：容器已统一 contextmenu preventDefault，iOS 加 touch-callout none；
- * - 仅“复制 / 书签”两项，带 SVG 图标；
+ * - 仅「复制 / 书签 / 朗读」三项，带 SVG 图标；
  * - 固定高度条，宽度自适应内容；内容超出可用宽度时内部横向滚动，杜绝纵向溢出/出屏；
  * - 跟随选区定位：上方空间不足自动翻到选区下方；滚动手势或选区消失即隐藏。
  */
-import {
-  Show,
-  createEffect,
-  createSignal,
-  onCleanup,
-  onMount,
-} from "solid-js";
-import { BookmarkIcon, CopyIcon } from "./icons";
+import { Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
+import { BookmarkIcon, CopyIcon, SpeakerIcon } from "./icons";
 
 export interface SelectionMenuProps {
   /** 坐标换算基准（阅读区容器） */
@@ -22,6 +16,8 @@ export interface SelectionMenuProps {
   active: () => boolean;
   onCopy: (text: string) => void;
   onBookmark: (range: Range) => void;
+  /** 从选区所在句子开始朗读 */
+  onSpeak: (range: Range) => void;
 }
 
 const BAR_H = 46;
@@ -163,6 +159,14 @@ export function SelectionMenu(props: SelectionMenuProps) {
               >
                 <BookmarkIcon size={17} />
                 <span>书签</span>
+              </button>
+              <div class="mx-1 h-5 w-px flex-none bg-border" />
+              <button
+                class="flex h-9 flex-none cursor-pointer items-center gap-1.5 rounded-xl px-3 text-[13px] text-text-2 transition-colors active:bg-surface-2"
+                onClick={() => props.onSpeak(current().range)}
+              >
+                <SpeakerIcon size={17} />
+                <span>朗读</span>
               </button>
             </div>
           </div>
