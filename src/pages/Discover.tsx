@@ -71,7 +71,7 @@ function ResultRow(props: { entry: ResultEntry; onClick: () => void }) {
         )}
       </span>
       <span class="flex flex-none flex-col items-end gap-0.5">
-        <i class="not-italic rounded-full bg-surface-2 px-1.5 py-0.5 text-[9.5px] font-semibold text-text-3">
+        <i class="not-italic block max-w-[110px] truncate rounded-full bg-surface-2 px-1.5 py-0.5 text-[9.5px] font-semibold text-text-3">
           {source.name}
         </i>
         <ChevronRightIcon size={16} class="text-text-3/70" />
