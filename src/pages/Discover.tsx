@@ -15,8 +15,9 @@ import {
 } from "../lib/bookSources";
 import { callRemoteSource } from "../lib/backend";
 import type { BookItem, BookSourceSummary } from "../lib/bookSourcesTypes";
-import { rememberPicked } from "../lib/online";
+import { rememberPicked, type PickedBook } from "../lib/online";
 import { currentSourceParallel } from "../lib/store";
+import { OnlineBookSheet } from "../components/OnlineBookSheet";
 
 type Mode = "search" | "discover";
 
@@ -91,6 +92,8 @@ export default function DiscoverPage() {
   const [searchTotal, setSearchTotal] = createSignal(0);
   const [results, setResults] = createSignal<ResultEntry[]>([]);
   const [errorText, setErrorText] = createSignal("");
+  // 点击结果后弹出的在线书详情抽屉（不切路由，保留搜索/发现页状态）
+  const [preview, setPreview] = createSignal<PickedBook | null>(null);
 
   // 发现模式
   const [discoverSourceId, setDiscoverSourceId] = createSignal("");
@@ -109,9 +112,10 @@ export default function DiscoverPage() {
     () => bookSourceList().filter((s) => s.enabled && s.capabilities.search).length > 0,
   );
 
-  function goOnline(entry: ResultEntry) {
+  function openPreview(entry: ResultEntry) {
+    // 仍登记会话级 pick，保持与 /online/:key 深链的兼容
     const key = rememberPicked(entry.source, entry.item);
-    navigate(`/online/${key}`);
+    setPreview({ key, source: entry.source, item: entry.item });
   }
 
   async function onSearch() {
@@ -347,7 +351,7 @@ export default function DiscoverPage() {
                 <div class="overflow-hidden rounded-[14px] border border-border bg-surface">
                   <For each={results()}>
                     {(entry) => (
-                      <ResultRow entry={entry} onClick={() => goOnline(entry)} />
+                      <ResultRow entry={entry} onClick={() => openPreview(entry)} />
                     )}
                   </For>
                 </div>
@@ -415,7 +419,7 @@ export default function DiscoverPage() {
                   <div class="overflow-hidden rounded-[14px] border border-border bg-surface">
                     <For each={discResults()}>
                       {(entry) => (
-                        <ResultRow entry={entry} onClick={() => goOnline(entry)} />
+                        <ResultRow entry={entry} onClick={() => openPreview(entry)} />
                       )}
                     </For>
                   </div>
@@ -439,6 +443,9 @@ export default function DiscoverPage() {
           </Show>
         </Show>
       </div>
+
+      {/* 在线书详情抽屉：点击结果行弹出，不离开本页（保留搜索词 / 结果 / 滚动状态） */}
+      <OnlineBookSheet pick={preview()} onClose={() => setPreview(null)} />
     </div>
   );
 }
