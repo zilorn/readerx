@@ -245,6 +245,48 @@ export function caretRangeAtGlobalOffset(
 }
 
 /**
+ * 在根容器内取「镜像文本全局偏移」紧贴边界处的单个字符 Range，供手柄做纵向锚定。
+ * 折叠 caret 的 getBoundingClientRect 语义各引擎/各设备字体并不一致（top 有的指行盒顶、
+ * 有的指字形内容盒顶、高度可能为 0），直接用会把选区手柄相对文字上下带偏；
+ * 而单字符 Range 的矩形来自真实排版字形框，与实际画出来的字一致，跨引擎稳定。
+ *
+ * 优先取边界**左侧**的字符（视觉上光标停在它之后，与选区端点的落点一致）；
+ * 边界恰好在文本/单元开头（无左侧字符）时取右侧第一个字符；offset 落点处必有可见字符
+ * 的场合才返回非 null，否则返回 null 由调用方兜底。
+ */
+export function glyphRangeAtGlobalOffset(
+  root: ParentNode | null,
+  unitStart: number[],
+  offset: number,
+): Range | null {
+  if (!root) return null;
+  const target = Math.max(0, Math.floor(offset) || 0);
+  const els = root.querySelectorAll<HTMLElement>("[data-u]");
+  for (const el of els) {
+    const unit = Number(el.dataset.u ?? "");
+    const cstart = Number(el.dataset.c ?? "0");
+    const base = unitStart[unit];
+    if (!Number.isFinite(base)) continue;
+    const spanStart = base + cstart;
+    const spanEnd = spanStart + elementTextLength(el);
+    if (target < spanStart || target > spanEnd) continue;
+    const local = target - spanStart;
+    const len = spanEnd - spanStart;
+    if (len <= 0) return null;
+    const glyphStart = local >= 1 && local <= len ? local - 1 : Math.min(local, len - 1);
+    const start = charNodeAtOffset(el, glyphStart);
+    const end = charNodeAtOffset(el, glyphStart + 1);
+    if (!start || !end) return null;
+    const range = document.createRange();
+    range.setStart(start.node, start.offset);
+    range.setEnd(end.node, end.offset);
+    if (range.collapsed) return null;
+    return range;
+  }
+  return null;
+}
+
+/**
  * 高亮一段可能跨多个正文单元（段落/标题）的镜像字符区间 [fromGlobal, toGlobal)。
  * 只影响根容器内已渲染的单元；滚动模式下还可定位到首个覆盖单元。
  * 返回是否至少覆盖了一个元素。

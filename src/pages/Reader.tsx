@@ -105,6 +105,7 @@ import {
   copyPlainText,
   dataAnchorOf,
   flashSpan,
+  glyphRangeAtGlobalOffset,
 } from "../lib/textAnchor";
 import {
   createTtsPlayer,
@@ -1702,26 +1703,42 @@ export default function ReaderPage() {
     const pointAt = (
       off: number,
     ): { x: number; y: number; top: number; bottom: number } | null => {
-      const range = caretRangeAtGlobalOffset(col, mir.unitStart, off);
-      if (!range) return null;
-      const rr = range.getBoundingClientRect();
-      if (!rr) return null;
-      let top = rr.top;
-      let height = rr.height;
-      if (rr.width <= 0 || rr.height <= 0) {
-        // 折叠 caret：按其所在行行高估算
-        const node = range.startContainer;
+      const caret = caretRangeAtGlobalOffset(col, mir.unitStart, off);
+      if (!caret) return null;
+      const cr = caret.getBoundingClientRect();
+      if (!cr) return null;
+      // 折叠 caret 的 rect 语义各引擎/设备字体不一致（top 有的指行盒顶、有的指字形内容盒
+      // 顶、高度甚至为 0），若直接用其 top 会把手柄相对文字上下带偏；横向落点（left）则是
+      // 引擎统一的字符边界，保留用它。纵向改锚定到贴着边界的一个实际字符排版框（与画出来的
+      // 字一致，跨引擎/跨设备稳定），手柄圆心放字形框下方，呈“手柄在文字下方”的观感。
+      const x = cr.left - areaRect.left;
+      const glyph = glyphRangeAtGlobalOffset(col, mir.unitStart, off);
+      const gr = glyph ? glyph.getBoundingClientRect() : null;
+      if (gr && gr.width > 0 && gr.height > 0) {
+        // 圆心贴字形框底往下挪一截：避开字又不至于坠进下一行的字
+        const below = Math.max(4, Math.round((layout()?.fontSize ?? 24) * 0.3));
+        return {
+          x,
+          y: gr.bottom - areaRect.top + below,
+          top: gr.top - areaRect.top,
+          bottom: gr.bottom - areaRect.top,
+        };
+      }
+      // 兜底（极端排版拿不到字符框）：退回折叠 caret + 行高估算
+      let top = cr.top;
+      let height = cr.height;
+      if (cr.width <= 0 || cr.height <= 0) {
+        const node = caret.startContainer;
         const el = (
           node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement
         ) as Element | null;
         const cs = el ? getComputedStyle(el) : null;
         const lh = cs ? parseFloat(cs.lineHeight) || 0 : 0;
         height = lh || Math.round(READING_LINE_HEIGHT * (layout()?.fontSize ?? 24));
-        top = rr.top;
+        top = cr.top;
       }
-      // 圆心从行中下移约 1/4 行高：避开行中文字（与手柄渲染口径一致）
       return {
-        x: rr.left - areaRect.left,
+        x,
         y: top - areaRect.top + height * 0.75,
         top: top - areaRect.top,
         bottom: top - areaRect.top + height,
