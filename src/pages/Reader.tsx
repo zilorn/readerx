@@ -646,6 +646,26 @@ export default function ReaderPage() {
     void ensureReadingWindow(current.id, idx);
   });
 
+  // 取消跟读后视图不再随朗读章移动，引擎跨章只在内部推进、可能读出视图窗口之外。
+  // 在线书：以播放器当前朗读章为中心补一轮窗口预取（读某章期间就绪其后的窗口），
+  // 保证引擎继续向后朗读时正文可用；视图仍在跟随或引擎未运行时无需处理。
+  // ensureReadingWindow 对无缺失章节直接返回，此处无需再按距离过滤。
+  createEffect(
+    on(
+      () => ttsPlayer.focus()?.chapterIndex ?? -1,
+      (ci) => {
+        if (followEnabled() || ci < 0) return;
+        const current = book();
+        const run = onlineRunState(bookId());
+        void run.busy;
+        void run.phase;
+        if (!current || !isOnlineBook(current)) return;
+        if (run.busy || run.phase !== "idle") return;
+        void ensureReadingWindow(current.id, ci);
+      },
+    ),
+  );
+
   // 阅读区几何（分页排版依赖真实尺寸；书就绪且元素挂载后测量）
   const [area, setArea] = createSignal({ w: 0, h: 0 });
   let areaRef: HTMLDivElement | undefined;
@@ -788,24 +808,27 @@ export default function ReaderPage() {
     return null;
   }
 
+  // -------------------------------------------------------------------
+  // 跟读跟随：语音激活期间视图默认跟随朗读句自动翻页/滚动（避免读到屏幕外）。
+  // 用户手动翻页 / 滚动 / 切章会解除跟随（语音继续朗读，页面停在手动位置），
+  // 呼出菜单后可通过底栏上方的「返回跟读」把视图跳回当前朗读句并恢复跟随。
+  // 播放器跨章时也依据本开关决定是否把阅读视图一并切到新章（取消跟读则不动）。
+  // -------------------------------------------------------------------
+  const [followEnabled, setFollowEnabled] = createSignal(true);
+
   const ttsPlayer = createTtsPlayer({
     bookId,
     chapterIndex: chapterIdx,
     chapterAt: (idx) => book()?.chapters[idx],
     chapterCount: () => book()?.chapters.length ?? 0,
     navigateChapter: (idx) => goToChapter(idx),
+    followEnabled,
     readingOffset: ttsReadingOffset,
     notify: (message, isError) => showToast(message, !!isError),
   });
   const [ttsSettingsOpen, setTtsSettingsOpen] = createSignal(false);
   const [prewarmText, setPrewarmText] = createSignal<string | null>(null);
 
-  // -------------------------------------------------------------------
-  // 跟读跟随：语音激活期间视图默认跟随朗读句自动翻页/滚动（避免读到屏幕外）。
-  // 用户手动翻页 / 滚动 / 切章会解除跟随（语音继续朗读，页面停在手动位置），
-  // 呼出菜单后可通过底栏上方的「返回跟读」把视图跳回当前朗读句并恢复跟随。
-  // -------------------------------------------------------------------
-  const [followEnabled, setFollowEnabled] = createSignal(true);
   /** 程序化定位引发的滚动窗口：此期间内的 scroll 事件不算用户手动滚动 */
   let suppressFollowCancelUntil = 0;
 

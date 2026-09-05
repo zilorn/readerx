@@ -12,9 +12,11 @@
  *   章节播完自动切下一章（读完整本书），定时（分钟 / 本章结束）自动停止；
  * - 预热：HTTP 引擎下，阅读页空闲会预热当前章节窗口；也可 warmBook 批量把
  *   整本书逐句合成进按书籍的磁盘缓存（同书同声源下次直接命中，不再请求）。
- * - 视图章节由外部（阅读页）驱动：引擎自动跨章用 jumpChapter + navigateChapter
- *   落视图；用户翻页跨章浏览时以 browse=true 通知，语音不被打断、继续读原章，
- *   待原章播完再自动进入下一章。
+ * - 视图章节由外部（阅读页）驱动：跟读跟随中引擎自动跨章用 jumpChapter +
+ *   navigateChapter 把视图一并切到新章；用户取消跟读后，引擎只在内部推进朗读
+ *   章节、不再挪动阅读视图（阅读页可经「返回跟读」把视图追回朗读句所在章）。
+ *   用户翻页跨章浏览时以 browse=true 通知，语音不被打断、继续读原章，待原章
+ *   播完再自动进入下一章。
  *
  * 实例与阅读页同生命周期；dispose() 负责清理监听、计时器与 WebAudio 节点。
  */
@@ -75,6 +77,11 @@ export interface TtsPlayerCtx {
   /** 取某章数据 */
   chapterAt: (index: number) => LocalBookChapter | undefined;
   chapterCount: () => number;
+  /**
+   * 视图是否处于「跟读跟随」：false 时引擎跨章只在内部推进朗读章节，
+   * 不得调用 navigateChapter 挪动阅读视图。缺省视为 true（跟随）。
+   */
+  followEnabled?: () => boolean;
   /** 让阅读页切章 */
   navigateChapter: (index: number) => void;
   /** 当前阅读位置（镜像偏移）；未知返回 null */
@@ -514,8 +521,12 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
 
   /**
    * 跨章跳转（引擎主动切章，如本章播完 / 上一句下一句跨章）。
-   * 视图已在目标章（用户在浏览期间语音读完了本章）时不重复导航视图，
-   * 直接在本章内部切换朗读内容；否则先落视图章再切。
+   * - 跟读跟随中：先经 navigateChapter 把阅读视图切到目标章，再由
+   *   noteViewChapter 的 auto 分支在“视图==目标章”下重锚续播；
+   * - 取消跟读：视图必须留在用户手动阅读的位置，引擎在内部直接切到目标章续播
+   *   （不能走 noteViewChapter：它的 auto 分支要求“视图==目标章”才会消费
+   *   pendingAutoNav，否则该值残留，会污染后续视图通知的 auto 判定）。
+   *   视图本就在目标章时两种情况都无需挪动视图，统一走 noteViewChapter。
    */
   function jumpChapter(target: number, pref: "first" | "last"): void {
     if (target < 0 || target >= ctx.chapterCount()) return;
@@ -526,11 +537,34 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
     clearNativeWait();
     stopActiveSource();
     void stopNativeSpeech();
-    if (target !== ctx.chapterIndex()) {
-      ctx.navigateChapter(target);
+    const viewIdx = ctx.chapterIndex();
+    const following = ctx.followEnabled ? ctx.followEnabled() : true;
+    if (viewIdx === target) {
+      // 视图本就在目标章（跟随已同步 / 取消跟读后手动翻到了引擎所在章）
+      noteViewChapter();
+      return;
     }
-    // 立即同步（阅读页的 chapterIdx 已更新；重复调用会被幂等拦截）
-    noteViewChapter();
+    if (following) {
+      ctx.navigateChapter(target);
+      // 阅读页 chapterIdx 已同步到目标章；重复调用会被 noteViewChapter 幂等拦截
+      noteViewChapter();
+      return;
+    }
+    // 取消跟读且视图不在目标章：引擎内部切章续播，视图原地不动
+    pendingAutoNav = -1;
+    loadItems(target);
+    if (items.length === 0) {
+      const next = contentChapter(target + 1, 1);
+      if (next > target) {
+        jumpChapter(next, pref);
+      } else {
+        ctx.notify?.("后续章节暂无内容，已停止朗读", true);
+        stop();
+      }
+      return;
+    }
+    const stayPaused = status() === "paused";
+    void playFrom(pref === "last" ? items.length - 1 : 0, stayPaused);
   }
 
   /**
