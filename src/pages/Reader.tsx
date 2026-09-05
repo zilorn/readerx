@@ -1897,7 +1897,8 @@ export default function ReaderPage() {
         height = lh || Math.round(READING_LINE_HEIGHT * (layout()?.fontSize ?? 24));
         top = r.top;
       }
-      return { x: r.left - areaRect.left, y: top - areaRect.top + height / 2 };
+      // 圆心从行中下移约 1/4 行高：避开行中文字（原行中会压住字），又不至于悬到行间空隙
+      return { x: r.left - areaRect.left, y: top - areaRect.top + height * 0.75 };
     };
     // 选区与本页的重叠；端点落在页外时把手柄夹到本页边界显示
     // （拖该“页边手柄”可继续向前/后跨页调整选区）
