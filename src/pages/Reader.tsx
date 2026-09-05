@@ -431,6 +431,21 @@ function ScrollBlock(props: {
 }
 
 // ---------------------------------------------------------------------------
+// 阅读位置快照：搜索模式进入前 / 目录、菜单进度条等定点跳转前记录“读到哪”，
+// 用于事后一键返回原进度
+// ---------------------------------------------------------------------------
+
+/** 某瞬间的阅读位置：章节下标 + 稳定 cid + 章节镜像文本字符偏移（0 = 章首） */
+interface ReadingPos {
+  ci: number;
+  cid: string;
+  char: number;
+}
+
+/** 「返回原进度」提示自动消失前停留的时长 */
+const JUMP_BACK_MS = 5_000;
+
+// ---------------------------------------------------------------------------
 // 搜索模式会话：从全书搜索结果逐条查看时的上下文
 // ---------------------------------------------------------------------------
 
@@ -442,7 +457,7 @@ interface ReaderSearchSession {
   /** 正在查看的命中序号（0 起） */
   index: number;
   /** 进入搜索模式前的阅读位置（章节号 + 章节镜像文本字符偏移） */
-  prev: { ci: number; cid: string; char: number } | null;
+  prev: ReadingPos | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1118,7 +1133,82 @@ export default function ReaderPage() {
     const next = Math.min(total - 1, Math.max(0, Math.round(page)));
     if (next === pageIdx()) return;
     cancelFollowIfActive();
+    offerJumpBack();
     setPageIdx(next);
+  }
+
+  // -------------------------------------------------------------------
+  // 定点跳转后的「返回原进度」提示：目录跳章 / 菜单进度条跳页会离开当前阅读位置，
+  // 跳转前记下原位置并在底部显示提示条，可一键返回；5 秒未处理自动消失，也可手动关闭。
+  // -------------------------------------------------------------------
+  const [jumpOrigin, setJumpOrigin] = createSignal<ReadingPos | null>(null);
+  let jumpOriginTimer: number | undefined;
+
+  /** 记录跳转前位置并亮起「返回原进度」提示；已有未决提示时不覆盖（保留最初的阅读位置） */
+  function offerJumpBack(): void {
+    if (jumpOrigin() !== null) return;
+    const origin = captureReadingPos();
+    if (!origin) return;
+    setJumpOrigin(origin);
+  }
+
+  /** 收起「返回原进度」提示（超时 / 手动关闭 / 返回后） */
+  function dismissJumpBack(): void {
+    window.clearTimeout(jumpOriginTimer);
+    jumpOriginTimer = undefined;
+    setJumpOrigin(null);
+  }
+
+  /** 提示可见条件：有未决原位置，且没有菜单/抽屉/搜索/加载等界面盖住阅读区 */
+  const jumpBackHint = createMemo(() => {
+    if (jumpOrigin() === null) return false;
+    if (
+      menuOpen() ||
+      tocOpen() ||
+      bmPanelOpen() ||
+      readerSettingsOpen() ||
+      replaceSheetOpen() ||
+      bookSearchOpen() ||
+      searchSession() !== null ||
+      downloadOpen()
+    ) {
+      return false;
+    }
+    if (remoteMissing() || remoteBodyEmpty()) return false;
+    // 正文尚未就绪（分页排版中 / 滚动精确恢复等待）时不打扰
+    if (
+      (isPaged() && pagedBusy() && !paged()) ||
+      (!isPaged() && scrollResumePending())
+    ) {
+      return false;
+    }
+    return !!chapter();
+  });
+
+  // 自动消失计时：提示真正可见才开始倒计时，被菜单/抽屉盖住期间暂停
+  createEffect(() => {
+    window.clearTimeout(jumpOriginTimer);
+    jumpOriginTimer = undefined;
+    if (jumpBackHint()) {
+      jumpOriginTimer = window.setTimeout(dismissJumpBack, JUMP_BACK_MS);
+    }
+  });
+
+  /** 返回原进度：跳回记录位置并收起提示（章节 + 镜像文本偏移精确定位，同搜索模式返回） */
+  function restoreJumpOrigin(): void {
+    const origin = jumpOrigin();
+    dismissJumpBack();
+    if (!origin) return;
+    cancelFollowIfActive();
+    goToChapter(origin.ci);
+    if (origin.char > 0) {
+      const target = book()?.chapters[origin.ci];
+      if (target) setResumeTarget({ cid: target.cid, char: origin.char });
+    } else if (isPaged()) {
+      setPageIdx(0);
+    } else if (scrollRef) {
+      scrollRef.scrollTop = 0;
+    }
   }
 
   // -------------------------------------------------------------------
@@ -1136,7 +1226,8 @@ export default function ReaderPage() {
       !bmPanelOpen() &&
       !readerSettingsOpen() &&
       !replaceSheetOpen() &&
-      !bookSearchOpen(),
+      !bookSearchOpen() &&
+      !jumpBackHint(),
   );
 
   /** 整本书进度百分比（按章节正文累计字符） */
@@ -1437,6 +1528,7 @@ export default function ReaderPage() {
   onCleanup(() => {
     window.cancelAnimationFrame(scrollFrame);
     window.clearInterval(resumeTick);
+    window.clearTimeout(jumpOriginTimer);
     flushLocation();
   });
   onMount(() => {
@@ -1475,6 +1567,7 @@ export default function ReaderPage() {
   }
 
   function jumpFromToc(idx: number): void {
+    if (idx !== chapterIdx()) offerJumpBack();
     goToChapter(idx);
     cancelFollowIfActive();
     setTocOpen(false);
@@ -1485,8 +1578,8 @@ export default function ReaderPage() {
   // 搜索模式：点中全书搜索结果后进入，正文高亮命中词，可逐条切换 / 返回原进度
   // -------------------------------------------------------------------
 
-  /** 记录进入搜索模式前的阅读位置（章节号 + 章节镜像文本字符偏移） */
-  function capturePreSearchReading(): ReaderSearchSession["prev"] {
+  /** 记录当前阅读位置（分页=当前页首行，滚动=视口顶部；章节号 + 章节镜像文本字符偏移） */
+  function captureReadingPos(): ReadingPos | null {
     const ch = chapter();
     if (!ch) return null;
     const mir = mirror();
@@ -1508,7 +1601,7 @@ export default function ReaderPage() {
     if (!current || target.hits.length === 0) return;
     const index = Math.max(0, Math.min(target.index, target.hits.length - 1));
     const existing = searchSession();
-    const prev = existing?.prev ?? capturePreSearchReading();
+    const prev = existing?.prev ?? captureReadingPos();
     setBookSearchOpen(false);
     setMenuOpen(false);
     setSearchSession({ term: target.term, hits: target.hits, index, prev });
@@ -2575,7 +2668,14 @@ export default function ReaderPage() {
                         class="relative flex-none"
                         style={{ height: `${bottomPadPaged()}px` }}
                       >
-                        <Show when={totalPages() > 1 && !menuOpen() && !currentStatusBarEnabled()}>
+                        <Show
+                          when={
+                            totalPages() > 1 &&
+                            !menuOpen() &&
+                            !jumpBackHint() &&
+                            !currentStatusBarEnabled()
+                          }
+                        >
                           <span
                             class="pointer-events-none absolute bottom-0 left-1/2 -translate-x-1/2 text-[10.5px] tracking-[0.08em] text-text-3 opacity-70 tabular-nums"
                             aria-hidden="true"
@@ -2820,6 +2920,37 @@ export default function ReaderPage() {
                       <span> · {pageIdx() + 1} / {totalPages()} 页</span>
                     </Show>
                   </span>
+                </div>
+              </div>
+            </Show>
+
+            {/* 定点跳转（目录 / 菜单进度条）后的「返回原进度」提示条：底部悬浮，5s 自动消失可关闭 */}
+            <Show when={jumpBackHint()}>
+              <div
+                class="pointer-events-none absolute inset-x-0 z-[17] flex justify-center px-5"
+                style={{ bottom: `${Math.max(safeInsets().bottom, 10) + 8}px` }}
+              >
+                <div
+                  data-reader-ui
+                  class="pointer-events-auto flex max-w-full items-center overflow-hidden rounded-full border border-border bg-surface shadow-[0_4px_18px_rgb(0_0_0/0.3)]"
+                >
+                  <button
+                    type="button"
+                    class="flex min-w-0 items-center gap-1.5 py-2 pl-4 pr-2.5 text-[13px] font-semibold text-text-2 transition-[opacity] duration-100 active:opacity-75"
+                    aria-label="返回原进度"
+                    onClick={restoreJumpOrigin}
+                  >
+                    <RestoreBackIcon size={15} class="flex-none text-accent" />
+                    <span class="truncate">返回原进度</span>
+                  </button>
+                  <button
+                    type="button"
+                    class="grid h-9 w-9 flex-none place-items-center rounded-full text-text-3 transition-[background-color,color] duration-100 active:bg-surface-2 active:text-text-2"
+                    aria-label="关闭返回提示"
+                    onClick={dismissJumpBack}
+                  >
+                    <CloseIcon size={14} />
+                  </button>
                 </div>
               </div>
             </Show>
