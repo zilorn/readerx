@@ -22,6 +22,7 @@ const PAGE_MODE_KEY = "readerx.pageMode";
 const STATUS_BAR_KEY = "readerx.statusBar";
 const PROGRESS_SCOPE_KEY = "readerx.progressScope";
 const SOURCE_PARALLEL_KEY = "readerx.onlineConcurrency";
+const SHELF_SOURCE_FILTER_KEY = "readerx.shelfSourceFilter";
 
 export const FONT_MIN = 15;
 export const FONT_MAX = 28;
@@ -52,7 +53,7 @@ let initialized = false;
 export async function initReaderState(): Promise<void> {
   if (initialized) return;
   initialized = true;
-  const [storedTheme, storedShelf, storedFont, storedSpacing, storedPageMode, storedStatusBar, storedScope, storedSourceParallel] =
+  const [storedTheme, storedShelf, storedFont, storedSpacing, storedPageMode, storedStatusBar, storedScope, storedSourceParallel, storedShelfSourceFilter] =
     await Promise.all([
       readState<string>(THEME_KEY),
       readState<Record<string, ShelfEntry>>(SHELF_KEY),
@@ -62,6 +63,7 @@ export async function initReaderState(): Promise<void> {
       readState<boolean>(STATUS_BAR_KEY),
       readState<ProgressScope>(PROGRESS_SCOPE_KEY),
       readState<number>(SOURCE_PARALLEL_KEY),
+      readState<boolean>(SHELF_SOURCE_FILTER_KEY),
     ]);
 
   // 未保存过偏好时默认护眼(sepia)，不再跟随系统深浅色
@@ -89,6 +91,9 @@ export async function initReaderState(): Promise<void> {
   }
   if (typeof storedSourceParallel === "number" && Number.isFinite(storedSourceParallel)) {
     setSourceParallelSignal(clampSourceParallel(storedSourceParallel));
+  }
+  if (typeof storedShelfSourceFilter === "boolean") {
+    setShelfSourceFilterSignal(storedShelfSourceFilter);
   }
 }
 
@@ -349,6 +354,31 @@ export function setSourceParallel(value: number): void {
   sourceParallelWriteQueue = sourceParallelWriteQueue.then(() =>
     writeState(SOURCE_PARALLEL_KEY, next),
   );
+}
+
+// ---------------------------------------------------------------------------
+// 书架来源筛选显示（全局偏好，设置页开关）
+// 关闭后书架顶部不再显示「本地 / WebDAV / 在线」等来源筛选 chips（分组筛选不受影响）。
+// 默认开启；仅当书架存在云端 / 在线书时这些 chip 本就会出现。
+
+const [shelfSourceFilter, setShelfSourceFilterSignal] = createSignal<boolean>(true);
+let shelfSourceFilterWriteQueue: Promise<void> = Promise.resolve();
+
+/** 响应式：书架顶部是否显示来源筛选 */
+export function shelfSourceFilterEnabled(): boolean {
+  return shelfSourceFilter();
+}
+
+function persistShelfSourceFilter(on: boolean): void {
+  shelfSourceFilterWriteQueue = shelfSourceFilterWriteQueue.then(() =>
+    writeState(SHELF_SOURCE_FILTER_KEY, on),
+  );
+}
+
+/** 开启 / 关闭书架来源筛选并持久化 */
+export function setShelfSourceFilterEnabled(on: boolean): void {
+  setShelfSourceFilterSignal(on);
+  persistShelfSourceFilter(on);
 }
 
 // ---------------------------------------------------------------------------

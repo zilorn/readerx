@@ -39,6 +39,7 @@ import {
   removeShelfEntry,
   setShelfSelecting,
   shelfOrder,
+  shelfSourceFilterEnabled,
   type ShelfEntry,
 } from "../lib/store";
 
@@ -271,6 +272,11 @@ export default function BookshelfPage() {
     () => sourceCounts().webdav > 0 || sourceCounts().online > 0,
   );
 
+  /** 来源筛选 chips 是否可见：需要书架里有云端 / 在线书，且用户未在设置里关闭 */
+  const showSourceChips = createMemo(
+    () => shelfSourceFilterEnabled() && hasNonLocalBooks(),
+  );
+
   /** 各分组在架书数（分组没有书也显示 chip，计数为 0） */
   const groupCounts = createMemo<Record<string, number>>(() => {
     const counts: Record<string, number> = {};
@@ -287,6 +293,7 @@ export default function BookshelfPage() {
    */
   const activeFilter = createMemo<ShelfFilter>(() => {
     const f = filter();
+    if (!showSourceChips() && f.kind === "source") return { kind: "all" };
     if (f.kind === "source" && sourceCounts()[f.source] === 0) return { kind: "all" };
     if (f.kind === "group" && !groupList().some((group) => group.id === f.groupId))
       return { kind: "all" };
@@ -313,16 +320,16 @@ export default function BookshelfPage() {
   const filterChips = createMemo<FilterChip[]>(() => {
     const chips: FilterChip[] = [];
     const groups = groupList();
-    // 只有本地书时来源筛选没有意义：不出现「全部 / 本地」；
-    // 有分组时仍要提供「全部」作为分组筛选的复位项
-    if (!hasNonLocalBooks() && groups.length === 0) return chips;
+    // 没有来源筛选也没有分组时，筛选条整体不出现：
+    // 关闭来源筛选或书架只有本地书时等同「只有本地」，此时「全部」仅随分组一起出现
+    if (!showSourceChips() && groups.length === 0) return chips;
     chips.push({
       key: "all",
       label: "全部",
       count: items().length,
       value: { kind: "all" },
     });
-    if (hasNonLocalBooks()) {
+    if (showSourceChips()) {
       const counts = sourceCounts();
       const options: { key: string; label: string; source: BookSource }[] = [
         { key: "local", label: "本地", source: "local" },

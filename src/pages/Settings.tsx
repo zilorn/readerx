@@ -8,6 +8,7 @@ import {
   FileTextIcon,
   GitHubIcon,
   HeadphonesIcon,
+  LibraryIcon,
   RegexIcon,
   SourceIcon,
   TrashIcon,
@@ -15,6 +16,7 @@ import {
 import { PageHeader } from "../components/PageHeader";
 import { LicenseSheet } from "../components/LicenseSheet";
 import { GroupManager } from "../components/GroupManager";
+import { ToggleSwitch } from "../components/ToggleSwitch";
 import {
   SOURCE_PARALLEL_MAX,
   SOURCE_PARALLEL_MIN,
@@ -22,7 +24,9 @@ import {
   currentTheme,
   resetReadingProgress,
   setSourceParallel,
+  setShelfSourceFilterEnabled,
   setTheme,
+  shelfSourceFilterEnabled,
   type ThemeMode,
 } from "../lib/store";
 import { initGroups } from "../lib/groups";
@@ -243,6 +247,36 @@ export default function SettingsPage() {
             >
               <ChevronRightIcon size={18} class="flex-none text-text-3" />
             </Row>
+          </div>
+        </section>
+
+        {/* 书架 */}
+        <section class="mb-6">
+          <h2 class="mx-1 mb-2 text-[12.5px] font-medium tracking-[0.04em] text-text-3">
+            书架
+          </h2>
+          <div class="divide-y divide-border overflow-hidden rounded-[14px] border border-border bg-surface">
+            <div class="flex w-full items-center gap-3 px-4 py-[13px] text-left">
+              <span
+                class="grid h-[34px] w-[34px] flex-none place-items-center rounded-[10px] bg-surface-2 text-text-2"
+                aria-hidden="true"
+              >
+                <LibraryIcon size={18} />
+              </span>
+              <span class="flex min-w-0 flex-1 flex-col gap-0.5">
+                <span class="text-[14.5px] font-medium">来源筛选</span>
+                <span class="text-[11.5px] text-text-3">
+                  在书架顶部显示「本地 / WebDAV / 在线」筛选
+                </span>
+              </span>
+              <ToggleSwitch
+                on={shelfSourceFilterEnabled()}
+                label="书架来源筛选"
+                onChange={() =>
+                  setShelfSourceFilterEnabled(!shelfSourceFilterEnabled())
+                }
+              />
+            </div>
           </div>
         </section>
 
