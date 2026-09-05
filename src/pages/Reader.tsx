@@ -1752,12 +1752,16 @@ export default function ReaderPage() {
   // 原生 text 选区在分页列被禁用（select-none），由本引擎接管：
   //   - 触屏：长按起选（拉丁词按整词 / 中文按单字），随后拖动扩选；
   //   - 鼠标/触控笔：按下后拖拽（≥6px）直接起选；
-  //   - 选区端拖出正文列上/下缘 → 在本章内自动翻页续选，跨页连成一段
+  //   - 选区端拖出正文列上/下缘 → 指针在页缘外持续停留满判定时长后，
+  //     在本章内翻一页续选（每翻一页需先回页内再拖出），跨页连成一段
   //     [lo, hi) 镜像区间，交给 复制 / 书签（可跨段落）/ 朗读 使用。
   // -------------------------------------------------------------------
   const SEL_LONG_PRESS_MS = 380;
   const SEL_DRAG_SLOP = 6;
-  const SEL_FLIP_PACE_MS = 220;
+  // 拖出页缘的翻页判定时长：指针须在页缘外持续停留满该时长才翻页续选。
+  // 判定不足的短暂越界（快速划过页边、拖到页缘即抬手）不会误翻整页；
+  // 且每次拖出只翻一页，需回页内重新拖出才会再翻，避免连续跨过多个页面。
+  const SEL_FLIP_HOLD_MS = 400;
   // 选区手柄按钮半宽（24px 触控目标 / 2）：选区菜单避让手柄时的圆形半径
   const SEL_HANDLE_R = 12;
   let colRef: HTMLDivElement | undefined;
@@ -1778,7 +1782,12 @@ export default function ReaderPage() {
     pointerId: number;
     x: number;
     y: number;
-    lastFlipAt: number;
+    /** 指针当前相对正文列的位置：0 页内 / 1 下缘外 / -1 上缘外 */
+    edgeDir: 0 | 1 | -1;
+    /** 本次「拖出页缘」是否已翻过页：翻页后须回页内重置，才会再次判定翻页 */
+    edgeFlipped: boolean;
+    /** 「拖出页缘」翻页判定计时器（页缘外持续停留满 SEL_FLIP_HOLD_MS 触发） */
+    edgeTimer: number | undefined;
     /** 翻页落地等待中：此期间忽略指针输入 */
     pending: boolean;
   }
@@ -1983,7 +1992,9 @@ export default function ReaderPage() {
       pointerId: p.pointerId,
       x: p.x,
       y: p.y,
-      lastFlipAt: 0,
+      edgeDir: 0,
+      edgeFlipped: false,
+      edgeTimer: undefined,
       pending: false,
     };
     setSelSpan([s, e]);
@@ -2003,7 +2014,9 @@ export default function ReaderPage() {
       pointerId: e.pointerId,
       x: e.clientX,
       y: e.clientY,
-      lastFlipAt: 0,
+      edgeDir: 0,
+      edgeFlipped: false,
+      edgeTimer: undefined,
       pending: false,
     };
     captureSelPointer(e.pointerId);
@@ -2022,7 +2035,9 @@ export default function ReaderPage() {
       pointerId: e.pointerId,
       x: e.clientX,
       y: e.clientY,
-      lastFlipAt: 0,
+      edgeDir: 0,
+      edgeFlipped: false,
+      edgeTimer: undefined,
       pending: false,
     };
     captureSelPointer(e.pointerId);
@@ -2042,7 +2057,8 @@ export default function ReaderPage() {
     }
     drag.pending = true;
     setPageIdx(dir > 0 ? pi + 1 : pi - 1);
-    // 新页挂载后再按最近指针位置续选（自动再翻页按 SEL_FLIP_PACE_MS 限速）
+    // 新页挂载后再按最近指针位置续选；若指针仍在页缘外，因本次拖出已翻过页
+    // （edgeFlipped），需回页内重新拖出才会进入下一次翻页判定，不会连翻多页
     window.requestAnimationFrame(() => {
       if (selDrag === drag) {
         drag.pending = false;
@@ -2068,11 +2084,39 @@ export default function ReaderPage() {
       if (drag.anchor === null && span) {
         drag.anchor = below ? span[0] : span[1];
       }
-      const now = performance.now();
-      if (now - drag.lastFlipAt < SEL_FLIP_PACE_MS) return;
-      drag.lastFlipAt = now;
-      selFlip(below ? 1 : -1);
+      const dir = below ? 1 : -1;
+      // 拖出方向变化（含从页内新拖出）→ 重置本次拖出的翻页判定
+      if (drag.edgeDir !== dir) {
+        drag.edgeDir = dir;
+        drag.edgeFlipped = false;
+        if (drag.edgeTimer !== undefined) {
+          window.clearTimeout(drag.edgeTimer);
+          drag.edgeTimer = undefined;
+        }
+      }
+      // 本次拖出已翻过页：需回页内重新拖出才再次判定，避免停留页缘外连翻多页
+      if (drag.edgeFlipped) return;
+      // 判定计时：指针须在页缘外持续停留满 SEL_FLIP_HOLD_MS 才翻页续选，
+      // 短暂越界/未及判定就回页内（或抬手）都不会误翻整页
+      if (drag.edgeTimer === undefined) {
+        drag.edgeTimer = window.setTimeout(() => {
+          drag.edgeTimer = undefined;
+          // 判定期间指针回到页内 / 手势结束 / 正在翻页落地 → 放弃本次翻页
+          if (selDrag !== drag || drag.pending || drag.edgeDir !== dir) return;
+          drag.edgeFlipped = true;
+          selFlip(dir);
+        }, SEL_FLIP_HOLD_MS);
+      }
       return;
+    }
+    // 指针回到页内：取消未决判定并重置拖出状态（下次拖出重新判定）
+    if (drag.edgeDir !== 0 || drag.edgeFlipped || drag.edgeTimer !== undefined) {
+      drag.edgeDir = 0;
+      drag.edgeFlipped = false;
+      if (drag.edgeTimer !== undefined) {
+        window.clearTimeout(drag.edgeTimer);
+        drag.edgeTimer = undefined;
+      }
     }
     const c = mirrorOffsetAtPoint(x, y);
     if (c === null) return;
@@ -2215,6 +2259,10 @@ export default function ReaderPage() {
     }
     const drag = selDrag;
     if (!drag || drag.pointerId !== e.pointerId) return;
+    if (drag.edgeTimer !== undefined) {
+      window.clearTimeout(drag.edgeTimer);
+      drag.edgeTimer = undefined;
+    }
     selDrag = null;
     releaseSelPointer(e.pointerId);
     if (cancelled) {
@@ -2244,6 +2292,9 @@ export default function ReaderPage() {
       window.removeEventListener("pointercancel", onCancel);
       if (selPress && selPress.longTimer !== undefined) {
         window.clearTimeout(selPress.longTimer);
+      }
+      if (selDrag && selDrag.edgeTimer !== undefined) {
+        window.clearTimeout(selDrag.edgeTimer);
       }
       selPress = null;
       selDrag = null;
