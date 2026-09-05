@@ -1578,6 +1578,8 @@ export default function ReaderPage() {
   const SEL_LONG_PRESS_MS = 380;
   const SEL_DRAG_SLOP = 6;
   const SEL_FLIP_PACE_MS = 220;
+  // 选区手柄按钮半宽（24px 触控目标 / 2）：选区菜单避让手柄时的圆形半径
+  const SEL_HANDLE_R = 12;
   let colRef: HTMLDivElement | undefined;
 
   interface SelPressState {
@@ -1620,6 +1622,75 @@ export default function ReaderPage() {
     if (!col) return null;
     const r = col.getBoundingClientRect();
     return r.width > 0 && r.height > 0 ? r : null;
+  }
+
+  /**
+   * 分页自绘选区在本页可见端点的几何（相对阅读区容器坐标）。
+   * 手柄渲染与选区菜单避让共用同一份口径：
+   * - lo/hi：两端手柄圆心（可见端点被页界夹取后仍在页内的那个才给出）；
+   * - top/bottom：选区在本页可见首/末行的行盒上/下缘（纵向范围）。
+   */
+  function pageSelLayout(): {
+    lo: { x: number; y: number } | null;
+    hi: { x: number; y: number } | null;
+    top: number;
+    bottom: number;
+  } | null {
+    const span = selSpan();
+    const area = areaRef;
+    const col = colRef;
+    if (!span || !area || !col || !isPaged()) return null;
+    const mir = mirror();
+    const cur = pageSpans();
+    const pi = pageIdx();
+    if (!mir || cur.length === 0 || pi < 0 || pi >= cur.length) return null;
+    const [ps, pe] = cur[pi];
+    const ovS = Math.max(span[0], ps);
+    const ovE = Math.min(span[1], pe);
+    if (ovE <= ovS) return null;
+    const loOffset = Math.min(Math.max(span[0], ps), ovE);
+    const hiOffset = Math.max(Math.min(span[1], pe), ovS);
+    const areaRect = area.getBoundingClientRect();
+    if (areaRect.width <= 0) return null;
+    const pointAt = (
+      off: number,
+    ): { x: number; y: number; top: number; bottom: number } | null => {
+      const range = caretRangeAtGlobalOffset(col, mir.unitStart, off);
+      if (!range) return null;
+      const rr = range.getBoundingClientRect();
+      if (!rr) return null;
+      let top = rr.top;
+      let height = rr.height;
+      if (rr.width <= 0 || rr.height <= 0) {
+        // 折叠 caret：按其所在行行高估算
+        const node = range.startContainer;
+        const el = (
+          node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement
+        ) as Element | null;
+        const cs = el ? getComputedStyle(el) : null;
+        const lh = cs ? parseFloat(cs.lineHeight) || 0 : 0;
+        height = lh || Math.round(READING_LINE_HEIGHT * (layout()?.fontSize ?? 24));
+        top = rr.top;
+      }
+      // 圆心从行中下移约 1/4 行高：避开行中文字（与手柄渲染口径一致）
+      return {
+        x: rr.left - areaRect.left,
+        y: top - areaRect.top + height * 0.75,
+        top: top - areaRect.top,
+        bottom: top - areaRect.top + height,
+      };
+    };
+    const loP = loOffset < ovE ? pointAt(loOffset) : null;
+    const hiP = hiOffset > ovS ? pointAt(hiOffset) : null;
+    if (!loP && !hiP) return null;
+    const zTop = loP && hiP ? Math.min(loP.top, hiP.top) : (loP ?? hiP)!.top;
+    const zBottom = loP && hiP ? Math.max(loP.bottom, hiP.bottom) : (loP ?? hiP)!.bottom;
+    return {
+      lo: loP ? { x: loP.x, y: loP.y } : null,
+      hi: hiP ? { x: hiP.x, y: hiP.y } : null,
+      top: zTop,
+      bottom: zBottom,
+    };
   }
 
   /** 客户端坐标 → 镜像文本偏移（按当前页可见正文） */
@@ -1854,7 +1925,16 @@ export default function ReaderPage() {
       setSelMenu(null);
       return;
     }
-    setSelMenu({ text, anchor, span: [span[0], span[1]] });
+    // 菜单避让数据：选区在本页的纵向范围 + 两端手柄圆心（与手柄渲染同口径）
+    const geo = pageSelLayout();
+    let avoid: SelectionCustom["avoid"];
+    if (geo) {
+      const handles: Array<{ x: number; y: number; r: number }> = [];
+      if (geo.lo) handles.push({ x: geo.lo.x, y: geo.lo.y, r: SEL_HANDLE_R });
+      if (geo.hi) handles.push({ x: geo.hi.x, y: geo.hi.y, r: SEL_HANDLE_R });
+      avoid = { top: geo.top, bottom: geo.bottom, handles };
+    }
+    setSelMenu({ text, anchor, span: [span[0], span[1]], ...(avoid ? { avoid } : {}) });
   }
 
   // 选区手柄位置（相对阅读区容器；两端落在当前页内才显示）
@@ -1864,63 +1944,14 @@ export default function ReaderPage() {
   } | null>(null);
 
   function refreshSelHandles(): void {
-    const span = selSpan();
-    const area = areaRef;
-    const col = colRef;
-    if (!span || !area || !col || !isPaged()) {
+    const geo = pageSelLayout();
+    if (!geo) {
       setSelHandles(null);
       return;
     }
-    const mir = mirror();
-    const cur = pageSpans();
-    const pi = pageIdx();
-    if (!mir || cur.length === 0 || pi < 0 || pi >= cur.length) {
-      setSelHandles(null);
-      return;
-    }
-    const [ps, pe] = cur[pi];
-    const areaRect = area.getBoundingClientRect();
-    const unitStart = mir.unitStart;
-    const caretPos = (range: Range): { x: number; y: number } | null => {
-      const r = range.getBoundingClientRect();
-      if (!r || areaRect.width <= 0) return null;
-      let top = r.top;
-      let height = r.height;
-      if (r.width <= 0 || r.height <= 0) {
-        // 折叠 caret：按其所在行行高估算
-        const node = range.startContainer;
-        const el = (
-          node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement
-        ) as Element | null;
-        const cs = el ? getComputedStyle(el) : null;
-        const lh = cs ? parseFloat(cs.lineHeight) || 0 : 0;
-        height = lh || Math.round(READING_LINE_HEIGHT * (layout()?.fontSize ?? 24));
-        top = r.top;
-      }
-      // 圆心从行中下移约 1/4 行高：避开行中文字（原行中会压住字），又不至于悬到行间空隙
-      return { x: r.left - areaRect.left, y: top - areaRect.top + height * 0.75 };
-    };
-    // 选区与本页的重叠；端点落在页外时把手柄夹到本页边界显示
-    // （拖该“页边手柄”可继续向前/后跨页调整选区）
-    const ovS = Math.max(span[0], ps);
-    const ovE = Math.min(span[1], pe);
-    if (ovE <= ovS) {
-      setSelHandles(null);
-      return;
-    }
-    const loOffset = Math.min(Math.max(span[0], ps), ovE);
-    const hiOffset = Math.max(Math.min(span[1], pe), ovS);
     const out: { lo?: { x: number; y: number }; hi?: { x: number; y: number } } = {};
-    if (loOffset < ovE) {
-      const range = caretRangeAtGlobalOffset(col, unitStart, loOffset);
-      const p = range ? caretPos(range) : null;
-      if (p) out.lo = p;
-    }
-    if (hiOffset > ovS) {
-      const range = caretRangeAtGlobalOffset(col, unitStart, hiOffset);
-      const p = range ? caretPos(range) : null;
-      if (p) out.hi = p;
-    }
+    if (geo.lo) out.lo = geo.lo;
+    if (geo.hi) out.hi = geo.hi;
     setSelHandles(out.lo || out.hi ? out : null);
   }
 
@@ -3054,6 +3085,14 @@ export default function ReaderPage() {
             {/* 长按/拖选文本后的自定义菜单（搜索模式下让位给命中高亮） */}
             <SelectionMenu
               rootRef={() => areaRef}
+              insets={() => {
+                const s = safeInsets();
+                // 菜单条上下沿至少离屏幕边缘/刘海一个可见间距，避免贴到屏幕顶/底
+                return {
+                  top: Math.max(s.top + 10, 14),
+                  bottom: Math.max(s.bottom + 8, 14),
+                };
+              }}
               active={() =>
                 !!book() &&
                 !!layout() &&
