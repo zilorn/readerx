@@ -816,12 +816,21 @@ export default function ReaderPage() {
     if (followEnabled() && ttsActive()) setFollowEnabled(false);
   }
 
-  /** 「返回跟读」：恢复跟随，并把视图跳回当前正在朗读的句子 */
+  /** 「返回跟读」：恢复跟随，并把视图跳回当前正在朗读的句子。
+   *  朗读已读到其它章节（用户浏览/手动翻页把视图停在了旧章）时，仅恢复跟随无效：
+   *  上方跟读跟随 effect 与 ensureSpeakVisible 都要求朗读句落在“本视图章节”内，
+   *  必须先把视图切到朗读所在章（用 tts focus 的 chapterIndex），否则永远无法跨章跳回。
+   *  切章后新章正文/分页尚未就绪，定位交给跟读跟随的轮询在就绪后完成。 */
   function resumeFollow(): void {
     if (!ttsActive()) return;
     setFollowEnabled(true);
     const f = ttsPlayer.focus();
-    if (f && f.cid === chapter()?.cid) ensureSpeakVisible(f);
+    if (!f) return;
+    if (f.cid !== chapter()?.cid) {
+      goToChapter(f.chapterIndex);
+      return;
+    }
+    ensureSpeakVisible(f);
   }
 
   // 朗读停止（手动停止 / 整本读完）后复位跟随，保证下一次朗读默认从跟读开始

@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - webdav中直接点击阅读，返回后，失去状态数据的问题。
 - tts跟读后翻页异常问题。
 - 自动跟读跨章定位异常的问题。
+- 朗读已进入下一章时点击「返回跟读」无法跳回朗读句的问题（未带上朗读所在章节索引）。
 
 ### Changed
 

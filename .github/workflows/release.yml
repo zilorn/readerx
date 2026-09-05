@@ -21,7 +21,8 @@
 #     ANDROID_KEY_ALIAS          # 别名（示例 readerx）
 #     ANDROID_KEY_PASSWORD       # key 口令
 #
-# 产物：单个 universal（全 ABI）签名 APK，直接作为该 tag 的 GitHub Release asset 发布，
+# 产物：按 ABI 拆分的签名 APK（arm64-v8a / armeabi-v7a / x86 / x86_64，不做 universal 融合包），
+#       每个 APK 分别作为该 tag 的 GitHub Release asset 发布，
 #       Release body 取 CHANGELOG.md 中与版本号对应的区块。
 
 name: Release Android
@@ -138,27 +139,41 @@ jobs:
           } > src-tauri/gen/android/keystore.properties
           echo "Signing configured for alias ${KEY_ALIAS}"
 
-      - name: Build signed universal release APK
-        run: pnpm tauri android build --apk --ci
+      # --split-per-abi：跳过 universal 融合包，分别 assemble 每个 ABI 的 release APK，
+      # 产物位于 app/build/outputs/apk/<flavor>/release/（flavor 对应 arm64/arm/x86/x86_64）。
+      - name: Build signed per-ABI release APKs
+        run: pnpm tauri android build --apk --split-per-abi --ci
         timeout-minutes: 90
 
-      - name: Prepare APK artifact
+      - name: Prepare per-ABI APK artifacts
         id: apk
         run: |
           set -euo pipefail
-          APK_DIR="src-tauri/gen/android/app/build/outputs/apk/universal/release"
-          if [ -f "${APK_DIR}/app-universal-release-unsigned.apk" ]; then
-            echo "::error::产物未签名（app-universal-release-unsigned.apk）。请检查签名步骤与 app/build.gradle.kts 的 signingConfigs。"
-            exit 1
-          fi
-          APK="$(ls "${APK_DIR}"/app-universal-release.apk 2>/dev/null || find "${APK_DIR}" -maxdepth 1 -name '*.apk' | head -n 1)"
-          if [ -z "$APK" ]; then
-            echo "::error::未找到 release APK。"
-            exit 1
-          fi
-          cp "$APK" "$RUNNER_TEMP/readerx-${VERSION}.apk"
-          echo "APK=$APK" >> "$GITHUB_ENV"
-          echo "APK artifact: ${APK}"
+          declare -A ABI_OF=( [arm64]=arm64-v8a [arm]=armeabi-v7a [x86]=x86 [x86_64]=x86_64 )
+          APKS=()
+          for FLAVOR in arm64 arm x86 x86_64; do
+            ABI="${ABI_OF[$FLAVOR]}"
+            APK_DIR="src-tauri/gen/android/app/build/outputs/apk/${FLAVOR}/release"
+            if [ -f "${APK_DIR}/app-${FLAVOR}-release-unsigned.apk" ]; then
+              echo "::error::${ABI} 产物未签名（app-${FLAVOR}-release-unsigned.apk）。请检查签名步骤与 app/build.gradle.kts 的 signingConfigs。"
+              exit 1
+            fi
+            APK="${APK_DIR}/app-${FLAVOR}-release.apk"
+            if [ ! -f "$APK" ]; then
+              APK="$(find "${APK_DIR}" -maxdepth 1 -name '*.apk' 2>/dev/null | head -n 1)"
+            fi
+            if [ -z "$APK" ]; then
+              echo "::error::未找到 ${ABI} 的 release APK（期望 ${APK_DIR}/）。请检查 --split-per-abi 构建产物。"
+              exit 1
+            fi
+            DEST="$RUNNER_TEMP/readerx-${VERSION}-${ABI}.apk"
+            cp "$APK" "$DEST"
+            APKS+=("$DEST")
+            echo "APK artifact [${ABI}]: ${DEST}"
+          done
+          # 跨步骤传递：换行分隔写入临时文件，发布步骤按行还原
+          printf '%s\n' "${APKS[@]}" > "$RUNNER_TEMP/apk-paths.txt"
+          echo "Prepared ${#APKS[@]} per-ABI APKs"
 
       - name: Extract release notes from CHANGELOG.md
         run: |
@@ -170,14 +185,15 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          mapfile -t APKS < "$RUNNER_TEMP/apk-paths.txt"
           PRERELEASE=""
           case "${VERSION}" in
             *-*) PRERELEASE="--prerelease" ;;
           esac
-          gh release create "${TAG}" \
-            "$RUNNER_TEMP/readerx-${VERSION}.apk" \
+          gh release create "${TAG}" "${APKS[@]}" \
             --repo "${GITHUB_REPOSITORY}" \
             --title "${TAG}" \
             --notes-file "$RUNNER_TEMP/release-notes.md" \
             ${PRERELEASE}
-          echo "Released ${TAG} with readerx-${VERSION}.apk"
+          echo "Released ${TAG} with ${#APKS[@]} APKs:"
+          printf '  %s\n' "${APKS[@]}"
