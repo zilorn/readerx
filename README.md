@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="./public/favicon.svg" alt="ReaderX" width="96" height="96" />
+</p>
+
 # ReaderX
 
 基于 **Tauri 2 + SolidJS + TypeScript** 的移动端风格电子书阅读器。

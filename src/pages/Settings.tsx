@@ -15,7 +15,6 @@ import {
 } from "../components/icons";
 import { PageHeader } from "../components/PageHeader";
 import { LicenseSheet } from "../components/LicenseSheet";
-import { GroupManager } from "../components/GroupManager";
 import { ToggleSwitch } from "../components/ToggleSwitch";
 import {
   SOURCE_PARALLEL_MAX,
@@ -29,7 +28,6 @@ import {
   shelfSourceFilterEnabled,
   type ThemeMode,
 } from "../lib/store";
-import { initGroups } from "../lib/groups";
 import { appVersion, loadAppVersion } from "../lib/version";
 import { ReadingSettingsRows } from "../components/ReadingSettingsRows";
 
@@ -96,7 +94,6 @@ export default function SettingsPage() {
   });
 
   createEffect(() => {
-    void initGroups();
     void loadAppVersion();
   });
 
@@ -216,23 +213,6 @@ export default function SettingsPage() {
           </div>
         </section>
 
-        {/* 听书缓存 */}
-        <section class="mb-6">
-          <h2 class="mx-1 mb-2 text-[12.5px] font-medium tracking-[0.04em] text-text-3">
-            听书缓存
-          </h2>
-          <div class="overflow-hidden rounded-[14px] border border-border bg-surface">
-            <Row
-              icon={<HeadphonesIcon size={18} />}
-              label="管理听书缓存"
-              desc="查看并删除各书籍的合成音频缓存"
-              onClick={() => navigate("/tts-cache")}
-            >
-              <ChevronRightIcon size={18} class="flex-none text-text-3" />
-            </Row>
-          </div>
-        </section>
-
         {/* 导入 */}
         <section class="mb-6">
           <h2 class="mx-1 mb-2 text-[12.5px] font-medium tracking-[0.04em] text-text-3">
@@ -280,23 +260,20 @@ export default function SettingsPage() {
           </div>
         </section>
 
-        {/* 书架分组 */}
-        <section class="mb-6">
-          <h2 class="mx-1 mb-2 text-[12.5px] font-medium tracking-[0.04em] text-text-3">
-            书架分组
-          </h2>
-          <p class="mx-1 mb-2 text-[11.5px] leading-[1.6] text-text-3">
-            本地书都可归入分组，在书架顶部按分组筛选
-          </p>
-          <GroupManager />
-        </section>
-
         {/* 数据 */}
         <section class="mb-6">
           <h2 class="mx-1 mb-2 text-[12.5px] font-medium tracking-[0.04em] text-text-3">
             数据
           </h2>
-          <div class="overflow-hidden rounded-[14px] border border-border bg-surface">
+          <div class="divide-y divide-border overflow-hidden rounded-[14px] border border-border bg-surface">
+            <Row
+              icon={<HeadphonesIcon size={18} />}
+              label="管理听书缓存"
+              desc="查看并删除各书籍的合成音频缓存"
+              onClick={() => navigate("/tts-cache")}
+            >
+              <ChevronRightIcon size={18} class="flex-none text-text-3" />
+            </Row>
             <Row
               icon={<TrashIcon size={18} />}
               label={resetConfirming() ? "再点一次确认重置" : "重置全部阅读进度"}

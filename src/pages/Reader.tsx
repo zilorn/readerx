@@ -1702,8 +1702,9 @@ export default function ReaderPage() {
     if (areaRect.width <= 0) return null;
     const pointAt = (
       off: number,
+      fromStart: boolean,
     ): { x: number; y: number; top: number; bottom: number } | null => {
-      const caret = caretRangeAtGlobalOffset(col, mir.unitStart, off);
+      const caret = caretRangeAtGlobalOffset(col, mir.unitStart, off, fromStart);
       if (!caret) return null;
       const cr = caret.getBoundingClientRect();
       if (!cr) return null;
@@ -1712,7 +1713,7 @@ export default function ReaderPage() {
       // 引擎统一的字符边界，保留用它。纵向改锚定到贴着边界的一个实际字符排版框（与画出来的
       // 字一致，跨引擎/跨设备稳定），手柄圆心放字形框下方，呈“手柄在文字下方”的观感。
       const x = cr.left - areaRect.left;
-      const glyph = glyphRangeAtGlobalOffset(col, mir.unitStart, off);
+      const glyph = glyphRangeAtGlobalOffset(col, mir.unitStart, off, fromStart);
       const gr = glyph ? glyph.getBoundingClientRect() : null;
       if (gr && gr.width > 0 && gr.height > 0) {
         // 圆心贴字形框底往下挪一截：避开字又不至于坠进下一行的字
@@ -1744,8 +1745,10 @@ export default function ReaderPage() {
         bottom: top - areaRect.top + height,
       };
     };
-    const loP = loOffset < ovE ? pointAt(loOffset) : null;
-    const hiP = hiOffset > ovS ? pointAt(hiOffset) : null;
+    // lo 端点含 offset 处字符（起点语义：段首选中时手柄须锚在段首，而非上一段末尾）；
+    // hi 端点为排他终点（停在上一段末尾的语义不变）。
+    const loP = loOffset < ovE ? pointAt(loOffset, true) : null;
+    const hiP = hiOffset > ovS ? pointAt(hiOffset, false) : null;
     if (!loP && !hiP) return null;
     const zTop = loP && hiP ? Math.min(loP.top, hiP.top) : (loP ?? hiP)!.top;
     const zBottom = loP && hiP ? Math.max(loP.bottom, hiP.bottom) : (loP ?? hiP)!.bottom;
@@ -1983,7 +1986,7 @@ export default function ReaderPage() {
     const col = colRef;
     const anchor = col
       ? (caretRangeAtGlobalOffset(col, mir.unitStart, span[1]) ??
-        caretRangeAtGlobalOffset(col, mir.unitStart, span[0]))
+        caretRangeAtGlobalOffset(col, mir.unitStart, span[0], true))
       : null;
     if (!anchor) {
       setSelMenu(null);

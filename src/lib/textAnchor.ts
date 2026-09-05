@@ -217,11 +217,17 @@ function textNodesRange(el: Element, from: number, to: number): Range | null {
  * unitStart：该章 buildTextMirror 得到的单元起始偏移表。
  * offset 必须落在根容器内某个 [data-u] 元素的文本范围里（含恰好在其末尾），
  * 否则返回 null —— 用于：选区手柄定位、选区菜单锚点、朗读起点。
+ *
+ * fromStart：offset 是否为选区**起点**（lo，含 offset 处的字符）。
+ * 镜像文本把段落/标题首尾相接（无分隔符），某偏移恰好等于上一元素末尾 + 下一元素
+ * 开头。终点语义（默认）应锚到「在此收尾」的上一个元素；起点语义则锚到「由此开始」
+ * 的下一个元素——否则在段首起选时，起点手柄会被算到上一段的末尾去。
  */
 export function caretRangeAtGlobalOffset(
   root: ParentNode | null,
   unitStart: number[],
   offset: number,
+  fromStart = false,
 ): Range | null {
   if (!root) return null;
   const target = Math.max(0, Math.floor(offset) || 0);
@@ -233,7 +239,14 @@ export function caretRangeAtGlobalOffset(
     if (!Number.isFinite(base)) continue;
     const spanStart = base + cstart;
     const spanEnd = spanStart + elementTextLength(el);
-    if (target < spanStart || target > spanEnd) continue;
+    if (fromStart) {
+      // 起点：需要元素真正包含 offset 处的字符（[spanStart, spanEnd)），
+      // 因而恰好接在上一元素之后开始的元素（spanStart == target）会被选中。
+      if (target < spanStart || target >= spanEnd) continue;
+    } else {
+      // 终点：沿用既有口径——含边界即可（spanEnd == target 的上一元素命中）。
+      if (target < spanStart || target > spanEnd) continue;
+    }
     const pt = charNodeAtOffset(el, target - spanStart);
     if (!pt) continue;
     const range = document.createRange();
@@ -250,7 +263,8 @@ export function caretRangeAtGlobalOffset(
  * 有的指字形内容盒顶、高度可能为 0），直接用会把选区手柄相对文字上下带偏；
  * 而单字符 Range 的矩形来自真实排版字形框，与实际画出来的字一致，跨引擎稳定。
  *
- * 优先取边界**左侧**的字符（视觉上光标停在它之后，与选区端点的落点一致）；
+ * 终点语义（默认）优先取边界**左侧**的字符（视觉上光标停在它之后，与选区端点的落点
+ * 一致）；起点语义（fromStart）取边界**右侧**的字符（光标停在它之前，即选区首个字符）。
  * 边界恰好在文本/单元开头（无左侧字符）时取右侧第一个字符；offset 落点处必有可见字符
  * 的场合才返回非 null，否则返回 null 由调用方兜底。
  */
@@ -258,6 +272,7 @@ export function glyphRangeAtGlobalOffset(
   root: ParentNode | null,
   unitStart: number[],
   offset: number,
+  fromStart = false,
 ): Range | null {
   if (!root) return null;
   const target = Math.max(0, Math.floor(offset) || 0);
@@ -269,11 +284,18 @@ export function glyphRangeAtGlobalOffset(
     if (!Number.isFinite(base)) continue;
     const spanStart = base + cstart;
     const spanEnd = spanStart + elementTextLength(el);
-    if (target < spanStart || target > spanEnd) continue;
+    if (fromStart) {
+      // 起点：需元素真正包含 offset 处的字符，取它作为手柄下方的字形。
+      if (target < spanStart || target >= spanEnd) continue;
+    } else {
+      // 终点：含边界即可（边界恰好是上一元素末尾时命中它）。
+      if (target < spanStart || target > spanEnd) continue;
+    }
     const local = target - spanStart;
     const len = spanEnd - spanStart;
     if (len <= 0) return null;
-    const glyphStart = local >= 1 && local <= len ? local - 1 : Math.min(local, len - 1);
+    const glyphStart =
+      fromStart ? local : local >= 1 && local <= len ? local - 1 : Math.min(local, len - 1);
     const start = charNodeAtOffset(el, glyphStart);
     const end = charNodeAtOffset(el, glyphStart + 1);
     if (!start || !end) return null;

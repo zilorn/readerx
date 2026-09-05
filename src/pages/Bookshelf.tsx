@@ -8,6 +8,7 @@ import {
 } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 import { BookCover } from "../components/BookCover";
+import { GroupManagerSheet } from "../components/GroupManager";
 import { GroupPicker } from "../components/GroupPicker";
 import { LoadingScreen } from "../components/LoadingScreen";
 import { PageHeader } from "../components/PageHeader";
@@ -216,15 +217,98 @@ function GroupChip(props: {
   active: boolean;
   count: number;
   onClick: () => void;
+  onLongPress?: () => void;
 }) {
+  let longPressTimer: number | undefined;
+  let longPressFired = false;
+  let downX = 0;
+  let downY = 0;
+  let downEl: HTMLElement | undefined;
+  let downPointerId = -1;
+
+  function releaseCapture() {
+    if (!downEl || downPointerId < 0) return;
+    try {
+      if (downEl.hasPointerCapture(downPointerId))
+        downEl.releasePointerCapture(downPointerId);
+    } catch {
+      /* 指针已失效时忽略 */
+    }
+    downEl = undefined;
+    downPointerId = -1;
+  }
+
+  function onPointerDown(e: PointerEvent) {
+    if (!props.onLongPress) return;
+    longPressFired = false;
+    downX = e.clientX;
+    downY = e.clientY;
+    downEl = e.currentTarget as HTMLElement;
+    downPointerId = e.pointerId;
+    window.clearTimeout(longPressTimer);
+    longPressTimer = window.setTimeout(() => {
+      if (!props.onLongPress || !downEl) return;
+      // 长按触发后捕获指针：后续 pointerup/click 落在本 chip，
+      // 避免点到新弹出的管理面板遮罩导致立即关闭
+      try {
+        downEl.setPointerCapture(downPointerId);
+      } catch {
+        /* 指针已失效时忽略 */
+      }
+      longPressFired = true;
+      props.onLongPress();
+    }, 480);
+  }
+
+  function onPointerMove(e: PointerEvent) {
+    if (Math.hypot(e.clientX - downX, e.clientY - downY) > 12) {
+      window.clearTimeout(longPressTimer);
+    }
+  }
+
+  function cancelLongPress() {
+    window.clearTimeout(longPressTimer);
+  }
+
+  function onPointerUp() {
+    if (longPressFired) return; // 保留捕获，交给 onClick 消化并释放
+    cancelLongPress();
+    releaseCapture();
+  }
+
+  function onPointerCancel() {
+    cancelLongPress();
+    longPressFired = false;
+    releaseCapture();
+  }
+
+  function onClick() {
+    if (longPressFired) {
+      longPressFired = false;
+      releaseCapture();
+      return;
+    }
+    props.onClick();
+  }
+
   return (
     <button
-      class="inline-flex flex-none items-center gap-1.5 rounded-full px-3.5 py-[7px] text-[13px] transition-colors duration-150"
+      class="inline-flex flex-none select-none items-center gap-1.5 rounded-full px-3.5 py-[7px] text-[13px] touch-manipulation transition-colors duration-150"
       classList={{
         "bg-accent text-on-accent font-semibold": props.active,
         "bg-surface text-text-2 border border-border": !props.active,
       }}
-      onClick={props.onClick}
+      onClick={onClick}
+      onContextMenu={(e) => e.preventDefault()}
+      {...(props.onLongPress
+        ? {
+            onPointerDown,
+            onPointerMove,
+            onPointerUp,
+            onPointerCancel,
+            onPointerLeave: cancelLongPress,
+          }
+        : {})}
     >
       {props.label}
       <span class={props.active ? "text-on-accent/80" : "text-text-3"}>{props.count}</span>
@@ -238,6 +322,7 @@ export default function BookshelfPage() {
   const [selecting, setSelecting] = createSignal(false);
   const [selectedIds, setSelectedIds] = createSignal<string[]>([]);
   const [groupPickerOpen, setGroupPickerOpen] = createSignal(false);
+  const [groupManageOpen, setGroupManageOpen] = createSignal(false);
   const [confirmDelete, setConfirmDelete] = createSignal(false);
   let confirmTimer: number | undefined;
 
@@ -488,6 +573,11 @@ export default function BookshelfPage() {
                   active={isChipActive(chip.key)}
                   count={chip.count}
                   onClick={() => setFilter(chip.value)}
+                  onLongPress={
+                    chip.value.kind === "group" && !selecting()
+                      ? () => setGroupManageOpen(true)
+                      : undefined
+                  }
                 />
               )}
             </For>
@@ -597,6 +687,10 @@ export default function BookshelfPage() {
           }}
           onClose={() => setGroupPickerOpen(false)}
         />
+      </Show>
+
+      <Show when={groupManageOpen()}>
+        <GroupManagerSheet onClose={() => setGroupManageOpen(false)} />
       </Show>
     </div>
   );
