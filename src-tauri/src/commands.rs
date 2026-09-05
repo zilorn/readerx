@@ -5,7 +5,7 @@ use crate::engine;
 use crate::host;
 use crate::models::{
     BookItem, BookSource, BookSourceSummary, ChapterContentResult, ChapterItem, CachedAudio,
-    LocalBook, SourceCallResult, TtsCacheStat,
+    FetchedImage, LocalBook, SourceCallResult, TtsCacheStat,
 };
 use crate::storage;
 use crate::webview_login;
@@ -292,6 +292,50 @@ pub async fn readerx_source_fetch_contents(
     })
     .await
     .map_err(|e| format!("书源正文拉取任务失败: {e}"))?
+}
+
+/// 用书源会话下载一张正文图片（正文插图/整章图片），返回 base64 与 MIME。
+/// 失败时返回 ok:false（不抛 command 错误），便于调用方做占位/整章失败判定。
+#[tauri::command]
+pub async fn readerx_source_fetch_image(
+    app: AppHandle,
+    source_id: String,
+    url: String,
+    referer: Option<String>,
+) -> Result<FetchedImage, String> {
+    spawn_blocking(move || -> Result<FetchedImage, String> {
+        let source = storage::get_book_source(&app, &source_id)?
+            .ok_or_else(|| "书源不存在".to_string())?;
+        if !source.enabled {
+            return Err("书源已禁用".to_string());
+        }
+        if !source.capabilities.content {
+            return Err(format!("书源「{}」已禁用正文能力", source.name));
+        }
+        host::prepare_source(&source)?;
+        // 重启后把该书源已保存的登录 Cookie 注入会话（进程内幂等）
+        let _ = webview_login::seed_source_session(&app, &source.id);
+        match host::fetch_image_bytes(
+            &source.id,
+            &url,
+            referer.as_deref().unwrap_or(""),
+        ) {
+            Ok((mime, bytes)) => Ok(FetchedImage {
+                ok: true,
+                mime,
+                data: B64.encode(&bytes),
+                error: String::new(),
+            }),
+            Err(error) => Ok(FetchedImage {
+                ok: false,
+                mime: String::new(),
+                data: String::new(),
+                error,
+            }),
+        }
+    })
+    .await
+    .map_err(|e| format!("图片下载任务失败: {e}"))?
 }
 
 // ---------------------------------------------------------------------------

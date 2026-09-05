@@ -43,7 +43,7 @@
 | discover（可选） | `discoverCategories()` | 无 | `{name,url}[]` |
 | detail（可选） | `bookDetail(book)` | `BookItem` | 富化后的 `BookItem` |
 | toc | `bookToc(book)` | `BookItem` | `ChapterItem[]` |
-| content | `bookContent(chapter, book)` | `ChapterItem, BookItem` | 正文文本 string |
+| content | `bookContent(chapter, book)` | `ChapterItem, BookItem` | 正文文本 string，或 `{text?, images?}` |
 
 ### 对象形状
 
@@ -70,10 +70,20 @@
 `<br>`、`</p>`、`</div>`、`<li>` 等折算为换行，但**不保证精确排版**——复杂页面请用
 `html` 对象选中正文容器后再 `html.text(el.html)`（见 api 文档示例）。
 
+**正文也可以是图片**（漫画 / 扫描 / 图文混排），两种表达方式等价：
+
+- 返回 HTML：内含 `<img>` 时按出现顺序抽取图片并保留周围文字（纯文本无 `<img>` 时行为与旧版完全一致）；
+- 返回对象 `{ text?, images? }`（`images` 亦可写 `imgs`）：显式给出图片地址，`text` 作为图前正文。
+
+图片由阅读器经**该书源会话**（默认头 / UA / Cookie，`Referer` = 正文页地址）自动下载并以
+data URL 存入本地章节（离线可读、防盗链源可用），详见 [book-source-image.md](./book-source-image.md)。
+
 ## 容量与超时
 
 - 搜索结果：单源 ≤ 100 条截断展示；目录：≤ 20000 章。
 - 单次响应体 ≤ 32 MiB；单章正文 ≤ 5 MiB（超出截断并置 `truncated`）。
+- 正文图片：单张 ≤ 24 MiB、下载超时 60s、并发跟随全局「书源并发」；图片以 data URL 落本地书库，
+  体积随图片明显增长，「下载全部正文」前请先预估磁盘占用。
 - 单请求默认超时 15s（`opts.timeoutMs` 可调，上限 120s）；单函数调用预算 45s、单章正文 30s。
 - 书源 JS 中**不可用**：定时器（`setTimeout`…）、真 DOM、`fetch`、文件/进程访问；
   纯 CPU 死循环无法被杀停（属已知限制，请勿在规则里写死循环）。

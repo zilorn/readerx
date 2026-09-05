@@ -75,6 +75,12 @@ async function bookContent(chapter, book) {
 - 请求章节页拿“章节分页数/下一页”，循环 `http.get` 拼 text；
 - 返回 JSON 时 `JSON.parse` 取正文段数组后 `.join("\n\n")`。
 
+### 正文是图片（漫画 / 扫描 / 图文混排）
+
+`bookContent` 返回含 `<img>` 的 HTML（或对象 `{ text?, images? }`）即可让本章带图，
+阅读器会自动下载并本地化图片（走书源会话 / Cookie / 防盗链 Referer），详见
+[book-source-image.md](./book-source-image.md)。纯文字写法不受任何影响。
+
 ## 5. 详情与发现（可选）
 
 - `bookDetail(book)`：返回富化后的 `BookItem`（补 `cover/intro/latest/updateTime`），失败可不实现。

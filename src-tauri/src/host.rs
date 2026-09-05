@@ -26,6 +26,12 @@ pub const DEFAULT_TIMEOUT_MS: u64 = 15_000;
 pub const CONCURRENCY_CAP: usize = 8;
 /// 每源最多保存的手动 Cookie 行数
 const MAX_COOKIE_LINES: usize = 64;
+/// 缺省 UA（与 http_request 中原先的内联值一致）
+const DEFAULT_UA: &str = "Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36";
+/// 正文图片读取上限（24 MiB，超限报错而非截断）
+const IMAGE_BODY_LIMIT: u64 = 24 * 1024 * 1024;
+/// 正文图片下载超时（毫秒；图片通常比页面慢）
+const IMAGE_TIMEOUT_MS: u64 = 60_000;
 
 static SOURCES: OnceLock<Mutex<HashMap<String, Arc<SourceState>>>> = OnceLock::new();
 
@@ -95,6 +101,52 @@ fn source_state(source_id: &str) -> Result<Arc<SourceState>, String> {
         .get(source_id)
         .cloned()
         .ok_or_else(|| "书源会话尚未初始化".to_string())
+}
+
+/// 组装书源会话的基础请求头：默认头 + 手动 Cookie 行 + UA（空 UA 用内置默认）。
+/// 顺序与历史实现一致（默认头 → Cookie → UA），便于后续“末尾同名覆盖”。
+fn session_base_headers(state: &SourceState) -> Vec<(String, String)> {
+    let mut lines: Vec<(String, String)> = state
+        .default_headers
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let cookies = state
+        .extra_cookies
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    if !cookies.is_empty() {
+        lines.push(("cookie".to_string(), cookies.join("; ")));
+    }
+    let ua = state
+        .user_agent
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    if !ua.is_empty() {
+        lines.push(("user-agent".to_string(), ua));
+    } else {
+        lines.push(("user-agent".to_string(), DEFAULT_UA.to_string()));
+    }
+    lines
+}
+
+/// 同名请求头合并：cookie 追加合并，其余“后出现的覆盖先出现的”。
+fn finalize_headers(header_lines: Vec<(String, String)>) -> Vec<(String, String)> {
+    let mut final_headers: Vec<(String, String)> = Vec::new();
+    for (k, v) in header_lines {
+        if let Some(existing) = final_headers.iter_mut().find(|(ek, _)| *ek == k) {
+            if k == "cookie" {
+                existing.1 = format!("{}; {}", existing.1, v);
+            } else {
+                existing.1 = v;
+            }
+        } else {
+            final_headers.push((k, v));
+        }
+    }
+    final_headers
 }
 
 /// 统一错误 JSON（宿主边界内原生函数不抛 JS 异常，交由 JS 包装层 throw）
@@ -224,36 +276,9 @@ pub(crate) fn http_request(source_id: &str, method: &str, raw_url: &str, opts: &
             url,
         );
 
-        let mut header_lines: Vec<(String, String)> = state
-            .default_headers
-            .lock()
-            .map_err(|_| "会话锁异常".to_string())?
-            .clone();
+        let mut header_lines = session_base_headers(&state);
 
-        // 手动 Cookie 行（跨调用累积，CF cookie 等）
-        let cookies = state
-            .extra_cookies
-            .lock()
-            .map_err(|_| "会话锁异常".to_string())?
-            .clone();
-        if !cookies.is_empty() {
-            header_lines.push(("cookie".to_string(), cookies.join("; ")));
-        }
-        let ua = state
-            .user_agent
-            .lock()
-            .map_err(|_| "会话锁异常".to_string())?
-            .clone();
-        if !ua.is_empty() {
-            header_lines.push(("user-agent".to_string(), ua));
-        } else {
-            header_lines.push((
-                "user-agent".to_string(),
-                "Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36".to_string(),
-            ));
-        }
-
-        // 单请求头覆盖
+        // 单请求头覆盖（末尾同名覆盖默认头；Referer 等按需追加）
         if let Some(Value::Object(extra)) = o.get("headers") {
             for (k, v) in extra {
                 if let Value::String(s) = v {
@@ -296,18 +321,7 @@ pub(crate) fn http_request(source_id: &str, method: &str, raw_url: &str, opts: &
         }
 
         // 去重同名头（cookie/ua/头覆盖优先级最高，保留最后一次）
-        let mut final_headers: Vec<(String, String)> = Vec::new();
-        for (k, v) in header_lines {
-            if let Some(existing) = final_headers.iter_mut().find(|(ek, _)| *ek == k) {
-                if k == "cookie" {
-                    existing.1 = format!("{}; {}", existing.1, v);
-                } else {
-                    existing.1 = v;
-                }
-            } else {
-                final_headers.push((k, v));
-            }
-        }
+        let final_headers = finalize_headers(header_lines);
         let mut header_map = reqwest::header::HeaderMap::new();
         for (k, v) in final_headers {
             if let Ok(name) = reqwest::header::HeaderName::from_bytes(k.as_bytes()) {
@@ -383,6 +397,136 @@ pub(crate) fn http_request(source_id: &str, method: &str, raw_url: &str, opts: &
         Ok(value) => serde_json::to_string(&value).unwrap_or_else(|_| error_payload("序列化失败".into())),
         Err(message) => error_payload(message),
     }
+}
+
+// ---------------------------------------------------------------------------
+// 二进制图片下载（正文插图 / 整章图片用；复用书源会话头与 Cookie）
+// ---------------------------------------------------------------------------
+
+fn ext_image_mime(url: &str) -> Option<&'static str> {
+    let path = url.split(['?', '#']).next().unwrap_or("");
+    let ext = path.rsplit('.').next()?.to_ascii_lowercase();
+    match ext.as_str() {
+        "jpg" | "jpeg" | "jpe" => Some("image/jpeg"),
+        "png" => Some("image/png"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        "avif" => Some("image/avif"),
+        "bmp" => Some("image/bmp"),
+        "svg" => Some("image/svg+xml"),
+        "ico" => Some("image/x-icon"),
+        _ => None,
+    }
+}
+
+fn sniff_image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\xFF\xD8\xFF") {
+        return Some("image/jpeg");
+    }
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Some("image/png");
+    }
+    if bytes.starts_with(b"GIF8") {
+        return Some("image/gif");
+    }
+    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
+        let brand = String::from_utf8_lossy(&bytes[8..12]).to_ascii_lowercase();
+        if brand.contains("avif") || brand.contains("avis") {
+            return Some("image/avif");
+        }
+        return None;
+    }
+    if bytes.starts_with(b"BM") && bytes.len() > 14 {
+        return Some("image/bmp");
+    }
+    let head = String::from_utf8_lossy(&bytes[..bytes.len().min(512)])
+        .trim()
+        .to_ascii_lowercase();
+    if head.starts_with("<svg") || (head.starts_with("<?xml") && head.contains("<svg")) {
+        return Some("image/svg+xml");
+    }
+    None
+}
+
+/// 识别图片 MIME：优先响应头 Content-Type；否则按 URL 扩展名；最后嗅探字节头。
+fn image_mime(url: &str, content_type: &str, bytes: &[u8]) -> String {
+    let ct = content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if ct.starts_with("image/") && ct.len() > "image/".len() {
+        return ct;
+    }
+    if let Some(mime) = ext_image_mime(url) {
+        return mime.to_string();
+    }
+    if let Some(mime) = sniff_image_mime(bytes) {
+        return mime.to_string();
+    }
+    "application/octet-stream".to_string()
+}
+
+/// 用书源会话请求一张图片的原始字节。referer 非空时作为 Referer 头（防盗链常见）。
+/// 返回 (MIME, 字节)；无法识别为图片时返回 Err。
+pub(crate) fn fetch_image_bytes(
+    source_id: &str,
+    url: &str,
+    referer: &str,
+) -> Result<(String, Vec<u8>), String> {
+    let url = url.trim();
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err("仅支持 http/https 图片地址".to_string());
+    }
+    let state = source_state(source_id)?;
+    let mut header_lines = session_base_headers(&state);
+    let referer = referer.trim();
+    if !referer.is_empty() {
+        header_lines.push(("referer".to_string(), referer.to_string()));
+    }
+    let final_headers = finalize_headers(header_lines);
+    let mut header_map = reqwest::header::HeaderMap::new();
+    for (k, v) in final_headers {
+        if let Ok(name) = reqwest::header::HeaderName::from_bytes(k.as_bytes()) {
+            if let Ok(val) = reqwest::header::HeaderValue::from_str(&v) {
+                header_map.append(name, val);
+            }
+        }
+    }
+    let resp = state
+        .client
+        .get(url)
+        .headers(header_map)
+        .timeout(Duration::from_millis(IMAGE_TIMEOUT_MS))
+        .send()
+        .map_err(|e| format!("图片请求失败: {e}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!("图片下载失败 HTTP {}", status.as_u16()));
+    }
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let mut reader = resp.take(IMAGE_BODY_LIMIT + 1);
+    let mut bytes = Vec::new();
+    reader
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("读取图片失败: {e}"))?;
+    if bytes.len() as u64 > IMAGE_BODY_LIMIT {
+        return Err("图片过大（超过 24 MiB 上限）".to_string());
+    }
+    let mime = image_mime(url, &content_type, &bytes);
+    if mime == "application/octet-stream" {
+        return Err("无法识别图片格式（响应不是有效图片）".to_string());
+    }
+    Ok((mime, bytes))
 }
 
 /// http.setCookie：手动追加一行 Cookie 头内容（后续所有请求自动携带）。

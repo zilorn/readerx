@@ -3276,6 +3276,9 @@ export default function ReaderPage() {
                     平时阅读只按需缓存「当前章前后 5 章」；这里可把全书正文批量下载到本机，之后断网也能读。
                     请求并行度跟随全局「书源并发」设置（设置 → 书源）。
                   </p>
+                  <p class="text-[11.5px] leading-[1.6] text-text-3">
+                    含图片的章节（漫画 / 图文）会把图片一并下载到本地缓存，占用空间随图片数量明显增大。
+                  </p>
                   <Show when={remoteRun().busy}>
                     <div class="rounded-[12px] bg-surface-2 px-3.5 py-3">
                       <div class="flex items-center justify-between text-[12px]">

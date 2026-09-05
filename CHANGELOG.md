@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- 书源正文支持图片（图片正文）：`bookContent` 返回含 `<img>` 的 HTML 或对象 `{ text?, images? }` 即可在正文中展示插图 / 整章图片（漫画、扫描、图文混排）；图片经该书源 HTTP 会话（Cookie / 默认头 / UA，Referer 取正文页地址）下载为 data URL 随章节本地缓存，离线可读、对防盗链图站开箱即用。老书源纯文本返回与已缓存章节不受影响，书源 schema 与书籍数据格式均未变。
+- 在线阅读窗口拉取改为「当前章优先、逐章落盘」，含图章节打开时无需等整窗下载完。
+
 ## [0.1.2] - 2026-09-05
 
 ### Added

@@ -9,6 +9,7 @@ import { createSignal } from "solid-js";
 import {
   callRemoteSource,
   fetchRemoteChapterContents,
+  fetchRemoteSourceImage,
 } from "./backend";
 import { addBookRecord, commitBookContentUpdate, localBookById } from "./books";
 import { isOnlineBook, type LocalBook, type LocalBookChapter } from "./booksTypes";
@@ -18,6 +19,11 @@ import type {
   ChapterItem,
   ChapterContentResult,
 } from "./bookSourcesTypes";
+import { currentSourceParallel } from "./store";
+import {
+  buildSourceChapterContent,
+  type SourceContentBuild,
+} from "./sourceContent";
 
 /** 阅读懒加载窗口半径（前后各 N 章） */
 export const LAZY_WINDOW = 5;
@@ -73,44 +79,8 @@ export function chapterHasContent(chapter: LocalBookChapter): boolean {
   );
 }
 
-/** 把引擎返回的原始正文清洗成段落数组（分段 = 空行；HTML 先行剥标签） */
-export function normalizeContentText(raw: string): string[] {
-  let t = raw ?? "";
-  t = t
-    .replace(/<script[\s\S]*?<\/script>/gi, "")
-    .replace(/<style[\s\S]*?<\/style>/gi, "");
-  if (t.includes("<")) {
-    t = t
-      .replace(/<(?:br|hr)\s*\/?>/gi, "\n")
-      .replace(/<\/(?:p|div|li|h[1-6]|tr|table|ul|ol|section|article|blockquote|td|dd|dt)>/gi, "\n")
-      .replace(/<[^>]*>/g, "");
-  }
-  t = t
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&lt;/gi, "<")
-    .replace(/&gt;/gi, ">")
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;|&apos;/gi, "'")
-    .replace(/&amp;/gi, "&")
-    .replace(/&#(\d+);/g, (_m, code: string) => {
-      const c = Number(code);
-      return Number.isFinite(c) && c > 0 ? String.fromCodePoint(c) : "";
-    })
-    .replace(/&#x([0-9a-fA-F]+);/g, (_m, code: string) => {
-      const c = parseInt(code, 16);
-      return Number.isFinite(c) && c > 0 ? String.fromCodePoint(c) : "";
-    })
-    .replace(/\r\n?/g, "\n")
-    .replace(/[ \t]+\n/g, "\n")
-    .replace(/\n[ \t]+/g, "\n");
-  const paragraphs = t
-    .split(/\n[ \t]*\n+/)
-    .map((p) => p.replace(/\s*\n\s*/g, "").replace(/[ \t]+/g, " ").trim())
-    .filter(Boolean);
-  if (paragraphs.length > 0) return paragraphs;
-  const single = t.replace(/\s+/g, " ").trim();
-  return single ? [single] : [];
-}
+// 正文文本规范化已迁至 sourceContent.ts（供“含图正文”解析共用）；这里再导出保持旧引用可用
+export { normalizeContentText } from "./sourceContent";
 
 function toBookItem(book: LocalBook): BookItem {
   return {
@@ -249,9 +219,18 @@ export function onlineRunBusy(bookId: string): boolean {
   return runMap()[bookId]?.busy ?? false;
 }
 
+/** 单章拉取计划：引擎返回 + 结构化解析结果 */
+interface BatchPlan {
+  chapterIndex: number;
+  chapter: LocalBookChapter;
+  build: SourceContentBuild;
+}
+
 /**
- * 依次下载 book 中缺失正文的章节（分批提交，每批内部并行上限由用户全局“书源并发”设置决定）。
- * indexes 为空时表示「剩余全部」。
+ * 依次下载 book 中缺失正文的章节（分批；引擎正文拉取按批并发，批内图片下载限并发）。
+ * - indexes 为空表示「剩余全部」（download 相位，每批统一落盘，保持批量 I/O）；
+ * - window 相位按传入顺序逐章处理并逐章落盘（调用方已把当前阅读章排在前面，
+ *   使其尽早可读，其余窗口章节随后在后台补齐）。
  */
 async function runFetch(
   bookId: string,
@@ -291,6 +270,7 @@ async function runFetch(
   });
   const failed: { index: number; error: string }[] = [];
   let done = 0;
+  const concurrency = Math.max(1, currentSourceParallel());
 
   for (let start = 0; start < targets.length; start += BATCH_SIZE) {
     if (cancellations.has(bookId)) break;
@@ -309,24 +289,104 @@ async function runFetch(
     );
     if (cancellations.has(bookId)) break;
     const nextBook = structuredClone(book);
-    results.forEach((res, offset) => {
+
+    // 单章图片下载（章内限并发；取消/失败时该图留占位 src=""，阅读器显示占位框）
+    const fetchPlanImages = async (plan: BatchPlan): Promise<number> => {
+      const refs = plan.build.imageRefs;
+      if (refs.length === 0) return 0;
+      const cache = new Map<string, string | null>();
+      let cursor = 0;
+      let loaded = 0;
+      const cap = Math.max(1, Math.min(concurrency, refs.length));
+      const worker = async (): Promise<void> => {
+        for (;;) {
+          const ref = refs[cursor];
+          if (!ref) return;
+          cursor++;
+          const block = plan.build.blocks[ref.index];
+          if (!block || block.kind !== "img") continue;
+          if (cancellations.has(bookId)) {
+            block.src = "";
+            continue;
+          }
+          let data = cache.get(ref.url);
+          if (data === undefined) {
+            data = await fetchRemoteSourceImage(sourceId, ref.url, plan.chapter.url || null);
+            cache.set(ref.url, data);
+          }
+          if (data) {
+            block.src = data;
+            loaded++;
+          } else {
+            block.src = "";
+          }
+        }
+      };
+      await Promise.all(Array.from({ length: cap }, () => worker()));
+      return loaded;
+    };
+
+    // 把解析结果写入章节；纯图章一张图都没成功时视为失败（不落盘，供 UI 重试）。
+    const applyOne = async (plan: BatchPlan): Promise<boolean> => {
+      const { chapter, build } = plan;
+      const imgCount = build.blocks.filter((b) => b.kind === "img").length;
+      // data: 直给图片无需下载，视为已就绪
+      const ready = imgCount - build.imageRefs.length;
+      const loaded = build.imageRefs.length > 0 ? await fetchPlanImages(plan) : 0;
+      if (build.hasImages) {
+        if (build.paragraphs.length === 0 && ready + loaded === 0) {
+          failed.push({
+            index: plan.chapterIndex,
+            error: `图片加载失败（0/${build.imageRefs.length}）`,
+          });
+          return false;
+        }
+        chapter.paragraphs = build.paragraphs;
+        chapter.blocks = build.blocks;
+        return true;
+      }
+      // 纯文本：保持旧行为（无图片不写 blocks，避免旧读者差异；空正文标记已拉取）
+      chapter.paragraphs = build.paragraphs;
+      if (build.paragraphs.length > 0) {
+        chapter.blocks = undefined;
+      } else {
+        chapter.blocks = [];
+      }
+      return true;
+    };
+
+    // 组装批次计划（引擎失败的章节直接进失败列表）
+    const plans: BatchPlan[] = [];
+    for (let offset = 0; offset < slice.length; offset++) {
+      const res = results[offset];
       const chapterIndex = slice[offset];
       const chapter = nextBook.chapters[chapterIndex];
-      if (!chapter) return;
-      if (res.ok) {
-        chapter.paragraphs = normalizeContentText(res.text);
-        if (chapter.paragraphs.length > 0) {
-          chapter.blocks = undefined;
-        } else {
-          // 已拉取但正文为空：标记为已获取，避免反复请求
-          chapter.blocks = [];
-        }
-      } else {
+      if (!chapter) continue;
+      if (!res.ok) {
         failed.push({ index: chapterIndex, error: res.error || "未知错误" });
+        done++;
+        continue;
       }
-    });
-    done += results.length;
-    await commitBookContentUpdate(nextBook);
+      const build = buildSourceChapterContent(res.text, chapter.url || undefined);
+      plans.push({ chapterIndex, chapter, build });
+    }
+
+    if (phase === "window") {
+      // 逐章处理并逐章落盘：当前阅读章在调用方传入顺序最前，尽快可读
+      for (const plan of plans) {
+        if (cancellations.has(bookId)) break;
+        const applied = await applyOne(plan);
+        done++;
+        if (applied) await commitBookContentUpdate(nextBook);
+      }
+    } else {
+      for (const plan of plans) {
+        await applyOne(plan);
+        done++;
+      }
+      await commitBookContentUpdate(nextBook);
+    }
+
     const remaining = targets.slice(start + slice.length);
     patchRun(bookId, {
       done: Math.min(done, targets.length),
@@ -346,7 +406,7 @@ async function runFetch(
   });
 }
 
-/** 阅读窗口预取：确保 [idx-WINDOW, idx+WINDOW] 内章节有正文 */
+/** 阅读窗口预取：确保 [idx-WINDOW, idx+WINDOW] 内章节有正文（当前章优先） */
 export async function ensureReadingWindow(
   bookId: string,
   chapterIndex: number,
@@ -360,6 +420,8 @@ export async function ensureReadingWindow(
     if (!chapterHasContent(book.chapters[i])) missing.push(i);
   }
   if (missing.length === 0) return;
+  // 离当前章近的先拉（同距按下标升序），runFetch 按此顺序逐章落盘，阅读无需等整窗
+  missing.sort((a, b) => Math.abs(a - chapterIndex) - Math.abs(b - chapterIndex) || a - b);
   await runFetch(bookId, missing, "window");
 }
 

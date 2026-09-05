@@ -37,6 +37,7 @@ pub fn run() {
             commands::readerx_source_delete,
             commands::readerx_source_call,
             commands::readerx_source_fetch_contents,
+            commands::readerx_source_fetch_image,
             commands::readerx_source_login_supported,
             commands::readerx_source_login_webview,
             commands::readerx_source_login_clear

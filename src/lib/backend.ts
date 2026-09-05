@@ -11,6 +11,7 @@ import type {
   BookSourceSummary,
   ChapterContentResult,
   ChapterItem,
+  FetchedImage,
   SourceCallResult,
   SourceLoginResult,
 } from "./bookSourcesTypes";
@@ -179,6 +180,33 @@ export async function fetchRemoteChapterContents(
   } catch (err) {
     console.error("[backend] 拉取正文失败", err);
     return [];
+  }
+}
+
+/**
+ * 用书源会话下载一张正文插图，返回 data URL；失败返回 null。
+ * 图片请求自动携带该书源的默认头/Cookie/UA，Referer 可单独指定（正文页面地址）。
+ */
+export async function fetchRemoteSourceImage(
+  sourceId: string,
+  url: string,
+  referer: string | null,
+): Promise<string | null> {
+  if (!tauri) return null;
+  try {
+    const r = await invoke<FetchedImage>("readerx_source_fetch_image", {
+      sourceId,
+      url,
+      referer: referer || null,
+    });
+    if (!r.ok || !r.data) {
+      if (r.error) console.warn(`[backend] 图片下载失败: ${r.error}`);
+      return null;
+    }
+    return `data:${r.mime || "image/jpeg"};base64,${r.data}`;
+  } catch (err) {
+    console.error("[backend] 图片下载失败", err);
+    return null;
   }
 }
 

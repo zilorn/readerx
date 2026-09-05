@@ -234,6 +234,22 @@ pub struct ChapterContentResult {
     pub error: String,
 }
 
+/// 经书源会话下载一张正文插图的结果（正文图片可能带防盗链，必须走该书源的
+/// cookie / 默认头 / UA，因此放到 Rust 侧用与 bookContent 相同的会话请求）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FetchedImage {
+    pub ok: bool,
+    /// 图片 MIME（如 image/jpeg）；失败时为空
+    #[serde(default)]
+    pub mime: String,
+    /// 图片字节（base64）；失败时为空
+    #[serde(default)]
+    pub data: String,
+    #[serde(default)]
+    pub error: String,
+}
+
 /// 一次书源函数调用的统一结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -73,6 +73,16 @@ export interface ChapterContentResult {
   error: string;
 }
 
+/** 经书源会话下载一张正文插图的结果（图片可能带防盗链，必须走书源 Cookie/头） */
+export interface FetchedImage {
+  ok: boolean;
+  /** 图片 MIME（如 image/jpeg）；失败时为空 */
+  mime: string;
+  /** 图片字节（base64）；失败时为空 */
+  data: string;
+  error: string;
+}
+
 /** 一次书源函数调用的结果 */
 export interface SourceCallResult {
   ok: boolean;
