@@ -242,6 +242,14 @@
   text-underline-offset: 0.2em;
 }
 
+/* 分页模式自绘选区：正在拖选的文字底色（每段文字独立圆角，跨行不断开） */
+.readerx-select {
+  border-radius: 3px;
+  background-color: color-mix(in srgb, var(--accent) 30%, transparent);
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+
 /* 搜索模式：命中词持续高亮（浅），当前查看的命中词更醒目 */
 .readerx-search {
   border-radius: 3px;

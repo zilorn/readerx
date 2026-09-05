@@ -28,7 +28,7 @@ import {
 } from "../components/BookSearchPanel";
 import type { BookSearchHit } from "../lib/bookSearch";
 import { BookmarkPanel } from "../components/BookmarkPanel";
-import { SelectionMenu } from "../components/SelectionMenu";
+import { SelectionMenu, type SelectionCustom } from "../components/SelectionMenu";
 import { TtsBubble } from "../components/TtsBubble";
 import { TtsSheet } from "../components/TtsSheet";
 import {
@@ -97,11 +97,12 @@ import {
 import { progressContextAt, readingPercent, resolveReadingTarget } from "../lib/progress";
 import { showToast } from "../lib/toast";
 import {
+  caretRangeAtGlobalOffset,
   charNodeAtOffset,
   charOffsetInElement,
   copyPlainText,
   dataAnchorOf,
-  flashUnitRange,
+  flashSpan,
 } from "../lib/textAnchor";
 import {
   createTtsPlayer,
@@ -154,8 +155,8 @@ function asCss(record: CssRecord): JSX.CSSProperties {
 // 书签下划线：按单元内字符区间把文本切段渲染
 // ---------------------------------------------------------------------------
 
-/** 标记的视觉语义：书签=下划线，朗读中=浅橙底，搜索模式命中=强调底 */
-export type MarkKind = "bookmark" | "speak" | "search" | "searchCurrent";
+/** 标记的视觉语义：书签=下划线，朗读中=浅橙底，搜索模式命中=强调底，选取中=拖选底色 */
+export type MarkKind = "bookmark" | "speak" | "search" | "searchCurrent" | "select";
 
 /** 单元内被标记覆盖的字符区间（局部于该单元文本） */
 export interface UnitMark {
@@ -180,6 +181,7 @@ interface TextSegment {
   speak: boolean;
   search: boolean;
   searchCurrent: boolean;
+  select: boolean;
 }
 
 /** 把文本按覆盖区间切段（窗口 [winStart, winStart+text.length) 之外的标记忽略） */
@@ -199,7 +201,9 @@ function splitMarkedText(
     spans.push({ s: s - winStart, e: e - winStart, kind: mark.kind ?? "bookmark" });
   }
   if (spans.length === 0) {
-    return [{ text, bookmark: false, speak: false, search: false, searchCurrent: false }];
+    return [
+      { text, bookmark: false, speak: false, search: false, searchCurrent: false, select: false },
+    ];
   }
   const points = [0, text.length];
   for (const sp of spans) {
@@ -219,15 +223,24 @@ function splitMarkedText(
     let speak = false;
     let search = false;
     let searchCurrent = false;
+    let select = false;
     for (const sp of spans) {
       if (sp.e > a && sp.s < b) {
         if (sp.kind === "speak") speak = true;
         else if (sp.kind === "search") search = true;
         else if (sp.kind === "searchCurrent") searchCurrent = true;
+        else if (sp.kind === "select") select = true;
         else bookmark = true;
       }
     }
-    segments.push({ text: text.slice(a, b), bookmark, speak, search, searchCurrent });
+    segments.push({
+      text: text.slice(a, b),
+      bookmark,
+      speak,
+      search,
+      searchCurrent,
+      select,
+    });
   }
   return segments;
 }
@@ -258,7 +271,8 @@ function renderMarkedText(
     !segments[0].bookmark &&
     !segments[0].speak &&
     !segments[0].search &&
-    !segments[0].searchCurrent
+    !segments[0].searchCurrent &&
+    !segments[0].select
   ) {
     return segments[0].text;
   }
@@ -269,7 +283,8 @@ function renderMarkedText(
           !seg.bookmark &&
           !seg.speak &&
           !seg.search &&
-          !seg.searchCurrent
+          !seg.searchCurrent &&
+          !seg.select
         ) {
           return seg.text;
         }
@@ -280,6 +295,7 @@ function renderMarkedText(
               "readerx-speak": seg.speak,
               "readerx-search": seg.search,
               "readerx-search-current": seg.searchCurrent,
+              "readerx-select": seg.select,
             }}
           >
             {seg.text}
@@ -692,7 +708,8 @@ export default function ReaderPage() {
   // 本书记签（按位置排序，响应式）
   const bookBookmarks = createMemo(() => sortedBookmarks(bookId()));
 
-  // 当前章节内、书签覆盖的单元内字符区间（供下划线渲染）
+  // 当前章节内、书签覆盖的单元内字符区间（供下划线渲染）。
+  // 书签区间是镜像文本全局 [charStart, charEnd)，可与多个单元（跨段落）求交。
   const unitMarks = createMemo<UnitMark[]>(() => {
     const bms = bookBookmarks();
     const ch = chapter();
@@ -701,9 +718,15 @@ export default function ReaderPage() {
     const out: UnitMark[] = [];
     for (const bm of bms) {
       if (bm.chapterCid !== ch.cid) continue;
-      const base = mir.unitStart[bm.unitIndex] ?? -1;
-      if (base < 0) continue;
-      out.push({ unit: bm.unitIndex, s: bm.charStart - base, e: bm.charEnd - base });
+      for (let u = 0; u < mir.unitLength.length; u++) {
+        const len = mir.unitLength[u];
+        if (len <= 0) continue;
+        const base = mir.unitStart[u];
+        const lo = Math.max(bm.charStart, base);
+        const hi = Math.min(bm.charEnd, base + len);
+        if (hi <= lo) continue;
+        out.push({ unit: u, s: lo - base, e: hi - base });
+      }
     }
     out.sort((a, b) => a.unit - b.unit || a.s - b.s || a.e - b.e);
     return out;
@@ -841,9 +864,37 @@ export default function ReaderPage() {
   /** 命中总数 */
   const searchHitTotal = createMemo(() => searchSession()?.hits.length ?? 0);
 
-  /** 正文渲染用：书签下划线 + 朗读高亮 + 搜索命中高亮的并集 */
+  // -------------------------------------------------------------------
+  // 分页模式自绘选区（可跨页连选，原生选区在本列禁用）：
+  // selSpan 保存选区在“当前章镜像文本”里的全局 [lo, hi)，与页码无关；
+  // 选区高亮经 selMarks 与书签/朗读/搜索标记一起渲染。
+  // -------------------------------------------------------------------
+  const [selSpan, setSelSpan] = createSignal<readonly [number, number] | null>(null);
+  /** 选区结束（抬起）后弹出的自定义菜单数据；无自绘选区时为 null */
+  const [selMenu, setSelMenu] = createSignal<SelectionCustom | null>(null);
+
+  /** 选区覆盖的单元内字符区间（拖选高亮渲染用） */
+  const selMarks = createMemo<UnitMark[]>(() => {
+    const span = selSpan();
+    if (!span) return [];
+    const mir = mirror();
+    if (!mir || mir.text.length === 0) return [];
+    const out: UnitMark[] = [];
+    for (let u = 0; u < mir.unitLength.length; u++) {
+      const len = mir.unitLength[u];
+      if (len <= 0) continue;
+      const base = mir.unitStart[u];
+      const lo = Math.max(span[0], base);
+      const hi = Math.min(span[1], base + len);
+      if (hi <= lo) continue;
+      out.push({ unit: u, s: lo - base, e: hi - base, kind: "select" });
+    }
+    return out;
+  });
+
+  /** 正文渲染用：书签下划线 + 朗读高亮 + 搜索命中高亮 + 拖选高亮的并集 */
   const renderMarks = createMemo<UnitMark[]>(() =>
-    combineMarks(unitMarks(), speakMarks(), searchMarks()),
+    combineMarks(unitMarks(), selMarks(), speakMarks(), searchMarks()),
   );
 
   // 视图切章（用户翻章 / 引擎自动跨章）后让播放控制器跟随。
@@ -1067,6 +1118,27 @@ export default function ReaderPage() {
       }
     }
     return out;
+  });
+
+  // 分页模式：每页正文在镜像文本里的 [起始, 结束) 区间（仅 p/h 文本，图片不占字符）
+  const pageSpans = createMemo<Array<[number, number]>>(() => {
+    const pg = paged();
+    const mir = mirror();
+    if (!pg || !mir || mir.text.length === 0) return [];
+    const spans: Array<[number, number]> = [];
+    let cursor = 0;
+    for (const page of pg.pages) {
+      const start = cursor;
+      for (const f of page) {
+        if (f.kind !== "p" && f.kind !== "h") continue;
+        const base = mir.unitStart[f.unit] ?? -1;
+        if (base < 0) continue;
+        const end = base + f.cstart + f.text.length;
+        if (end > cursor) cursor = end;
+      }
+      spans.push([start, cursor]);
+    }
+    return spans;
   });
 
   /** 立即把挂起的阅读位置落库（去抖超时 / 退出阅读页 / 页面隐藏时调用） */
@@ -1495,6 +1567,451 @@ export default function ReaderPage() {
   let animDir: 1 | -1 = 1;
   let animTriggered = false;
 
+  // -------------------------------------------------------------------
+  // 分页模式：自绘文本选区（拖选 + 跨页自动翻页续选）
+  // 原生 text 选区在分页列被禁用（select-none），由本引擎接管：
+  //   - 触屏：长按起选（拉丁词按整词 / 中文按单字），随后拖动扩选；
+  //   - 鼠标/触控笔：按下后拖拽（≥6px）直接起选；
+  //   - 选区端拖出正文列上/下缘 → 在本章内自动翻页续选，跨页连成一段
+  //     [lo, hi) 镜像区间，交给 复制 / 书签（可跨段落）/ 朗读 使用。
+  // -------------------------------------------------------------------
+  const SEL_LONG_PRESS_MS = 380;
+  const SEL_DRAG_SLOP = 6;
+  const SEL_FLIP_PACE_MS = 220;
+  let colRef: HTMLDivElement | undefined;
+
+  interface SelPressState {
+    x: number;
+    y: number;
+    pointerId: number;
+    pointerType: string;
+    /** 按下点的镜像字符偏移；不在正文上时为 null */
+    downChar: number | null;
+    longTimer: number | undefined;
+  }
+  interface SelDragState {
+    kind: "new" | "long" | "handle";
+    /** 固定端镜像偏移（另一端随指针移动）；"long" 起选后待首个移动确定 */
+    anchor: number | null;
+    pointerId: number;
+    x: number;
+    y: number;
+    lastFlipAt: number;
+    /** 翻页落地等待中：此期间忽略指针输入 */
+    pending: boolean;
+  }
+  let selPress: SelPressState | null = null;
+  let selDrag: SelDragState | null = null;
+
+  /** 选区手势当前是否可用（无弹层/工具栏/搜索/章节未就绪时不可用） */
+  function selEngineUsable(): boolean {
+    if (!isPaged() || !layout() || !chapter() || resumeTarget() !== null) return false;
+    if (menuOpen() || tocOpen() || bmPanelOpen() || readerSettingsOpen() || bookSearchOpen()) {
+      return false;
+    }
+    if (searchSession() !== null || downloadOpen()) return false;
+    if (remoteMissing() || remoteBodyEmpty()) return false;
+    return !!colRef;
+  }
+
+  /** 当前页正文列矩形（判定指针是否拖出上/下缘） */
+  function pageTextRect(): DOMRect | null {
+    const col = colRef;
+    if (!col) return null;
+    const r = col.getBoundingClientRect();
+    return r.width > 0 && r.height > 0 ? r : null;
+  }
+
+  /** 客户端坐标 → 镜像文本偏移（按当前页可见正文） */
+  function mirrorOffsetAtPoint(px: number, py: number): number | null {
+    const mir = mirror();
+    if (!mir || mir.text.length === 0) return null;
+    const d = document as Document & {
+      caretRangeFromPoint?: (x: number, y: number) => Range | null;
+      caretPositionFromPoint?: (
+        x: number,
+        y: number,
+      ) => { offsetNode: Node; offset: number } | null;
+    };
+    const range = d.caretRangeFromPoint?.(px, py) ?? null;
+    let node: Node | null = null;
+    let off = 0;
+    if (range) {
+      node = range.startContainer;
+      off = range.startOffset;
+    } else {
+      const pos = d.caretPositionFromPoint?.(px, py);
+      if (pos) {
+        node = pos.offsetNode;
+        off = pos.offset;
+      }
+    }
+    if (!node) return null;
+    const anchor = dataAnchorOf(node);
+    if (!anchor) return null;
+    const base = mir.unitStart[anchor.unit] ?? -1;
+    if (base < 0) return null;
+    const local = charOffsetInElement(anchor.el, node, off);
+    return Math.min(mir.text.length, base + anchor.cstart + local);
+  }
+
+  /** 长按起点：拉丁词按整词扩展；中文等无词界文字按单个字 */
+  function expandSelectStart(text: string, c: number): [number, number] {
+    const isWordChar = (i: number): boolean => {
+      const ch = text[i];
+      return !!ch && /[A-Za-z0-9_]/.test(ch);
+    };
+    if (!isWordChar(c)) return [c, Math.min(c + 1, text.length)];
+    let s = c;
+    while (s > 0 && isWordChar(s - 1)) s--;
+    let e = c + 1;
+    while (e < text.length && isWordChar(e)) e++;
+    return [s, e];
+  }
+
+  function captureSelPointer(pointerId: number): void {
+    const el = areaRef;
+    if (el && el.setPointerCapture) {
+      try {
+        el.setPointerCapture(pointerId);
+      } catch {
+        /* 已释放等场景忽略 */
+      }
+    }
+  }
+
+  function releaseSelPointer(pointerId: number): void {
+    const el = areaRef;
+    if (el && el.hasPointerCapture && el.hasPointerCapture(pointerId)) {
+      try {
+        el.releasePointerCapture(pointerId);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  /** 长按触发：选中整词/字并进入可拖动扩选状态 */
+  function startLongPressSelection(p: SelPressState): void {
+    selPress = null;
+    gestureStart = null; // 抬手不再当作点击（翻页/呼出菜单）
+    const mir = mirror();
+    if (p.downChar === null || !mir || p.downChar < 0 || p.downChar >= mir.text.length) return;
+    if (!selEngineUsable()) return;
+    const [s, e] = expandSelectStart(mir.text, p.downChar);
+    cancelFollowIfActive();
+    selDrag = {
+      kind: "long",
+      anchor: null,
+      pointerId: p.pointerId,
+      x: p.x,
+      y: p.y,
+      lastFlipAt: 0,
+      pending: false,
+    };
+    setSelSpan([s, e]);
+    setSelMenu(null);
+    captureSelPointer(p.pointerId);
+  }
+
+  /** 鼠标/笔拖拽开始新选区 */
+  function startDragSelection(p: SelPressState, e: PointerEvent): void {
+    selPress = null;
+    gestureStart = null;
+    if (p.downChar === null || !selEngineUsable()) return;
+    cancelFollowIfActive();
+    selDrag = {
+      kind: "new",
+      anchor: p.downChar,
+      pointerId: e.pointerId,
+      x: e.clientX,
+      y: e.clientY,
+      lastFlipAt: 0,
+      pending: false,
+    };
+    captureSelPointer(e.pointerId);
+    selDragUpdate(e.clientX, e.clientY);
+  }
+
+  /** 选区端点（手柄）开始拖动 */
+  function beginHandleDrag(side: "lo" | "hi", e: PointerEvent): void {
+    const span = selSpan();
+    if (!span || !selEngineUsable()) return;
+    setSelMenu(null);
+    cancelFollowIfActive();
+    selDrag = {
+      kind: "handle",
+      anchor: side === "lo" ? span[1] : span[0],
+      pointerId: e.pointerId,
+      x: e.clientX,
+      y: e.clientY,
+      lastFlipAt: 0,
+      pending: false,
+    };
+    captureSelPointer(e.pointerId);
+  }
+
+  /** 拖动端拖出正文列上下缘：把当前页整页纳入选区后翻页（仅本章内） */
+  function selFlip(dir: 1 | -1): void {
+    const cur = pageSpans();
+    const pi = pageIdx();
+    const drag = selDrag;
+    if (!drag || cur.length === 0) return;
+    if (dir > 0 ? pi + 1 >= cur.length : pi <= 0) return; // 本章首/末页边界
+    const span = selSpan();
+    if (span && cur[pi]) {
+      const [ps, pe] = cur[pi];
+      setSelSpan([Math.min(span[0], ps), Math.max(span[1], pe)]);
+    }
+    drag.pending = true;
+    setPageIdx(dir > 0 ? pi + 1 : pi - 1);
+    // 新页挂载后再按最近指针位置续选（自动再翻页按 SEL_FLIP_PACE_MS 限速）
+    window.requestAnimationFrame(() => {
+      if (selDrag === drag) {
+        drag.pending = false;
+        selDragUpdate(drag.x, drag.y);
+      }
+    });
+  }
+
+  /** 拖动中的一次更新：指针映射为字符并扩选/缩选；页缘触发自动翻页 */
+  function selDragUpdate(x: number, y: number): void {
+    const drag = selDrag;
+    if (!drag || drag.pending) return;
+    const mir = mirror();
+    const cur = pageSpans();
+    const pi = pageIdx();
+    if (!mir || mir.text.length === 0 || cur.length === 0 || pi < 0 || pi >= cur.length) return;
+    const span = selSpan();
+    const rect = pageTextRect();
+    const below = rect ? y > rect.bottom + 8 : false;
+    const above = rect ? y < rect.top - 8 : false;
+    if (below || above) {
+      // 长按整词阶段直接拖出页缘：向下视为扩选终点、向上视为扩选起点
+      if (drag.anchor === null && span) {
+        drag.anchor = below ? span[0] : span[1];
+      }
+      const now = performance.now();
+      if (now - drag.lastFlipAt < SEL_FLIP_PACE_MS) return;
+      drag.lastFlipAt = now;
+      selFlip(below ? 1 : -1);
+      return;
+    }
+    const c = mirrorOffsetAtPoint(x, y);
+    if (c === null) return;
+    drag.x = x;
+    drag.y = y;
+    if (drag.anchor === null) {
+      // 长按整词起选后的首次移动：以词的另一端为固定端
+      if (!span) return;
+      if (c <= span[0]) drag.anchor = span[1];
+      else if (c >= span[1]) drag.anchor = span[0];
+      else return; // 仍停留在词内
+    }
+    const anchor = drag.anchor;
+    const lo = Math.min(anchor, c);
+    const hi = Math.max(anchor, c);
+    if (hi <= lo) {
+      setSelSpan(null); // 拖回固定端：选区收拢为空
+      return;
+    }
+    const clampedLo = Math.max(0, lo);
+    const clampedHi = Math.min(mir.text.length, hi);
+    const curSpan = selSpan();
+    if (curSpan && curSpan[0] === clampedLo && curSpan[1] === clampedHi) return; // 未变化
+    setSelSpan([clampedLo, clampedHi]);
+  }
+
+  /** 手势结束（非取消）：按当前区间弹出选区菜单 */
+  function openSelMenuForSpan(): void {
+    const span = selSpan();
+    const mir = mirror();
+    if (!span || !mir || mir.text.length === 0) return;
+    // 展示文本：跨段/跨页选取时按段落/标题之间补换行，便于复制阅读
+    const parts: string[] = [];
+    for (let u = 0; u < mir.units.length; u++) {
+      const unit = mir.units[u];
+      if (unit.kind !== "p" && unit.kind !== "h") continue;
+      const us = mir.unitStart[u] ?? -1;
+      const ue = us + (mir.unitLength[u] ?? 0);
+      if (us < 0) continue;
+      const s = Math.max(span[0], us);
+      const e = Math.min(span[1], ue);
+      if (e > s) parts.push(mir.text.slice(s, e));
+    }
+    const text = parts.join("\n");
+    if (!text.trim()) {
+      setSelSpan(null);
+      setSelMenu(null);
+      return;
+    }
+    const col = colRef;
+    const anchor = col
+      ? (caretRangeAtGlobalOffset(col, mir.unitStart, span[1]) ??
+        caretRangeAtGlobalOffset(col, mir.unitStart, span[0]))
+      : null;
+    if (!anchor) {
+      setSelMenu(null);
+      return;
+    }
+    setSelMenu({ text, anchor, span: [span[0], span[1]] });
+  }
+
+  // 选区手柄位置（相对阅读区容器；两端落在当前页内才显示）
+  const [selHandles, setSelHandles] = createSignal<{
+    lo?: { x: number; y: number };
+    hi?: { x: number; y: number };
+  } | null>(null);
+
+  function refreshSelHandles(): void {
+    const span = selSpan();
+    const area = areaRef;
+    const col = colRef;
+    if (!span || !area || !col || !isPaged()) {
+      setSelHandles(null);
+      return;
+    }
+    const mir = mirror();
+    const cur = pageSpans();
+    const pi = pageIdx();
+    if (!mir || cur.length === 0 || pi < 0 || pi >= cur.length) {
+      setSelHandles(null);
+      return;
+    }
+    const [ps, pe] = cur[pi];
+    const areaRect = area.getBoundingClientRect();
+    const unitStart = mir.unitStart;
+    const caretPos = (range: Range): { x: number; y: number } | null => {
+      const r = range.getBoundingClientRect();
+      if (!r || areaRect.width <= 0) return null;
+      let top = r.top;
+      let height = r.height;
+      if (r.width <= 0 || r.height <= 0) {
+        // 折叠 caret：按其所在行行高估算
+        const node = range.startContainer;
+        const el = (
+          node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement
+        ) as Element | null;
+        const cs = el ? getComputedStyle(el) : null;
+        const lh = cs ? parseFloat(cs.lineHeight) || 0 : 0;
+        height = lh || Math.round(READING_LINE_HEIGHT * (layout()?.fontSize ?? 24));
+        top = r.top;
+      }
+      return { x: r.left - areaRect.left, y: top - areaRect.top + height / 2 };
+    };
+    // 选区与本页的重叠；端点落在页外时把手柄夹到本页边界显示
+    // （拖该“页边手柄”可继续向前/后跨页调整选区）
+    const ovS = Math.max(span[0], ps);
+    const ovE = Math.min(span[1], pe);
+    if (ovE <= ovS) {
+      setSelHandles(null);
+      return;
+    }
+    const loOffset = Math.min(Math.max(span[0], ps), ovE);
+    const hiOffset = Math.max(Math.min(span[1], pe), ovS);
+    const out: { lo?: { x: number; y: number }; hi?: { x: number; y: number } } = {};
+    if (loOffset < ovE) {
+      const range = caretRangeAtGlobalOffset(col, unitStart, loOffset);
+      const p = range ? caretPos(range) : null;
+      if (p) out.lo = p;
+    }
+    if (hiOffset > ovS) {
+      const range = caretRangeAtGlobalOffset(col, unitStart, hiOffset);
+      const p = range ? caretPos(range) : null;
+      if (p) out.hi = p;
+    }
+    setSelHandles(out.lo || out.hi ? out : null);
+  }
+
+  // 页面 / 选区 / 版式变化后重算手柄位置
+  createEffect(() => {
+    void selSpan();
+    void pageIdx();
+    void paged();
+    void layout();
+    refreshSelHandles();
+  });
+
+  // 切章 / 切换阅读模式 / 进入或退出搜索模式后清空自绘选区
+  createEffect(
+    on(
+      [() => isPaged(), () => chapter()?.cid ?? null, () => searchSession() !== null],
+      () => {
+        if (selSpan() !== null) setSelSpan(null);
+        if (selMenu() !== null) setSelMenu(null);
+      },
+    ),
+  );
+
+  // 全局指针路由：候选按下 + 拖拽由移动/抬起驱动
+  function routeSelPointerMove(e: PointerEvent): void {
+    const drag = selDrag;
+    if (drag && drag.pointerId === e.pointerId) {
+      drag.x = e.clientX;
+      drag.y = e.clientY;
+      selDragUpdate(e.clientX, e.clientY);
+      return;
+    }
+    const press = selPress;
+    if (!press || press.pointerId !== e.pointerId) return;
+    const moved = Math.hypot(e.clientX - press.x, e.clientY - press.y);
+    if (press.longTimer !== undefined) {
+      // 触屏候选：位移过大取消长按（交给翻页/滚动手势）
+      if (moved > 12) {
+        window.clearTimeout(press.longTimer);
+        press.longTimer = undefined;
+        selPress = null;
+      }
+      return;
+    }
+    if (press.downChar !== null && moved >= SEL_DRAG_SLOP && e.buttons !== 0) {
+      startDragSelection(press, e);
+    }
+  }
+
+  function routeSelPointerEnd(e: PointerEvent, cancelled: boolean): void {
+    const press = selPress;
+    if (press && press.pointerId === e.pointerId) {
+      if (press.longTimer !== undefined) window.clearTimeout(press.longTimer);
+      selPress = null;
+    }
+    const drag = selDrag;
+    if (!drag || drag.pointerId !== e.pointerId) return;
+    selDrag = null;
+    releaseSelPointer(e.pointerId);
+    if (cancelled) {
+      setSelSpan(null);
+      setSelMenu(null);
+      return;
+    }
+    const span = selSpan();
+    if (!span || span[1] <= span[0]) {
+      setSelSpan(null);
+      setSelMenu(null);
+      return;
+    }
+    openSelMenuForSpan();
+  }
+
+  onMount(() => {
+    const onMove = (e: PointerEvent) => routeSelPointerMove(e);
+    const onUp = (e: PointerEvent) => routeSelPointerEnd(e, false);
+    const onCancel = (e: PointerEvent) => routeSelPointerEnd(e, true);
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onCancel);
+    onCleanup(() => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onCancel);
+      if (selPress && selPress.longTimer !== undefined) {
+        window.clearTimeout(selPress.longTimer);
+      }
+      selPress = null;
+      selDrag = null;
+    });
+  });
+
   function isUiTarget(e: Event): boolean {
     const target = e.target as HTMLElement | null;
     return !!target?.closest?.("[data-reader-ui]");
@@ -1509,6 +2026,32 @@ export default function ReaderPage() {
   function onSurfacePointerDown(e: PointerEvent) {
     if (e.pointerType === "mouse" && e.button !== 0) return;
     if (isUiTarget(e)) return;
+    // 自绘选区：记录按下候选（触屏等待长按；鼠标/笔等待拖拽起选）
+    if (!selDrag && selEngineUsable()) {
+      const pointerType = e.pointerType;
+      if (pointerType === "touch" || pointerType === "mouse" || pointerType === "pen") {
+        const target = e.target as HTMLElement | null;
+        const dataEl = target?.closest?.("[data-u]");
+        if (dataEl) {
+          const downChar = mirrorOffsetAtPoint(e.clientX, e.clientY);
+          selPress = {
+            x: e.clientX,
+            y: e.clientY,
+            pointerId: e.pointerId,
+            pointerType,
+            downChar,
+            longTimer: undefined,
+          };
+          if (pointerType === "touch") {
+            selPress.longTimer = window.setTimeout(() => {
+              if (selPress && selPress.pointerId === e.pointerId) {
+                startLongPressSelection(selPress);
+              }
+            }, SEL_LONG_PRESS_MS);
+          }
+        }
+      }
+    }
     gestureStart = { x: e.clientX, y: e.clientY, t: performance.now() };
   }
 
@@ -1517,6 +2060,12 @@ export default function ReaderPage() {
     const start = gestureStart;
     gestureStart = null;
     if (!start || isUiTarget(e)) return;
+    // 已有自绘选区时：这次轻点只收起选区（再点才翻页/呼菜单）
+    if (selSpan() !== null) {
+      setSelSpan(null);
+      setSelMenu(null);
+      return;
+    }
     const dt = performance.now() - start.t;
     if (dt > 700) return;
     const dx = e.clientX - start.x;
@@ -1591,7 +2140,9 @@ export default function ReaderPage() {
   });
 
   // -------------------------------------------------------------------
-  // 选区操作：复制 / 书签（新增、重复选取则移除）
+  // 选区操作：复制 / 书签（新增、重复选取则移除）/ 朗读
+  // 选区区间统一换算成“本章镜像文本”的 [lo, hi)（可跨段落/跨页），
+  // 原生选区与分页自绘选区共用同一套动作实现。
   // -------------------------------------------------------------------
 
   async function handleCopyText(text: string): Promise<void> {
@@ -1599,40 +2150,56 @@ export default function ReaderPage() {
     showToast(ok ? "已复制" : "复制失败", !ok);
   }
 
-  function handleBookmarkRange(range: Range): void {
+  /** 一个 Range 端点 → 镜像全局偏移；端点在章节标题等无 data-u 内容上时返回 null */
+  function rangeEndpointOffset(container: Node, offsetInNode: number): number | null {
+    const anchor = dataAnchorOf(container);
+    const mir = mirror();
+    if (!anchor || !mir) return null;
+    const base = mir.unitStart[anchor.unit] ?? -1;
+    if (base < 0) return null;
+    const local = charOffsetInElement(anchor.el, container, offsetInNode);
+    return base + anchor.cstart + local;
+  }
+
+  /** 原生 Range → 镜像区间 [lo, hi)（两端都必须落在正文单元内） */
+  function spanOfRange(range: Range): [number, number] | null {
+    const s = rangeEndpointOffset(range.startContainer, range.startOffset);
+    const e = rangeEndpointOffset(range.endContainer, range.endOffset);
+    if (s === null || e === null) return null;
+    const lo = Math.min(s, e);
+    const hi = Math.max(s, e);
+    if (hi <= lo) return null;
+    return [lo, hi];
+  }
+
+  /** 收起当前可见选区：原生选区 + 分页自绘选区（含选区菜单） */
+  function clearVisibleSelection(): void {
+    window.getSelection()?.removeAllRanges();
+    if (selSpan() !== null) setSelSpan(null);
+    if (selMenu() !== null) setSelMenu(null);
+  }
+
+  /**
+   * 在镜像区间 [lo, hi) 上“新增 / 再点一次则移除”书签。
+   * 区间允许横跨多个段落/标题（跨段落书签）；由调用方先收起选区。
+   */
+  function toggleBookmarkAtSpan(rawLo: number, rawHi: number): void {
     const b = book();
     const ch = chapter();
     const mir = mirror();
-    if (!b || !ch || mir.text.length === 0) {
+    if (!b || !ch || !mir || mir.text.length === 0) {
       showToast("当前内容无法添加书签", true);
       return;
     }
-    const anchorStart = dataAnchorOf(range.startContainer);
-    const anchorEnd = dataAnchorOf(range.endContainer);
-    if (!anchorStart || !anchorEnd || anchorStart.unit !== anchorEnd.unit) {
-      showToast("书签需在同一段文字内选取", true);
-      return;
-    }
-    const base = mir.unitStart[anchorStart.unit] ?? -1;
-    if (base < 0) {
-      showToast("当前内容无法添加书签", true);
-      return;
-    }
-    const os = charOffsetInElement(anchorStart.el, range.startContainer, range.startOffset);
-    const oe = charOffsetInElement(anchorEnd.el, range.endContainer, range.endOffset);
-    const rawS = base + anchorStart.cstart + os;
-    const rawE = base + anchorEnd.cstart + oe;
-    if (rawE <= rawS) {
+    const charStart = Math.max(0, Math.min(rawLo, mir.text.length));
+    const charEnd = Math.max(charStart, Math.min(rawHi, mir.text.length));
+    if (charEnd <= charStart) {
       showToast("请选择要标记的文字", true);
       return;
     }
-    const charStart = Math.min(rawS, rawE);
-    const charEnd = Math.max(rawS, rawE);
-    // 操作完成即收起原生选区
-    window.getSelection()?.removeAllRanges();
-
     const existed = bookmarkAtExactRange(b.id, ch.cid, charStart, charEnd);
     if (existed) {
+      clearVisibleSelection();
       removeBookmark(existed.id);
       showToast("已移除书签");
       return;
@@ -1641,11 +2208,12 @@ export default function ReaderPage() {
       showToast("所选文字过长，无法添加书签", true);
       return;
     }
+    const startUnit = unitAtGlobalOffset(mir, charStart)?.unit ?? -1;
     const bookmark = makeBookmark(
       b.id,
       ch,
       chapterIdx(),
-      anchorStart.unit,
+      startUnit,
       charStart,
       charEnd,
       mir,
@@ -1654,35 +2222,39 @@ export default function ReaderPage() {
       showToast("无法添加书签", true);
       return;
     }
+    clearVisibleSelection();
     addBookmark(bookmark);
     showToast("已添加书签");
   }
 
-  /** 选区「朗读」：从选区起点所在句子开始朗读（起点无正文锚点时回退章首起读） */
-  function handleSpeakFromRange(range: Range): void {
-    // 收起原生选区（同时隐藏选择菜单），交给朗读句高亮展示
-    window.getSelection()?.removeAllRanges();
+  /** 原生选区「书签」入口 */
+  function handleBookmarkRange(range: Range): void {
+    const span = spanOfRange(range);
+    if (!span) {
+      showToast("书签需在正文段落内选取", true);
+      return;
+    }
+    toggleBookmarkAtSpan(span[0], span[1]);
+  }
+
+  /** 从镜像偏移处开始朗读（null/越界 → 本章开头起读） */
+  function handleSpeakAtOffset(start: number | null): void {
     const ch = chapter();
     if (!ch) return;
+    // 收起选区（同时隐藏选区菜单），交给朗读句高亮展示
+    clearVisibleSelection();
     const mir = mirror();
-    if (mir.text.length > 0) {
-      const anchor = dataAnchorOf(range.startContainer);
-      if (anchor) {
-        const base = mir.unitStart[anchor.unit] ?? -1;
-        if (base >= 0) {
-          const os = charOffsetInElement(
-            anchor.el,
-            range.startContainer,
-            range.startOffset,
-          );
-          const offset = Math.min(mir.text.length, base + anchor.cstart + os);
-          ttsPlayer.startFromChar(offset);
-          return;
-        }
-      }
+    if (start === null || !mir || start < 0 || start >= mir.text.length) {
+      ttsPlayer.startFromChar(-1);
+      return;
     }
-    // 选中内容没有正文锚点（如章节标题）：从本章开头读起
-    ttsPlayer.startFromChar(-1);
+    ttsPlayer.startFromChar(start);
+  }
+
+  /** 原生选区「朗读」：从选区起点所在句子开始朗读 */
+  function handleSpeakFromRange(range: Range): void {
+    const span = spanOfRange(range);
+    handleSpeakAtOffset(span ? span[0] : null);
   }
 
   // -------------------------------------------------------------------
@@ -1759,10 +2331,8 @@ export default function ReaderPage() {
     }
     window.cancelAnimationFrame(flashRaf);
     flashRaf = window.requestAnimationFrame(() => {
-      const base = mir.unitStart[p.unit] ?? -1;
-      if (base >= 0) {
-        flashUnitRange(root, p.unit, base, p.charStart, p.charEnd, { scroll: !mode });
-      }
+      // 书签区间可能跨多个单元/段落：整段一起闪亮（只作用于当前可见 DOM）
+      flashSpan(root, mir.unitStart, p.charStart, p.charEnd, { scroll: !mode });
       setPendingFlash(null);
     });
   });
@@ -1818,10 +2388,10 @@ export default function ReaderPage() {
               <Show
                 when={!isPaged()}
                 fallback={
-                  /* 分页模式：左右翻页视图 */
+                  /* 分页模式：左右翻页视图（select-none：由自绘选区接管文本选取） */
                   <div
                     ref={pageAnimRef}
-                    class="absolute inset-0 overflow-hidden"
+                    class="absolute inset-0 select-none overflow-hidden"
                     classList={{ invisible: resumeTarget() !== null }}
                     style={{ "touch-action": "none" }}
                   >
@@ -1834,6 +2404,7 @@ export default function ReaderPage() {
                     >
                       <div style={{ height: `${topPad()}px`, "flex": "none" }} />
                       <div
+                        ref={colRef}
                         class="relative w-full overflow-hidden"
                         style={{ height: `${layout()!.pageHeight}px` }}
                       >
@@ -2033,11 +2604,55 @@ export default function ReaderPage() {
               </div>
             </Show>
 
+            {/* 分页自绘选区手柄：跨页连选时拖住端点继续翻页扩选 */}
+            <Show when={isPaged() && selSpan() && selHandles()}>
+              <div class="pointer-events-none absolute inset-0 z-[26]" aria-hidden="true">
+                <Show when={selHandles()?.lo}>
+                  {(p) => (
+                    <button
+                      type="button"
+                      tabIndex={-1}
+                      data-reader-ui
+                      aria-label="调整选区起点"
+                      class="pointer-events-auto absolute grid h-6 w-6 cursor-pointer -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full"
+                      style={{ top: `${p().y}px`, left: `${p().x}px`, "touch-action": "none" }}
+                      onPointerDown={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        beginHandleDrag("lo", e);
+                      }}
+                    >
+                      <span class="block h-4 w-4 rounded-full border-2 border-white bg-accent shadow-[0_1px_6px_rgb(0_0_0/0.35)]" />
+                    </button>
+                  )}
+                </Show>
+                <Show when={selHandles()?.hi}>
+                  {(p) => (
+                    <button
+                      type="button"
+                      tabIndex={-1}
+                      data-reader-ui
+                      aria-label="调整选区终点"
+                      class="pointer-events-auto absolute grid h-6 w-6 cursor-pointer -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full"
+                      style={{ top: `${p().y}px`, left: `${p().x}px`, "touch-action": "none" }}
+                      onPointerDown={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        beginHandleDrag("hi", e);
+                      }}
+                    >
+                      <span class="block h-4 w-4 rounded-full border-2 border-white bg-accent shadow-[0_1px_6px_rgb(0_0_0/0.35)]" />
+                    </button>
+                  )}
+                </Show>
+              </div>
+            </Show>
+
             {/* 底部阅读状态栏：章节名 + 阅读进度（呼出菜单/抽屉时隐藏，避免遮挡） */}
             <Show when={statusShown()}>
               <div
                 aria-hidden="true"
-                class="pointer-events-none absolute inset-x-0 bottom-0 z-[15] select-none bg-gradient-to-t from-bg via-bg/45 to-transparent"
+                class="pointer-events-none absolute inset-x-0 bottom-0 z-[15] select-none bg-gradient-to-t from-bg via-bg/45 to-transparent select-none"
               >
                 <div
                   class="flex items-center justify-between gap-3 px-6 pt-2 text-[10.5px] leading-none text-text-3"
@@ -2068,7 +2683,7 @@ export default function ReaderPage() {
               aria-hidden={!menuOpen()}
             >
               <div
-                class="flex items-center gap-1.5 px-3 pb-2"
+                class="flex items-center gap-1.5 px-3 pb-2 select-none"
                 style={{ "padding-top": `${topbarPadTop()}px` }}
               >
                 {/* 搜索模式：顶部显示当前命中章节，点章节名返回搜索结果列表 */}
@@ -2140,7 +2755,7 @@ export default function ReaderPage() {
                   >
                     <BookmarkIcon
                       size={21}
-                      filled={bookBookmarks().length > 0 || bmPanelOpen()}
+                      filled={bmPanelOpen()}
                     />
                   </button>
                   <button
@@ -2183,7 +2798,7 @@ export default function ReaderPage() {
 
             {/* 底部菜单栏 + 听书悬浮球（固定在菜单栏上方，随菜单一同滑入/滑出） */}
             <div
-              class="absolute inset-x-0 bottom-0 z-30 transition-transform duration-200"
+              class="absolute inset-x-0 bottom-0 z-30 transition-transform duration-200 select-none"
               classList={{
                 "translate-y-full": !menuOpen(),
                 "translate-y-0": menuOpen(),
@@ -2450,6 +3065,9 @@ export default function ReaderPage() {
               onCopy={(text) => void handleCopyText(text)}
               onBookmark={(range) => handleBookmarkRange(range)}
               onSpeak={(range) => handleSpeakFromRange(range)}
+              onBookmarkSpan={(lo, hi) => toggleBookmarkAtSpan(lo, hi)}
+              onSpeakOffset={(start) => handleSpeakAtOffset(start)}
+              custom={() => (isPaged() ? selMenu() : null)}
             />
 
             {/* 听书设置（引擎 / 音色 / 自定义源 / 倍速 / 定时） */}

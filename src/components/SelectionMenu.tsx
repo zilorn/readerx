@@ -5,19 +5,41 @@
  * - 仅「复制 / 书签 / 朗读」三项，带 SVG 图标；
  * - 固定高度条，宽度自适应内容；内容超出可用宽度时内部横向滚动，杜绝纵向溢出/出屏；
  * - 跟随选区定位：上方空间不足自动翻到选区下方；滚动手势或选区消失即隐藏。
+ *
+ * 两种驱动方式：
+ * 1. 原生选区（滚动模式等）：监听 selectionchange / pointerup，从 window.getSelection
+ *    读出文本与 Range；「书签/朗读」按 Range 回调由页面换算镜像偏移。
+ * 2. 自定义选区（分页模式自绘拖选，可跨页连选）：页面把整段镜像文本、定位锚点
+ *    （可见端的折叠 caret）与 [lo,hi) 偏移通过 props.custom 注入；回调直接给偏移。
  */
 import { Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import { BookmarkIcon, CopyIcon, SpeakerIcon } from "./icons";
+
+/** 自定义（跨页）选区数据：全文 + 定位锚点 + 镜像偏移区间 */
+export interface SelectionCustom {
+  text: string;
+  /** 菜单定位锚点（选区可见端的折叠 caret Range） */
+  anchor: Range;
+  /** 当前章镜像文本内的偏移区间 [lo, hi) */
+  span: [number, number];
+}
 
 export interface SelectionMenuProps {
   /** 坐标换算基准（阅读区容器） */
   rootRef: () => HTMLDivElement | undefined;
   /** 是否允许展示（阅读页就绪且无弹层/工具栏） */
   active: () => boolean;
+  /** 传入时菜单进入“自定义选区”模式，不再跟随原生选区 */
+  custom?: () => SelectionCustom | null;
   onCopy: (text: string) => void;
-  onBookmark: (range: Range) => void;
-  /** 从选区所在句子开始朗读 */
-  onSpeak: (range: Range) => void;
+  /** 原生选区模式：书签（页面内部换算偏移） */
+  onBookmark?: (range: Range) => void;
+  /** 原生选区模式：从选区起点所在句子开始朗读 */
+  onSpeak?: (range: Range) => void;
+  /** 自定义选区模式：按镜像偏移区间添加书签 */
+  onBookmarkSpan?: (lo: number, hi: number) => void;
+  /** 自定义选区模式：从镜像偏移处开始朗读 */
+  onSpeakOffset?: (start: number) => void;
 }
 
 const BAR_H = 46;
@@ -34,6 +56,15 @@ export function SelectionMenu(props: SelectionMenuProps) {
   }
 
   function sync(): void {
+    const custom = props.custom?.() ?? null;
+    if (custom) {
+      if (!props.active()) {
+        hide();
+        return;
+      }
+      setMenu({ range: custom.anchor, text: custom.text });
+      return;
+    }
     const root = props.rootRef();
     const sel = window.getSelection();
     if (
@@ -68,9 +99,10 @@ export function SelectionMenu(props: SelectionMenuProps) {
     setMenu({ range, text });
   }
 
-  // active 由 false → true（工具栏/弹层收起）后重查选区
+  // active / custom 变化（工具栏、弹层收起或选区变更）后重查
   createEffect(() => {
     props.active();
+    props.custom?.();
     queueMicrotask(sync);
   });
 
@@ -101,8 +133,27 @@ export function SelectionMenu(props: SelectionMenuProps) {
     }
     const area = root.getBoundingClientRect();
     if (area.width <= 0 || area.height <= 0) return;
-    const rect = current.range.getBoundingClientRect();
-    if (!rect || rect.width <= 0) return;
+    let r = current.range.getBoundingClientRect();
+    if (!r) return;
+    // 折叠 caret（自定义选区锚点）没有宽高：按其所在行的行高补出可用矩形
+    if (r.width <= 0 || r.height <= 0) {
+      const node = current.range.startContainer;
+      const el = (
+        node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement
+      ) as Element | null;
+      let lineH = 0;
+      if (el) lineH = parseFloat(getComputedStyle(el).lineHeight) || 0;
+      if (!lineH) lineH = 24;
+      const top = r.top;
+      const height = Math.max(r.height, lineH);
+      r = { left: r.left, right: r.left, top, bottom: top + height } as DOMRect;
+    }
+    const rect = {
+      left: r.left,
+      right: Math.max(r.right, r.left + 2),
+      top: r.top,
+      bottom: Math.max(r.bottom, r.top + 2),
+    };
 
     const roomTop = rect.top - area.top;
     const above = roomTop >= BAR_H + GAP;
@@ -135,7 +186,7 @@ export function SelectionMenu(props: SelectionMenuProps) {
           class="absolute z-[45] overflow-hidden rounded-2xl border border-border bg-surface shadow-[0_10px_34px_rgb(0_0_0/0.22)] select-none"
           style={{ height: `${BAR_H}px`, visibility: "hidden" }}
           onPointerDown={(e) => {
-            // 保住文本选区，避免点按菜单导致选区折叠
+            // 保住文本选区/自定义选区，避免点按菜单导致选区折叠
             e.preventDefault();
             e.stopPropagation();
           }}
@@ -155,7 +206,11 @@ export function SelectionMenu(props: SelectionMenuProps) {
               <div class="mx-1 h-5 w-px flex-none bg-border" />
               <button
                 class="flex h-9 flex-none cursor-pointer items-center gap-1.5 rounded-xl px-3 text-[13px] text-text-2 transition-colors active:bg-surface-2"
-                onClick={() => props.onBookmark(current().range)}
+                onClick={() => {
+                  const c = props.custom?.() ?? null;
+                  if (c) props.onBookmarkSpan?.(c.span[0], c.span[1]);
+                  else props.onBookmark?.(current().range);
+                }}
               >
                 <BookmarkIcon size={17} />
                 <span>书签</span>
@@ -163,7 +218,11 @@ export function SelectionMenu(props: SelectionMenuProps) {
               <div class="mx-1 h-5 w-px flex-none bg-border" />
               <button
                 class="flex h-9 flex-none cursor-pointer items-center gap-1.5 rounded-xl px-3 text-[13px] text-text-2 transition-colors active:bg-surface-2"
-                onClick={() => props.onSpeak(current().range)}
+                onClick={() => {
+                  const c = props.custom?.() ?? null;
+                  if (c) props.onSpeakOffset?.(c.span[0]);
+                  else props.onSpeak?.(current().range);
+                }}
               >
                 <SpeakerIcon size={17} />
                 <span>朗读</span>

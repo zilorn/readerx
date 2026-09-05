@@ -29,6 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 封面可以在epub中取。
 - 当章节内容过多时，阅读器显示正在加载，而不是卡页面。
 - 阅读器设置继承设置页面的某些设置项。
+- 当书籍有至少一个书签时，不填充svg图标。
+- 跨页面选取支持（分页模式）。
+- 书签跨段落支持。
 
 ## [0.1.1] - 2026-09-04
 

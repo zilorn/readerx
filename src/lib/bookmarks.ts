@@ -2,9 +2,10 @@
  * 书签：持久化 + 精确定位。
  *
  * 定位思路（避免“同一章节多个相同文本”误跳）：
- * - 创建书签时记录【结构化指纹】：章节 cid / 正文单元序号 unitIndex / 章节镜像文本内的
+ * - 创建书签时记录【结构化指纹】：章节 cid / 起点正文单元序号 unitIndex / 章节镜像文本内的
  *   全局字符区间 [charStart, charEnd)，以及选中文本与前/后文锚（before/after）。
- *   （镜像文本 = 章节内全部 p/h 正文按序拼接，图片不占字符，见 buildTextMirror。）
+ *   区间可横跨多个段落/标题（“跨段落书签”）；镜像文本 = 章节内全部 p/h 正文按序拼接，
+ *   图片不占字符，见 buildTextMirror。
  * - 渲染时正文元素带 data-u/data-c，因此任何字号、翻页、窗口宽度变化都不影响字符偏移；
  *   书签下划线、跳转高亮都只依赖偏移，与“搜重复文字”无关。
  * - resolveBookmarkTarget 定位时按多级方法兜底：
@@ -33,9 +34,9 @@ export interface Bookmark {
   /** 章节序号（cid 失效时的回退） */
   chapterIndex: number;
   chapterTitle: string;
-  /** 选中起点所在正文单元序号（chapterUnits 下标，p/h） */
+  /** 选中起点所在正文单元序号（chapterUnits 下标，p/h；跨段落时仍记起点单元） */
   unitIndex: number;
-  /** 章节镜像文本中的全局字符区间（只含 p/h 文本） */
+  /** 章节镜像文本中的全局字符区间（只含 p/h 文本；可横跨多个单元） */
   charStart: number;
   charEnd: number;
   /** 选中原文（完整保存以便展示与定位比对，一般 ≤ BOOKMARK_MAX_LEN） */
@@ -192,6 +193,10 @@ export function newBookmarkId(): string {
 
 /**
  * 组装一条书签记录。
+ *
+ * 支持跨段落/标题的书签：charStart/charEnd 是本章镜像文本（p/h 正文按序拼接）
+ * 的全局区间，可横跨任意多个单元（图片不占字符）。unitIndex 只记录“起点所在
+ * 单元”，作为定位时的结构化锚点之一。
  * mirror 需来自该书签所在章节的 buildTextMirror(章节单元)。
  */
 export function makeBookmark(
@@ -203,11 +208,15 @@ export function makeBookmark(
   charEnd: number,
   mirror: TextMirror,
 ): Bookmark | null {
-  if (!chapter || charStart < 0 || charEnd <= charStart) return null;
+  if (!chapter || !Number.isFinite(charStart) || !Number.isFinite(charEnd)) return null;
+  if (charEnd <= charStart) return null;
   if (charEnd - charStart > BOOKMARK_MAX_LEN) return null;
-  const base = mirror.unitStart[unitIndex] ?? -1;
-  if (base < 0) return null;
-  if (charStart < base || charEnd > base + (mirror.unitLength[unitIndex] ?? 0)) return null;
+  if (charStart < 0 || charEnd > mirror.text.length) return null;
+  // 起点必须落在某个 p/h 文本内（定位/渲染的锚定基础；终点允许在正文末尾）
+  const startUnit = unitAtGlobalOffset(mirror, charStart);
+  const effectiveUnit =
+    startUnit?.unit ?? (Number.isFinite(unitIndex) && unitIndex >= 0 ? unitIndex : -1);
+  if (effectiveUnit < 0) return null;
   const text = mirror.text.slice(charStart, charEnd);
   if (!text) return null;
   return {
@@ -216,7 +225,7 @@ export function makeBookmark(
     chapterCid: chapter.cid,
     chapterIndex,
     chapterTitle: chapter.title,
-    unitIndex,
+    unitIndex: effectiveUnit,
     charStart,
     charEnd,
     text,
@@ -298,13 +307,16 @@ export function resolveBookmarkTarget(book: LocalBook, bm: Bookmark): ResolvedTa
   const length = bm.charEnd - bm.charStart;
   const base = bm.unitIndex >= 0 ? mirror.unitStart[bm.unitIndex] ?? -1 : -1;
 
-  // 1) 结构化：单元编号 + 偏移仍落在同一单元内，且起点文字未变
+  // 1) 结构化：起点单元仍存在、起点偏移落在其文本内，且起点文字未变。
+  //    （书签可横跨多个单元，因此终点允许超出该单元、只要不越出镜像文本。）
   if (
     base >= 0 &&
     bm.unitIndex < units.length &&
     (units[bm.unitIndex].kind === "p" || units[bm.unitIndex].kind === "h") &&
     bm.charStart >= base &&
-    bm.charEnd <= base + (mirror.unitLength[bm.unitIndex] ?? 0)
+    bm.charStart < base + (mirror.unitLength[bm.unitIndex] ?? 0) &&
+    bm.charEnd >= bm.charStart &&
+    bm.charEnd <= mirror.text.length
   ) {
     const sample = mirror.text.slice(bm.charStart, bm.charStart + Math.min(length, 96));
     if (sample === bm.text.slice(0, sample.length)) {

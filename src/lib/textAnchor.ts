@@ -42,6 +42,11 @@ function textLengthOf(node: Node): number {
   return total;
 }
 
+/** 元素子树内的文本总长（含书签/朗读等嵌套 span 的文本） */
+export function elementTextLength(el: Element): number {
+  return textLengthOf(el);
+}
+
 /**
  * 元素内字符偏移 → 所在的（文本节点, 节点内偏移）。
  * 与 charOffsetInElement 互为逆向：偏移落在嵌套 span（书签下划线）内也正确。
@@ -205,6 +210,86 @@ function textNodesRange(el: Element, from: number, to: number): Range | null {
   range.setStart(startNode, startOff);
   range.setEnd(endNode, endOff);
   return range;
+}
+
+/**
+ * 在根容器内把「镜像文本全局偏移」定位到已渲染字符上的（折叠）Range。
+ * unitStart：该章 buildTextMirror 得到的单元起始偏移表。
+ * offset 必须落在根容器内某个 [data-u] 元素的文本范围里（含恰好在其末尾），
+ * 否则返回 null —— 用于：选区手柄定位、选区菜单锚点、朗读起点。
+ */
+export function caretRangeAtGlobalOffset(
+  root: ParentNode | null,
+  unitStart: number[],
+  offset: number,
+): Range | null {
+  if (!root) return null;
+  const target = Math.max(0, Math.floor(offset) || 0);
+  const els = root.querySelectorAll<HTMLElement>("[data-u]");
+  for (const el of els) {
+    const unit = Number(el.dataset.u ?? "");
+    const cstart = Number(el.dataset.c ?? "0");
+    const base = unitStart[unit];
+    if (!Number.isFinite(base)) continue;
+    const spanStart = base + cstart;
+    const spanEnd = spanStart + elementTextLength(el);
+    if (target < spanStart || target > spanEnd) continue;
+    const pt = charNodeAtOffset(el, target - spanStart);
+    if (!pt) continue;
+    const range = document.createRange();
+    range.setStart(pt.node, Math.min(pt.offset, pt.node.data.length));
+    range.collapse(true);
+    return range;
+  }
+  return null;
+}
+
+/**
+ * 高亮一段可能跨多个正文单元（段落/标题）的镜像字符区间 [fromGlobal, toGlobal)。
+ * 只影响根容器内已渲染的单元；滚动模式下还可定位到首个覆盖单元。
+ * 返回是否至少覆盖了一个元素。
+ */
+export function flashSpan(
+  root: ParentNode | null,
+  unitStart: number[],
+  fromGlobal: number,
+  toGlobal: number,
+  options: FlashOptions = {},
+): boolean {
+  if (!root || toGlobal <= fromGlobal) return false;
+  const ms = options.ms ?? 1700;
+  const scroll = options.scroll ?? true;
+  const marks: HTMLSpanElement[] = [];
+  let firstEl: HTMLElement | null = null;
+  const els = root.querySelectorAll<HTMLElement>("[data-u]");
+  for (const el of els) {
+    const unit = Number(el.dataset.u ?? "");
+    const cstart = Number(el.dataset.c ?? "0");
+    const base = unitStart[unit];
+    if (!Number.isFinite(base)) continue;
+    const spanStart = base + cstart;
+    const spanEnd = spanStart + elementTextLength(el);
+    if (toGlobal <= spanStart || fromGlobal >= spanEnd) continue;
+    if (!firstEl) firstEl = el;
+    const lo = Math.max(0, fromGlobal - spanStart);
+    const hi = Math.min(elementTextLength(el), toGlobal - spanStart);
+    const mark = wrapTextRange(el, lo, hi);
+    if (mark) marks.push(mark);
+  }
+  if (marks.length === 0) return false;
+  if (scroll && firstEl) {
+    try {
+      firstEl.scrollIntoView({ block: "center" });
+    } catch {
+      /* 旧 WebView 忽略 options 即可 */
+    }
+  }
+  window.setTimeout(() => {
+    for (const mark of marks) {
+      mark.replaceWith(...Array.from(mark.childNodes));
+    }
+  }, ms);
+  return true;
 }
 
 /** 复制纯文本；Clipboard API 失败时退回 execCommand */
