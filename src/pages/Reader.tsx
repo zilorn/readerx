@@ -2862,8 +2862,8 @@ export default function ReaderPage() {
                   <button
                     class="grid h-10 w-10 flex-none place-items-center rounded-xl transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
                     classList={{
-                      "text-accent": bookBookmarks().length > 0 || bmPanelOpen(),
-                      "text-text-2": bookBookmarks().length === 0 && !bmPanelOpen(),
+                      "text-accent": bmPanelOpen(),
+                      "text-text-2": !bmPanelOpen(),
                     }}
                     aria-label="书签"
                     aria-pressed={bmPanelOpen()}

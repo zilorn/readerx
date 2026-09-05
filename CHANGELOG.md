@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-09-05
+
 ### Added
 
 - 书源「网页登录」：Android 端在应用内 WebView 浮层登录后自动捕获站点 Cookie（含 httpOnly）并按书源持久化（重启自动注入，不随书源 JSON 导出）；书源 JS 引擎开放 `webview.login(url)` / `webview.isSupported()` 宿主 API，书源编辑页提供「网页登录 / 清空登录 Cookie」入口。桌面/iOS 不支持时返回 `ok:false` 且不抛错。
@@ -23,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - tts跟读后翻页异常问题。
 - 自动跟读跨章定位异常的问题。
 - 朗读已进入下一章时点击「返回跟读」无法跳回朗读句的问题（未带上朗读所在章节索引）。
+- 书签按钮异常高亮的问题。
 
 ### Changed
 
