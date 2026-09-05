@@ -897,12 +897,16 @@ export default function ReaderPage() {
     combineMarks(unitMarks(), selMarks(), speakMarks(), searchMarks()),
   );
 
-  // 视图切章（用户翻章 / 引擎自动跨章）后让播放控制器跟随。
-  // 翻页跨章浏览（browse）不打断语音：语音继续读原章，读完再由引擎自动跨章；
-  // 引擎自动跨章 / 定点跳章（目录/书签等）才在切章时重锚朗读句。
+  // 视图切章后向播放器通知。
+  // 关键防护：朗读进行中（playing/loading）时，视图的章节 idx 一律不得“继承”
+  // 给引擎——无论本次切章是否被 browse 标记覆盖，都按 browse 处理：语音继续读
+  // 它自己的章节，引擎不会被视图切章重锚去新章读（杜绝 idx 继承导致的跳读）。
+  // 仅停止/暂停态下的显式定点跳章（目录/书签等）允许把语音重锚到目标章。
   createEffect(() => {
     void chapterIdx();
-    const browse = browseChapterPending;
+    const running =
+      ttsPlayer.status() === "playing" || ttsPlayer.status() === "loading";
+    const browse = running || browseChapterPending;
     browseChapterPending = false;
     ttsPlayer.noteViewChapter(browse);
   });
