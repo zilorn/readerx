@@ -32,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 当书籍有至少一个书签时，不填充svg图标。
 - 跨页面选取支持（分页模式）。
 - 书签跨段落支持。
+- 将书本来源筛选与分组合并。
 
 ## [0.1.1] - 2026-09-04
 

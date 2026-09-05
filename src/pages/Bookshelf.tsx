@@ -47,8 +47,16 @@ interface ShelfItem {
   book: LocalBook;
 }
 
-/** 书架来源筛选：全部 / 本地 / WebDAV */
-type SourceFilter = "all" | BookSource;
+/**
+ * 书架筛选（互斥单选，不可叠加）：
+ * - all    ：无筛选（全部在架书）
+ * - source ：只看某一来源（本地 / WebDAV / 在线）
+ * - group  ：只看某一分组
+ */
+type ShelfFilter =
+  | { kind: "all" }
+  | { kind: "source"; source: BookSource }
+  | { kind: "group"; groupId: string };
 
 /**
  * 按“正文文本位置”计算进度：已读章节累计字符 + 当前章节内偏移 → 整书百分比。
@@ -225,8 +233,7 @@ function GroupChip(props: {
 
 export default function BookshelfPage() {
   const navigate = useNavigate();
-  const [groupId, setGroupId] = createSignal<string>("all");
-  const [sourceFilter, setSourceFilter] = createSignal<SourceFilter>("all");
+  const [filter, setFilter] = createSignal<ShelfFilter>({ kind: "all" });
   const [selecting, setSelecting] = createSignal(false);
   const [selectedIds, setSelectedIds] = createSignal<string[]>([]);
   const [groupPickerOpen, setGroupPickerOpen] = createSignal(false);
@@ -252,52 +259,110 @@ export default function BookshelfPage() {
       .filter((item): item is ShelfItem => item !== null),
   );
 
-  /** 书架内是否存在 WebDAV 导入的书（决定来源筛选行是否显示） */
-  const hasWebdavBooks = createMemo(() =>
-    items().some((item) => bookSourceOf(item.book) === "webdav"),
-  );
-
-  /** 实际生效的来源筛选：没有 WebDAV 书时来源行隐藏，一律视为全部 */
-  const activeSource = createMemo<SourceFilter>(() =>
-    hasWebdavBooks() ? sourceFilter() : "all",
-  );
-
-  /** 当前可见书架（分组筛选 × 来源筛选叠加） */
-  const visibleItems = createMemo(() => {
-    const gid = groupId();
-    const src = activeSource();
-    return items().filter((item) => {
-      if (gid !== "all" && (item.book.groupId ?? null) !== gid) return false;
-      if (src !== "all" && bookSourceOf(item.book) !== src) return false;
-      return true;
-    });
+  /** 各来源在架书数（全局统计，不随当前筛选变化） */
+  const sourceCounts = createMemo<Record<BookSource, number>>(() => {
+    const counts: Record<BookSource, number> = { local: 0, webdav: 0, online: 0 };
+    for (const item of items()) counts[bookSourceOf(item.book)]++;
+    return counts;
   });
 
-  /** 分组 chips 数量：在当前来源筛选内统计（两行筛选叠加生效） */
+  /** 是否存在非本地来源的书（WebDAV / 在线），决定来源筛选 chips 是否出现 */
+  const hasNonLocalBooks = createMemo(
+    () => sourceCounts().webdav > 0 || sourceCounts().online > 0,
+  );
+
+  /** 各分组在架书数（分组没有书也显示 chip，计数为 0） */
   const groupCounts = createMemo<Record<string, number>>(() => {
-    const src = activeSource();
-    const counts: Record<string, number> = { all: 0 };
+    const counts: Record<string, number> = {};
     for (const item of items()) {
-      if (src !== "all" && bookSourceOf(item.book) !== src) continue;
-      counts.all = (counts.all ?? 0) + 1;
       const gid = item.book.groupId ?? null;
       if (gid) counts[gid] = (counts[gid] ?? 0) + 1;
     }
     return counts;
   });
 
-  /** 来源 chips 数量：在当前分组筛选内统计 */
-  const sourceCounts = createMemo(() => {
-    const gid = groupId();
-    const counts = { all: 0, local: 0, webdav: 0 };
-    for (const item of items()) {
-      if (gid !== "all" && (item.book.groupId ?? null) !== gid) continue;
-      counts.all++;
-      if (bookSourceOf(item.book) === "webdav") counts.webdav++;
-      else counts.local++;
-    }
-    return counts;
+  /**
+   * 实际生效的筛选：所选来源已无书 / 所选分组已被删除时回到「全部」，
+   * 避免筛选指向一个已经不存在的 chip。
+   */
+  const activeFilter = createMemo<ShelfFilter>(() => {
+    const f = filter();
+    if (f.kind === "source" && sourceCounts()[f.source] === 0) return { kind: "all" };
+    if (f.kind === "group" && !groupList().some((group) => group.id === f.groupId))
+      return { kind: "all" };
+    return f;
   });
+
+  /** 当前可见书架（按单一筛选条件，来源与分组不可叠加） */
+  const visibleItems = createMemo(() => {
+    const f = activeFilter();
+    if (f.kind === "source")
+      return items().filter((item) => bookSourceOf(item.book) === f.source);
+    if (f.kind === "group")
+      return items().filter((item) => (item.book.groupId ?? null) === f.groupId);
+    return items();
+  });
+
+  /** 顶部筛选 chip：来源在前、分组在后，整行互斥单选 */
+  interface FilterChip {
+    key: string;
+    label: string;
+    count: number;
+    value: ShelfFilter;
+  }
+  const filterChips = createMemo<FilterChip[]>(() => {
+    const chips: FilterChip[] = [];
+    const groups = groupList();
+    // 只有本地书时来源筛选没有意义：不出现「全部 / 本地」；
+    // 有分组时仍要提供「全部」作为分组筛选的复位项
+    if (!hasNonLocalBooks() && groups.length === 0) return chips;
+    chips.push({
+      key: "all",
+      label: "全部",
+      count: items().length,
+      value: { kind: "all" },
+    });
+    if (hasNonLocalBooks()) {
+      const counts = sourceCounts();
+      const options: { key: string; label: string; source: BookSource }[] = [
+        { key: "local", label: "本地", source: "local" },
+        { key: "webdav", label: "WebDAV", source: "webdav" },
+        { key: "online", label: "在线", source: "online" },
+      ];
+      // 没有该来源的在架书就不显示对应 chip
+      for (const option of options) {
+        if (counts[option.source] > 0) {
+          chips.push({
+            key: option.key,
+            label: option.label,
+            count: counts[option.source],
+            value: { kind: "source", source: option.source },
+          });
+        }
+      }
+    }
+    for (const group of groups) {
+      chips.push({
+        key: `group-${group.id}`,
+        label: group.name,
+        count: groupCounts()[group.id] ?? 0,
+        value: { kind: "group", groupId: group.id },
+      });
+    }
+    return chips;
+  });
+
+  /** 当前生效筛选对应的 chip key（all / local / webdav / online / group-<id>） */
+  const activeChipKey = createMemo(() => {
+    const f = activeFilter();
+    if (f.kind === "group") return `group-${f.groupId}`;
+    if (f.kind === "source") return f.source;
+    return "all";
+  });
+
+  function isChipActive(key: string): boolean {
+    return key === activeChipKey();
+  }
 
   const openBook = (id: string) => navigate(`/book/${id}`);
 
@@ -407,53 +472,20 @@ export default function BookshelfPage() {
           )
         }
       >
-        <div class="flex flex-col">
-          <Show when={groupList().length > 0}>
-            <div class="m-0.5 flex gap-2 overflow-x-auto px-[18px] pb-1 pt-2 scrollbar-none">
-              <GroupChip
-                label="全部"
-                active={groupId() === "all"}
-                count={groupCounts().all ?? 0}
-                onClick={() => setGroupId("all")}
-              />
-              <For each={groupList()}>
-                {(group) => (
-                  <GroupChip
-                    label={group.name}
-                    active={groupId() === group.id}
-                    count={groupCounts()[group.id] ?? 0}
-                    onClick={() => setGroupId(group.id)}
-                  />
-                )}
-              </For>
-            </div>
-          </Show>
-          <Show when={hasWebdavBooks()}>
-            <div
-              class="m-0.5 flex gap-2 overflow-x-auto px-[18px] pb-1.5 scrollbar-none"
-              classList={{ "pt-2": groupList().length === 0 }}
-            >
-              <GroupChip
-                label="全部"
-                active={activeSource() === "all"}
-                count={sourceCounts().all}
-                onClick={() => setSourceFilter("all")}
-              />
-              <GroupChip
-                label="本地"
-                active={activeSource() === "local"}
-                count={sourceCounts().local}
-                onClick={() => setSourceFilter("local")}
-              />
-              <GroupChip
-                label="WebDAV"
-                active={activeSource() === "webdav"}
-                count={sourceCounts().webdav}
-                onClick={() => setSourceFilter("webdav")}
-              />
-            </div>
-          </Show>
-        </div>
+        <Show when={filterChips().length > 0}>
+          <div class="m-0.5 flex gap-2 overflow-x-auto px-[18px] pb-1.5 pt-2 scrollbar-none">
+            <For each={filterChips()}>
+              {(chip) => (
+                <GroupChip
+                  label={chip.label}
+                  active={isChipActive(chip.key)}
+                  count={chip.count}
+                  onClick={() => setFilter(chip.value)}
+                />
+              )}
+            </For>
+          </div>
+        </Show>
       </PageHeader>
 
       <div
@@ -473,15 +505,15 @@ export default function BookshelfPage() {
                 <p class="text-[15.5px] font-semibold text-text-2">
                   {items().length === 0
                     ? "书架空空如也"
-                    : groupId() !== "all" && activeSource() === "all"
+                    : activeFilter().kind === "group"
                       ? "该分组暂无书籍"
                       : "没有符合条件的书籍"}
                 </p>
                 <p class="mb-[18px] mt-0.5 text-[12.5px] leading-[1.6]">
                   {items().length === 0
                     ? "导入 TXT / EPUB 到本地书架"
-                    : groupId() !== "all" && activeSource() === "all"
-                      ? "在书架顶部切回「全部」分组即可看到书"
+                    : activeFilter().kind === "group"
+                      ? "回到书架顶部点「全部」即可看到其它书籍"
                       : "切换书架顶部的筛选条件即可看到其它书籍"}
                 </p>
                 <ImportButton
