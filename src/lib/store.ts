@@ -21,6 +21,8 @@ const PARA_SPACING_KEY = "readerx.paragraphSpacing";
 const PAGE_MODE_KEY = "readerx.pageMode";
 const STATUS_BAR_KEY = "readerx.statusBar";
 const PROGRESS_SCOPE_KEY = "readerx.progressScope";
+const MENU_SLIDER_KEY = "readerx.menuSlider";
+const MENU_SLIDER_NODES_KEY = "readerx.menuSliderNodes";
 const SOURCE_PARALLEL_KEY = "readerx.onlineConcurrency";
 const SHELF_SOURCE_FILTER_KEY = "readerx.shelfSourceFilter";
 
@@ -53,7 +55,7 @@ let initialized = false;
 export async function initReaderState(): Promise<void> {
   if (initialized) return;
   initialized = true;
-  const [storedTheme, storedShelf, storedFont, storedSpacing, storedPageMode, storedStatusBar, storedScope, storedSourceParallel, storedShelfSourceFilter] =
+  const [storedTheme, storedShelf, storedFont, storedSpacing, storedPageMode, storedStatusBar, storedScope, storedSourceParallel, storedShelfSourceFilter, storedMenuSlider, storedMenuSliderNodes] =
     await Promise.all([
       readState<string>(THEME_KEY),
       readState<Record<string, ShelfEntry>>(SHELF_KEY),
@@ -64,6 +66,8 @@ export async function initReaderState(): Promise<void> {
       readState<ProgressScope>(PROGRESS_SCOPE_KEY),
       readState<number>(SOURCE_PARALLEL_KEY),
       readState<boolean>(SHELF_SOURCE_FILTER_KEY),
+      readState<boolean>(MENU_SLIDER_KEY),
+      readState<boolean>(MENU_SLIDER_NODES_KEY),
     ]);
 
   // 未保存过偏好时默认护眼(sepia)，不再跟随系统深浅色
@@ -94,6 +98,12 @@ export async function initReaderState(): Promise<void> {
   }
   if (typeof storedShelfSourceFilter === "boolean") {
     setShelfSourceFilterSignal(storedShelfSourceFilter);
+  }
+  if (typeof storedMenuSlider === "boolean") {
+    setMenuSliderEnabledSignal(storedMenuSlider);
+  }
+  if (typeof storedMenuSliderNodes === "boolean") {
+    setMenuSliderNodesSignal(storedMenuSliderNodes);
   }
 }
 
@@ -325,6 +335,54 @@ function persistProgressScope(scope: ProgressScope): void {
 export function setProgressScope(scope: ProgressScope): void {
   setProgressScopeSignal(scope);
   persistProgressScope(scope);
+}
+
+// ---------------------------------------------------------------------------
+// 阅读菜单章节进度条（全局偏好：入口在阅读页菜单顶栏的「阅读设置」）
+// 左右翻页模式：底部菜单上方悬浮章节页进度条，可拖动跳页。开关控制其显示。
+
+const [menuSliderEnabled, setMenuSliderEnabledSignal] = createSignal<boolean>(true);
+let menuSliderWriteQueue: Promise<void> = Promise.resolve();
+
+/** 响应式：阅读菜单里的章节进度条是否开启 */
+export function currentMenuSliderEnabled(): boolean {
+  return menuSliderEnabled();
+}
+
+function persistMenuSliderEnabled(on: boolean): void {
+  menuSliderWriteQueue = menuSliderWriteQueue.then(() =>
+    writeState(MENU_SLIDER_KEY, on),
+  );
+}
+
+/** 开启 / 关闭阅读菜单章节进度条并持久化 */
+export function setMenuSliderEnabled(on: boolean): void {
+  setMenuSliderEnabledSignal(on);
+  persistMenuSliderEnabled(on);
+}
+
+// ---------------------------------------------------------------------------
+// 阅读菜单进度条上的逐页刻度（全局偏好：入口在「阅读设置」）
+// 左右翻页模式：进度条上按总页数等分显示灰色圆点，指示页数分布。开关控制其显示。
+
+const [menuSliderNodes, setMenuSliderNodesSignal] = createSignal<boolean>(true);
+let menuSliderNodesWriteQueue: Promise<void> = Promise.resolve();
+
+/** 响应式：菜单进度条上的逐页等分刻度是否开启 */
+export function currentMenuSliderNodes(): boolean {
+  return menuSliderNodes();
+}
+
+function persistMenuSliderNodes(on: boolean): void {
+  menuSliderNodesWriteQueue = menuSliderNodesWriteQueue.then(() =>
+    writeState(MENU_SLIDER_NODES_KEY, on),
+  );
+}
+
+/** 开启 / 关闭菜单进度条逐页刻度并持久化 */
+export function setMenuSliderNodes(on: boolean): void {
+  setMenuSliderNodesSignal(on);
+  persistMenuSliderNodes(on);
 }
 
 // ---------------------------------------------------------------------------

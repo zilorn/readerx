@@ -7,8 +7,12 @@
  */
 import { For, Show, type JSX } from "solid-js";
 import {
+  currentMenuSliderEnabled,
+  currentMenuSliderNodes,
   currentProgressScope,
   currentStatusBarEnabled,
+  setMenuSliderEnabled,
+  setMenuSliderNodes,
   setProgressScope,
   setStatusBarEnabled,
   type ProgressScope,
@@ -148,6 +152,32 @@ export function ReaderSettingsSheet(props: ReaderSettingsSheetProps) {
                     }}
                   </For>
                 </div>
+              </div>
+              <div class="flex w-full items-center gap-3 px-4 py-[13px] text-left">
+                <span class="flex min-w-0 flex-1 flex-col gap-0.5">
+                  <span class="text-[14.5px] font-medium">菜单进度条</span>
+                  <span class="text-[11.5px] text-text-3">
+                    左右翻页时在菜单上方显示，可拖动跳转页数
+                  </span>
+                </span>
+                <ToggleSwitch
+                  on={currentMenuSliderEnabled()}
+                  label="菜单进度条"
+                  onChange={() => setMenuSliderEnabled(!currentMenuSliderEnabled())}
+                />
+              </div>
+              <div class="flex w-full items-center gap-3 px-4 py-[13px] text-left">
+                <span class="flex min-w-0 flex-1 flex-col gap-0.5">
+                  <span class="text-[14.5px] font-medium">逐页刻度</span>
+                  <span class="text-[11.5px] text-text-3">
+                    菜单进度条上按页数等分显示灰色圆点
+                  </span>
+                </span>
+                <ToggleSwitch
+                  on={currentMenuSliderNodes()}
+                  label="逐页刻度"
+                  onChange={() => setMenuSliderNodes(!currentMenuSliderNodes())}
+                />
               </div>
             </Card>
           </div>

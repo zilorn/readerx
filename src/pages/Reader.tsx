@@ -30,6 +30,7 @@ import {
 } from "../components/BookSearchPanel";
 import type { BookSearchHit } from "../lib/bookSearch";
 import { BookmarkPanel } from "../components/BookmarkPanel";
+import { MenuPageSlider } from "../components/MenuPageSlider";
 import { SelectionMenu, type SelectionCustom } from "../components/SelectionMenu";
 import { TtsBubble } from "../components/TtsBubble";
 import { TtsSheet } from "../components/TtsSheet";
@@ -89,6 +90,8 @@ import {
 } from "../lib/pagination";
 import {
   currentFontSize,
+  currentMenuSliderEnabled,
+  currentMenuSliderNodes,
   currentPageMode,
   currentParaSpacing,
   currentProgressScope,
@@ -1107,6 +1110,16 @@ export default function ReaderPage() {
   });
 
   const totalPages = createMemo(() => paged()?.pages.length ?? 0);
+
+  /** 菜单进度条拖动提交：跳到当前章的指定页（与手动翻页一致地先解除跟读跟随） */
+  function seekToPage(page: number): void {
+    const total = totalPages();
+    if (total <= 0 || !isPaged()) return;
+    const next = Math.min(total - 1, Math.max(0, Math.round(page)));
+    if (next === pageIdx()) return;
+    cancelFollowIfActive();
+    setPageIdx(next);
+  }
 
   // -------------------------------------------------------------------
   // 底部状态栏：章节名 + 阅读进度（百分比口径可在「阅读设置」切换）
@@ -2981,6 +2994,25 @@ export default function ReaderPage() {
                   </div>
                 </div>
               </Show>
+
+              {/* 章节页进度条（左右翻页模式）：悬浮在底部菜单上方，听书悬浮球之下。
+                  拖动跳转到本章指定页，拖动中显示 x/y页 提示；可随「阅读设置」关闭 */}
+              <Show
+                when={
+                  isPaged() &&
+                  currentMenuSliderEnabled() &&
+                  totalPages() > 1 &&
+                  !searchSession()
+                }
+              >
+                <MenuPageSlider
+                  page={pageIdx()}
+                  total={totalPages()}
+                  nodes={currentMenuSliderNodes()}
+                  onCommit={seekToPage}
+                />
+              </Show>
+
               <footer
                 data-reader-ui
                 class="select-none border-t border-border bg-surface"
