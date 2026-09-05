@@ -2,6 +2,7 @@
 import { render } from "solid-js/web";
 import { initReaderState } from "./lib/store";
 import { initChapterRules } from "./lib/chapterRules";
+import { initTextReplacements } from "./lib/textReplacements";
 import { ensureLocalBooksLoaded } from "./lib/books";
 import { initGroups } from "./lib/groups";
 import "./index.css";
@@ -12,6 +13,7 @@ async function start() {
   await Promise.all([
     initReaderState(),
     initChapterRules(),
+    initTextReplacements(),
     initGroups(),
     ensureLocalBooksLoaded().catch(() => undefined),
   ]);

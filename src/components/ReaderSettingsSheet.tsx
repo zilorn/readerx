@@ -13,13 +13,21 @@ import {
   setStatusBarEnabled,
   type ProgressScope,
 } from "../lib/store";
-import { CloseIcon, RefreshIcon, SettingsIcon } from "./icons";
+import {
+  ChevronRightIcon,
+  CloseIcon,
+  RefreshIcon,
+  ReplaceIcon,
+  SettingsIcon,
+} from "./icons";
 import { ReadingSettingsRows } from "./ReadingSettingsRows";
 import { ToggleSwitch } from "./ToggleSwitch";
 
 export interface ReaderSettingsSheetProps {
   open: boolean;
   onClose: () => void;
+  /** 打开文本替换抽屉（列出本书可用替换并支持增删改） */
+  onOpenReplace: () => void;
   /** 在线书「重新加载本章」：提供即在设置中显示该入口（下载进行中时 disabled） */
   onlineReload?: {
     disabled: boolean;
@@ -72,6 +80,27 @@ export function ReaderSettingsSheet(props: ReaderSettingsSheetProps) {
           <Card>
             <ReadingSettingsRows />
           </Card>
+
+          <div class="mt-3">
+            <Card>
+              <button
+                type="button"
+                class="flex w-full items-center gap-3 px-4 py-[13px] text-left transition-colors active:bg-surface-2"
+                onClick={props.onOpenReplace}
+              >
+                <span class="grid h-9 w-9 flex-none place-items-center rounded-[10px] bg-surface-2 text-accent">
+                  <ReplaceIcon size={18} />
+                </span>
+                <span class="flex min-w-0 flex-1 flex-col gap-0.5">
+                  <span class="text-[14.5px] font-medium">文本替换</span>
+                  <span class="text-[11.5px] text-text-3">
+                    替换阅读正文，不改动原文文件
+                  </span>
+                </span>
+                <ChevronRightIcon size={17} class="flex-none text-text-3" />
+              </button>
+            </Card>
+          </div>
 
           <div class="mt-3">
             <Card>

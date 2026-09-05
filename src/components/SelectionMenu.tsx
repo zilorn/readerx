@@ -2,7 +2,7 @@
  * 阅读页长按/拖选文本后的自定义菜单（替换原生菜单/右键菜单观感）。
  *
  * - 阻止原生弹出：容器已统一 contextmenu preventDefault，iOS 加 touch-callout none；
- * - 仅「复制 / 书签 / 朗读」三项，带 SVG 图标；
+ * - 仅「复制 / 书签 / 朗读 / 替换」等动作项，带 SVG 图标；
  * - 固定高度条，宽度自适应内容；内容超出可用宽度时内部横向滚动，杜绝纵向溢出/出屏；
  * - 跟随选区定位，但只在能完整放进安全区（上/下留白）的区间摆放，绝不压到选区两端手柄
  *   （自定义选区模式下页面会传手柄位置来避让）；滚动手势或选区消失即隐藏。
@@ -14,7 +14,7 @@
  *    （可见端的折叠 caret）与 [lo,hi) 偏移通过 props.custom 注入；回调直接给偏移。
  */
 import { Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
-import { BookmarkIcon, CopyIcon, SpeakerIcon } from "./icons";
+import { BookmarkIcon, CopyIcon, ReplaceIcon, SpeakerIcon } from "./icons";
 
 /** 自定义（跨页）选区数据：全文 + 定位锚点 + 镜像偏移区间 */
 export interface SelectionCustom {
@@ -54,6 +54,8 @@ export interface SelectionMenuProps {
   onBookmarkSpan?: (lo: number, hi: number) => void;
   /** 自定义选区模式：从镜像偏移处开始朗读 */
   onSpeakOffset?: (start: number) => void;
+  /** 文本替换：把所选文字交给阅读页打开替换抽屉（预填查找框） */
+  onReplace?: (text: string) => void;
 }
 
 const BAR_H = 46;
@@ -309,6 +311,21 @@ export function SelectionMenu(props: SelectionMenuProps) {
                 <SpeakerIcon size={17} />
                 <span>朗读</span>
               </button>
+              <Show when={props.onReplace}>
+                <div class="mx-1 h-5 w-px flex-none bg-border" />
+                <button
+                  class="flex h-9 flex-none cursor-pointer items-center gap-1.5 rounded-xl px-3 text-[13px] text-text-2 transition-colors active:bg-surface-2"
+                  onClick={() => {
+                    const text = current().text.trim();
+                    if (!text) return;
+                    hide();
+                    props.onReplace?.(text);
+                  }}
+                >
+                  <ReplaceIcon size={17} />
+                  <span>替换</span>
+                </button>
+              </Show>
             </div>
           </div>
         </div>

@@ -444,6 +444,18 @@ export function SaveIcon(p: SvgIconProps) {
   );
 }
 
+/** 替换（左右交换箭头） */
+export function ReplaceIcon(p: SvgIconProps) {
+  return (
+    <Icon {...p}>
+      <path d="m16 3 4 4-4 4" />
+      <path d="M20 7H5" />
+      <path d="m8 21-4-4 4-4" />
+      <path d="M4 17h15" />
+    </Icon>
+  );
+}
+
 /** 测试（烧瓶） */
 export function TestIcon(p: SvgIconProps) {
   return (

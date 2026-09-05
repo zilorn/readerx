@@ -63,23 +63,33 @@ interface Lengths {
   total: number;
 }
 
-// 书籍导入后内容不变，按 bookId 缓存累计字符数，避免书架反复全量统计
-const lengthsCache = new Map<string, Lengths>();
+// 书籍导入后内容不变，按 bookId 缓存累计字符数，避免书架反复全量统计。
+// 阅读器的“显示副本”（应用文本替换后）与原书同 id 但内容可能不同：
+// - id 缓存只对缓存的“那一本”对象有效（记录对象引用，副本对象不复用）；
+// - 另按书籍对象做 WeakMap 缓存，同一显示副本对象只重算一次。
+const lengthsCache = new Map<string, { book: LocalBook; lengths: Lengths }>();
+const lengthsObjectCache = new WeakMap<LocalBook, Lengths>();
 
 function lengthsOf(book: LocalBook): Lengths {
-  const cached = lengthsCache.get(book.id);
-  if (cached) return cached;
+  const byObject = lengthsObjectCache.get(book);
+  if (byObject) return byObject;
+  const idEntry = lengthsCache.get(book.id);
+  if (idEntry && idEntry.book === book) {
+    lengthsObjectCache.set(book, idEntry.lengths);
+    return idEntry.lengths;
+  }
   const cum: number[] = new Array(book.chapters.length + 1);
   cum[0] = 0;
   for (let i = 0; i < book.chapters.length; i++) {
     cum[i + 1] = cum[i] + chapterMirrorLength(book.chapters[i]);
   }
   const entry: Lengths = { cum, total: cum[book.chapters.length] };
-  lengthsCache.set(book.id, entry);
+  lengthsCache.set(book.id, { book, lengths: entry });
+  lengthsObjectCache.set(book, entry);
   return entry;
 }
 
-/** 书籍正文被替换（WebDAV 重新导入）后失效其累计字符缓存 */
+/** 书籍正文被替换（WebDAV 重新导入 / 内容更新）后失效其累计字符缓存 */
 export function invalidateBookLengths(bookId: string): void {
   lengthsCache.delete(bookId);
 }

@@ -12,6 +12,7 @@ import {
 import { useNavigate, useParams } from "@solidjs/router";
 import { LoadingScreen } from "../components/LoadingScreen";
 import { ReaderSettingsSheet } from "../components/ReaderSettingsSheet";
+import { ReplaceRulesSheet } from "../components/ReplaceRulesSheet";
 import { isOnlineBook } from "../lib/booksTypes";
 import {
   LAZY_WINDOW,
@@ -51,6 +52,7 @@ import {
   localBookById,
   localBooksReady,
 } from "../lib/books";
+import { withDisplayReplacements } from "../lib/textReplacements";
 import {
   BOOKMARK_MAX_LEN,
   addBookmark,
@@ -451,13 +453,22 @@ export default function ReaderPage() {
     void ensureLocalBooksLoaded();
   });
 
-  const book = createMemo(() => localBookById(bookId()));
+  /** 书架中的原书（对象身份只随书库内容更新变化，用作「打开书」类副作用触发源） */
+  const rawBook = createMemo(() => localBookById(bookId()));
+  /**
+   * 显示用书：把「对本书生效」的文本替换规则应用到各章正文（仅影响阅读展示，
+   * 不改动书库原文；没有生效规则或文本无变化时与原书同一引用）。
+   */
+  const book = createMemo(() => withDisplayReplacements(rawBook(), bookId()));
   const [chapterIdx, setChapterIdx] = createSignal(0);
   const [pageIdx, setPageIdx] = createSignal(0);
   const [menuOpen, setMenuOpen] = createSignal(false);
   const [tocOpen, setTocOpen] = createSignal(false);
   const [bmPanelOpen, setBmPanelOpen] = createSignal(false);
   const [readerSettingsOpen, setReaderSettingsOpen] = createSignal(false);
+  // 文本替换抽屉：replaceSeed 非空表示从选区菜单进入（查找框预填所选文字）
+  const [replaceSheetOpen, setReplaceSheetOpen] = createSignal(false);
+  const [replaceSeed, setReplaceSeed] = createSignal<string | null>(null);
   // 全书搜索抽屉（阅读器内，不占路由历史）
   const [bookSearchOpen, setBookSearchOpen] = createSignal(false);
   // 搜索模式：点中搜索结果后进入，正文持续高亮命中词，点屏中间呼出搜索模式菜单
@@ -484,9 +495,11 @@ export default function ReaderPage() {
     void ensureBookmarksLoaded();
   });
 
-  // 书载入后：补建档案、按存档的精确文本位置（cid+偏移）恢复章节
+  // 书载入后：补建档案、按存档的精确文本位置（cid+偏移）恢复章节。
+  // 以原书身份为触发源：文本替换等显示副本变化不应重置阅读位置。
   createEffect(
-    on(book, (current) => {
+    on(rawBook, () => {
+      const current = book();
       if (!current) return;
       ensureShelfEntry(current.id);
       const entry = shelfEntries()[current.id];
@@ -590,6 +603,28 @@ export default function ReaderPage() {
     await reloadChapterContent(current.id, chapterIdx());
   }
 
+  /** 阅读设置 → 文本替换：打开替换抽屉的列表视图 */
+  function openReplaceManager(): void {
+    setMenuOpen(false);
+    setTocOpen(false);
+    setBmPanelOpen(false);
+    setReaderSettingsOpen(false);
+    setReplaceSeed(null);
+    setReplaceSheetOpen(true);
+  }
+
+  /** 选区菜单「替换」：收起选区，打开替换抽屉并直接进入新建表单（预填所选文字） */
+  function openReplaceFromSelection(text: string): void {
+    clearVisibleSelection();
+    setMenuOpen(false);
+    setTocOpen(false);
+    setBmPanelOpen(false);
+    setBookSearchOpen(false);
+    setReaderSettingsOpen(false);
+    setReplaceSeed(text || null);
+    setReplaceSheetOpen(true);
+  }
+
   // 进入/切换章节时：若窗口内存在缺正文章节则后台预取（当前章失败过的不自动重试）
   createEffect(() => {
     const current = book();
@@ -615,7 +650,7 @@ export default function ReaderPage() {
   let areaRef: HTMLDivElement | undefined;
   let areaObserver: ResizeObserver | null = null;
   createEffect(
-    on(book, () => {
+    on(rawBook, () => {
       const el = areaRef;
       if (!el || areaObserver) return;
       const measure = () => setArea({ w: el.clientWidth, h: el.clientHeight });
@@ -1053,6 +1088,7 @@ export default function ReaderPage() {
       !tocOpen() &&
       !bmPanelOpen() &&
       !readerSettingsOpen() &&
+      !replaceSheetOpen() &&
       !bookSearchOpen(),
   );
 
@@ -1612,7 +1648,14 @@ export default function ReaderPage() {
   /** 选区手势当前是否可用（无弹层/工具栏/搜索/章节未就绪时不可用） */
   function selEngineUsable(): boolean {
     if (!isPaged() || !layout() || !chapter() || resumeTarget() !== null) return false;
-    if (menuOpen() || tocOpen() || bmPanelOpen() || readerSettingsOpen() || bookSearchOpen()) {
+    if (
+      menuOpen() ||
+      tocOpen() ||
+      bmPanelOpen() ||
+      readerSettingsOpen() ||
+      replaceSheetOpen() ||
+      bookSearchOpen()
+    ) {
       return false;
     }
     if (searchSession() !== null || downloadOpen()) return false;
@@ -2168,7 +2211,15 @@ export default function ReaderPage() {
   onMount(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
-      if (menuOpen() || tocOpen() || bookSearchOpen() || !isPaged()) return;
+      if (
+        menuOpen() ||
+        tocOpen() ||
+        bookSearchOpen() ||
+        readerSettingsOpen() ||
+        replaceSheetOpen() ||
+        !isPaged()
+      )
+        return;
       userFlip(e.key === "ArrowRight" ? 1 : -1);
     };
     window.addEventListener("keydown", onKey);
@@ -3111,6 +3162,7 @@ export default function ReaderPage() {
               onSpeak={(range) => handleSpeakFromRange(range)}
               onBookmarkSpan={(lo, hi) => toggleBookmarkAtSpan(lo, hi)}
               onSpeakOffset={(start) => handleSpeakAtOffset(start)}
+              onReplace={(text) => openReplaceFromSelection(text)}
               custom={() => (isPaged() ? selMenu() : null)}
             />
 
@@ -3137,6 +3189,7 @@ export default function ReaderPage() {
             <ReaderSettingsSheet
               open={readerSettingsOpen()}
               onClose={() => setReaderSettingsOpen(false)}
+              onOpenReplace={openReplaceManager}
               onlineReload={
                 isRemoteBook()
                   ? {
@@ -3148,6 +3201,21 @@ export default function ReaderPage() {
                   : undefined
               }
             />
+
+            {/* 文本替换（列表 / 新建 / 编辑）。每次打开都重新挂载：
+                从选区菜单进入时按 replaceSeed 直接进新建表单并预填查找框 */}
+            <Show when={replaceSheetOpen()}>
+              <ReplaceRulesSheet
+                open
+                bookId={bookId()}
+                bookTitle={book()?.title}
+                seedFind={replaceSeed()}
+                onClose={() => {
+                  setReplaceSheetOpen(false);
+                  setReplaceSeed(null);
+                }}
+              />
+            </Show>
 
             {/* 在线书：批量下载正文 */}
             <Show when={downloadOpen()}>
