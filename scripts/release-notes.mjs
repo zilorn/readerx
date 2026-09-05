@@ -93,4 +93,6 @@ if (!text) {
   process.exit(1);
 }
 
-process.stdout.write(`${text}\n`);
+const t = readFileSync(join(ROOT, "scripts", "tip.md"), "utf-8");
+
+process.stdout.write(`${t}\n${text}\n`);

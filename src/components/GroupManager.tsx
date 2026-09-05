@@ -8,6 +8,7 @@ import {
   TrashIcon,
 } from "./icons";
 import { createGroup, deleteGroup, groupList, renameGroup } from "../lib/groups";
+import { ScrollArea } from "./ScrollArea";
 
 /** 底部抽屉：书架分组管理（新建 / 重命名 / 删除），由书架长按分组栏呼出 */
 export function GroupManagerSheet(props: { onClose: () => void }) {
@@ -70,7 +71,7 @@ export function GroupManagerSheet(props: { onClose: () => void }) {
         </div>
 
         {/* 分组列表 */}
-        <div class="min-h-0 flex-1 overflow-y-auto scrollbar-none">
+        <ScrollArea class="min-h-0 flex-1">
           <Show
             when={groupList().length > 0}
             fallback={
@@ -143,7 +144,7 @@ export function GroupManagerSheet(props: { onClose: () => void }) {
               </For>
             </div>
           </Show>
-        </div>
+        </ScrollArea>
 
         {/* 新建分组 */}
         <div class="flex flex-none items-center gap-2 border-t border-border px-4 py-3 pb-[calc(12px+env(safe-area-inset-bottom))]">

@@ -6,6 +6,7 @@
 import { Show, createEffect, createSignal } from "solid-js";
 import { readLicenseText } from "../lib/backend";
 import { CloseIcon, FileTextIcon } from "./icons";
+import { ScrollArea } from "./ScrollArea";
 
 interface LicenseSheetProps {
   open: boolean;
@@ -49,7 +50,10 @@ export function LicenseSheet(props: LicenseSheetProps) {
             </button>
           </header>
 
-          <div class="min-h-0 flex-1 overflow-y-auto scrollbar-none px-[18px] pb-[calc(28px+env(safe-area-inset-bottom))] pt-4">
+          <ScrollArea
+            class="min-h-0 flex-1"
+            contentClass="px-[18px] pb-[calc(28px+env(safe-area-inset-bottom))] pt-4"
+          >
             <Show
               when={text() !== null}
               fallback={
@@ -62,7 +66,7 @@ export function LicenseSheet(props: LicenseSheetProps) {
                 {text()}
               </pre>
             </Show>
-          </div>
+          </ScrollArea>
         </div>
       </div>
     </Show>

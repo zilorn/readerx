@@ -25,6 +25,7 @@ import {
   setHttpTtsUrl,
 } from "../lib/ttsSettings";
 import { CheckIcon, CloseIcon, HeadphonesIcon, TimerIcon } from "./icons";
+import { ScrollArea } from "./ScrollArea";
 
 export interface TtsSheetProps {
   open: boolean;
@@ -138,7 +139,7 @@ export function TtsSheet(props: TtsSheetProps) {
           </button>
         </div>
 
-        <div class="min-h-0 flex-1 overflow-y-auto px-1 py-3 pb-[calc(14px+env(safe-area-inset-bottom))] scrollbar-none">
+        <ScrollArea class="min-h-0 flex-1" contentClass="px-1 py-3 pb-[calc(14px+env(safe-area-inset-bottom))]">
           {/* 引擎 */}
           <SectionTitle text="引擎" />
           <div class="grid grid-cols-2 gap-2 px-3 pb-4">
@@ -412,7 +413,7 @@ export function TtsSheet(props: TtsSheetProps) {
           >
             停止朗读
           </button>
-        </div>
+        </ScrollArea>
       </div>
     </Show>
   );

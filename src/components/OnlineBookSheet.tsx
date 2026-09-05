@@ -13,6 +13,7 @@ import { localBookList } from "../lib/books";
 import { addOnlineBookToShelf, fetchBookToc, type PickedBook } from "../lib/online";
 import { showToast } from "../lib/toast";
 import { BookIcon, CloseIcon, ListIcon, RefreshIcon } from "./icons";
+import { ScrollArea } from "./ScrollArea";
 
 function hueOf(text: string): number {
   let hash = 0;
@@ -255,7 +256,7 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
             </button>
           </div>
 
-          <div class="min-h-0 flex-1 overflow-y-auto overscroll-contain scrollbar-none">
+          <ScrollArea class="min-h-0 flex-1">
             <div class="px-[18px] pb-2 pt-2.5">
               {/* 封面 + 基本信息 */}
               <div class="flex gap-3.5">
@@ -399,7 +400,7 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
                 </Show>
               </section>
             </div>
-          </div>
+          </ScrollArea>
 
           {/* 底部操作 */}
           <div class="flex-none border-t border-border px-[18px] pb-[calc(12px+env(safe-area-inset-bottom))] pt-2.5">

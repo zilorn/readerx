@@ -51,7 +51,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 设置页面中**听书缓存**移入到**数据**中。
 - 分组配置在**书架**页面长按分组标签即可进入。
 
-## Removed
+### Removed
 
 - 删除了设置页面的**书架分组**栏目。
 

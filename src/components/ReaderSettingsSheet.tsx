@@ -22,6 +22,7 @@ import {
 } from "./icons";
 import { ReadingSettingsRows } from "./ReadingSettingsRows";
 import { ToggleSwitch } from "./ToggleSwitch";
+import { ScrollArea } from "./ScrollArea";
 
 export interface ReaderSettingsSheetProps {
   open: boolean;
@@ -75,7 +76,7 @@ export function ReaderSettingsSheet(props: ReaderSettingsSheetProps) {
           </button>
         </div>
 
-        <div class="min-h-0 flex-1 overflow-y-auto px-4 pb-[calc(20px+env(safe-area-inset-bottom))] pt-3 scrollbar-none">
+        <ScrollArea class="min-h-0 flex-1" contentClass="px-4 pb-[calc(20px+env(safe-area-inset-bottom))] pt-3">
           {/* 与「设置」页共用的阅读设置（字号 / 段落间距 / 翻页方式） */}
           <Card>
             <ReadingSettingsRows />
@@ -179,7 +180,7 @@ export function ReaderSettingsSheet(props: ReaderSettingsSheetProps) {
               </Card>
             </div>
           </Show>
-        </div>
+        </ScrollArea>
       </div>
     </Show>
   );

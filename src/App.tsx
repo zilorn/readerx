@@ -9,6 +9,7 @@ import {
 } from "@solidjs/router";
 import { TabBar } from "./components/TabBar";
 import { LoadingScreen } from "./components/LoadingScreen";
+import { ScrollArea } from "./components/ScrollArea";
 import { ensureLocalBooksLoaded } from "./lib/books";
 import { currentToast } from "./lib/toast";
 import { shelfSelectingMode } from "./lib/store";
@@ -66,18 +67,17 @@ const AppShell: Component<RouteSectionProps> = (props) => {
       class="relative mx-auto flex h-screen w-full max-w-[480px] flex-col overflow-hidden bg-bg min-[521px]:border-x min-[521px]:border-border min-[521px]:shadow-[0_0_44px_rgb(0_0_0/0.16)]"
       style={{ height: "100dvh" }}
     >
-      <div
-        ref={viewRef}
-        class="relative min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain scrollbar-none"
-        classList={{
-          // 内容页统一在滚动区底部默认留一点空位（阅读页自行排版，不套用）
-          "pb-4": !isReader(),
+      <ScrollArea
+        class="min-h-0 flex-1"
+        contentClass={() => (isReader() ? "" : "pb-4")}
+        onEl={(el) => {
+          viewRef = el;
         }}
       >
         <Suspense fallback={<LoadingScreen label="页面加载中…" />}>
           {props.children}
         </Suspense>
-      </div>
+      </ScrollArea>
       <Show when={inMainTabs() && !tabBarHidden()}>
         <TabBar />
       </Show>

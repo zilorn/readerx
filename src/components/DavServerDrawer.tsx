@@ -26,6 +26,7 @@ import {
   type DavServer,
 } from "../lib/webdav";
 import { showToast } from "../lib/toast";
+import { ScrollArea } from "./ScrollArea";
 
 interface DavServerDrawerProps {
   open: boolean;
@@ -171,7 +172,10 @@ export function DavServerDrawer(props: DavServerDrawerProps) {
               </button>
             </div>
 
-            <div class="min-h-0 flex-1 overflow-y-auto pb-[calc(14px+env(safe-area-inset-bottom))] scrollbar-none">
+            <ScrollArea
+              class="min-h-0 flex-1"
+              contentClass="pb-[calc(14px+env(safe-area-inset-bottom))]"
+            >
               <Show when={view() === "list"}>
                 <p class="px-[18px] pb-1 pt-2 text-[12px] text-text-3">
                   可配置多台服务器，点选一台即在导入页使用
@@ -247,7 +251,7 @@ export function DavServerDrawer(props: DavServerDrawerProps) {
                   </button>
                 </div>
               </Show>
-            </div>
+            </ScrollArea>
           </div>
         </div>
       </Portal>

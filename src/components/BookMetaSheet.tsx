@@ -10,6 +10,7 @@ import type { LocalBook } from "../lib/booksTypes";
 import { fileToCoverThumb } from "../lib/coverImage";
 import { showToast } from "../lib/toast";
 import { CloseIcon, ImageIcon, TrashIcon } from "./icons";
+import { ScrollArea } from "./ScrollArea";
 
 interface BookMetaSheetProps {
   book: LocalBook;
@@ -92,7 +93,10 @@ export function BookMetaSheet(props: BookMetaSheetProps) {
           </button>
         </div>
 
-        <div class="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-4 pb-2">
+        <ScrollArea
+          class="min-h-0 flex-1"
+          contentClass="space-y-4 px-4 py-4 pb-2"
+        >
           {/* 封面 */}
           <div class="flex gap-4">
             <Show
@@ -196,7 +200,7 @@ export function BookMetaSheet(props: BookMetaSheetProps) {
               正在保存…
             </Show>
           </button>
-        </div>
+        </ScrollArea>
       </div>
 
       <input

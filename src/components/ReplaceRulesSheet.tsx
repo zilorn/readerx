@@ -27,6 +27,7 @@ import {
   type TextReplaceRule,
 } from "../lib/textReplacements";
 import { showToast } from "../lib/toast";
+import { ScrollArea } from "./ScrollArea";
 
 export interface ReplaceRulesSheetProps {
   open: boolean;
@@ -221,7 +222,10 @@ export function ReplaceRulesSheet(props: ReplaceRulesSheetProps) {
         <Show
           when={isEditing()}
           fallback={
-            <div class="min-h-0 flex-1 overflow-y-auto px-4 pb-[calc(18px+env(safe-area-inset-bottom))] pt-3 scrollbar-none">
+            <ScrollArea
+              class="min-h-0 flex-1"
+              contentClass="px-4 pb-[calc(18px+env(safe-area-inset-bottom))] pt-3"
+            >
               <Show
                 when={totalCount() > 0}
                 fallback={
@@ -283,11 +287,14 @@ export function ReplaceRulesSheet(props: ReplaceRulesSheetProps) {
                 <PlusIcon size={16} />
                 新建替换
               </button>
-            </div>
+            </ScrollArea>
           }
         >
           {/* 编辑 / 新建表单 */}
-          <div class="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 pb-[calc(18px+env(safe-area-inset-bottom))] pt-3.5 scrollbar-none">
+          <ScrollArea
+            class="min-h-0 flex-1"
+            contentClass="space-y-4 px-4 pb-[calc(18px+env(safe-area-inset-bottom))] pt-3.5"
+          >
             <div class="space-y-3">
               <label class="block min-w-0">
                 <Label
@@ -410,7 +417,7 @@ export function ReplaceRulesSheet(props: ReplaceRulesSheetProps) {
                 </button>
               </Show>
             </div>
-          </div>
+          </ScrollArea>
         </Show>
       </div>
     </Show>

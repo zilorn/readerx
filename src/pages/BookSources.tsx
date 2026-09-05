@@ -27,6 +27,7 @@ import {
 } from "../lib/backend";
 import { CAPABILITY_LABELS } from "../lib/bookSourcesTypes";
 import { showToast } from "../lib/toast";
+import { ScrollArea } from "../components/ScrollArea";
 
 /**
  * 书源管理：列表 / 新建 / 导入导出 / 删除
@@ -313,7 +314,10 @@ export default function BookSourcesPage() {
               <CloseIcon />
             </button>
           </div>
-          <div class="min-h-0 flex-1 space-y-2.5 overflow-y-auto px-4 py-4">
+          <ScrollArea
+            class="min-h-0 flex-1"
+            contentClass="space-y-2.5 px-4 py-4"
+          >
             <p class="rounded-[12px] bg-surface-2 px-3.5 py-3 text-[12px] leading-[1.7] text-text-2">
               社区/第三方制作的书源与 ReaderX 及其作者无关，作者未参与任何书源制作。书源 JS
               会在本地沙箱执行，但作者无法保证其安全性——仅导入可信来源。
@@ -342,7 +346,7 @@ export default function BookSourcesPage() {
                 从剪贴板粘贴导入
               </button>
             </p>
-          </div>
+          </ScrollArea>
         </div>
       </Show>
     </div>

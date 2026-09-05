@@ -12,6 +12,7 @@ import {
   chapterRuleList,
   removeChapterRule,
 } from "../lib/chapterRules";
+import { ScrollArea } from "../components/ScrollArea";
 
 const SAMPLE_PATTERN = String.raw`^\s*第\s*[0-9一二三四五六七八九十百千万零〇两]+\s*章[^\n]{0,50}`;
 
@@ -132,7 +133,10 @@ export default function ChapterRulesPage() {
               <CloseIcon />
             </button>
           </div>
-          <div class="min-h-0 flex-1 space-y-2.5 overflow-y-auto px-4 py-4">
+          <ScrollArea
+            class="min-h-0 flex-1"
+            contentClass="space-y-2.5 px-4 py-4"
+          >
             <label class="flex min-w-0 flex-col gap-[5px]">
               <span class="text-[11.5px] font-semibold tracking-[0.03em] text-text-3">
                 规则名称
@@ -186,7 +190,7 @@ export default function ChapterRulesPage() {
             <p class="-mt-2 mb-2.5 text-center text-[11px] text-text-3">
               新增规则会立即用于之后导入的 TXT 文件
             </p>
-          </div>
+          </ScrollArea>
         </div>
       </Show>
     </div>

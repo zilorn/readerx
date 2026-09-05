@@ -5,6 +5,7 @@
 import { For, Show } from "solid-js";
 import type { Bookmark } from "../lib/bookmarks";
 import { BookmarkIcon, CloseIcon, TrashIcon } from "./icons";
+import { ScrollArea } from "./ScrollArea";
 
 export interface BookmarkPanelProps {
   open: boolean;
@@ -58,7 +59,7 @@ export function BookmarkPanel(props: BookmarkPanelProps) {
             </div>
           }
         >
-          <div class="scrollbar-none min-h-0 flex-1 overflow-y-auto py-1 pb-3.5">
+          <ScrollArea class="min-h-0 flex-1" contentClass="py-1 pb-3.5">
             <For each={props.bookmarks}>
               {(bookmark) => (
                 <div class="group flex items-stretch gap-1 px-2">
@@ -96,7 +97,7 @@ export function BookmarkPanel(props: BookmarkPanelProps) {
                 </div>
               )}
             </For>
-          </div>
+          </ScrollArea>
         </Show>
       </div>
     </Show>

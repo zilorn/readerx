@@ -14,6 +14,7 @@ import {
   onCleanup,
 } from "solid-js";
 import { CloseIcon, SearchIcon } from "./icons";
+import { ScrollArea } from "./ScrollArea";
 import type { LocalBook } from "../lib/booksTypes";
 import {
   searchBookText,
@@ -315,7 +316,7 @@ export function BookSearchPanel(props: BookSearchPanelProps) {
           </div>
         </div>
 
-        <div class="min-h-0 flex-1 overflow-y-auto scrollbar-none">
+        <ScrollArea class="min-h-0 flex-1">
           <div
             ref={resultListRef}
             class="px-[18px] pb-[max(env(safe-area-inset-bottom),12px)] pt-1"
@@ -370,7 +371,7 @@ export function BookSearchPanel(props: BookSearchPanelProps) {
               </Show>
             </Show>
           </div>
-        </div>
+        </ScrollArea>
       </div>
     </Show>
   );

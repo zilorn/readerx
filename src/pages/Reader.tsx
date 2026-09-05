@@ -13,6 +13,7 @@ import { useNavigate, useParams } from "@solidjs/router";
 import { LoadingScreen } from "../components/LoadingScreen";
 import { ReaderSettingsSheet } from "../components/ReaderSettingsSheet";
 import { ReplaceRulesSheet } from "../components/ReplaceRulesSheet";
+import { ScrollArea } from "../components/ScrollArea";
 import { isOnlineBook } from "../lib/booksTypes";
 import {
   LAZY_WINDOW,
@@ -3126,9 +3127,12 @@ export default function ReaderPage() {
                     <CloseIcon />
                   </button>
                 </div>
-                <div
-                  ref={listRef}
-                  class="min-h-0 flex-1 overflow-y-auto px-0 py-1 pb-3.5 scrollbar-none"
+                <ScrollArea
+                  class="min-h-0 flex-1"
+                  contentClass="px-0 py-1 pb-3.5"
+                  onEl={(el) => {
+                    listRef = el;
+                  }}
                 >
                   <For each={book()!.chapters}>
                     {(item, idx) => {
@@ -3176,7 +3180,7 @@ export default function ReaderPage() {
                       );
                     }}
                   </For>
-                </div>
+                </ScrollArea>
               </div>
             </Show>
             {/* 书签面板 */}
@@ -3294,7 +3298,7 @@ export default function ReaderPage() {
                     <CloseIcon />
                   </button>
                 </div>
-                <div class="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-4">
+                <ScrollArea class="min-h-0 flex-1" contentClass="space-y-3 px-4 py-4">
                   <p class="text-[12px] leading-[1.7] text-text-3">
                     平时阅读只按需缓存「当前章前后 5 章」；这里可把全书正文批量下载到本机，之后断网也能读。
                     请求并行度跟随全局「书源并发」设置（设置 → 书源）。
@@ -3370,7 +3374,7 @@ export default function ReaderPage() {
                   <p class="pb-1 text-center text-[11px] text-text-3">
                     下载内容同样保存在本机书库，删除书籍时一并清除
                   </p>
-                </div>
+                </ScrollArea>
               </div>
             </Show>
 
