@@ -35,15 +35,19 @@ export function bookSourceSummaryById(id: string): BookSourceSummary | undefined
   return bookSourceList().find((s) => s.id === id);
 }
 
+async function loadBookSourceList(): Promise<void> {
+  const list = await listRemoteSources();
+  list.sort((a, b) => a.name.localeCompare(b.name, "zh"));
+  setSourcesState(list);
+}
+
 /** 首次进入相关页面时调用（幂等） */
 export function ensureBookSourcesLoaded(): Promise<void> {
   if (sourcesState() !== null) return Promise.resolve();
   if (!ensurePromise) {
     ensurePromise = (async () => {
       try {
-        const list = await listRemoteSources();
-        list.sort((a, b) => a.name.localeCompare(b.name, "zh"));
-        setSourcesState(list);
+        await loadBookSourceList();
       } catch {
         setSourcesState([]);
       } finally {
@@ -52,6 +56,21 @@ export function ensureBookSourcesLoaded(): Promise<void> {
     })();
   }
   return ensurePromise;
+}
+
+/**
+ * 强制从后端重新拉取书源清单。
+ * 书源管理页的启停 / JSON 导入等直接写盘的操作会绕过本模块的持久化入口，
+ * 只调 ensureBookSourcesLoaded() 不会刷新（清单已载入即短路）——这里无条件重拉，
+ * 保证新增 / 覆盖 / 停用的书源在本进程内立即生效，无需重启软件。
+ */
+export async function refreshBookSources(): Promise<void> {
+  try {
+    await loadBookSourceList();
+  } catch (err) {
+    console.error("[bookSources] 刷新书源清单失败", err);
+    // 刷新失败保留旧清单，避免清空可用书源
+  }
 }
 
 function applySummary(source: BookSource): BookSourceSummary {

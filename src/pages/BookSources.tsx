@@ -18,6 +18,7 @@ import {
   ensureBookSourcesLoaded,
   openSourceEditor,
   planBookSourceImport,
+  refreshBookSources,
   removeBookSource,
   type ImportPlan,
 } from "../lib/bookSources";
@@ -129,7 +130,8 @@ export default function BookSourcesPage() {
     }
     setConfirmPlan(null);
     setSkippedOverwrites(new Set<number>());
-    await ensureBookSourcesLoaded();
+    // 导入是直接写盘：重拉清单让新增 / 覆盖立即在列表与「发现」页生效
+    await refreshBookSources();
   }
 
   function closeImportPlan(): void {
@@ -152,7 +154,8 @@ export default function BookSourcesPage() {
     if (!source) return;
     source.enabled = enabled;
     await saveRemoteSource(source);
-    await ensureBookSourcesLoaded();
+    // 启停是直接写盘：重拉清单让状态立即在列表与「发现」页生效
+    await refreshBookSources();
   }
 
   async function copyExport(id: string) {
