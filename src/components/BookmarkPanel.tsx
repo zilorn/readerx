@@ -109,63 +109,65 @@ export function BookmarkPanel(props: BookmarkPanelProps) {
             </div>
           }
         >
-          <ScrollArea class="min-h-0 flex-1" contentClass="flex flex-col gap-2.5 px-3 pb-4 pt-2.5">
-            <For each={groups()}>
-              {(group) => {
-                const isCurrent = group.chapterCid === props.currentCid;
-                return (
-                  <section class="overflow-hidden rounded-[14px] border border-border bg-bg">
-                    <header class="flex items-center gap-2 border-b border-border px-3.5 py-2.5">
-                      <BookmarkIcon
-                        size={15}
-                        filled={isCurrent}
-                        class={isCurrent ? "text-accent" : "text-text-3"}
-                      />
-                      <h3
-                        class={`min-w-0 flex-1 truncate text-[13px] font-semibold ${
-                          isCurrent ? "text-accent" : "text-text-2"
-                        }`}
-                      >
-                        {group.label}
-                      </h3>
-                      <Show when={isCurrent}>
-                        <span class="shrink-0 rounded-md bg-accent-weak px-1.5 py-0.5 text-[10px] font-medium text-accent">
-                          本章
+          <ScrollArea class="min-h-0 flex-1" contentClass="px-3 pb-4 pt-2.5">
+            <div class="flex flex-col gap-2.5">
+              <For each={groups()}>
+                {(group) => {
+                  const isCurrent = group.chapterCid === props.currentCid;
+                  return (
+                    <section class="overflow-hidden rounded-[14px] border border-border bg-bg">
+                      <header class="flex items-center gap-2 border-b border-border px-3.5 py-2.5">
+                        <BookmarkIcon
+                          size={15}
+                          filled={isCurrent}
+                          class={isCurrent ? "text-accent" : "text-text-3"}
+                        />
+                        <h3
+                          class={`min-w-0 flex-1 truncate text-[13px] font-semibold ${
+                            isCurrent ? "text-accent" : "text-text-2"
+                          }`}
+                        >
+                          {group.label}
+                        </h3>
+                        <Show when={isCurrent}>
+                          <span class="shrink-0 rounded-md bg-accent-weak px-1.5 py-0.5 text-[10px] font-medium text-accent">
+                            本章
+                          </span>
+                        </Show>
+                        <span class="shrink-0 text-[10.5px] text-text-3">
+                          {group.items.length} 条
                         </span>
-                      </Show>
-                      <span class="shrink-0 text-[10.5px] text-text-3">
-                        {group.items.length} 条
-                      </span>
-                    </header>
-                    <ul class="divide-y divide-border px-1">
-                      <For each={group.items}>
-                        {(bookmark) => (
-                          <li class="flex items-stretch">
-                            <button
-                              class="flex min-w-0 flex-1 cursor-pointer flex-col justify-center gap-1 px-2.5 py-3 text-left transition-colors active:bg-surface-2"
-                              onClick={() => props.onJump(bookmark)}
-                            >
-                              <span class="line-clamp-2 text-[13.5px] leading-[1.6] text-text-2">
-                                {bookmark.text.length > MAX_PREVIEW
-                                  ? `${bookmark.text.slice(0, MAX_PREVIEW)}…`
-                                  : bookmark.text}
-                              </span>
-                            </button>
-                            <button
-                              class="my-1 grid w-11 flex-none cursor-pointer place-items-center self-center rounded-xl text-text-3 transition-colors active:bg-danger-weak active:text-danger"
-                              aria-label="删除书签"
-                              onClick={() => props.onDelete(bookmark)}
-                            >
-                              <TrashIcon size={18} />
-                            </button>
-                          </li>
-                        )}
-                      </For>
-                    </ul>
-                  </section>
-                );
-              }}
-            </For>
+                      </header>
+                      <ul class="divide-y divide-border px-1">
+                        <For each={group.items}>
+                          {(bookmark) => (
+                            <li class="flex items-stretch">
+                              <button
+                                class="flex min-w-0 flex-1 cursor-pointer flex-col justify-center gap-1 px-2.5 py-3 text-left transition-colors active:bg-surface-2"
+                                onClick={() => props.onJump(bookmark)}
+                              >
+                                <span class="line-clamp-2 text-[13.5px] leading-[1.6] text-text-2">
+                                  {bookmark.text.length > MAX_PREVIEW
+                                    ? `${bookmark.text.slice(0, MAX_PREVIEW)}…`
+                                    : bookmark.text}
+                                </span>
+                              </button>
+                              <button
+                                class="my-1 grid w-11 flex-none cursor-pointer place-items-center self-center rounded-xl text-text-3 transition-colors active:bg-danger-weak active:text-danger"
+                                aria-label="删除书签"
+                                onClick={() => props.onDelete(bookmark)}
+                              >
+                                <TrashIcon size={18} />
+                              </button>
+                            </li>
+                          )}
+                        </For>
+                      </ul>
+                    </section>
+                  );
+                }}
+              </For>
+            </div>
           </ScrollArea>
         </Show>
       </div>
