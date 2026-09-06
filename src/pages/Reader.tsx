@@ -1823,8 +1823,9 @@ export default function ReaderPage() {
   /**
    * 分页自绘选区在本页可见端点的几何（相对阅读区容器坐标）。
    * 手柄渲染与选区菜单避让共用同一份口径：
-   * - lo/hi：两端手柄圆心（可见端点被页界夹取后仍在页内的那个才给出）；
-   * - top/bottom：选区在本页可见首/末行的行盒上/下缘（纵向范围）。
+   * - lo/hi：两端手柄圆心——真实端点落在本页内才给出（跨页连选时起点/终点在
+   *   其它页的那端不在本页显示，只留仍在本页内的拖动端手柄）；
+   * - top/bottom：选区在本页可见首/末行的行盒上/下缘（越界端点夹取到页界）。
    */
   function pageSelLayout(): {
     lo: { x: number; y: number } | null;
@@ -1893,13 +1894,24 @@ export default function ReaderPage() {
         bottom: top - areaRect.top + height,
       };
     };
+    // 纵向范围（zLoP/zHiP）：越界端点先夹取到页界，保证选区菜单的避让区间始终覆盖
+    // 本页可见的全部选中行（真实端点不在本页也适用）。
+    const zLoP = loOffset < ovE ? pointAt(loOffset, true) : null;
+    const zHiP = hiOffset > ovS ? pointAt(hiOffset, false) : null;
+    if (!zLoP && !zHiP) return null;
+    const zTop = zLoP && zHiP ? Math.min(zLoP.top, zHiP.top) : (zLoP ?? zHiP)!.top;
+    const zBottom = zLoP && zHiP ? Math.max(zLoP.bottom, zHiP.bottom) : (zLoP ?? zHiP)!.bottom;
+    // 手柄只画「真实端点就在本页内」的那端：跨页连选自动翻到下一页时，起点/终点若落在
+    // 其它页，本页不显示那端的手柄——起点在上一页时，本页只保留仍在页内的拖动端手柄。
     // lo 端点含 offset 处字符（起点语义：段首选中时手柄须锚在段首，而非上一段末尾）；
     // hi 端点为排他终点（停在上一段末尾的语义不变）。
-    const loP = loOffset < ovE ? pointAt(loOffset, true) : null;
-    const hiP = hiOffset > ovS ? pointAt(hiOffset, false) : null;
-    if (!loP && !hiP) return null;
-    const zTop = loP && hiP ? Math.min(loP.top, hiP.top) : (loP ?? hiP)!.top;
-    const zBottom = loP && hiP ? Math.max(loP.bottom, hiP.bottom) : (loP ?? hiP)!.bottom;
+    const loP = span[0] >= ps ? pointAt(span[0], true) : null;
+    const hiP = span[1] <= pe ? pointAt(span[1], false) : null;
+    if (!loP && !hiP) {
+      // 整页都被选入、两端真实端点都在其它页（跨页连选正停留在被整页选中的中间页）：
+      // 本页没有可拖的手柄，仅保留整片可见选区的纵向避让范围
+      return { lo: null, hi: null, top: zTop, bottom: zBottom };
+    }
     return {
       lo: loP ? { x: loP.x, y: loP.y } : null,
       hi: hiP ? { x: hiP.x, y: hiP.y } : null,
