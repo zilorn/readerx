@@ -11,7 +11,7 @@ import { callRemoteSource } from "../lib/backend";
 import type { BookItem, ChapterItem } from "../lib/bookSourcesTypes";
 import { normalizeBookTags } from "../lib/booksTypes";
 import { bookMetaList } from "../lib/books";
-import { addOnlineBookToShelf, fetchBookToc, type PickedBook } from "../lib/online";
+import { addOnlineBookToShelf, fetchBookToc, mergeBookDetail, type PickedBook } from "../lib/online";
 import { showToast } from "../lib/toast";
 import { TagChips } from "./TagChips";
 import { BookIcon, CloseIcon, ListIcon, RefreshIcon } from "./icons";
@@ -27,33 +27,6 @@ const TOC_PREVIEW_CAP = 300;
  */
 const detailCache = new Map<string, BookItem>();
 const tocCache = new Map<string, ChapterItem[]>();
-
-/** 把书源详情返回值里非空的字符串字段合并进搜索命中项 */
-function mergeDetail(base: BookItem, value: unknown): BookItem {
-  if (!value || typeof value !== "object") return base;
-  const raw = value as Record<string, unknown>;
-  const str = (key: string): string =>
-    typeof raw[key] === "string" ? (raw[key] as string).trim() : "";
-  const out: BookItem = { ...base };
-  const bookName = str("bookName");
-  if (bookName) out.bookName = bookName;
-  const author = str("author");
-  if (author) out.author = author;
-  const cover = str("cover");
-  if (cover) out.cover = cover;
-  const intro = str("intro");
-  if (intro) out.intro = intro;
-  const latest = str("latest");
-  if (latest) out.latest = latest;
-  const updateTime = str("updateTime");
-  if (updateTime) out.updateTime = updateTime;
-  const bookUrl = str("bookUrl");
-  if (bookUrl) out.bookUrl = bookUrl;
-  // 详情返回的标签视为完整集合；为空/缺失时沿用命中项的标签
-  const tags = normalizeBookTags(raw["tags"]);
-  if (tags.length > 0) out.tags = tags;
-  return out;
-}
 
 export interface OnlineBookSheetProps {
   /** 当前预览的书；null 表示关闭抽屉 */
@@ -127,7 +100,7 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
       const r = await callRemoteSource(p.source.id, "bookDetail", [p.item]);
       if (run !== seq) return;
       if (r.ok) {
-        const merged = mergeDetail(p.item, r.value);
+        const merged = mergeBookDetail(p.item, r.value);
         detailCache.set(p.key, merged);
         setInfo(merged);
       } else if (r.error) {

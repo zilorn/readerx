@@ -104,7 +104,9 @@ export function chapterHasContent(chapter: LocalBookChapter): boolean {
 // 正文文本规范化已迁至 sourceContent.ts（供“含图正文”解析共用）；这里再导出保持旧引用可用
 export { normalizeContentText } from "./sourceContent";
 
-function toBookItem(book: LocalBook): BookItem {
+function toBookItem(
+  book: Pick<LocalBook, "title" | "author" | "bookUrl" | "tags">,
+): BookItem {
   const tags = normalizeBookTags(book.tags);
   return {
     bookName: book.title,
@@ -112,6 +114,33 @@ function toBookItem(book: LocalBook): BookItem {
     bookUrl: book.bookUrl ?? "",
     ...(tags.length > 0 ? { tags } : {}),
   };
+}
+
+/** 把书源详情返回值里非空的字符串字段合并进基础命中项 */
+export function mergeBookDetail(base: BookItem, value: unknown): BookItem {
+  if (!value || typeof value !== "object") return base;
+  const raw = value as Record<string, unknown>;
+  const str = (key: string): string =>
+    typeof raw[key] === "string" ? (raw[key] as string).trim() : "";
+  const out: BookItem = { ...base };
+  const bookName = str("bookName");
+  if (bookName) out.bookName = bookName;
+  const author = str("author");
+  if (author) out.author = author;
+  const cover = str("cover");
+  if (cover) out.cover = cover;
+  const intro = str("intro");
+  if (intro) out.intro = intro;
+  const latest = str("latest");
+  if (latest) out.latest = latest;
+  const updateTime = str("updateTime");
+  if (updateTime) out.updateTime = updateTime;
+  const bookUrl = str("bookUrl");
+  if (bookUrl) out.bookUrl = bookUrl;
+  // 详情返回的标签视为完整集合；为空/缺失时沿用基础项的标签
+  const tags = normalizeBookTags(raw["tags"]);
+  if (tags.length > 0) out.tags = tags;
+  return out;
 }
 
 function newBookId(): string {
@@ -815,4 +844,63 @@ export async function applyOnlineTocOverwrite(
   });
   await commitBookContentUpdate(next);
   return next.chapters.length;
+}
+
+// ---------------------------------------------------------------------------
+// 在线书「重新拉取书籍信息」（书籍详情页）：
+// 以书架里保存的标题 / 作者 / 书源地址为入参，重调书源「详情」（bookDetail），
+// 把书源返回的非空简介与封面重新写回书架（简介 / 封面为缺失或与当前一致时不写）。
+// 封面 URL 与「加入书架」同一套规则：经该书源会话下载压缩为缩略图 data URL。
+// ---------------------------------------------------------------------------
+
+export interface RefreshOnlineBookInfoResult {
+  /** 简介是否被书源返回的新内容覆盖 */
+  introUpdated: boolean;
+  /** 封面是否被书源返回的新封面覆盖 */
+  coverUpdated: boolean;
+}
+
+/** 在线书重新拉取书籍信息（简介 / 封面）；非在线书或书源不可用时抛可读错误 */
+export async function refreshOnlineBookInfo(
+  bookId: string,
+): Promise<RefreshOnlineBookInfoResult> {
+  const meta = bookMetaById(bookId);
+  if (!meta || !isOnlineBook(meta) || !meta.bookSourceId || !meta.bookUrl) {
+    throw new Error("仅在线书支持重新拉取书籍信息");
+  }
+  await ensureBookSourcesLoaded();
+  const source = bookSourceSummaryById(meta.bookSourceId);
+  if (!source) throw new Error("该书源已删除，无法重新拉取");
+  if (!source.enabled) throw new Error("该书源已停用，请先在「书源」中启用");
+  if (!source.capabilities.detail) {
+    throw new Error("该书源未启用「详情」能力，无法重新拉取简介与封面");
+  }
+  const tags = normalizeBookTags(meta.tags);
+  const item: BookItem = {
+    bookName: meta.title,
+    ...(meta.author && meta.author !== "佚名" ? { author: meta.author } : {}),
+    bookUrl: meta.bookUrl,
+    ...(tags.length > 0 ? { tags } : {}),
+  };
+  const result = await callRemoteSource(source.id, "bookDetail", [item]);
+  if (!result.ok) throw new Error(result.error ?? "拉取书籍信息失败");
+  const merged = mergeBookDetail(item, result.value);
+
+  let introUpdated = false;
+  let coverUpdated = false;
+  const intro = merged.intro?.trim();
+  if (intro && intro !== (meta.intro ?? "").trim()) {
+    introUpdated = true;
+    await updateBookInfo(bookId, { intro });
+  }
+  const coverUrl = merged.cover?.trim();
+  if (coverUrl) {
+    const referer = meta.bookUrl || source.bookSourceUrl || "";
+    const thumb = await loadSourceCoverThumb(source.id, coverUrl, referer);
+    if (thumb && thumb !== meta.cover) {
+      coverUpdated = true;
+      await updateBookInfo(bookId, { cover: thumb });
+    }
+  }
+  return { introUpdated, coverUpdated };
 }

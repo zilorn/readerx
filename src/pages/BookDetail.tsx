@@ -5,7 +5,7 @@ import { PageHeader } from "../components/PageHeader";
 import { BookCover } from "../components/BookCover";
 import { BookMetaSheet } from "../components/BookMetaSheet";
 import { TagChips } from "../components/TagChips";
-import { EditIcon, LinkIcon } from "../components/icons";
+import { EditIcon, LinkIcon, RefreshIcon } from "../components/icons";
 import { openExternal } from "../lib/external";
 import {
   ensureLocalBooksLoaded,
@@ -15,9 +15,12 @@ import {
 import {
   bookSourceOf,
   formatFileSize,
+  isOnlineBook,
   type BookFormat,
   type BookMeta,
 } from "../lib/booksTypes";
+import { refreshOnlineBookInfo, onlineRunBusy } from "../lib/online";
+import { showToast } from "../lib/toast";
 import { groupName } from "../lib/groups";
 
 function formatName(format: BookFormat): string {
@@ -110,10 +113,50 @@ export default function BookDetailPage() {
   const bookId = () => params.id ?? "";
   const book = createMemo(() => bookMetaById(bookId()));
   const [editOpen, setEditOpen] = createSignal(false);
+  /** 在线书：重新拉取简介 / 封面（书源 bookDetail）是否进行中 */
+  const [refreshing, setRefreshing] = createSignal(false);
 
   createEffect(() => {
     void ensureLocalBooksLoaded();
   });
+
+  /** 该书是仍在书架、可向书源重新拉取简介与封面的在线书 */
+  const refreshable = createMemo(() => {
+    const current = book();
+    return (
+      !!current &&
+      isOnlineBook(current) &&
+      !!current.bookSourceId &&
+      !!current.bookUrl
+    );
+  });
+
+  async function refreshBookInfo(): Promise<void> {
+    if (refreshing()) return;
+    const id = bookId();
+    if (!refreshable()) return;
+    if (onlineRunBusy(id)) {
+      showToast("有章节下载进行中，请稍后再试", true);
+      return;
+    }
+    setRefreshing(true);
+    try {
+      const result = await refreshOnlineBookInfo(id);
+      if (result.introUpdated && result.coverUpdated) {
+        showToast("简介与封面已更新");
+      } else if (result.introUpdated) {
+        showToast("简介已更新");
+      } else if (result.coverUpdated) {
+        showToast("封面已更新");
+      } else {
+        showToast("简介与封面已是最新");
+      }
+    } catch (e) {
+      showToast(`重新拉取失败：${e instanceof Error ? e.message : String(e)}`, true);
+    } finally {
+      setRefreshing(false);
+    }
+  }
 
   function goBack() {
     if (window.history.length > 1) navigate(-1);
@@ -129,13 +172,27 @@ export default function BookDetailPage() {
         onBack={goBack}
         right={
           <Show when={book()}>
-            <button
-              class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-              aria-label="编辑书籍信息"
-              onClick={() => setEditOpen(true)}
-            >
-              <EditIcon size={20} />
-            </button>
+            <div class="flex items-center gap-1">
+              <Show when={refreshable()}>
+                <button
+                  class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2 disabled:pointer-events-none disabled:opacity-60"
+                  aria-label="重新拉取书籍信息（简介与封面）"
+                  disabled={refreshing() || onlineRunBusy(bookId())}
+                  onClick={() => void refreshBookInfo()}
+                >
+                  <Show when={refreshing()} fallback={<RefreshIcon size={20} />}>
+                    <RefreshIcon size={20} class="animate-spin" />
+                  </Show>
+                </button>
+              </Show>
+              <button
+                class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
+                aria-label="编辑书籍信息"
+                onClick={() => setEditOpen(true)}
+              >
+                <EditIcon size={20} />
+              </button>
+            </div>
           </Show>
         }
       />
