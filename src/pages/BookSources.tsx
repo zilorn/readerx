@@ -28,6 +28,7 @@ import {
 import { CAPABILITY_LABELS } from "../lib/bookSourcesTypes";
 import { showToast } from "../lib/toast";
 import { ScrollArea } from "../components/ScrollArea";
+import { ToggleSwitch } from "../components/ToggleSwitch";
 
 /**
  * 书源管理：列表 / 新建 / 导入导出 / 删除
@@ -36,8 +37,38 @@ export default function BookSourcesPage() {
   const navigate = useNavigate();
   void ensureBookSourcesLoaded();
   const [confirmPlan, setConfirmPlan] = createSignal<ImportPlan | null>(null);
+  /** 导入计划中逐条选择「跳过覆盖」的覆盖项下标（默认全部覆盖） */
+  const [skippedOverwrites, setSkippedOverwrites] = createSignal<ReadonlySet<number>>(
+    new Set<number>(),
+  );
   const [deleteId, setDeleteId] = createSignal<string | null>(null);
   let fileInput: HTMLInputElement | undefined;
+
+  function presentImportPlan(plan: ImportPlan): void {
+    setSkippedOverwrites(new Set<number>());
+    setConfirmPlan(plan);
+  }
+
+  function toggleOverwrite(index: number): void {
+    setSkippedOverwrites((prev) => {
+      const next = new Set(prev);
+      if (next.has(index)) next.delete(index);
+      else next.add(index);
+      return next;
+    });
+  }
+
+  /** 去掉协议与末尾斜杠的站点缩写，列表与覆盖行共用 */
+  function siteLabel(url: string): string {
+    return url.replace(/^https?:\/\//, "").replace(/\/+$/, "");
+  }
+
+  /** 当前导入计划中实际会执行的覆盖数（扣除被跳过的项） */
+  const activeOverwriteCount = () => {
+    const plan = confirmPlan();
+    if (!plan) return 0;
+    return plan.overwrite.length - skippedOverwrites().size;
+  };
 
   function goBack() {
     if (window.history.length > 1) navigate(-1);
@@ -55,7 +86,7 @@ export default function BookSourcesPage() {
     if (!file) return;
     void (async () => {
       const text = await file.text();
-      setConfirmPlan(planBookSourceImport(text));
+      presentImportPlan(planBookSourceImport(text));
     })();
     input.value = "";
   }
@@ -67,30 +98,43 @@ export default function BookSourcesPage() {
         showToast("剪贴板没有可导入的内容", true);
         return;
       }
-      setConfirmPlan(planBookSourceImport(text));
+      presentImportPlan(planBookSourceImport(text));
     })();
   }
 
   async function applyImport() {
     const plan = confirmPlan();
     if (!plan) return;
+    const skipped = skippedOverwrites();
     let created = 0;
     let overwritten = 0;
+    let kept = 0;
     try {
       for (const source of plan.create) {
         await saveRemoteSource(source);
         created++;
       }
-      for (const item of plan.overwrite) {
+      for (const [index, item] of plan.overwrite.entries()) {
+        if (skipped.has(index)) {
+          kept++;
+          continue;
+        }
         await saveRemoteSource(item.source);
         overwritten++;
       }
-      showToast(`导入完成：新增 ${created} 个，覆盖 ${overwritten} 个`);
+      const keptText = kept > 0 ? `，保留本机 ${kept} 个` : "";
+      showToast(`导入完成：新增 ${created} 个，覆盖 ${overwritten} 个${keptText}`);
     } catch (err) {
       showToast(String(err), true);
     }
     setConfirmPlan(null);
+    setSkippedOverwrites(new Set<number>());
     await ensureBookSourcesLoaded();
+  }
+
+  function closeImportPlan(): void {
+    setConfirmPlan(null);
+    setSkippedOverwrites(new Set<number>());
   }
 
   async function onDelete(id: string) {
@@ -294,7 +338,7 @@ export default function BookSourcesPage() {
       <Show when={confirmPlan() !== null}>
         <div
           class="fixed inset-0 z-40 animate-sheet-fade bg-black/45 backdrop-blur-[2px]"
-          onClick={() => setConfirmPlan(null)}
+          onClick={closeImportPlan}
         />
         <div
           class="fixed inset-x-0 bottom-0 z-[41] mx-auto flex max-h-[78%] max-w-[480px] animate-sheet-up flex-col overflow-hidden rounded-t-[16px] bg-surface shadow-[0_-10px_34px_rgb(0_0_0/0.22)]"
@@ -304,12 +348,12 @@ export default function BookSourcesPage() {
           <div class="flex flex-none items-center gap-2 border-b border-border px-4 py-3">
             <span class="text-[15px] font-bold">导入书源</span>
             <span class="flex-1 text-xs text-text-3">
-              {confirmPlan()!.create.length} 新增 · {confirmPlan()!.overwrite.length} 覆盖
+              {confirmPlan()!.create.length} 新增 · {activeOverwriteCount()} 覆盖
             </span>
             <button
               class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 active:bg-surface-2"
               aria-label="关闭"
-              onClick={() => setConfirmPlan(null)}
+              onClick={closeImportPlan}
             >
               <CloseIcon />
             </button>
@@ -331,8 +375,43 @@ export default function BookSourcesPage() {
                   .join("；")}
               </p>
             </Show>
+            {/* 与本机重复（同名 + 同站点）的书源：可逐条关闭覆盖，保留本机版本 */}
+            <Show when={confirmPlan()!.overwrite.length > 0}>
+              <div class="overflow-hidden rounded-[12px] border border-border bg-bg">
+                <p class="border-b border-border bg-surface-2/60 px-3.5 py-2 text-[11.5px] font-semibold text-text-3">
+                  与本机重复的书源（同名 · 同站点），默认用导入内容覆盖
+                </p>
+                <div class="divide-y divide-border">
+                  <For each={confirmPlan()!.overwrite}>
+                    {(item, index) => (
+                      <div class="flex items-center gap-3 px-3.5 py-2.5">
+                        <span class="flex min-w-0 flex-1 flex-col gap-0.5">
+                          <span class="truncate text-[13px] font-medium text-text-2">
+                            {item.source.name}
+                          </span>
+                          <span class="truncate text-[11px] text-text-3">
+                            {siteLabel(item.source.bookSourceUrl)}
+                          </span>
+                        </span>
+                        <span class="flex flex-none items-center gap-2">
+                          <span class="text-[11px] font-semibold tabular-nums text-text-3">
+                            {skippedOverwrites().has(index()) ? "跳过" : "覆盖"}
+                          </span>
+                          <ToggleSwitch
+                            on={!skippedOverwrites().has(index())}
+                            label={`覆盖书源 ${item.source.name}`}
+                            onChange={() => toggleOverwrite(index())}
+                          />
+                        </span>
+                      </div>
+                    )}
+                  </For>
+                </div>
+              </div>
+            </Show>
             <button
-              class="mt-2 inline-flex w-full items-center justify-center gap-1.5 rounded-xl bg-accent px-4 py-3 text-[14px] font-semibold text-on-accent active:scale-[0.98]"
+              class="mt-2 inline-flex w-full items-center justify-center gap-1.5 rounded-xl bg-accent px-4 py-3 text-[14px] font-semibold text-on-accent active:scale-[0.98] disabled:pointer-events-none disabled:opacity-50"
+              disabled={confirmPlan()!.create.length + activeOverwriteCount() === 0}
               onClick={() => void applyImport()}
             >
               仍要导入

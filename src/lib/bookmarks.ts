@@ -358,6 +358,45 @@ export interface BookmarkInheritPreview {
 }
 
 /**
+ * 预演“单章内容替换”对落在该章书签的影响（在线书「重新加载本章」用）：
+ * 只评估 chapterCid 落在【将被替换章节】上的书签，其余章节不参与。
+ * nextChapter 应是新正文落库后的章节对象（cid / 下标保持原值）。
+ * 只做评估，不修改任何已存数据；调用方可据此提示用户或放弃本次重载。
+ */
+export async function previewChapterBookmarkReplacement(
+  book: LocalBook,
+  chapterIndex: number,
+  nextChapter: LocalBookChapter,
+): Promise<BookmarkInheritPreview> {
+  await ensureBookmarksLoaded();
+  const chapter = book.chapters[chapterIndex];
+  const cid = chapter?.cid;
+  const list = cid ? bookmarksFor(book.id).filter((bm) => bm.chapterCid === cid) : [];
+  const total = list.length;
+  if (total === 0) return { total, failedCount: 0, samples: [] };
+
+  const virtual: LocalBook = {
+    ...book,
+    chapters: book.chapters.map((ch, i) => (i === chapterIndex ? nextChapter : ch)),
+  };
+  let failedCount = 0;
+  const samples: BookmarkInheritPreview["samples"] = [];
+  for (const bm of list) {
+    const target = resolveBookmarkTarget(virtual, bm);
+    if (target?.certain) continue;
+    failedCount++;
+    if (samples.length < 3) {
+      const snippet = bm.text.slice(0, 48);
+      samples.push({
+        chapterTitle: bm.chapterTitle || `第 ${bm.chapterIndex + 1} 章`,
+        text: snippet.length < bm.text.length ? `${snippet}…` : snippet,
+      });
+    }
+  }
+  return { total, failedCount, samples };
+}
+
+/**
  * 预演“书签继承”：在【即将替换成的新章节】上尝试重新定位该书全部现有书签。
  * 与阅读时 resolveBookmarkTarget 同一口径：
  * - 能明确命中（certain）的书签视为可继承（其余保持不变）；

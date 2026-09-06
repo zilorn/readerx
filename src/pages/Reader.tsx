@@ -37,6 +37,7 @@ import type { ChapterItem } from "../lib/bookSourcesTypes";
 import { BookmarkPanel } from "../components/BookmarkPanel";
 import { MenuPageSlider } from "../components/MenuPageSlider";
 import { OnlineTocOverwriteDialog } from "../components/OnlineTocOverwriteDialog";
+import { ReloadChapterRiskDialog } from "../components/ReloadChapterRiskDialog";
 import { SelectionMenu, type SelectionCustom } from "../components/SelectionMenu";
 import { TtsBubble } from "../components/TtsBubble";
 import { TtsSheet } from "../components/TtsSheet";
@@ -73,6 +74,7 @@ import {
   sortedBookmarks,
   unitAtGlobalOffset,
   type Bookmark,
+  type BookmarkInheritPreview,
   type TextMirror,
 } from "../lib/bookmarks";
 import {
@@ -615,19 +617,55 @@ export default function ReaderPage() {
     return chapterUnits(ch).length === 0;
   });
 
-  /** 阅读设置「重新加载本章」：在线书清掉当前章缓存后从书源强制重取 */
+  /**
+   * 阅读设置「重新加载本章」：在线书从书源强制重取当前章正文。
+   * 重载会用新正文替换本章，可能影响落在本章的书签——先由 online 层预演，
+   * 有新正文无法精确定位的书签时弹窗询问是否继续，用户放弃则不改动正文与书签。
+   */
+  const [reloadRisk, setReloadRisk] = createSignal<BookmarkInheritPreview | null>(null);
+  let reloadRiskResolve: ((proceed: boolean) => void) | null = null;
+
+  /** 弹出「书签可能失效」询问，等待用户选择（仍在拉取中的重载流程等待此结果） */
+  function askReloadRisk(preview: BookmarkInheritPreview): Promise<boolean> {
+    reloadRiskResolve?.(false); // 上一次未决询问先按取消处理
+    setReloadRisk(preview);
+    return new Promise<boolean>((resolve) => {
+      reloadRiskResolve = resolve;
+    });
+  }
+
+  function settleReloadRisk(proceed: boolean): void {
+    const resolve = reloadRiskResolve;
+    reloadRiskResolve = null;
+    setReloadRisk(null);
+    resolve?.(proceed);
+  }
+
   async function reloadCurrentChapter(): Promise<void> {
     const current = book();
     if (!current || !isOnlineBook(current)) return;
     if (remoteRun().busy) return; // 其它拉取进行中（入口已禁用，双保险）
+    const targetIndex = chapterIdx();
     setReaderSettingsOpen(false);
     setMenuOpen(false);
+    const outcome = await reloadChapterContent(current.id, targetIndex, {
+      confirmRisk: askReloadRisk,
+    });
+    if (outcome.cancelled) return; // 用户放弃：正文与书签均未改动
+    if (!outcome.applied) {
+      showToast(`重新加载失败：${outcome.error ?? "未知错误"}`, true);
+      return;
+    }
     // 重载后回到本章开头（旧正文的偏移/页码已无意义）
-    setResumeTarget(null);
-    setPageIdx(0);
-    setViewOffset(0);
-    await reloadChapterContent(current.id, chapterIdx());
+    if (chapterIdx() === targetIndex) {
+      setResumeTarget(null);
+      setPageIdx(0);
+      setViewOffset(0);
+    }
   }
+
+  // 离开阅读页时若有未决的「重载书签风险」询问，按取消处理，避免重载流程悬挂
+  onCleanup(() => settleReloadRisk(false));
 
   // -------------------------------------------------------------------
   // 在线书「检查书籍更新」：重新获取书源目录。
@@ -3590,6 +3628,18 @@ export default function ReaderPage() {
                   : undefined
               }
             />
+
+            {/* 「重新加载本章」前：新正文可能使本章书签失效，询问是否继续 */}
+            <Show when={reloadRisk()}>
+              {(risk) => (
+                <ReloadChapterRiskDialog
+                  chapterTitle={chapter()?.title ?? "当前章节"}
+                  preview={risk()}
+                  onCancel={() => settleReloadRisk(false)}
+                  onProceed={() => settleReloadRisk(true)}
+                />
+              )}
+            </Show>
 
             {/* 检查书籍更新：最新目录与书架目录冲突时询问是否覆盖 */}
             <Show when={updateConflict()}>

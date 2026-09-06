@@ -13,6 +13,10 @@ import {
 } from "./backend";
 import { addBookRecord, commitBookContentUpdate, localBookById } from "./books";
 import {
+  previewChapterBookmarkReplacement,
+  type BookmarkInheritPreview,
+} from "./bookmarks";
+import {
   bookSourceSummaryById,
   ensureBookSourcesLoaded,
 } from "./bookSources";
@@ -236,6 +240,91 @@ interface BatchPlan {
 }
 
 /**
+ * 单章图片下载（章内限并发；取消/失败时该图留占位 src=""，阅读器显示占位框）。
+ * 返回成功下载张数（data: 直给图片无需下载，不计入）。
+ */
+async function fetchChapterImages(
+  bookId: string,
+  sourceId: string,
+  chapterUrl: string | null,
+  build: SourceContentBuild,
+  concurrency: number,
+): Promise<number> {
+  const refs = build.imageRefs;
+  if (refs.length === 0) return 0;
+  const cache = new Map<string, string | null>();
+  let cursor = 0;
+  let loaded = 0;
+  const cap = Math.max(1, Math.min(concurrency, refs.length));
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const ref = refs[cursor];
+      if (!ref) return;
+      cursor++;
+      const block = build.blocks[ref.index];
+      if (!block || block.kind !== "img") continue;
+      if (cancellations.has(bookId)) {
+        block.src = "";
+        continue;
+      }
+      let data = cache.get(ref.url);
+      if (data === undefined) {
+        data = await fetchRemoteSourceImage(sourceId, ref.url, chapterUrl);
+        cache.set(ref.url, data);
+      }
+      if (data) {
+        block.src = data;
+        loaded++;
+      } else {
+        block.src = "";
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: cap }, () => worker()));
+  return loaded;
+}
+
+/**
+ * 把一个章节的解析结果写入 chapter 对象（含图片下载）。
+ * 纯图章一张图都没成功时返回 false（不落盘，供调用方标记失败/提示）。
+ */
+async function applyChapterBuild(
+  bookId: string,
+  sourceId: string,
+  chapter: LocalBookChapter,
+  build: SourceContentBuild,
+  concurrency: number,
+): Promise<boolean> {
+  const imgCount = build.blocks.filter((b) => b.kind === "img").length;
+  // data: 直给图片无需下载，视为已就绪
+  const ready = imgCount - build.imageRefs.length;
+  const loaded =
+    build.imageRefs.length > 0
+      ? await fetchChapterImages(
+          bookId,
+          sourceId,
+          chapter.url || null,
+          build,
+          concurrency,
+        )
+      : 0;
+  if (build.hasImages) {
+    if (build.paragraphs.length === 0 && ready + loaded === 0) return false;
+    chapter.paragraphs = build.paragraphs;
+    chapter.blocks = build.blocks;
+    return true;
+  }
+  // 纯文本：保持旧行为（无图片不写 blocks，避免旧读者差异；空正文标记已拉取）
+  chapter.paragraphs = build.paragraphs;
+  if (build.paragraphs.length > 0) {
+    chapter.blocks = undefined;
+  } else {
+    chapter.blocks = [];
+  }
+  return true;
+}
+
+/**
  * 依次下载 book 中缺失正文的章节（分批；引擎正文拉取按批并发，批内图片下载限并发）。
  * - indexes 为空表示「剩余全部」（download 相位，每批统一落盘，保持批量 I/O）；
  * - window 相位按传入顺序逐章处理并逐章落盘（调用方已把当前阅读章排在前面，
@@ -299,70 +388,19 @@ async function runFetch(
     if (cancellations.has(bookId)) break;
     const nextBook = structuredClone(book);
 
-    // 单章图片下载（章内限并发；取消/失败时该图留占位 src=""，阅读器显示占位框）
-    const fetchPlanImages = async (plan: BatchPlan): Promise<number> => {
-      const refs = plan.build.imageRefs;
-      if (refs.length === 0) return 0;
-      const cache = new Map<string, string | null>();
-      let cursor = 0;
-      let loaded = 0;
-      const cap = Math.max(1, Math.min(concurrency, refs.length));
-      const worker = async (): Promise<void> => {
-        for (;;) {
-          const ref = refs[cursor];
-          if (!ref) return;
-          cursor++;
-          const block = plan.build.blocks[ref.index];
-          if (!block || block.kind !== "img") continue;
-          if (cancellations.has(bookId)) {
-            block.src = "";
-            continue;
+    // 把解析结果写入章节；纯图章一张图都没成功时视为失败（不落盘，供 UI 重试）
+    const applyOne = (plan: BatchPlan): Promise<boolean> =>
+      applyChapterBuild(bookId, sourceId, plan.chapter, plan.build, concurrency).then(
+        (ok) => {
+          if (!ok) {
+            failed.push({
+              index: plan.chapterIndex,
+              error: `图片加载失败（0/${plan.build.imageRefs.length}）`,
+            });
           }
-          let data = cache.get(ref.url);
-          if (data === undefined) {
-            data = await fetchRemoteSourceImage(sourceId, ref.url, plan.chapter.url || null);
-            cache.set(ref.url, data);
-          }
-          if (data) {
-            block.src = data;
-            loaded++;
-          } else {
-            block.src = "";
-          }
-        }
-      };
-      await Promise.all(Array.from({ length: cap }, () => worker()));
-      return loaded;
-    };
-
-    // 把解析结果写入章节；纯图章一张图都没成功时视为失败（不落盘，供 UI 重试）。
-    const applyOne = async (plan: BatchPlan): Promise<boolean> => {
-      const { chapter, build } = plan;
-      const imgCount = build.blocks.filter((b) => b.kind === "img").length;
-      // data: 直给图片无需下载，视为已就绪
-      const ready = imgCount - build.imageRefs.length;
-      const loaded = build.imageRefs.length > 0 ? await fetchPlanImages(plan) : 0;
-      if (build.hasImages) {
-        if (build.paragraphs.length === 0 && ready + loaded === 0) {
-          failed.push({
-            index: plan.chapterIndex,
-            error: `图片加载失败（0/${build.imageRefs.length}）`,
-          });
-          return false;
-        }
-        chapter.paragraphs = build.paragraphs;
-        chapter.blocks = build.blocks;
-        return true;
-      }
-      // 纯文本：保持旧行为（无图片不写 blocks，避免旧读者差异；空正文标记已拉取）
-      chapter.paragraphs = build.paragraphs;
-      if (build.paragraphs.length > 0) {
-        chapter.blocks = undefined;
-      } else {
-        chapter.blocks = [];
-      }
-      return true;
-    };
+          return ok;
+        },
+      );
 
     // 组装批次计划（引擎失败的章节直接进失败列表）
     const plans: BatchPlan[] = [];
@@ -444,25 +482,126 @@ export async function downloadRemainingChapters(
   await runFetch(bookId, null, "download", onProgress);
 }
 
+export interface ReloadChapterOutcome {
+  /** 新正文已写入书库（含新旧正文相同的情形） */
+  applied: boolean;
+  /** 用户取消（书签风险提示选择不重载，书库与阅读位置不变） */
+  cancelled: boolean;
+  /** applied=false 且非用户取消时的可读错误 */
+  error?: string;
+}
+
+export interface ReloadChapterOptions {
+  /** 新正文会让本章书签失效时回调（给出预演结果）；返回 false 则放弃本次重载 */
+  confirmRisk?: (preview: BookmarkInheritPreview) => Promise<boolean>;
+}
+
 /**
  * 强制重新获取单个章节正文（阅读设置「重新加载本章」）：
- * 先清掉该章已缓存的正文（含“已拉取但为空”的标记），再单独重拉一次并落盘。
- * 有其它拉取任务正在进行时不动作（UI 端已据此禁用入口）。
+ * - 先拉取最新正文并解析，期间不动书库（成功才覆盖，失败保留旧正文）；
+ * - 新正文会替换本章书签锚定的文字：通过 options.confirmRisk 交调用方询问，
+ *   用户选择放弃时既不覆盖正文也不改动书签；
+ * - 有其它拉取任务正在进行时不动作（UI 端已据此禁用入口）。
  */
 export async function reloadChapterContent(
   bookId: string,
   chapterIndex: number,
-): Promise<void> {
-  if (onlineRunBusy(bookId)) return;
+  options?: ReloadChapterOptions,
+): Promise<ReloadChapterOutcome> {
+  if (onlineRunBusy(bookId)) return { applied: false, cancelled: false };
   const book = localBookById(bookId);
-  if (!book || !isOnlineBook(book)) return;
-  const next = structuredClone(book);
-  const chapter = next.chapters[chapterIndex];
-  if (!chapter || !chapter.url) return;
-  chapter.paragraphs = [];
-  chapter.blocks = undefined;
-  await commitBookContentUpdate(next);
-  await runFetch(bookId, [chapterIndex], "window");
+  if (!book || !isOnlineBook(book)) return { applied: false, cancelled: false };
+  const chapter = book.chapters[chapterIndex];
+  if (!chapter?.url) return { applied: false, cancelled: false };
+  const sourceId = book.bookSourceId!;
+  const concurrency = Math.max(1, currentSourceParallel());
+
+  // 占用 run 状态：与其余拉取互斥，“下载中”提示 / 相关入口禁用一并生效
+  cancellations.delete(bookId);
+  patchRun(bookId, {
+    phase: "window",
+    busy: true,
+    total: 1,
+    done: 0,
+    failed: [],
+    pending: [chapterIndex],
+    cancelled: false,
+  });
+  const settle = (patch: Partial<OnlineRunState>): void => {
+    patchRun(bookId, { phase: "idle", busy: false, pending: [], ...patch });
+  };
+
+  try {
+    const results = await fetchRemoteChapterContents(sourceId, toBookItem(book), [
+      { chapterName: chapter.title, chapterUrl: chapter.url },
+    ]);
+    const res = results[0];
+    if (!res?.ok) {
+      const error = res?.error || "获取正文失败";
+      settle({ failed: [{ index: chapterIndex, error }] });
+      return { applied: false, cancelled: false, error };
+    }
+    if (cancellations.has(bookId)) {
+      cancellations.delete(bookId);
+      settle({ cancelled: true });
+      return { applied: false, cancelled: true };
+    }
+    const build = buildSourceChapterContent(res.text, chapter.url);
+
+    // 新正文会替换本章书签锚定的文字：先预演，部分书签无法精确定位时交调用方询问
+    if (options?.confirmRisk) {
+      const nextChapter: LocalBookChapter = {
+        ...chapter,
+        paragraphs: build.paragraphs,
+        blocks: build.hasImages ? build.blocks : build.paragraphs.length > 0 ? undefined : [],
+      };
+      const preview = await previewChapterBookmarkReplacement(
+        book,
+        chapterIndex,
+        nextChapter,
+      );
+      if (preview.failedCount > 0) {
+        const proceed = await options.confirmRisk(preview);
+        if (!proceed) {
+          settle({});
+          return { applied: false, cancelled: true };
+        }
+      }
+    }
+
+    // 拉取期间书库可能已更新（其它窗口预取落盘）：以最新书为基底只补当前章
+    const latest = localBookById(bookId) ?? book;
+    const target = latest.chapters[chapterIndex];
+    if (!target) {
+      settle({});
+      return { applied: false, cancelled: false, error: "章节已变化，未重新加载" };
+    }
+    const next = structuredClone(latest);
+    const okApply = await applyChapterBuild(
+      bookId,
+      sourceId,
+      next.chapters[chapterIndex],
+      build,
+      concurrency,
+    );
+    if (cancellations.has(bookId)) {
+      cancellations.delete(bookId);
+      settle({ cancelled: true });
+      return { applied: false, cancelled: true };
+    }
+    if (!okApply) {
+      const error = `图片加载失败（0/${build.imageRefs.length}）`;
+      settle({ failed: [{ index: chapterIndex, error }] });
+      return { applied: false, cancelled: false, error };
+    }
+    await commitBookContentUpdate(next);
+    settle({ done: 1, failed: [] });
+    return { applied: true, cancelled: false };
+  } catch (err) {
+    const error = err instanceof Error ? err.message : String(err);
+    settle({ failed: [{ index: chapterIndex, error }] });
+    return { applied: false, cancelled: false, error };
+  }
 }
 
 // ---------------------------------------------------------------------------
