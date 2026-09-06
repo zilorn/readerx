@@ -37,7 +37,9 @@ import {
   resolveReadingTarget,
 } from "../lib/progress";
 import {
+  lastShelfFilterKey,
   removeShelfEntry,
+  rememberShelfFilter,
   setShelfSelecting,
   shelfOrder,
   shelfSourceFilterEnabled,
@@ -59,6 +61,23 @@ type ShelfFilter =
   | { kind: "all" }
   | { kind: "source"; source: BookSource }
   | { kind: "group"; groupId: string };
+
+/**
+ * 把记忆的筛选标签 key（all / local / webdav / online / group-<id>）还原为筛选条件。
+ * 目标分组已被删除 / 来源未知时回落「全部」，避免指向不存在的 chip。
+ */
+function restoreShelfFilter(key: string): ShelfFilter {
+  if (key === "local" || key === "webdav" || key === "online") {
+    return { kind: "source", source: key };
+  }
+  if (key.startsWith("group-")) {
+    const groupId = key.slice("group-".length);
+    if (groupList().some((group) => group.id === groupId)) {
+      return { kind: "group", groupId };
+    }
+  }
+  return { kind: "all" };
+}
 
 /**
  * 按“正文文本位置”计算进度：已读章节累计字符 + 当前章节内偏移 → 整书百分比。
@@ -318,7 +337,10 @@ function GroupChip(props: {
 
 export default function BookshelfPage() {
   const navigate = useNavigate();
-  const [filter, setFilter] = createSignal<ShelfFilter>({ kind: "all" });
+  // 初始筛选标签还原上次记忆的选择（进入书架即停留在上次的标签上）
+  const [filter, setFilter] = createSignal<ShelfFilter>(
+    restoreShelfFilter(lastShelfFilterKey()),
+  );
   const [selecting, setSelecting] = createSignal(false);
   const [selectedIds, setSelectedIds] = createSignal<string[]>([]);
   const [groupPickerOpen, setGroupPickerOpen] = createSignal(false);
@@ -572,7 +594,10 @@ export default function BookshelfPage() {
                   label={chip.label}
                   active={isChipActive(chip.key)}
                   count={chip.count}
-                  onClick={() => setFilter(chip.value)}
+                  onClick={() => {
+                    setFilter(chip.value);
+                    rememberShelfFilter(chip.key);
+                  }}
                   onLongPress={
                     chip.value.kind === "group" && !selecting()
                       ? () => setGroupManageOpen(true)

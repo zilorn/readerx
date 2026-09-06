@@ -25,6 +25,7 @@ const MENU_SLIDER_KEY = "readerx.menuSlider";
 const MENU_SLIDER_NODES_KEY = "readerx.menuSliderNodes";
 const SOURCE_PARALLEL_KEY = "readerx.onlineConcurrency";
 const SHELF_SOURCE_FILTER_KEY = "readerx.shelfSourceFilter";
+const SHELF_FILTER_KEY = "readerx.shelfFilter";
 
 export const FONT_MIN = 15;
 export const FONT_MAX = 28;
@@ -55,7 +56,7 @@ let initialized = false;
 export async function initReaderState(): Promise<void> {
   if (initialized) return;
   initialized = true;
-  const [storedTheme, storedShelf, storedFont, storedSpacing, storedPageMode, storedStatusBar, storedScope, storedSourceParallel, storedShelfSourceFilter, storedMenuSlider, storedMenuSliderNodes] =
+  const [storedTheme, storedShelf, storedFont, storedSpacing, storedPageMode, storedStatusBar, storedScope, storedSourceParallel, storedShelfSourceFilter, storedMenuSlider, storedMenuSliderNodes, storedShelfFilter] =
     await Promise.all([
       readState<string>(THEME_KEY),
       readState<Record<string, ShelfEntry>>(SHELF_KEY),
@@ -68,6 +69,7 @@ export async function initReaderState(): Promise<void> {
       readState<boolean>(SHELF_SOURCE_FILTER_KEY),
       readState<boolean>(MENU_SLIDER_KEY),
       readState<boolean>(MENU_SLIDER_NODES_KEY),
+      readState<string>(SHELF_FILTER_KEY),
     ]);
 
   // 未保存过偏好时默认护眼(sepia)，不再跟随系统深浅色
@@ -104,6 +106,9 @@ export async function initReaderState(): Promise<void> {
   }
   if (typeof storedMenuSliderNodes === "boolean") {
     setMenuSliderNodesSignal(storedMenuSliderNodes);
+  }
+  if (typeof storedShelfFilter === "string" && storedShelfFilter.trim()) {
+    setShelfFilterKeySignal(storedShelfFilter.trim());
   }
 }
 
@@ -437,6 +442,34 @@ function persistShelfSourceFilter(on: boolean): void {
 export function setShelfSourceFilterEnabled(on: boolean): void {
   setShelfSourceFilterSignal(on);
   persistShelfSourceFilter(on);
+}
+
+// ---------------------------------------------------------------------------
+// 书架筛选标签记忆（全局偏好）
+// 书架顶部「全部 / 来源 / 分组」筛选 chip 的选中态，以 chip key 记忆
+// （all / local / webdav / online / group-<id>）：用户点击某个筛选标签后记住，
+// 下次进入书架时直接还原到该标签。分组被删、来源已无书等失效情形由书架页还原时回落「全部」。
+
+const [shelfFilterKey, setShelfFilterKeySignal] = createSignal<string>("all");
+let shelfFilterWriteQueue: Promise<void> = Promise.resolve();
+
+/** 上次选中的书架筛选标签 key（all / 来源 / group-<id>） */
+export function lastShelfFilterKey(): string {
+  return shelfFilterKey();
+}
+
+function persistShelfFilterKey(key: string): void {
+  shelfFilterWriteQueue = shelfFilterWriteQueue.then(() =>
+    writeState(SHELF_FILTER_KEY, key),
+  );
+}
+
+/** 记住书架当前选中的筛选标签（点击筛选 chip 时调用；重复值不重复落盘） */
+export function rememberShelfFilter(key: string): void {
+  const next = key || "all";
+  if (next === shelfFilterKey()) return;
+  setShelfFilterKeySignal(next);
+  persistShelfFilterKey(next);
 }
 
 // ---------------------------------------------------------------------------
