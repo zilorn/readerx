@@ -486,6 +486,27 @@ export default function BookshelfPage() {
     );
   }
 
+  /** 当前筛选下是否所有可见书都已选中（决定「全选」按钮文案） */
+  function allVisibleSelected(): boolean {
+    const items = visibleItems();
+    return items.length > 0 && items.every((item) => selectedIds().includes(item.book.id));
+  }
+
+  /** 全选 / 取消全选：只作用于当前筛选可见的书（隐藏项保持不动） */
+  function toggleSelectAll() {
+    const ids = visibleItems().map((item) => item.book.id);
+    if (ids.length === 0) return;
+    setSelectedIds((prev) => {
+      if (allVisibleSelected()) {
+        const drop = new Set(ids);
+        return prev.filter((id) => !drop.has(id));
+      }
+      const merged = new Set(prev);
+      for (const id of ids) merged.add(id);
+      return [...merged];
+    });
+  }
+
   function onLongPress(id: string) {
     if (!selecting()) {
       setSelecting(true);
@@ -560,13 +581,25 @@ export default function BookshelfPage() {
         }
         right={
           selecting() ? (
-            <button
-              class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-              aria-label="取消选择"
-              onClick={cancelSelect}
-            >
-              <CloseIcon />
-            </button>
+            <div class="flex flex-none items-center gap-0.5">
+              <button
+                class="h-10 rounded-xl px-2.5 text-[13.5px] font-medium text-accent transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2 disabled:opacity-35"
+                aria-label={
+                  allVisibleSelected() ? "取消全选当前可见书籍" : "全选当前可见书籍"
+                }
+                disabled={visibleItems().length === 0}
+                onClick={toggleSelectAll}
+              >
+                {allVisibleSelected() ? "取消全选" : "全选"}
+              </button>
+              <button
+                class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
+                aria-label="取消选择"
+                onClick={cancelSelect}
+              >
+                <CloseIcon />
+              </button>
+            </div>
           ) : (
             <div class="flex flex-none items-center gap-1">
               <button
