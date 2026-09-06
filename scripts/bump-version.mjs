@@ -2,17 +2,22 @@
 /**
  * 一键同步 ReaderX 版本号
  *
- * 单一输入同步四处来源，避免版本号漂移：
+ * 单一输入同步多处来源，避免版本号漂移：
  *   - package.json
  *   - src-tauri/tauri.conf.json
  *   - src-tauri/Cargo.toml
  *   - src-tauri/Cargo.lock
+ *   - CHANGELOG.md（仅正式版本）
  *
  * 用法：
  *   node scripts/bump-version.mjs 0.3.0   # 显式指定新版本（语义化版本）
  *   node scripts/bump-version.mjs patch   # 相对当前版本递进：patch | minor | major
  *
  * 说明：
+ *   - 新版本为正式版本（无预发布后缀，如 0.1.3 而非 0.1.3-beta.1）时，会同步归档
+ *     CHANGELOG.md：保留顶部 [Unreleased]，把其正文移入新版本区块并取当天日期——
+ *       ## [0.1.3] - YYYY-MM-DD
+ *     归档后 [Unreleased] 重新留空，供继续记录改动；预发布版本只改版本来源，不动 CHANGELOG.md。
  *   - 若当前版本带预发布后缀（如 0.1.0-beta.1），`patch` 会收敛为正式版本 0.1.0，
  *     与 `npm version patch` 语义一致；
  *   - Cargo 不支持 semver 的 build metadata（+xxx），此类输入会被拒绝。
@@ -103,6 +108,48 @@ function replaceCargoLock(version) {
   write("src-tauri/Cargo.lock", `${lines.join("\n")}\n`);
 }
 
+/** 当天日期，格式 YYYY-MM-DD */
+function today() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+/**
+ * 把 CHANGELOG.md 顶部 [Unreleased] 的正文归档到 `## [version] - date` 区块：
+ * [Unreleased] 标题保留并清空，新版本区块插在其后、排在旧版本之前。
+ * 找不到 [Unreleased] 返回 null，否则返回改写后的完整内容。
+ */
+function archiveUnreleased(content, version, date) {
+  const heading = "## [Unreleased]";
+  const uIdx = content.indexOf(heading);
+  if (uIdx === -1) return null;
+
+  const head = content.slice(0, uIdx); // 文件头（含标题前的空行）
+  const tail = content.slice(uIdx + heading.length); // 标题行之后的所有内容
+  const nextIdx = tail.search(/\n## /); // 下一个二级标题（已发布版本 / 文件尾）
+  const body = (nextIdx === -1 ? tail : tail.slice(0, nextIdx)).trim();
+  const rest =
+    nextIdx === -1 ? "" : content.slice(uIdx + heading.length + nextIdx + 1);
+
+  let out = `${head}${heading}\n\n## [${version}] - ${date}`;
+  if (body) out += `\n\n${body}`;
+  if (rest) out += `\n\n${rest}`;
+  return `${out.replace(/\s+$/, "")}\n`;
+}
+
+/** 正式发版：把 CHANGELOG.md 的 [Unreleased] 归档到指定版本（当天日期） */
+function releaseChangelog(version) {
+  const file = "CHANGELOG.md";
+  const next = archiveUnreleased(read(file), version, today());
+  if (next === null) {
+    console.error(`✗ ${file} 中未找到 "## [Unreleased]" 区块，无法归档`);
+    process.exit(1);
+  }
+  write(file, next);
+  console.log(`✓ ${file}  [Unreleased] 已归档 -> [${version}] - ${today()}`);
+}
+
 function usage(current) {
   console.log(
     [
@@ -138,6 +185,13 @@ if (next === current) {
   process.exit(0);
 }
 
+// 正式版本（无预发布后缀）才归档 CHANGELOG；先校验，避免版本已改才报错
+const isRelease = !next.includes("-");
+if (isRelease && !read("CHANGELOG.md").includes("## [Unreleased]")) {
+  console.error(`✗ CHANGELOG.md 中未找到 "## [Unreleased]" 区块，正式发版前需在其中记录本次改动`);
+  process.exit(1);
+}
+
 updateJson("package.json", next);
 updateJson(join("src-tauri", "tauri.conf.json"), next);
 replaceCargoToml(next);
@@ -148,4 +202,5 @@ for (const file of Object.keys(MANIFESTS)) {
 }
 console.log(`✓ ${join("src-tauri", "Cargo.toml")}   ${current} -> ${next}`);
 console.log(`✓ ${join("src-tauri", "Cargo.lock")}   ${current} -> ${next}`);
+if (isRelease) releaseChangelog(next);
 console.log("\n提示：设置页显示的是运行中二进制的真实版本，重新构建（pnpm build / pnpm tauri build）后生效。");
