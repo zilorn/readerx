@@ -16,7 +16,7 @@ use sha1::Sha1;
 use std::collections::HashMap;
 use std::io::Read;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// 响应体读取上限（32 MiB），超限截断
 pub const BODY_LIMIT: u64 = 32 * 1024 * 1024;
@@ -32,8 +32,33 @@ const DEFAULT_UA: &str = "Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36 (KH
 const IMAGE_BODY_LIMIT: u64 = 24 * 1024 * 1024;
 /// 正文图片下载超时（毫秒；图片通常比页面慢）
 const IMAGE_TIMEOUT_MS: u64 = 60_000;
+/// CF 挑战自动认证：两次自动拉起 WebView 的最小间隔（避免批量下载/并发搜索弹窗风暴）
+const AUTO_AUTH_COOLDOWN: Duration = Duration::from_secs(45);
+/// CF 挑战检测时最多扫描的响应体前缀长度
+const CF_SCAN_BODY: usize = 32 * 1024;
 
 static SOURCES: OnceLock<Mutex<HashMap<String, Arc<SourceState>>>> = OnceLock::new();
+/// 全局最近一次自动拉起网页认证的时间（跨源共用：同一时刻只该有一个认证窗口）
+static AUTO_AUTH_LAST_TRY: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+
+fn auto_auth_last_slot() -> &'static Mutex<Option<Instant>> {
+    AUTO_AUTH_LAST_TRY.get_or_init(Default::default)
+}
+
+/// 尝试占一次「自动拉起网页认证」名额；距上次不足冷却时间时返回 false。
+fn claim_auto_auth_slot() -> bool {
+    let now = Instant::now();
+    let mut guard = auto_auth_last_slot()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(last) = *guard {
+        if now.duration_since(last) < AUTO_AUTH_COOLDOWN {
+            return false;
+        }
+    }
+    *guard = Some(now);
+    true
+}
 
 fn sources_registry() -> &'static Mutex<HashMap<String, Arc<SourceState>>> {
     SOURCES.get_or_init(|| Mutex::new(HashMap::new()))
@@ -47,6 +72,8 @@ pub(crate) struct SourceState {
     pub(crate) default_headers: Mutex<Vec<(String, String)>>,
     pub(crate) user_agent: Mutex<String>,
     pub(crate) extra_cookies: Mutex<Vec<String>>,
+    /// 书源是否允许自动网页认证（CF 挑战自动拉起 WebView / 代码级 webview.login）
+    pub(crate) auto_auth: Mutex<bool>,
 }
 
 fn build_client(no_redirect: bool) -> Result<reqwest::blocking::Client, String> {
@@ -75,6 +102,7 @@ pub(crate) fn prepare_source(source: &BookSource) -> Result<(), String> {
                 default_headers: Mutex::new(Vec::new()),
                 user_agent: Mutex::new(String::new()),
                 extra_cookies: Mutex::new(Vec::new()),
+                auto_auth: Mutex::new(true),
             });
             guard.insert(source.id.clone(), state.clone());
             state
@@ -90,6 +118,7 @@ pub(crate) fn prepare_source(source: &BookSource) -> Result<(), String> {
     *state.default_headers.lock().unwrap_or_else(|e| e.into_inner()) = headers;
     *state.user_agent.lock().unwrap_or_else(|e| e.into_inner()) =
         source.user_agent.trim().to_string();
+    *state.auto_auth.lock().unwrap_or_else(|e| e.into_inner()) = source.auto_auth;
     Ok(())
 }
 
@@ -152,6 +181,11 @@ fn finalize_headers(header_lines: Vec<(String, String)>) -> Vec<(String, String)
 /// 统一错误 JSON（宿主边界内原生函数不抛 JS 异常，交由 JS 包装层 throw）
 fn error_payload(message: String) -> String {
     serde_json::to_string(&json!({ "__rxError": message })).unwrap_or_else(|_| "{}".to_string())
+}
+
+/// 把响应对象序列化为 JSON 文本（序列化失败兜底为宿主错误对象）
+fn serialize_value(value: &Value) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| error_payload("序列化失败".into()))
 }
 
 // ---------------------------------------------------------------------------
@@ -248,153 +282,314 @@ fn decode_body(bytes: &[u8], content_type: &str) -> String {
     gbk.into_owned()
 }
 
-/// 执行一次 HTTP 请求；始终返回 JSON 字符串（成功为响应对象，失败为 __rxError）
+/// 执行一次 HTTP 请求（单发，不做 CF 挑战自动认证）；成功返回响应对象 Value。
+fn do_http_request(source_id: &str, method: &str, raw_url: &str, opts: &str) -> Result<Value, String> {
+    let url = raw_url.trim();
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err("仅支持 http/https 绝对地址".to_string());
+    }
+    let opts: Value = if opts.trim().is_empty() || opts.trim() == "null" {
+        Value::Null
+    } else {
+        serde_json::from_str(opts).map_err(|e| format!("http 参数解析失败: {e}"))?
+    };
+    let o = opts.as_object().cloned().unwrap_or_default();
+    let method = method.to_uppercase();
+
+    let state = source_state(source_id)?;
+    let redirect_false = o.get("redirect").and_then(|v| v.as_bool()) == Some(false);
+    let client = if redirect_false {
+        &state.client_no_redirect
+    } else {
+        &state.client
+    };
+    let mut req = client.request(
+        reqwest::Method::from_bytes(method.as_bytes())
+            .map_err(|_| format!("不支持的请求方法: {method}"))?,
+        url,
+    );
+
+    let mut header_lines = session_base_headers(&state);
+
+    // 单请求头覆盖（末尾同名覆盖默认头；Referer 等按需追加）
+    if let Some(Value::Object(extra)) = o.get("headers") {
+        for (k, v) in extra {
+            if let Value::String(s) = v {
+                header_lines.push((k.trim().to_lowercase(), s.clone()));
+            }
+        }
+    }
+
+    // 组装参数与 body
+    let mut body_bytes: Option<Vec<u8>> = None;
+    if let Some(Value::Object(params)) = o.get("params") {
+        let full = append_query(url, params);
+        req = client.request(reqwest::Method::from_bytes(method.as_bytes()).unwrap(), full);
+    }
+    if let Some(Value::Object(form)) = o.get("form") {
+        let mut parts = Vec::new();
+        for (k, v) in form {
+            parts.push(format!(
+                "{}={}",
+                percent_encode(k),
+                percent_encode(&v.as_str().unwrap_or("").to_string())
+            ));
+        }
+        body_bytes = Some(parts.join("&").into_bytes());
+        if !header_lines.iter().any(|(k, _)| k == "content-type") {
+            header_lines.push((
+                "content-type".to_string(),
+                "application/x-www-form-urlencoded; charset=UTF-8".to_string(),
+            ));
+        }
+    } else if let Some(json_body) = o.get("json") {
+        let text = serde_json::to_string(json_body)
+            .map_err(|e| format!("json 序列化失败: {e}"))?;
+        body_bytes = Some(text.into_bytes());
+        if !header_lines.iter().any(|(k, _)| k == "content-type") {
+            header_lines.push(("content-type".to_string(), "application/json".to_string()));
+        }
+    } else if let Some(Value::String(s)) = o.get("body") {
+        body_bytes = Some(s.clone().into_bytes());
+    }
+
+    // 去重同名头（cookie/ua/头覆盖优先级最高，保留最后一次）
+    let final_headers = finalize_headers(header_lines);
+    let mut header_map = reqwest::header::HeaderMap::new();
+    for (k, v) in final_headers {
+        if let Ok(name) = reqwest::header::HeaderName::from_bytes(k.as_bytes()) {
+            if let Ok(val) = reqwest::header::HeaderValue::from_str(&v) {
+                header_map.append(name, val);
+            }
+        }
+    }
+    req = req.headers(header_map);
+
+    let timeout_ms = o
+        .get("timeoutMs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(DEFAULT_TIMEOUT_MS)
+        .clamp(100, 120_000);
+    req = req.timeout(Duration::from_millis(timeout_ms));
+    if let Some(bytes) = body_bytes {
+        req = req.body(bytes);
+    }
+
+    let resp = req.send().map_err(|e| format!("请求失败: {e}"))?;
+    let status = resp.status();
+    let status_text = status.canonical_reason().unwrap_or("").to_string();
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    let mut header_out = Map::new();
+    for (k, v) in resp.headers() {
+        if let Ok(text) = v.to_str() {
+            let key = k.as_str().to_lowercase();
+            match header_out.get_mut(&key) {
+                Some(Value::String(existing)) => {
+                    *existing = format!("{existing}, {text}");
+                }
+                _ => {
+                    header_out.insert(key, Value::String(text.to_string()));
+                }
+            }
+        }
+    }
+
+    // 限量读取响应体
+    let mut reader = resp.take(BODY_LIMIT + 1);
+    let mut bytes = Vec::new();
+    reader
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("读取响应失败: {e}"))?;
+    let truncated = bytes.len() as u64 > BODY_LIMIT;
+    bytes.truncate(BODY_LIMIT as usize);
+    let body = decode_body(&bytes, &content_type);
+
+    let mut out = Map::new();
+    out.insert("ok".into(), json!(status.is_success()));
+    out.insert("status".into(), json!(status.as_u16()));
+    out.insert("statusText".into(), json!(status_text));
+    out.insert("headers".into(), Value::Object(header_out));
+    out.insert("body".into(), json!(body));
+    out.insert("url".into(), json!(raw_url.to_string()));
+    if truncated {
+        out.insert("truncated".into(), json!(true));
+    }
+    Ok(Value::Object(out))
+}
+
+// ---------------------------------------------------------------------------
+// Cloudflare 挑战自动认证（请求层）
+// ---------------------------------------------------------------------------
+
+fn header_contains(headers: &Map<String, Value>, name: &str, needle: &str) -> bool {
+    headers
+        .get(name)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_lowercase().contains(needle))
+        .unwrap_or(false)
+}
+
+/// 判断一次响应是否为 Cloudflare 人机挑战页（此时旧的 cf_clearance 已失效，
+/// 需要重新在浏览器内核里完成挑战换取新令牌）。
+fn is_cf_challenge_response(value: &Value) -> bool {
+    let Some(obj) = value.as_object() else {
+        return false;
+    };
+    let headers = obj
+        .get("headers")
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default();
+    // CF 挑战页恒为 text/html；非 HTML 响应（JSON/图片）不做挑战判定，避免误拉认证窗
+    let content_type = headers
+        .get("content-type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_lowercase();
+    if !content_type.is_empty() && !content_type.contains("text/html") {
+        return false;
+    }
+    // `cf-mitigated: challenge` 是最可靠的现代标记（WAF 托管挑战/机器人拦截）
+    if header_contains(&headers, "cf-mitigated", "challenge") {
+        return true;
+    }
+    let server_cf = header_contains(&headers, "server", "cloudflare");
+    let status = obj.get("status").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+    // 老式「Just a moment…」挑战多为 403 / 503
+    if !server_cf && status != 403 && status != 503 {
+        return false;
+    }
+    let body = obj.get("body").and_then(|v| v.as_str()).unwrap_or("");
+    let scan = body.len().min(CF_SCAN_BODY);
+    let head = body.get(..scan).unwrap_or(body).to_ascii_lowercase();
+    const STRONG_MARKERS: [&str; 5] = [
+        "cf_chl_opt",
+        "cf-chl-widget",
+        "cf-browser-verification",
+        "cf-chl-out",
+        "__cf_chl",
+    ];
+    if STRONG_MARKERS.iter().any(|m| head.contains(m)) {
+        return true;
+    }
+    // 无 server: cloudflare 头时，「just a moment」置信不足（普通 403 页也可能出现）
+    server_cf && head.contains("just a moment")
+}
+
+/// 给挑战响应对象补一个 `cf` 字段，说明本次自动认证的处理情况（供规则/日志观察）。
+fn mark_cf_challenge(value: &mut Value, auto: &str, message: Option<&str>) {
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+    let existing = obj.get("cf").cloned().unwrap_or_else(|| json!({}));
+    let mut m = existing.as_object().cloned().unwrap_or_default();
+    m.insert("challenge".into(), json!(true));
+    m.insert("auto".into(), json!(auto));
+    if let Some(msg) = message {
+        m.insert("message".into(), json!(msg));
+    }
+    obj.insert("cf".into(), Value::Object(m));
+}
+
+/// 取 URL 的 origin（scheme://host），CF 认证用站点根即可触发挑战。
+fn origin_of(url: &str) -> Option<String> {
+    let lower = url.to_ascii_lowercase();
+    let scheme = if lower.starts_with("https://") {
+        "https"
+    } else if lower.starts_with("http://") {
+        "http"
+    } else {
+        return None;
+    };
+    let rest = &url[scheme.len() + 3..];
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if host.is_empty() {
+        return None;
+    }
+    Some(format!("{scheme}://{host}"))
+}
+
+/// 对外 HTTP 请求入口：命中 Cloudflare 挑战时，按书源「自动网页认证」开关决定
+/// 是否自动拉起应用内 WebView 认证并重试一次（cf_clearance 过期场景覆盖在此）。
+/// 始终返回 JSON 字符串（成功为响应对象，失败为 __rxError）。
 pub(crate) fn http_request(source_id: &str, method: &str, raw_url: &str, opts: &str) -> String {
-    let do_request = || -> Result<Value, String> {
-        let url = raw_url.trim();
-        if !(url.starts_with("http://") || url.starts_with("https://")) {
-            return Err("仅支持 http/https 绝对地址".to_string());
-        }
-        let opts: Value = if opts.trim().is_empty() || opts.trim() == "null" {
-            Value::Null
-        } else {
-            serde_json::from_str(opts).map_err(|e| format!("http 参数解析失败: {e}"))?
-        };
-        let o = opts.as_object().cloned().unwrap_or_default();
-        let method = method.to_uppercase();
+    let one = || do_http_request(source_id, method, raw_url, opts);
+    let first = match one() {
+        Ok(value) => value,
+        Err(message) => return error_payload(message),
+    };
+    if !is_cf_challenge_response(&first) {
+        return serialize_value(&first);
+    }
+    let mut first = first;
 
-        let state = source_state(source_id)?;
-        let redirect_false = o.get("redirect").and_then(|v| v.as_bool()) == Some(false);
-        let client = if redirect_false {
-            &state.client_no_redirect
-        } else {
-            &state.client
-        };
-        let mut req = client.request(
-            reqwest::Method::from_bytes(method.as_bytes())
-                .map_err(|_| format!("不支持的请求方法: {method}"))?,
-            url,
-        );
+    // 书源开关：允许自动网页认证才继续（可单独关闭）
+    let auto_auth = source_state(source_id)
+        .map(|s| s.auto_auth.lock().map(|g| *g).unwrap_or(false))
+        .unwrap_or(false);
+    if !auto_auth {
+        mark_cf_challenge(&mut first, "disabled", Some("该书源已关闭自动网页认证"));
+        return serialize_value(&first);
+    }
+    // 平台能力：应用内 WebView 认证仅 Android
+    if !webview_login::is_supported() {
+        mark_cf_challenge(&mut first, "unsupported", Some("自动网页认证仅 Android 端可用"));
+        return serialize_value(&first);
+    }
+    // 全局冷却：避免批量下载 / 并发搜索时连续弹多个认证窗
+    if !claim_auto_auth_slot() {
+        mark_cf_challenge(&mut first, "cooldown", Some("距上次自动认证过近，请稍后重试"));
+        return serialize_value(&first);
+    }
 
-        let mut header_lines = session_base_headers(&state);
-
-        // 单请求头覆盖（末尾同名覆盖默认头；Referer 等按需追加）
-        if let Some(Value::Object(extra)) = o.get("headers") {
-            for (k, v) in extra {
-                if let Value::String(s) = v {
-                    header_lines.push((k.trim().to_lowercase(), s.clone()));
-                }
-            }
-        }
-
-        // 组装参数与 body
-        let mut body_bytes: Option<Vec<u8>> = None;
-        if let Some(Value::Object(params)) = o.get("params") {
-            let full = append_query(url, params);
-            req = client.request(reqwest::Method::from_bytes(method.as_bytes()).unwrap(), full);
-        }
-        if let Some(Value::Object(form)) = o.get("form") {
-            let mut parts = Vec::new();
-            for (k, v) in form {
-                parts.push(format!(
-                    "{}={}",
-                    percent_encode(k),
-                    percent_encode(&v.as_str().unwrap_or("").to_string())
-                ));
-            }
-            body_bytes = Some(parts.join("&").into_bytes());
-            if !header_lines.iter().any(|(k, _)| k == "content-type") {
-                header_lines.push((
-                    "content-type".to_string(),
-                    "application/x-www-form-urlencoded; charset=UTF-8".to_string(),
-                ));
-            }
-        } else if let Some(json_body) = o.get("json") {
-            let text = serde_json::to_string(json_body)
-                .map_err(|e| format!("json 序列化失败: {e}"))?;
-            body_bytes = Some(text.into_bytes());
-            if !header_lines.iter().any(|(k, _)| k == "content-type") {
-                header_lines.push(("content-type".to_string(), "application/json".to_string()));
-            }
-        } else if let Some(Value::String(s)) = o.get("body") {
-            body_bytes = Some(s.clone().into_bytes());
-        }
-
-        // 去重同名头（cookie/ua/头覆盖优先级最高，保留最后一次）
-        let final_headers = finalize_headers(header_lines);
-        let mut header_map = reqwest::header::HeaderMap::new();
-        for (k, v) in final_headers {
-            if let Ok(name) = reqwest::header::HeaderName::from_bytes(k.as_bytes()) {
-                if let Ok(val) = reqwest::header::HeaderValue::from_str(&v) {
-                    header_map.append(name, val);
-                }
-            }
-        }
-        req = req.headers(header_map);
-
-        let timeout_ms = o
-            .get("timeoutMs")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(DEFAULT_TIMEOUT_MS)
-            .clamp(100, 120_000);
-        req = req.timeout(Duration::from_millis(timeout_ms));
-        if let Some(bytes) = body_bytes {
-            req = req.body(bytes);
-        }
-
-        let resp = req.send().map_err(|e| format!("请求失败: {e}"))?;
-        let status = resp.status();
-        let status_text = status
-            .canonical_reason()
-            .unwrap_or("")
-            .to_string();
-        let content_type = resp
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            .to_string();
-
-        let mut header_out = Map::new();
-        for (k, v) in resp.headers() {
-            if let Ok(text) = v.to_str() {
-                let key = k.as_str().to_lowercase();
-                match header_out.get_mut(&key) {
-                    Some(Value::String(existing)) => {
-                        *existing = format!("{existing}, {text}");
-                    }
-                    _ => {
-                        header_out.insert(key, Value::String(text.to_string()));
-                    }
-                }
-            }
-        }
-
-        // 限量读取响应体
-        let mut reader = resp.take(BODY_LIMIT + 1);
-        let mut bytes = Vec::new();
-        reader
-            .read_to_end(&mut bytes)
-            .map_err(|e| format!("读取响应失败: {e}"))?;
-        let truncated = bytes.len() as u64 > BODY_LIMIT;
-        bytes.truncate(BODY_LIMIT as usize);
-        let body = decode_body(&bytes, &content_type);
-
-        let mut out = Map::new();
-        out.insert("ok".into(), json!(status.is_success()));
-        out.insert("status".into(), json!(status.as_u16()));
-        out.insert("statusText".into(), json!(status_text));
-        out.insert("headers".into(), Value::Object(header_out));
-        out.insert("body".into(), json!(body));
-        out.insert("url".into(), json!(raw_url.to_string()));
-        if truncated {
-            out.insert("truncated".into(), json!(true));
-        }
-        Ok(Value::Object(out))
+    // GET/HEAD 直接把原地址交给 WebView（挑战通过后会落到真实页面）；其余方法用站点根
+    let method = method.to_uppercase();
+    let get_like = method == "GET" || method == "HEAD";
+    let target = if get_like {
+        raw_url.trim().to_string()
+    } else {
+        origin_of(raw_url.trim()).unwrap_or_else(|| raw_url.trim().to_string())
     };
 
-    match do_request() {
-        Ok(value) => serde_json::to_string(&value).unwrap_or_else(|_| error_payload("序列化失败".into())),
+    let outcome = match webview_login::perform(source_id, &target) {
+        Ok(o) => o,
+        Err(err) => {
+            // 登录桥异常（极少见）：按取消处理，避免阻塞书源代码
+            mark_cf_challenge(&mut first, "cancelled", Some(&err));
+            return serialize_value(&first);
+        }
+    };
+
+    // 用户取消 / 超时 / 失败：原样返回挑战响应（带说明字段），不打扰书源代码
+    if !outcome.ok {
+        let msg = if outcome.message.trim().is_empty() {
+            "认证未完成（已取消或失败），请重试".to_string()
+        } else {
+            outcome.message.clone()
+        };
+        mark_cf_challenge(&mut first, "cancelled", Some(&msg));
+        return serialize_value(&first);
+    }
+
+    // 认证成功（新 Cookie 已持久化并注入会话）：用原参数重试一次，不再递归自动认证
+    match one() {
+        Ok(second) => {
+            let mut second = second;
+            if is_cf_challenge_response(&second) {
+                mark_cf_challenge(
+                    &mut second,
+                    "stale",
+                    Some("认证后仍被拦截：令牌未生效或站点校验浏览器指纹，请确认书源 UA 与网页一致"),
+                );
+            }
+            serialize_value(&second)
+        }
         Err(message) => error_payload(message),
     }
 }
@@ -899,10 +1094,106 @@ pub(crate) fn webview_login_supported() -> bool {
 /// 成功后内部已完成：持久化 + 注入该书源会话（后续 http.* 自动携带 Cookie）。
 /// 返回 JSON 文本 `{ ok, url, cookies, count, message }`（不抛宿主错误）。
 pub(crate) fn webview_login(source_id: &str, url: &str, _opts: &str) -> String {
+    // 书源「自动网页认证」开关关闭时，书源代码无法主动拉起登录窗（编辑页手动按钮不受影响）
+    let auto_auth = source_state(source_id)
+        .map(|s| s.auto_auth.lock().map(|g| *g).unwrap_or(true))
+        .unwrap_or(true);
+    if !auto_auth {
+        let value = json!({
+            "ok": false,
+            "url": url,
+            "cookies": "",
+            "count": 0,
+            "message": "该书源已关闭「自动网页认证」，书源代码无法拉起登录窗口"
+        });
+        return serde_json::to_string(&value).unwrap_or_else(|_| error_payload("登录结果序列化失败".into()));
+    }
     let value = match webview_login::perform(source_id, url) {
         Ok(outcome) => serde_json::to_value(&outcome)
             .unwrap_or_else(|_| json!({ "ok": false, "message": "登录结果序列化失败" })),
         Err(err) => json!({ "ok": false, "message": err }),
     };
     serde_json::to_string(&value).unwrap_or_else(|_| error_payload("登录结果序列化失败".into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn response(status: u16, content_type: &str, extra_headers: &[(&str, &str)], body: &str) -> Value {
+        let mut headers = Map::new();
+        headers.insert("content-type".into(), json!(content_type));
+        for (k, v) in extra_headers {
+            headers.insert((*k).into(), json!(v));
+        }
+        json!({
+            "ok": status < 400,
+            "status": status,
+            "headers": headers,
+            "body": body,
+        })
+    }
+
+    #[test]
+    fn detects_modern_cf_challenge_by_header() {
+        let resp = response(
+            403,
+            "text/html; charset=UTF-8",
+            &[("server", "cloudflare"), ("cf-mitigated", "challenge")],
+            "<html>Verify you are human</html>",
+        );
+        assert!(is_cf_challenge_response(&resp));
+    }
+
+    #[test]
+    fn detects_classic_cf_challenge_page() {
+        let resp = response(
+            403,
+            "text/html",
+            &[("server", "cloudflare")],
+            "<html>Just a moment... Enable JavaScript and cookies to continue</html>",
+        );
+        assert!(is_cf_challenge_response(&resp));
+    }
+
+    #[test]
+    fn ignores_plain_error_pages() {
+        // 非 cloudflare 服务器 + 文案巧合，不应误判为挑战
+        let resp = response(
+            403,
+            "text/html",
+            &[("server", "nginx")],
+            "<html>Just a moment... retry later</html>",
+        );
+        assert!(!is_cf_challenge_response(&resp));
+
+        // 普通 404 页面
+        let resp = response(
+            404,
+            "text/html",
+            &[("server", "cloudflare")],
+            "<html>Not Found</html>",
+        );
+        assert!(!is_cf_challenge_response(&resp));
+    }
+
+    #[test]
+    fn ignores_non_html_blocked_responses() {
+        // cloudflare 拦 JSON 接口（非挑战页）不应触发自动认证窗
+        let resp = response(
+            403,
+            "application/json",
+            &[("server", "cloudflare")],
+            r#"{"code":403,"msg":"blocked"}"#,
+        );
+        assert!(!is_cf_challenge_response(&resp));
+    }
+
+    #[test]
+    fn origin_keeps_scheme_and_host() {
+        assert_eq!(origin_of("https://a.example.com/p?x=1").unwrap(), "https://a.example.com");
+        assert_eq!(origin_of("http://b.example.net:8080/x").unwrap(), "http://b.example.net:8080");
+        assert_eq!(origin_of("https://c.example.org"), Some("https://c.example.org".into()));
+        assert_eq!(origin_of("javascript:void(0)"), None);
+    }
 }

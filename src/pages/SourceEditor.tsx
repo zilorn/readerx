@@ -60,6 +60,7 @@ export default function SourceEditorPage() {
   const [author, setAuthor] = createSignal(draft().author);
   const [version, setVersion] = createSignal(draft().version);
   const [enabled, setEnabled] = createSignal(draft().enabled);
+  const [autoAuth, setAutoAuth] = createSignal(draft().autoAuth);
   const [userAgent, setUserAgent] = createSignal(draft().userAgent);
   const [headersText, setHeadersText] = createSignal(
     Object.entries(draft().headers)
@@ -113,6 +114,7 @@ export default function SourceEditorPage() {
       capabilities: caps(),
       userAgent: userAgent().trim(),
       headers,
+      autoAuth: autoAuth(),
       updateTime: draft().updateTime || Date.now(),
       js: js(),
     };
@@ -362,6 +364,33 @@ export default function SourceEditorPage() {
               <span class="text-[13px] font-semibold text-text-2">网页登录</span>
               <span class="text-[10.5px] text-text-3">WebView 浮层内完成登录，捕获含 httpOnly 的 Cookie</span>
             </div>
+            <button
+              class="flex w-full items-center justify-between gap-3 rounded-[12px] border border-border px-3 py-2.5"
+              onClick={() => setAutoAuth(!autoAuth())}
+            >
+              <span class="text-left">
+                <span class="block text-[12.5px] font-medium text-text-2">自动网页认证</span>
+                <span class="mt-0.5 block text-[10.5px] leading-[1.45] text-text-3">
+                  请求遇 Cloudflare 挑战时自动弹窗认证并重试（令牌过期自动刷新）；书源代码 webview.login 同受此开关控制
+                </span>
+              </span>
+              <span
+                class={`relative h-6 w-11 flex-none rounded-full transition-colors duration-150 ${
+                  autoAuth() ? "bg-accent" : "bg-surface-2"
+                }`}
+              >
+                <span
+                  class={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-[left] duration-150 ${
+                    autoAuth() ? "left-[22px]" : "left-0.5"
+                  }`}
+                />
+              </span>
+            </button>
+            <Show when={!autoAuth()}>
+              <p class="text-[10.5px] leading-[1.5] text-text-3">
+                已关闭：该书源请求被拦截时不会自动弹出认证窗，书源代码的 webview.login 也会返回不可用；编辑页「打开登录页」不受影响
+              </p>
+            </Show>
             <input
               class="w-full rounded-[10px] border border-border bg-surface px-3 py-2 font-mono text-[12px] outline-none focus:border-accent"
               placeholder="https://example.com/login"

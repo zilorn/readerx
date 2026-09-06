@@ -154,6 +154,11 @@ pub struct BookSource {
     pub enabled: bool,
     #[serde(default)]
     pub capabilities: BookSourceCapabilities,
+    /// 是否允许自动网页认证（登录 / Cloudflare 挑战）：引擎请求命中 CF 挑战时自动
+    /// 拉起应用内 WebView 认证并重试；书源代码的 `webview.login` 也受此开关约束。
+    /// 编辑页手动「网页登录」不受影响。默认开启，可单独关闭。
+    #[serde(default = "yes")]
+    pub auto_auth: bool,
     /// 缺省请求 UA（空 = 使用内置默认）
     #[serde(default)]
     pub user_agent: String,

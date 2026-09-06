@@ -117,6 +117,7 @@ export function blankBookSource(partial?: Partial<BookSource>): BookSource {
     capabilities: blankCapabilities(),
     userAgent: "",
     headers: {},
+    autoAuth: true,
     updateTime: now,
     js: "",
     ...partial,
@@ -260,6 +261,7 @@ function normalizeEntry(raw: unknown): { source: BookSource | null; issue?: stri
     capabilities,
     userAgent: typeof r.userAgent === "string" ? r.userAgent : "",
     headers,
+    autoAuth: bool(r.autoAuth, true),
     updateTime: typeof r.updateTime === "number" ? r.updateTime : Date.now(),
     js,
   };

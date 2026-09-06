@@ -21,6 +21,7 @@
     "toc": true,                 //   目录
     "content": true              //   正文
   },
+  "autoAuth": true,              // 自动网页认证（登录/CF 挑战，仅 Android）；默认 true，可单独关闭
   "userAgent": "",               // 空 = 内置默认
   "headers": { "Referer": "https://..." }, // 每请求合并的默认头（可含 Cookie）
   "updateTime": 1725400000000,
@@ -94,7 +95,10 @@ data URL 存入本地章节（离线可读、防盗链源可用），详见 [boo
   纯 CPU 死循环无法被杀停（属已知限制，请勿在规则里写死循环）。
 - `webview.login(url)`（Android 端网页登录，见 [book-source-api.md](./book-source-api.md)）
   会**阻塞等待**用户在登录浮层内完成/取消/超时；期间不占用函数预算计时，
-  请只在确实需要登录时调用，避免把整个调用拖住。
+  请只在确实需要登录时调用，避免把整个调用拖住。该书源关闭 `autoAuth` 时返回 `ok:false`。
+- `autoAuth`（默认 `true`，编辑页可单独关闭）：开启时 `http.*` 命中 Cloudflare 挑战会自动拉起
+  应用内 WebView 认证并重试（含 `cf_clearance` 过期自动刷新，Android 端），详见
+  [cloudflare.md](./cloudflare.md) 与 [book-source-api.md](./book-source-api.md)。
 - 「书源并发」是**用户级全局设置**（设置 → 书源），指一次搜索同时运行多少个书源；
   批量拉正文的单源内部并行请求数也以该设置值为上限（1–8，默认 3）。它不是书源 JSON 的字段。
 

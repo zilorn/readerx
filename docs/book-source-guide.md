@@ -102,6 +102,11 @@ async function bookContent(chapter, book) {
 
 见 [cloudflare.md](./cloudflare.md) 与 [book-source-api.md](./book-source-api.md) 的 `webview` 段。
 
+**Cloudflare 站点（Android，推荐）**：书源默认开启「自动网页认证」（编辑页「网页登录」卡片内可单独
+关闭）。只要站点返回 CF 人机挑战（含 `cf_clearance` 过期后的再次挑战），引擎会自动拉起应用内
+WebView 完成验证、刷新 Cookie 并重试原请求——搜索/目录/正文**不需要在书源代码里做任何处理**，
+普通 `http.get` 写法即可。认证后仍 403 时把书源 UA 填成与网页一致的浏览器 UA（见 cloudflare.md）。
+
 **Android 端（推荐）**：在书源编辑页点「网页登录」，应用内弹出 WebView 浮层，
 登录完成后宿主自动捕获该站 Cookie（含 httpOnly）并**持久化到该书源**（重启自动注入），
 之后的搜索/目录/正文请求都会自动带上：

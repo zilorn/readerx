@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- 书源新增「自动网页认证」（书源 JSON `autoAuth`，默认开启，编辑页「网页登录」卡片内可**单独关闭**）：
+  `http.*` 请求命中 Cloudflare 人机挑战（或 `cf_clearance` 令牌过期后再次挑战）时，引擎在 Android 端
+  自动拉起应用内 WebView 完成认证、覆盖式刷新并按书源持久化 Cookie，然后**自动重试原请求一次**
+  （书源代码无需改动，普通 `http.get` 即可）；两次自动弹窗间约 45s 全局冷却，避免批量下载/并发搜索
+  连环弹窗。未弹窗/被取消/刷新后仍被拦截时，原挑战响应带 `cf` 字段（`auto`：`disabled`/`unsupported`/
+  `cooldown`/`cancelled`/`stale`）返回；书源代码显式 `webview.login(url)` 也受该书源 `autoAuth` 开关
+  约束（关闭时返回 `ok:false`），编辑页手动「网页登录」不受影响。桌面/iOS/浏览器预览不支持时静默降级，
+  详见 docs/cloudflare.md 与 docs/book-source-api.md。
 - 书源作品信息支持 `tags` 标签字段（`searchBook` / `discoverBooks` / `bookDetail` 返回的 BookItem 可带 `tags` 字符串数组，自动去重去空白，单个 ≤ 24 字、至多 30 个）：发现页点击结果弹出的「书籍详情」预览会展示标签，「加入书架」时随书保存；所有书籍（含在线书）都可在书籍详情页查看，并通过右上角「编辑」增删标签（本地导入的书同样适用）。
 
 ## [0.1.3] - 2026-09-06

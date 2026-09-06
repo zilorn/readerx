@@ -41,11 +41,28 @@
   headers: { "content-type": "…" }, // 键名小写
   body: "…",                // 按字符集解码后的文本
   url: "https://…",          // 请求地址
-  truncated: false          // 响应体超限被截断时为 true
+  truncated: false,          // 响应体超限被截断时为 true
+  cf: {                      // 仅命中 Cloudflare 挑战且未自动解决时出现（见下）
+    challenge: true,
+    auto: "cooldown",        // disabled | unsupported | cooldown | cancelled | stale
+    message: "…"
+  }
 }
 ```
 
 规则惯例：`const resp = await http.get(url); if (!resp.ok) throw new Error("HTTP " + resp.status);`
+
+### Cloudflare 挑战自动认证（Android）
+
+书源默认开启「自动网页认证」（书源 JSON `autoAuth: true`，编辑页可单独关闭）。`http.*` 请求
+命中 Cloudflare 挑战时，引擎会**自动**拉起应用内 WebView 让用户完成验证，成功后把新 Cookie
+持久化并注入会话，然后**自动重试一次原请求**（`cf_clearance` 过期后同样会自动刷新），详见
+[cloudflare.md](./cloudflare.md)。
+
+- 刷新成功：规则拿到的就是重试后的正常响应，无额外字段；
+- 未弹窗/被取消/刷新后仍被拦截：原挑战响应返回，附 `cf` 字段说明原因（`disabled` 表示该书源
+  已关闭自动网页认证；桌面/iOS/浏览器预览恒为 `unsupported`），规则可据此提示或降级。
+
 
 ## `webview`（网页登录，仅 Android）
 
@@ -94,6 +111,8 @@ async function searchBook(keyword) {
   且一次只允许一个登录窗口；已有窗口时新调用返回 `ok:false`。
 - 登录窗口 **15 分钟**无操作会自动关闭并返回 `ok:false`。
 - 目标地址仅支持 `http/https`；非法地址返回 `ok:false`（message 说明）。
+- 该书源关闭「自动网页认证」（`autoAuth: false`，编辑页开关）时返回 `ok:false`
+  （message 说明被该书源设置禁用），规则内请自行降级；编辑页手动「网页登录」不受影响。
 - 桌面 / iOS / 纯浏览器预览：`isSupported()` 为 false，`login` 直接返回 `ok:false`
   （message 提示当前平台不支持），**不会抛错**，书源代码可自行降级。
 
