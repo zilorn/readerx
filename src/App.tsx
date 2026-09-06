@@ -1,20 +1,11 @@
-import { lazy, Suspense, Show, createEffect, createMemo, on, onMount } from "solid-js";
+import { lazy, onMount, Show, createEffect } from "solid-js";
 import type { Component } from "solid-js";
-import { registerAppScrollEl } from "./lib/appScroll";
-import {
-  Router,
-  Route,
-  useLocation,
-  type RouteSectionProps,
-} from "@solidjs/router";
-import { TabBar } from "./components/TabBar";
-import { LoadingScreen } from "./components/LoadingScreen";
-import { ScrollArea } from "./components/ScrollArea";
+import { Router, Route, type RouteSectionProps } from "@solidjs/router";
+import { RouteStage } from "./components/RouteStage";
 import { ensureLocalBooksLoaded } from "./lib/books";
 import { currentToast } from "./lib/toast";
-import { shelfSelectingMode } from "./lib/store";
 
-// ---- 路由页面全部走代码分割 + 懒加载（配合 Suspense） ----
+// ---- 路由页面全部走代码分割 + 懒加载（配合页面栈内 Suspense） ----
 const BookshelfPage = lazy(() => import("./pages/Bookshelf"));
 const ShelfSearchPage = lazy(() => import("./pages/ShelfSearch"));
 const WebdavImportPage = lazy(() => import("./pages/WebdavImport"));
@@ -30,57 +21,17 @@ const BookDetailPage = lazy(() => import("./pages/BookDetail.tsx"));
 const NotFoundPage = lazy(() => import("./pages/NotFound"));
 
 /**
- * 根布局：包裹所有路由。
- * - <Suspense> 承接懒加载页面代码块未就绪时的 loading
- * - 书架 / 发现 / 设置三个主 Tab 页面显示底部导航
+ * 根布局：外层手机列 + 页面栈 RouteStage。
+ * 滚动容器、底部 Tab 与页面切换动画统一由 RouteStage 以「页面层」维护，
+ * 此处只保留外壳与全局 Toast。
  */
 const AppShell: Component<RouteSectionProps> = (props) => {
-  const location = useLocation();
-
-  // /book/:id、404 等次级页面隐藏底部 Tab
-  const inMainTabs = createMemo(() => {
-    const path = location.pathname;
-    return path === "/" || path === "/discover" || path === "/settings";
-  });
-
-  // 书架多选时临时隐藏底部 Tab，把屏幕最底部让给“移动到分组 / 删除”操作条
-  const tabBarHidden = createMemo(
-    () => location.pathname === "/" && shelfSelectingMode(),
-  );
-
-  // 阅读页自行管理底部留白与分页高度，不套用统一的滚动区底部留白
-  const isReader = createMemo(() => location.pathname.startsWith("/book/"));
-
-  let viewRef: HTMLDivElement | undefined;
-  // 注册唯一的内容滚动容器，供页面（如 WebDAV 导入页）保存/恢复滚动位置
-  onMount(() => registerAppScrollEl(viewRef ?? null));
-  // 路由切换后，让滚动容器回到顶部（避免切页后停留在旧滚动位置）
-  createEffect(
-    on(
-      () => location.pathname,
-      () => viewRef?.scrollTo({ top: 0 }),
-    ),
-  );
-
   return (
     <div
       class="relative mx-auto flex h-screen w-full max-w-[480px] flex-col overflow-hidden bg-bg min-[521px]:border-x min-[521px]:border-border min-[521px]:shadow-[0_0_44px_rgb(0_0_0/0.16)]"
       style={{ height: "100dvh" }}
     >
-      <ScrollArea
-        class="min-h-0 flex-1"
-        contentClass={() => (isReader() ? "" : "pb-4")}
-        onEl={(el) => {
-          viewRef = el;
-        }}
-      >
-        <Suspense fallback={<LoadingScreen label="页面加载中…" />}>
-          {props.children}
-        </Suspense>
-      </ScrollArea>
-      <Show when={inMainTabs() && !tabBarHidden()}>
-        <TabBar />
-      </Show>
+      <RouteStage>{props.children}</RouteStage>
       <Show when={currentToast()}>
         {(toast) => (
           <div
@@ -103,6 +54,14 @@ function App() {
   // 尽早载入本地书库（幂等），让书架/阅读页直接消费响应式数据
   createEffect(() => {
     void ensureLocalBooksLoaded();
+  });
+
+  // 预热三个主 Tab 页面块：切 Tab 时正文即刻可渲染，
+  // 页面切换动画（淡入淡出）能把标题栏一并淡入，而不是先空白/加载占位。
+  onMount(() => {
+    void import("./pages/Bookshelf");
+    void import("./pages/Discover");
+    void import("./pages/Settings");
   });
 
   return (
