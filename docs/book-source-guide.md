@@ -30,7 +30,8 @@ async function searchBook(keyword) {
 ```
 
 测试：切到「搜索」，参数保持 `["关键词"]` → 保存并测试 → 应打印结果数组。
-字段除 `bookName`、`bookUrl` 都可省略。
+字段除 `bookName`、`bookUrl` 都可省略；若站点给了分类/标签，可一并返回 `tags: ["玄幻", "热血"]`（详见
+[book-source-spec.md](./book-source-spec.md) 的 BookItem 形状）。
 
 ## 3. 目录（HTML 站 + CSS 选择器）
 
@@ -83,7 +84,7 @@ async function bookContent(chapter, book) {
 
 ## 5. 详情与发现（可选）
 
-- `bookDetail(book)`：返回富化后的 `BookItem`（补 `cover/intro/latest/updateTime`），失败可不实现。
+- `bookDetail(book)`：返回富化后的 `BookItem`（补 `cover/intro/latest/updateTime/tags`），失败可不实现。
 - `discoverBooks(category, page)` + 可选 `discoverCategories()`：分类发现。列表页会自动把
   `{name,url}` 当作分类参数传给 discoverBooks。
 

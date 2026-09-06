@@ -56,6 +56,8 @@ export interface BookItem {
   bookUrl: string;
   /** 发现列表所属分类（翻页时回传） */
   categoryUrl?: string;
+  /** 作品标签（字符串数组，如 ["玄幻","热血"]；搜索/发现/详情可返回） */
+  tags?: string[];
 }
 
 /** bookToc 返回的章节 */

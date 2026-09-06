@@ -25,7 +25,7 @@ import type {
   LocalBook,
   LocalBookChapter,
 } from "./booksTypes";
-import { bookSourceOf, assignChapterCids, chapterCid } from "./booksTypes";
+import { bookSourceOf, assignChapterCids, chapterCid, normalizeBookTags } from "./booksTypes";
 import { parseEpubFile } from "./epub";
 import { ensureShelfEntry } from "./store";
 import { clearAllBookmarks, removeBookmarksForBook } from "./bookmarks";
@@ -339,13 +339,15 @@ export async function updateBookChapters(
  * 书籍元信息补丁（书籍详情页「编辑」用）：
  * - title / author / intro：缺省字段表示不改动；
  * - cover：undefined 不改动，null 清除自定义封面（回退程序化封面），
- *   data URL 则替换封面。书名 / 作者留空时回落默认值，保持全库一致。
+ *   data URL 则替换封面。书名 / 作者留空时回落默认值，保持全库一致；
+ * - tags：undefined 不改动，空数组清除现有标签，非空数组替换标签。
  */
 export interface BookInfoPatch {
   title?: string;
   author?: string;
   intro?: string;
   cover?: string | null;
+  tags?: string[];
 }
 
 export async function updateBookInfo(id: string, patch: BookInfoPatch): Promise<void> {
@@ -360,6 +362,11 @@ export async function updateBookInfo(id: string, patch: BookInfoPatch): Promise<
   }
   if (patch.cover !== undefined) {
     next.cover = patch.cover ?? undefined;
+  }
+  if (patch.tags !== undefined) {
+    const tags = normalizeBookTags(patch.tags);
+    if (tags.length > 0) next.tags = tags;
+    else delete next.tags;
   }
   await saveRemoteBook(next);
   setBooksState((prev) => prev?.map((b) => (b.id === id ? next : b)) ?? prev);

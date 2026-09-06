@@ -9,9 +9,11 @@ import { Portal } from "solid-js/web";
 import { useNavigate } from "@solidjs/router";
 import { callRemoteSource } from "../lib/backend";
 import type { BookItem, ChapterItem } from "../lib/bookSourcesTypes";
+import { normalizeBookTags } from "../lib/booksTypes";
 import { localBookList } from "../lib/books";
 import { addOnlineBookToShelf, fetchBookToc, type PickedBook } from "../lib/online";
 import { showToast } from "../lib/toast";
+import { TagChips } from "./TagChips";
 import { BookIcon, CloseIcon, ListIcon, RefreshIcon } from "./icons";
 import { ScrollArea } from "./ScrollArea";
 
@@ -54,6 +56,9 @@ function mergeDetail(base: BookItem, value: unknown): BookItem {
   if (updateTime) out.updateTime = updateTime;
   const bookUrl = str("bookUrl");
   if (bookUrl) out.bookUrl = bookUrl;
+  // 详情返回的标签视为完整集合；为空/缺失时沿用命中项的标签
+  const tags = normalizeBookTags(raw["tags"]);
+  if (tags.length > 0) out.tags = tags;
   return out;
 }
 
@@ -181,6 +186,13 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
 
   const tocCount = createMemo(() => chapters()?.length ?? 0);
 
+  /** 预览展示的标签：已在书架时以书内标签为准（可被详情页编辑），否则用书源返回的 */
+  const tags = createMemo(() => {
+    const shelf = existingBook();
+    if (shelf) return normalizeBookTags(shelf.tags);
+    return normalizeBookTags(info()?.tags);
+  });
+
   const visibleChapters = createMemo(() => {
     const all = chapters() ?? [];
     if (showAllChapters() || all.length <= TOC_PREVIEW_CAP) return all;
@@ -284,6 +296,11 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
                     <p class="text-[11px] text-text-3">
                       更新：{info()!.updateTime}
                     </p>
+                  </Show>
+                  <Show when={tags().length > 0}>
+                    <div class="mt-0.5 flex flex-wrap gap-1.5">
+                      <TagChips tags={tags()} />
+                    </div>
                   </Show>
                   <Show when={inShelf()}>
                     <p class="mt-1 inline-flex w-fit items-center gap-1 rounded-full bg-accent-weak px-2 py-0.5 text-[11px] font-semibold text-accent">

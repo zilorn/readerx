@@ -144,6 +144,7 @@ async function searchBook(keyword) {
       intro: it.intro,
       latest: it.latest,
       updateTime: it.update,
+      tags: it.tags, // 可选：作品标签数组，如 ["玄幻", "热血"]
       bookUrl: util.urlJoin(BASE, it.url),
     };
   });

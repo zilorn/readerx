@@ -15,6 +15,7 @@ import {
 } from "../lib/bookSources";
 import { callRemoteSource } from "../lib/backend";
 import type { BookItem, BookSourceSummary } from "../lib/bookSourcesTypes";
+import { normalizeBookTags } from "../lib/booksTypes";
 import { rememberPicked, type PickedBook } from "../lib/online";
 import { currentSourceParallel } from "../lib/store";
 import { OnlineBookSheet } from "../components/OnlineBookSheet";
@@ -32,6 +33,29 @@ function hueOf(text: string): number {
     hash = (Math.imul(hash, 31) + text.charCodeAt(i)) | 0;
   }
   return Math.abs(hash) % 360;
+}
+
+/** 把书源返回的裸记录归一化成 BookItem（bookName/bookUrl 必填，其余字段过滤后透传） */
+function toItem(raw: unknown): BookItem | null {
+  const item = raw as Record<string, unknown> | null;
+  if (!item || typeof item.bookName !== "string" || typeof item.bookUrl !== "string") {
+    return null;
+  }
+  const bookName: string = item.bookName;
+  const bookUrl: string = item.bookUrl;
+  const str = (key: string): string | undefined =>
+    typeof item[key] === "string" ? (item[key] as string) : undefined;
+  const tags = normalizeBookTags(item.tags);
+  return {
+    bookName,
+    bookUrl,
+    author: str("author"),
+    cover: str("cover"),
+    intro: str("intro"),
+    latest: str("latest"),
+    updateTime: str("updateTime"),
+    ...(tags.length > 0 ? { tags } : {}),
+  };
 }
 
 /** 搜索结果/发现列表共用行 */
@@ -140,25 +164,8 @@ export default function DiscoverPage() {
       const r = await callRemoteSource(source.id, "searchBook", [kw]);
       if (r.ok && Array.isArray(r.value)) {
         for (const raw of r.value as unknown[]) {
-          const item = raw as Record<string, unknown>;
-          if (
-            typeof item?.bookName === "string" &&
-            typeof item.bookUrl === "string"
-          ) {
-            out.push({
-              source,
-              item: {
-                bookName: item.bookName,
-                author: typeof item.author === "string" ? item.author : undefined,
-                cover: typeof item.cover === "string" ? item.cover : undefined,
-                intro: typeof item.intro === "string" ? item.intro : undefined,
-                latest: typeof item.latest === "string" ? item.latest : undefined,
-                updateTime:
-                  typeof item.updateTime === "string" ? item.updateTime : undefined,
-                bookUrl: item.bookUrl,
-              },
-            });
-          }
+          const item = toItem(raw);
+          if (item) out.push({ source, item });
         }
       } else if (r.error) {
         errors.push(`${source.name}: ${r.error}`);
@@ -232,21 +239,8 @@ export default function DiscoverPage() {
     if (r.ok && Array.isArray(r.value)) {
       const list: ResultEntry[] = [];
       for (const raw of r.value as unknown[]) {
-        const item = raw as Record<string, unknown>;
-        if (typeof item?.bookName === "string" && typeof item.bookUrl === "string") {
-          list.push({
-            source,
-            item: {
-              bookName: item.bookName,
-              author: typeof item.author === "string" ? item.author : undefined,
-              cover: typeof item.cover === "string" ? item.cover : undefined,
-              intro: typeof item.intro === "string" ? item.intro : undefined,
-              latest: typeof item.latest === "string" ? item.latest : undefined,
-              updateTime: typeof item.updateTime === "string" ? item.updateTime : undefined,
-              bookUrl: item.bookUrl,
-            },
-          });
-        }
+        const item = toItem(raw);
+        if (item) list.push({ source, item });
       }
       setDiscResults((prev) => (replace ? list : [...prev, ...list]));
       setDiscPage(page);

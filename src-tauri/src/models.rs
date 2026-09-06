@@ -84,6 +84,9 @@ pub struct LocalBook {
     /// 在线书：书源侧全书地址（与 sourceId 一起构成在线书稳定身份）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub book_url: Option<String>,
+    /// 标签（书源搜索/详情返回或用户在书籍详情页手编；本地导入与在线书通用）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
 }
 
 /// 一次「只回写单章正文」的下标 + 章节数据（在线书逐批下载用）。
@@ -219,6 +222,9 @@ pub struct BookItem {
     /// 发现列表所属分类（翻页时回传）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub category_url: Option<String>,
+    /// 作品标签（搜索/发现/详情可返回；加入书架时随书保存）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
 }
 
 /// 书源 bookToc 返回的章节项

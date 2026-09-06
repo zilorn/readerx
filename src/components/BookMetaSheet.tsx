@@ -1,15 +1,20 @@
 /**
  * 书籍元信息编辑抽屉（书籍详情页）：
- * 编辑书名 / 作者 / 简介，并可更换或移除自定义封面。
+ * 编辑书名 / 作者 / 标签 / 简介，并可更换或移除自定义封面。
  * 每次打开都会重新挂载，故内部表单初值即当前书籍内容。
  */
 import { Show, createSignal } from "solid-js";
 import { Portal } from "solid-js/web";
 import { updateBookInfo } from "../lib/books";
-import type { LocalBook } from "../lib/booksTypes";
+import {
+  MAX_BOOK_TAG_COUNT,
+  MAX_BOOK_TAG_LENGTH,
+  type LocalBook,
+} from "../lib/booksTypes";
 import { fileToCoverThumb } from "../lib/coverImage";
 import { showToast } from "../lib/toast";
-import { CloseIcon, ImageIcon, TrashIcon } from "./icons";
+import { TagChips } from "./TagChips";
+import { CloseIcon, ImageIcon, PlusIcon, TrashIcon } from "./icons";
 import { ScrollArea } from "./ScrollArea";
 
 interface BookMetaSheetProps {
@@ -23,6 +28,8 @@ export function BookMetaSheet(props: BookMetaSheetProps) {
   const [titleDraft, setTitleDraft] = createSignal(props.book.title);
   const [authorDraft, setAuthorDraft] = createSignal(props.book.author);
   const [introDraft, setIntroDraft] = createSignal(props.book.intro ?? "");
+  const [tagsDraft, setTagsDraft] = createSignal<string[]>(props.book.tags ?? []);
+  const [tagInput, setTagInput] = createSignal("");
   /** null = 无自定义封面（回退程序化封面） */
   const [coverDraft, setCoverDraft] = createSignal<string | null>(
     props.book.cover ?? null,
@@ -45,6 +52,27 @@ export function BookMetaSheet(props: BookMetaSheetProps) {
     setCoverDraft(thumb);
   }
 
+  /** 把输入框内容解析为标签追加（支持中英文逗号 / 顿号 / 分号分隔多条） */
+  function addTagsFromInput() {
+    const parts = tagInput()
+      .split(/[,，、;；]+/)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    if (parts.length === 0) return;
+    const next = [...tagsDraft()];
+    for (const part of parts) {
+      if (next.length >= MAX_BOOK_TAG_COUNT) break;
+      const tag = part.slice(0, MAX_BOOK_TAG_LENGTH);
+      if (tag && !next.includes(tag)) next.push(tag);
+    }
+    setTagsDraft(next);
+    setTagInput("");
+  }
+
+  function removeTag(tag: string) {
+    setTagsDraft((prev) => prev.filter((t) => t !== tag));
+  }
+
   async function onSave() {
     if (saving()) return;
     if (!titleDraft().trim()) {
@@ -59,6 +87,7 @@ export function BookMetaSheet(props: BookMetaSheetProps) {
         author: authorDraft(),
         intro: introDraft(),
         cover: coverDraft(),
+        tags: tagsDraft(),
       });
       props.onClose();
       showToast("已保存");
@@ -161,6 +190,44 @@ export function BookMetaSheet(props: BookMetaSheetProps) {
               onInput={(e) => setAuthorDraft(e.currentTarget.value)}
             />
           </label>
+          <div class="flex min-w-0 flex-col gap-[5px]">
+            <span class="text-[11.5px] font-semibold tracking-[0.03em] text-text-3">
+              标签
+            </span>
+            <div class="rounded-[10px] border border-border bg-bg px-[11px] py-2 transition-colors focus-within:border-accent">
+              <Show
+                when={tagsDraft().length > 0}
+                fallback={<p class="py-1 text-[12px] text-text-3">暂无标签</p>}
+              >
+                <div class="flex flex-wrap gap-1.5 pb-1.5">
+                  <TagChips tags={tagsDraft()} onRemove={removeTag} />
+                </div>
+              </Show>
+              <div class="flex items-center gap-1">
+                <input
+                  class="min-w-0 flex-1 bg-transparent text-[13.5px] text-text outline-none placeholder:text-text-3"
+                  placeholder="输入标签，回车或加号添加"
+                  value={tagInput()}
+                  onInput={(e) => setTagInput(e.currentTarget.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      addTagsFromInput();
+                    }
+                  }}
+                />
+                <button
+                  type="button"
+                  aria-label="添加标签"
+                  disabled={!tagInput().trim()}
+                  class="grid h-7 w-7 flex-none place-items-center rounded-lg bg-surface-2 text-text-2 transition-[background-color,scale] duration-150 active:scale-90 active:bg-surface disabled:opacity-40"
+                  onClick={addTagsFromInput}
+                >
+                  <PlusIcon size={15} />
+                </button>
+              </div>
+            </div>
+          </div>
           <label class="flex min-w-0 flex-col gap-[5px]">
             <span class="text-[11.5px] font-semibold tracking-[0.03em] text-text-3">
               简介

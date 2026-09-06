@@ -4,6 +4,7 @@ import { LoadingScreen } from "../components/LoadingScreen";
 import { PageHeader } from "../components/PageHeader";
 import { BookCover } from "../components/BookCover";
 import { BookMetaSheet } from "../components/BookMetaSheet";
+import { TagChips } from "../components/TagChips";
 import { EditIcon } from "../components/icons";
 import {
   ensureLocalBooksLoaded,
@@ -140,6 +141,25 @@ export default function BookDetailPage() {
                 </div>
               </div>
             </div>
+
+            {/* 标签 */}
+            <section>
+              <h3 class="mb-2 text-[12.5px] font-medium tracking-[0.04em] text-text-3">
+                标签
+              </h3>
+              <Show
+                when={(book()!.tags?.length ?? 0) > 0}
+                fallback={
+                  <div class="flex min-h-[44px] items-center justify-center rounded-[14px] border border-dashed border-border bg-surface px-4 text-center text-[12.5px] leading-[1.7] text-text-3">
+                    暂无标签，点击右上角「编辑」添加
+                  </div>
+                }
+              >
+                <div class="flex flex-wrap gap-1.5 pt-0.5">
+                  <TagChips tags={book()!.tags ?? []} />
+                </div>
+              </Show>
+            </section>
 
             {/* 简介 */}
             <section>

@@ -28,6 +28,7 @@ import {
 import {
   chapterCid,
   isOnlineBook,
+  normalizeBookTags,
   type LocalBook,
   type LocalBookChapter,
 } from "./booksTypes";
@@ -101,10 +102,12 @@ export function chapterHasContent(chapter: LocalBookChapter): boolean {
 export { normalizeContentText } from "./sourceContent";
 
 function toBookItem(book: LocalBook): BookItem {
+  const tags = normalizeBookTags(book.tags);
   return {
     bookName: book.title,
     author: book.author || undefined,
     bookUrl: book.bookUrl ?? "",
+    ...(tags.length > 0 ? { tags } : {}),
   };
 }
 
@@ -153,6 +156,7 @@ export async function addOnlineBookToShelf(
     paragraphs: [],
     url: ch.chapterUrl,
   }));
+  const tags = normalizeBookTags(item.tags);
   const book: LocalBook = {
     id: newBookId(),
     title: item.bookName.trim() || "未命名书籍",
@@ -168,6 +172,7 @@ export async function addOnlineBookToShelf(
     source: "online",
     bookSourceId: source.id,
     bookUrl: item.bookUrl,
+    ...(tags.length > 0 ? { tags } : {}),
   };
   await addBookRecord(book);
   return book;
@@ -705,10 +710,12 @@ export async function fetchOnlineBookToc(book: LocalBook): Promise<ChapterItem[]
   if (!source) throw new Error("该书源已删除，无法检查更新");
   if (!source.enabled) throw new Error("该书源已停用，请先在「书源」中启用");
   if (!source.capabilities.toc) throw new Error("该书源未启用「目录」能力，无法检查更新");
+  const tags = normalizeBookTags(book.tags);
   const item: BookItem = {
     bookName: book.title,
     ...(book.author && book.author !== "佚名" ? { author: book.author } : {}),
     bookUrl: book.bookUrl,
+    ...(tags.length > 0 ? { tags } : {}),
   };
   return await fetchBookToc(source, item);
 }

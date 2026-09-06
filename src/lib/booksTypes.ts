@@ -94,6 +94,8 @@ export interface LocalBook {
   bookSourceId?: string;
   /** 在线书：书源侧全书地址（与 bookSourceId 一起构成稳定身份） */
   bookUrl?: string;
+  /** 标签（书源搜索/详情返回，或用户在书籍详情页手编；本地导入与在线书通用） */
+  tags?: string[];
 }
 
 export function totalChars(book: Pick<LocalBook, "chapters">): number {
@@ -108,4 +110,25 @@ export function formatFileSize(size: number): string {
   if (size < 1024) return `${size} B`;
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
   return `${(size / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+/** 单本书可容纳的最大标签数与单个标签最大长度（书源返回 / 手编共用） */
+export const MAX_BOOK_TAG_COUNT = 30;
+export const MAX_BOOK_TAG_LENGTH = 24;
+
+/** 归一化标签：去空白 / 去重 / 限长限数；非法输入返回空数组 */
+export function normalizeBookTags(input: unknown): string[] {
+  if (!Array.isArray(input)) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of input) {
+    if (out.length >= MAX_BOOK_TAG_COUNT) break;
+    if (typeof raw !== "string") continue;
+    const tag = raw.trim();
+    if (!tag || tag.length > MAX_BOOK_TAG_LENGTH) continue;
+    if (seen.has(tag)) continue;
+    seen.add(tag);
+    out.push(tag);
+  }
+  return out;
 }

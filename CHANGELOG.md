@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- 书源作品信息支持 `tags` 标签字段（`searchBook` / `discoverBooks` / `bookDetail` 返回的 BookItem 可带 `tags` 字符串数组，自动去重去空白，单个 ≤ 24 字、至多 30 个）：发现页点击结果弹出的「书籍详情」预览会展示标签，「加入书架」时随书保存；所有书籍（含在线书）都可在书籍详情页查看，并通过右上角「编辑」增删标签（本地导入的书同样适用）。
+
 ## [0.1.3] - 2026-09-06
 
 ### Added
