@@ -4,6 +4,7 @@
  * - 提供新建模板 / 能力与启停更新 / JSON 导入导出归一化。
  */
 import { createSignal } from "solid-js";
+import { httpFetch } from "./http";
 import {
   deleteRemoteSource,
   getRemoteSource,
@@ -326,4 +327,46 @@ export function planBookSourceImport(text: string): ImportPlan {
 export function buildBookSourceExportText(sources: BookSource[]): string {
   const list = sources.map(({ js, ...rest }) => ({ ...rest, js }));
   return JSON.stringify(list.length === 1 ? list[0] : list, null, 2);
+}
+
+// ---------------------------------------------------------------------------
+// 网络导入
+// ---------------------------------------------------------------------------
+
+const URL_PREFIX_RE = /^https?:\/\//i;
+
+/**
+ * 从网址拉取书源 JSON（单条或数组）并归一化为导入计划。
+ * - 仅接受 http(s) 网址；请求走统一 HTTP 通道（Tauri 内 Rust 原生请求，可绕过跨域）；
+ * - 非 2xx / 无内容 / JSON 无法解析都会以可读错误抛出，交由调用方展示。
+ */
+export async function planBookSourceNetworkImport(url: string): Promise<ImportPlan> {
+  const target = url.trim();
+  if (!URL_PREFIX_RE.test(target)) {
+    throw new Error("请输入以 http(s):// 开头的书源网址");
+  }
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), 30000);
+  try {
+    const res = await httpFetch(target, {
+      headers: { Accept: "application/json,text/plain;charset=utf-8" },
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      throw new Error(`拉取失败：HTTP ${res.status}`);
+    }
+    const body = await res.text();
+    const text = body.replace(/^\uFEFF/, "").trim();
+    if (!text) throw new Error("该网址没有返回可导入的内容");
+    return planBookSourceImport(text);
+  } catch (err) {
+    if (controller.signal.aborted) {
+      throw new Error("请求超时（30 秒），请检查网址与网络后重试");
+    }
+    throw new Error(
+      `无法访问该网址：${err instanceof Error ? err.message : String(err)}`,
+    );
+  } finally {
+    window.clearTimeout(timer);
+  }
 }

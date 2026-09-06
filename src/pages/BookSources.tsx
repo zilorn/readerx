@@ -1,4 +1,4 @@
-import { For, Show, createSignal } from "solid-js";
+import { For, Show, createEffect, createSignal } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 import { PageHeader } from "../components/PageHeader";
 import {
@@ -6,6 +6,7 @@ import {
   CloseIcon,
   DownloadIcon,
   FileTextIcon,
+  LinkIcon,
   PlusIcon,
   SourceIcon,
   TrashIcon,
@@ -18,6 +19,7 @@ import {
   ensureBookSourcesLoaded,
   openSourceEditor,
   planBookSourceImport,
+  planBookSourceNetworkImport,
   refreshBookSources,
   removeBookSource,
   type ImportPlan,
@@ -43,7 +45,17 @@ export default function BookSourcesPage() {
     new Set<number>(),
   );
   const [deleteId, setDeleteId] = createSignal<string | null>(null);
+  /** 网络导入（从网址拉取 JSON）：弹层开合 / 输入 / 拉取中 / 错误 */
+  const [urlDialog, setUrlDialog] = createSignal(false);
+  const [urlInput, setUrlInput] = createSignal("");
+  const [urlBusy, setUrlBusy] = createSignal(false);
+  const [urlError, setUrlError] = createSignal("");
   let fileInput: HTMLInputElement | undefined;
+  let urlInputRef: HTMLInputElement | undefined;
+
+  createEffect(() => {
+    if (urlDialog()) urlInputRef?.focus();
+  });
 
   function presentImportPlan(plan: ImportPlan): void {
     setSkippedOverwrites(new Set<number>());
@@ -101,6 +113,47 @@ export default function BookSourcesPage() {
       }
       presentImportPlan(planBookSourceImport(text));
     })();
+  }
+
+  function openUrlImport() {
+    setUrlInput("");
+    setUrlError("");
+    setUrlDialog(true);
+  }
+
+  function closeUrlImport() {
+    if (urlBusy()) return;
+    setUrlDialog(false);
+  }
+
+  /** 从网址拉取书源 JSON → 解析 → 走统一的「确认导入」流程 */
+  async function runUrlImport() {
+    if (urlBusy()) return;
+    const value = urlInput().trim();
+    if (!value) {
+      setUrlError("请输入书源 JSON 的网址");
+      return;
+    }
+    setUrlBusy(true);
+    setUrlError("");
+    try {
+      const plan = await planBookSourceNetworkImport(value);
+      if (plan.create.length + plan.overwrite.length === 0) {
+        const issue = plan.issues[0];
+        setUrlError(
+          issue
+            ? `未识别到书源：${issue.message}`
+            : "该网址内容里没有可导入的书源",
+        );
+        return;
+      }
+      setUrlDialog(false);
+      presentImportPlan(plan);
+    } catch (err) {
+      setUrlError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setUrlBusy(false);
+    }
   }
 
   async function applyImport() {
@@ -189,6 +242,13 @@ export default function BookSourcesPage() {
             />
             <button
               class="grid h-10 w-10 place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
+              aria-label="从网址导入"
+              onClick={openUrlImport}
+            >
+              <LinkIcon size={21} />
+            </button>
+            <button
+              class="grid h-10 w-10 place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
               aria-label="新建书源"
               onClick={onNew}
             >
@@ -208,7 +268,7 @@ export default function BookSourcesPage() {
               <p class="mt-1 text-[12px] leading-[1.6]">
                 从社区导入 JSON，或在「发现」页使用模板新建
               </p>
-              <div class="mt-3 flex items-center gap-2">
+              <div class="mt-3 flex flex-wrap items-center justify-center gap-2">
                 <button
                   class="inline-flex items-center gap-1.5 rounded-xl bg-accent px-4 py-2.5 text-[13px] font-semibold text-on-accent active:scale-[0.97]"
                   onClick={() => fileInput?.click()}
@@ -222,6 +282,13 @@ export default function BookSourcesPage() {
                 >
                   <PlusIcon size={16} />
                   新建
+                </button>
+                <button
+                  class="inline-flex items-center gap-1.5 rounded-xl bg-surface-2 px-4 py-2.5 text-[13px] font-semibold text-text-2 active:scale-[0.97]"
+                  onClick={openUrlImport}
+                >
+                  <LinkIcon size={16} />
+                  从网址导入
                 </button>
               </div>
             </div>
@@ -332,6 +399,64 @@ export default function BookSourcesPage() {
               onClick={() => void onDelete(deleteId()!)}
             >
               删除
+            </button>
+          </div>
+        </div>
+      </Show>
+
+      {/* 网络导入：从网址拉取书源 JSON */}
+      <Show when={urlDialog()}>
+        <div
+          class="fixed inset-0 z-40 animate-sheet-fade bg-black/45 backdrop-blur-[2px]"
+          onClick={closeUrlImport}
+        />
+        <div
+          class="fixed inset-x-0 bottom-0 z-[41] mx-auto max-w-[480px] animate-sheet-up rounded-t-[16px] bg-surface px-4 pb-[calc(20px+env(safe-area-inset-bottom))] pt-4 shadow-[0_-10px_34px_rgb(0_0_0/0.22)]"
+          role="dialog"
+          aria-label="从网址导入书源"
+        >
+          <p class="mb-1 text-center text-[15px] font-bold">从网址导入</p>
+          <p class="mb-4 text-center text-[12px] leading-[1.6] text-text-3">
+            输入指向书源 JSON（单条或数组）的网址，拉取后进入确认
+          </p>
+          <div class="flex items-center gap-2 rounded-[12px] border border-border bg-bg px-3 py-2.5">
+            <LinkIcon size={17} class="flex-none text-text-3" />
+            <input
+              ref={urlInputRef}
+              type="url"
+              inputmode="url"
+              enterkeyhint="go"
+              autocapitalize="off"
+              autocomplete="off"
+              spellcheck={false}
+              placeholder="https://example.com/book-source.json"
+              class="min-w-0 flex-1 bg-transparent text-[13.5px] outline-none placeholder:text-text-3"
+              value={urlInput()}
+              onInput={(e) => setUrlInput(e.currentTarget.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void runUrlImport();
+              }}
+            />
+          </div>
+          <Show when={urlError()}>
+            <p class="mt-2 rounded-[10px] bg-danger-weak px-3 py-2 text-[12px] leading-[1.5] text-danger">
+              {urlError()}
+            </p>
+          </Show>
+          <div class="mt-4 flex gap-2.5">
+            <button
+              class="flex-1 rounded-xl bg-surface-2 px-4 py-2.5 text-[13.5px] font-semibold text-text-2"
+              disabled={urlBusy()}
+              onClick={closeUrlImport}
+            >
+              取消
+            </button>
+            <button
+              class="flex-1 rounded-xl bg-accent px-4 py-2.5 text-[13.5px] font-semibold text-on-accent disabled:pointer-events-none disabled:opacity-50"
+              disabled={urlBusy()}
+              onClick={() => void runUrlImport()}
+            >
+              {urlBusy() ? "拉取中…" : "拉取并导入"}
             </button>
           </div>
         </div>
