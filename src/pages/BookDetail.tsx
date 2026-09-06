@@ -5,7 +5,8 @@ import { PageHeader } from "../components/PageHeader";
 import { BookCover } from "../components/BookCover";
 import { BookMetaSheet } from "../components/BookMetaSheet";
 import { TagChips } from "../components/TagChips";
-import { EditIcon } from "../components/icons";
+import { EditIcon, LinkIcon } from "../components/icons";
+import { openExternal } from "../lib/external";
 import {
   ensureLocalBooksLoaded,
   localBookById,
@@ -44,6 +45,8 @@ function formatImportedAt(ts: number): string {
 interface MetaRow {
   label: string;
   value: string;
+  /** 在线书书源地址：存在时该行可点击，用系统浏览器打开原网页 */
+  url?: string;
 }
 
 function bookMetaRows(book: LocalBook): MetaRow[] {
@@ -53,6 +56,9 @@ function bookMetaRows(book: LocalBook): MetaRow[] {
     { label: "作者", value: book.author || "佚名" },
     { label: "格式", value: formatName(book.format) },
     { label: "来源", value: sourceName(book) },
+    ...(book.format === "online" && book.bookUrl
+      ? [{ label: "书源地址", value: book.bookUrl, url: book.bookUrl }]
+      : []),
     { label: "章节", value: `${book.chapters.length} 章` },
     ...(chars > 0 ? [{ label: "字数", value: `${chars} 字` }] : []),
     ...(book.size > 0 ? [{ label: "大小", value: formatFileSize(book.size) }] : []),
@@ -61,6 +67,40 @@ function bookMetaRows(book: LocalBook): MetaRow[] {
     { label: "导入时间", value: formatImportedAt(book.importedAt) },
   ];
   return rows;
+}
+
+/** 详情列表行：书源地址行为整行可点击，点击用浏览器打开原网页 */
+function MetaRowItem(props: { row: MetaRow }) {
+  const label = () => props.row.label;
+  const value = () => props.row.value;
+  return (
+    <Show
+      when={props.row.url}
+      fallback={
+        <div class="flex items-start gap-4 px-4 py-[10px]">
+          <span class="w-[64px] flex-none text-[12.5px] text-text-3">{label()}</span>
+          <span class="min-w-0 flex-1 break-words text-[12.5px] leading-[1.6] text-text">
+            {value()}
+          </span>
+        </div>
+      }
+    >
+      {(url) => (
+        <button
+          type="button"
+          class="flex w-full items-start gap-4 px-4 py-[10px] text-left transition-[background-color] duration-150 active:bg-surface-2"
+          aria-label={`在浏览器打开${label()}`}
+          onClick={() => void openExternal(url())}
+        >
+          <span class="w-[64px] flex-none text-[12.5px] text-text-3">{label()}</span>
+          <span class="min-w-0 flex-1 break-words text-[12.5px] leading-[1.6] text-accent">
+            {value()}
+          </span>
+          <LinkIcon size={15} class="mt-[3px] flex-none text-text-3" />
+        </button>
+      )}
+    </Show>
+  );
 }
 
 export default function BookDetailPage() {
@@ -187,16 +227,7 @@ export default function BookDetailPage() {
               </h3>
               <div class="divide-y divide-border overflow-hidden rounded-[14px] border border-border bg-surface">
                 <For each={rows()}>
-                  {(row) => (
-                    <div class="flex items-start gap-4 px-4 py-[10px]">
-                      <span class="w-[64px] flex-none text-[12.5px] text-text-3">
-                        {row.label}
-                      </span>
-                      <span class="min-w-0 flex-1 break-words text-[12.5px] leading-[1.6] text-text">
-                        {row.value}
-                      </span>
-                    </div>
-                  )}
+                  {(row) => <MetaRowItem row={row} />}
                 </For>
               </div>
             </section>

@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- 在线书「书籍详情」页新增「书源地址」行（仅在线书展示）：显示该书在书源网站的书页 URL，点击该行即用系统浏览器打开书源原网页（Tauri 端走系统默认浏览器，网页预览下退化为新标签页），便于到书源站点核对正版页面与更新。
 - 书源新增「自动网页认证」（书源 JSON `autoAuth`，默认开启，编辑页「网页登录」卡片内可**单独关闭**）：
   `http.*` 请求命中 Cloudflare 人机挑战（或 `cf_clearance` 令牌过期后再次挑战）时，引擎在 Android 端
   自动拉起应用内 WebView 完成认证、覆盖式刷新并按书源持久化 Cookie，然后**自动重试原请求一次**

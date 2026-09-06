@@ -1,7 +1,6 @@
 import { createEffect, createSignal, onCleanup, type JSX } from "solid-js";
 import { useNavigate } from "@solidjs/router";
-import { isTauri } from "@tauri-apps/api/core";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternal } from "../lib/external";
 import {
   BookOpenIcon,
   ChevronRightIcon,
@@ -40,11 +39,7 @@ const THEME_OPTIONS: { value: ThemeMode; label: string }[] = [
 const GITHUB_URL = "https://github.com/zilorn/readerx";
 
 async function openGitHub() {
-  if (isTauri()) {
-    await openUrl(GITHUB_URL);
-  } else {
-    window.open(GITHUB_URL, "_blank", "noopener,noreferrer");
-  }
+  await openExternal(GITHUB_URL);
 }
 
 function Row(props: {
