@@ -224,6 +224,8 @@ export default function DiscoverPage() {
     else setCategoryUrl("");
     setDiscBusy(true);
     setDiscError("");
+    // 整页替换（重选分类/书源标签）时先清空旧列表，让「加载中…」占位可见
+    if (replace) setDiscResults([]);
     const cat = category ?? { name: "", url: categoryUrl() };
     const args = [cat, page];
     const r = await callRemoteSource(source.id, "discoverBooks", args);
