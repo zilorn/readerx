@@ -163,6 +163,11 @@ export default function BookDetailPage() {
     else navigate("/");
   }
 
+  /** 点击标签：跳去发现页按该标签做一次全源快速搜索 */
+  function onTagQuickSearch(tag: string) {
+    navigate(`/discover?q=${encodeURIComponent(tag)}`);
+  }
+
   const rows = createMemo(() => (book() ? bookMetaRows(book()!) : []));
 
   return (
@@ -253,7 +258,7 @@ export default function BookDetailPage() {
                 }
               >
                 <div class="flex flex-wrap gap-1.5 pt-0.5">
-                  <TagChips tags={book()!.tags ?? []} />
+                  <TagChips tags={book()!.tags ?? []} onTagClick={onTagQuickSearch} />
                 </div>
               </Show>
             </section>

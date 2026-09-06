@@ -32,6 +32,8 @@ export interface OnlineBookSheetProps {
   /** 当前预览的书；null 表示关闭抽屉 */
   pick: PickedBook | null;
   onClose: () => void;
+  /** 只读标签点击回调：调用方借此发起快速搜索（不提供则标签仅展示） */
+  onTagSearch?: (tag: string) => void;
 }
 
 export function OnlineBookSheet(props: OnlineBookSheetProps) {
@@ -283,7 +285,17 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
                   </Show>
                   <Show when={tags().length > 0}>
                     <div class="mt-0.5 flex flex-wrap gap-1.5">
-                      <TagChips tags={tags()} />
+                      <TagChips
+                        tags={tags()}
+                        onTagClick={
+                          props.onTagSearch
+                            ? (tag) => {
+                                if (adding()) return;
+                                props.onTagSearch?.(tag);
+                              }
+                            : undefined
+                        }
+                      />
                     </div>
                   </Show>
                   <Show when={inShelf()}>

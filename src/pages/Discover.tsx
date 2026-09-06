@@ -1,5 +1,5 @@
-import { createMemo, createSignal, For, Show } from "solid-js";
-import { useNavigate } from "@solidjs/router";
+import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
+import { useNavigate, useSearchParams } from "@solidjs/router";
 import { PageHeader } from "../components/PageHeader";
 import {
   ChevronRightIcon,
@@ -111,6 +111,8 @@ export default function DiscoverPage() {
   const [errorText, setErrorText] = createSignal("");
   // 点击结果后弹出的在线书详情抽屉（不切路由，保留搜索/发现页状态）
   const [preview, setPreview] = createSignal<PickedBook | null>(null);
+  // 外部入口（如详情页点击标签 / 带 ?q= 深链）请求的「快速搜索」词，等待书源就绪后自动执行
+  const [pendingQuick, setPendingQuick] = createSignal<string | null>(null);
 
   // 发现模式
   const [discoverSourceId, setDiscoverSourceId] = createSignal("");
@@ -135,10 +137,45 @@ export default function DiscoverPage() {
     setPreview({ key, source: entry.source, item: entry.item });
   }
 
-  async function onSearch() {
-    const kw = keyword().trim();
+  /**
+   * 快速搜索入口（点击标签 / URL 带 ?q= 深链进入时调用）：
+   * 切回「搜索」模式并把标签作为关键词，书源就绪后自动执行一次全源搜索。
+   */
+  function quickSearch(kwRaw: string) {
+    const kw = kwRaw.trim();
+    if (!kw) return;
+    setMode("search");
+    setKeyword(kw);
+    setSearchDone(false);
+    setErrorText("");
+    setResults([]);
+    setPendingQuick(kw);
+  }
+
+  // URL 带 ?q=xxx（如书籍详情页点击标签跳转过来）→ 自动发起快速搜索
+  const [searchParams] = useSearchParams();
+  createEffect(() => {
+    const q = searchParams.q;
+    if (typeof q === "string" && q.trim()) quickSearch(q);
+  });
+
+  // 快速搜索词在书源就绪前只暂存，就绪后再真正跑搜索（避免源清单为空白搜一场）
+  createEffect(() => {
+    const kw = pendingQuick();
+    if (!kw || !bookSourcesReady()) return;
+    setPendingQuick(null);
+    if (!canSearch()) return; // 没有支持搜索的已启用书源 → 只预填关键词不空搜
+    void onSearch(kw);
+  });
+
+  // 搜索请求序号：防止上一次未跑完的搜索在完成时把新搜索的进度/结果覆盖掉
+  let searchSeq = 0;
+
+  async function onSearch(rawKw?: string) {
+    const kw = (rawKw ?? keyword()).trim();
     if (!kw) return;
     const sources = bookSourceList().filter((s) => s.enabled && s.capabilities.search);
+    const seq = ++searchSeq;
     setSearching(true);
     setSearchDone(false);
     setErrorText("");
@@ -175,6 +212,7 @@ export default function DiscoverPage() {
     }
     const workers = Math.min(limit, sources.length);
     await Promise.all(Array.from({ length: workers }, () => worker()));
+    if (seq !== searchSeq) return; // 已被更新的搜索接管，丢弃本次结果
     out.sort((a, b) => a.source.name.localeCompare(b.source.name, "zh"));
     setResults(out.slice(0, 120));
     setSearching(false);
@@ -434,7 +472,15 @@ export default function DiscoverPage() {
       </div>
 
       {/* 在线书详情抽屉：点击结果行弹出，不离开本页（保留搜索词 / 结果 / 滚动状态） */}
-      <OnlineBookSheet pick={preview()} onClose={() => setPreview(null)} />
+      <OnlineBookSheet
+        pick={preview()}
+        onClose={() => setPreview(null)}
+        onTagSearch={(tag) => {
+          // 点标签 → 收起抽屉并按该标签快速搜索
+          setPreview(null);
+          quickSearch(tag);
+        }}
+      />
     </div>
   );
 }
