@@ -5,6 +5,7 @@
 import { Show } from "solid-js";
 import type { TtsStatus } from "../lib/ttsPlayer";
 import {
+  PauseIcon,
   PlayIcon,
   SettingsIcon,
   SkipBackIcon,
@@ -25,7 +26,11 @@ export interface TtsBubbleProps {
 
 export function TtsBubble(props: TtsBubbleProps) {
   const status = props.status;
-  const playing = () => status() === "playing" || status() === "loading";
+  /** 正在合成/等待音频（短暂缓冲） */
+  const loading = () => status() === "loading";
+  /** 正在朗读 */
+  const playing = () => status() === "playing";
+  const active = () => status() === "playing" || status() === "loading";
 
   return (
     <div data-reader-ui class="flex select-none flex-col items-end">
@@ -43,20 +48,25 @@ export function TtsBubble(props: TtsBubbleProps) {
 
         <button
           class="mx-0.5 grid h-11 w-11 cursor-pointer place-items-center rounded-full bg-accent text-on-accent shadow-md transition-[scale] duration-100 active:scale-90"
-          aria-label={playing() ? "暂停" : "播放"}
-          aria-pressed={!playing()}
+          aria-label={active() ? "暂停" : "播放"}
+          aria-pressed={!active()}
           onClick={(e) => {
             e.stopPropagation();
             props.onToggle();
           }}
         >
-          {playing() ? (
+          <Show
+            when={loading()}
+            fallback={
+              <Show when={playing()} fallback={<PlayIcon size={19} class="translate-x-[1px]" />}>
+                <PauseIcon size={19} />
+              </Show>
+            }
+          >
             <span class="grid h-4 w-4 animate-spin place-items-center">
               <span class="block h-4 w-4 rounded-full border-2 border-on-accent/30 border-t-on-accent" />
             </span>
-          ) : (
-            <PlayIcon size={19} class="translate-x-[1px]" />
-          )}
+          </Show>
         </button>
 
         <button
