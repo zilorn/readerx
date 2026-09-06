@@ -224,6 +224,16 @@ export function RefreshIcon(p: SvgIconProps) {
   );
 }
 
+/** 在线书检查更新（双箭头循环同步） */
+export function UpdateIcon(p: SvgIconProps) {
+  return (
+    <Icon {...p}>
+      <polyline points="23 4 23 10 17 10" />
+      <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+    </Icon>
+  );
+}
+
 /** 文件夹（书架分组） */
 export function FolderIcon(p: SvgIconProps) {
   return (

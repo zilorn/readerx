@@ -12,7 +12,16 @@ import {
   fetchRemoteSourceImage,
 } from "./backend";
 import { addBookRecord, commitBookContentUpdate, localBookById } from "./books";
-import { isOnlineBook, type LocalBook, type LocalBookChapter } from "./booksTypes";
+import {
+  bookSourceSummaryById,
+  ensureBookSourcesLoaded,
+} from "./bookSources";
+import {
+  chapterCid,
+  isOnlineBook,
+  type LocalBook,
+  type LocalBookChapter,
+} from "./booksTypes";
 import type {
   BookItem,
   BookSourceSummary,
@@ -454,4 +463,118 @@ export async function reloadChapterContent(
   chapter.blocks = undefined;
   await commitBookContentUpdate(next);
   await runFetch(bookId, [chapterIndex], "window");
+}
+
+// ---------------------------------------------------------------------------
+// 在线书「检查书籍更新」：重新获取书源目录并与书架目录比对后更新。
+// 判定规则（章节身份 = 书源侧章节地址）：
+// - 最新目录是书架现有目录的「逐位前缀 + 末尾新增」→ 纯追加（返回新增数）；
+// - 与现有目录完全一致 → 无更新；
+// - 其余情况（中段被增删 / 重排 / 章节地址变动，无法安全追加）→ conflict，
+//   交由 UI 询问是否整本覆盖。
+// ---------------------------------------------------------------------------
+
+export interface OnlineTocConflict {
+  /** 书架现有章节数 */
+  oldCount: number;
+  /** 书源最新目录章节数 */
+  newCount: number;
+  /** 书源最新目录（用户确认覆盖后用于整本替换） */
+  fresh: ChapterItem[];
+}
+
+export type OnlineTocUpdate =
+  | { kind: "none" }
+  | { kind: "append"; added: ChapterItem[] }
+  | { kind: "conflict"; conflict: OnlineTocConflict };
+
+/** 重新获取在线书的书源目录（阅读设置「检查书籍更新」用）。
+ *  书源缺失 / 停用 / 未启用目录能力，或拉取失败时抛出可读错误。 */
+export async function fetchOnlineBookToc(book: LocalBook): Promise<ChapterItem[]> {
+  if (!isOnlineBook(book)) throw new Error("不是在线书，无法检查更新");
+  if (!book.bookUrl) throw new Error("该书缺少书源书籍地址，无法检查更新");
+  const sourceId = book.bookSourceId!;
+  await ensureBookSourcesLoaded();
+  const source = bookSourceSummaryById(sourceId);
+  if (!source) throw new Error("该书源已删除，无法检查更新");
+  if (!source.enabled) throw new Error("该书源已停用，请先在「书源」中启用");
+  if (!source.capabilities.toc) throw new Error("该书源未启用「目录」能力，无法检查更新");
+  const item: BookItem = {
+    bookName: book.title,
+    ...(book.author && book.author !== "佚名" ? { author: book.author } : {}),
+    bookUrl: book.bookUrl,
+  };
+  return await fetchBookToc(source, item);
+}
+
+/** 比对书源最新目录与书架现有目录，给出本次「检查更新」的更新方式 */
+export function diffOnlineBookToc(
+  book: Pick<LocalBook, "chapters">,
+  fresh: ChapterItem[],
+): OnlineTocUpdate {
+  const old = book.chapters;
+  const oldCount = old.length;
+  const newCount = fresh.length;
+  // 现有目录是否是「最新目录」的逐位前缀（章节身份按书源侧章节地址比对；
+  // 旧章节缺失地址时视为无法核对 → 交给覆盖流程）
+  let prefix = 0;
+  while (prefix < oldCount && prefix < newCount) {
+    if ((old[prefix].url ?? "").trim() !== (fresh[prefix].chapterUrl ?? "").trim()) break;
+    prefix++;
+  }
+  if (prefix === oldCount && newCount >= oldCount) {
+    if (newCount === oldCount) return { kind: "none" };
+    return { kind: "append", added: fresh.slice(oldCount) };
+  }
+  return { kind: "conflict", conflict: { oldCount, newCount, fresh } };
+}
+
+/** 执行追加更新：把末尾新增章节并入书架目录（正文留空，阅读时按窗口懒加载）。
+ *  返回实际追加的章节数。 */
+export async function applyOnlineTocAppend(
+  book: LocalBook,
+  added: ChapterItem[],
+): Promise<number> {
+  if (added.length === 0) return 0;
+  const next = structuredClone(book);
+  const start = next.chapters.length;
+  for (let i = 0; i < added.length; i++) {
+    const item = added[i];
+    next.chapters.push({
+      cid: chapterCid(start + i),
+      title: item.chapterName,
+      paragraphs: [],
+      url: item.chapterUrl,
+    });
+  }
+  await commitBookContentUpdate(next);
+  return added.length;
+}
+
+/** 执行覆盖更新：以最新目录整本替换章节列表。
+ *  章节地址未变的旧章节保留已缓存正文，其余章节正文留空（阅读时按需重新获取）。
+ *  返回覆盖后的章节总数。 */
+export async function applyOnlineTocOverwrite(
+  book: LocalBook,
+  fresh: ChapterItem[],
+): Promise<number> {
+  const oldByUrl = new Map<string, LocalBookChapter>();
+  for (const ch of book.chapters) {
+    const url = (ch.url ?? "").trim();
+    if (url && !oldByUrl.has(url)) oldByUrl.set(url, ch);
+  }
+  const next = structuredClone(book);
+  next.chapters = fresh.map((item, index) => {
+    const carried = oldByUrl.get((item.chapterUrl ?? "").trim());
+    const chapter: LocalBookChapter = {
+      cid: chapterCid(index),
+      title: item.chapterName,
+      paragraphs: carried?.paragraphs ?? [],
+      url: item.chapterUrl,
+    };
+    if (carried && carried.blocks !== undefined) chapter.blocks = carried.blocks;
+    return chapter;
+  });
+  await commitBookContentUpdate(next);
+  return next.chapters.length;
 }

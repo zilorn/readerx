@@ -17,10 +17,14 @@ import { ScrollArea } from "../components/ScrollArea";
 import { isOnlineBook } from "../lib/booksTypes";
 import {
   LAZY_WINDOW,
+  applyOnlineTocAppend,
+  applyOnlineTocOverwrite,
   cancelOnlineRun,
   chapterHasContent,
+  diffOnlineBookToc,
   downloadRemainingChapters,
   ensureReadingWindow,
+  fetchOnlineBookToc,
   onlineRunState,
   reloadChapterContent,
 } from "../lib/online";
@@ -29,8 +33,10 @@ import {
   type BookSearchOpenTarget,
 } from "../components/BookSearchPanel";
 import type { BookSearchHit } from "../lib/bookSearch";
+import type { ChapterItem } from "../lib/bookSourcesTypes";
 import { BookmarkPanel } from "../components/BookmarkPanel";
 import { MenuPageSlider } from "../components/MenuPageSlider";
+import { OnlineTocOverwriteDialog } from "../components/OnlineTocOverwriteDialog";
 import { SelectionMenu, type SelectionCustom } from "../components/SelectionMenu";
 import { TtsBubble } from "../components/TtsBubble";
 import { TtsSheet } from "../components/TtsSheet";
@@ -621,6 +627,96 @@ export default function ReaderPage() {
     setPageIdx(0);
     setViewOffset(0);
     await reloadChapterContent(current.id, chapterIdx());
+  }
+
+  // -------------------------------------------------------------------
+  // 在线书「检查书籍更新」：重新获取书源目录。
+  // - 最新目录 = 现有目录前缀 + 末尾新增 → 直接追加并提示新增数；
+  // - 结构冲突（中段增删/重排/地址变动，无法安全追加）→ 弹窗询问是否覆盖；
+  // - 拉取失败 → 提示错误，不做任何改动。
+  // 注意：检查 / 应用都要求无其它章节拉取在进行（并发写书会互相覆盖目录）。
+  // -------------------------------------------------------------------
+  const [checkingUpdate, setCheckingUpdate] = createSignal(false);
+  const [overwriteBusy, setOverwriteBusy] = createSignal(false);
+  const [updateConflict, setUpdateConflict] = createSignal<{
+    bookId: string;
+    oldCount: number;
+    newCount: number;
+    fresh: ChapterItem[];
+  } | null>(null);
+
+  async function checkOnlineBookUpdate(): Promise<void> {
+    if (checkingUpdate()) return;
+    // 书库原书（含书源身份）；显示副本仅替换阅读文字，不能作为更新源
+    const current = localBookById(bookId());
+    if (!current || !isOnlineBook(current)) return;
+    if (remoteRun().busy) return; // 其它拉取进行中（入口已禁用，双保险）
+    setCheckingUpdate(true);
+    try {
+      const fresh = await fetchOnlineBookToc(current);
+      if (remoteRun().busy) {
+        showToast("有章节下载进行中，请稍后再试", true);
+        return;
+      }
+      const diff = diffOnlineBookToc(current, fresh);
+      if (diff.kind === "none") {
+        showToast("目录已是最新，暂无更新");
+        return;
+      }
+      if (diff.kind === "append") {
+        // 拉取目录期间后台窗口预取可能已把正文写回书库，用最新记录追加，避免丢刚缓存的内容
+        const latest = localBookById(current.id) ?? current;
+        const added = await applyOnlineTocAppend(latest, diff.added);
+        // 收掉设置面板，让用户直接看到更新后的目录/正文
+        setReaderSettingsOpen(false);
+        setMenuOpen(false);
+        showToast(added > 0 ? `已更新 ${added} 个章节` : "目录已是最新，暂无更新");
+        return;
+      }
+      setUpdateConflict({
+        bookId: current.id,
+        oldCount: diff.conflict.oldCount,
+        newCount: diff.conflict.newCount,
+        fresh: diff.conflict.fresh,
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      showToast(`检查更新失败：${msg}`, true);
+    } finally {
+      setCheckingUpdate(false);
+    }
+  }
+
+  /** 冲突确认框「覆盖更新」：以最新目录整本替换 */
+  async function confirmOverwriteToc(): Promise<void> {
+    const pending = updateConflict();
+    if (!pending || overwriteBusy()) return;
+    if (pending.bookId !== bookId()) {
+      setUpdateConflict(null);
+      return;
+    }
+    if (remoteRun().busy) {
+      showToast("有章节下载进行中，暂无法覆盖更新", true);
+      return;
+    }
+    const current = localBookById(pending.bookId);
+    if (!current) {
+      setUpdateConflict(null);
+      return;
+    }
+    setOverwriteBusy(true);
+    try {
+      const total = await applyOnlineTocOverwrite(current, pending.fresh);
+      setUpdateConflict(null);
+      setReaderSettingsOpen(false);
+      setMenuOpen(false);
+      showToast(`目录已覆盖更新，共 ${total} 章`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      showToast(`覆盖更新失败：${msg}`, true);
+    } finally {
+      setOverwriteBusy(false);
+    }
   }
 
   /** 阅读设置 → 文本替换：打开替换抽屉的列表视图 */
@@ -3482,7 +3578,32 @@ export default function ReaderPage() {
                     }
                   : undefined
               }
+              onlineUpdate={
+                isRemoteBook()
+                  ? {
+                      disabled: checkingUpdate() || remoteRun().busy,
+                      busy: checkingUpdate(),
+                      onCheck: () => {
+                        void checkOnlineBookUpdate();
+                      },
+                    }
+                  : undefined
+              }
             />
+
+            {/* 检查书籍更新：最新目录与书架目录冲突时询问是否覆盖 */}
+            <Show when={updateConflict()}>
+              {(conflict) => (
+                <OnlineTocOverwriteDialog
+                  bookTitle={book()?.title ?? ""}
+                  oldCount={conflict().oldCount}
+                  newCount={conflict().newCount}
+                  busy={overwriteBusy()}
+                  onCancel={() => setUpdateConflict(null)}
+                  onConfirm={() => void confirmOverwriteToc()}
+                />
+              )}
+            </Show>
 
             {/* 文本替换（列表 / 新建 / 编辑）。每次打开都重新挂载：
                 从选区菜单进入时按 replaceSeed 直接进新建表单并预填查找框 */}
