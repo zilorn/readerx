@@ -1,6 +1,10 @@
-import { For, Show, createSignal } from "solid-js";
-import { CheckIcon, CloseIcon, PlusIcon } from "./icons";
-import { createGroup, groupList } from "../lib/groups";
+import { For, Show, createSignal, type JSX } from "solid-js";
+import { CheckIcon, CloseIcon, EyeOffIcon, PlusIcon } from "./icons";
+import {
+  createGroup,
+  groupList,
+  HIDDEN_GROUP_ID,
+} from "../lib/groups";
 import { ScrollArea } from "./ScrollArea";
 
 interface GroupPickerProps {
@@ -54,6 +58,14 @@ export function GroupPicker(props: GroupPickerProps) {
             active={!props.value}
             onClick={() => pick(null)}
           />
+          {/* 内置隐藏分组：不落库、不可改名/删除；仅用于把书从书架常规视图隐藏 */}
+          <GroupRow
+            label="隐藏"
+            hint="加入后不在书架与搜索中显示"
+            icon={<EyeOffIcon size={18} />}
+            active={props.value === HIDDEN_GROUP_ID}
+            onClick={() => pick(HIDDEN_GROUP_ID)}
+          />
           <For each={groupList()}>
             {(group) => (
               <GroupRow
@@ -88,14 +100,41 @@ export function GroupPicker(props: GroupPickerProps) {
   );
 }
 
-function GroupRow(props: { label: string; active: boolean; onClick: () => void }) {
+function GroupRow(props: {
+  label: string;
+  hint?: string;
+  icon?: JSX.Element;
+  active: boolean;
+  onClick: () => void;
+}) {
   return (
     <button
       class="flex w-full items-center gap-3 px-[18px] py-[12px] text-left text-[14px] transition-colors active:bg-surface-2"
-      classList={{ "bg-accent-weak font-semibold text-accent": props.active, "text-text-2": !props.active }}
+      classList={{
+        "bg-accent-weak font-semibold text-accent": props.active,
+        "text-text-2": !props.active,
+      }}
       onClick={props.onClick}
     >
-      <span class="min-w-0 flex-1 truncate">{props.label}</span>
+      {props.icon && (
+        <span classList={{ "flex-none": true, "text-accent": props.active }}>
+          {props.icon}
+        </span>
+      )}
+      <span class="flex min-w-0 flex-1 flex-col gap-[1px]">
+        <span class="min-w-0 truncate">{props.label}</span>
+        <Show when={props.hint}>
+          <span
+            class="truncate text-[11.5px] font-normal"
+            classList={{
+              "text-accent/70": props.active,
+              "text-text-3": !props.active,
+            }}
+          >
+            {props.hint}
+          </span>
+        </Show>
+      </span>
       <Show when={props.active}>
         <CheckIcon size={18} class="flex-none text-accent" />
       </Show>

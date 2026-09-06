@@ -500,3 +500,15 @@ export function ClearIcon(p: SvgIconProps) {
     </Icon>
   );
 }
+
+/** 隐藏（眼睛 + 斜线） */
+export function EyeOffIcon(p: SvgIconProps) {
+  return (
+    <Icon {...p}>
+      <path d="M2 3l20 20" />
+      <path d="M10.6 5.1A10.9 10.9 0 0 1 12 5c4.6 0 8 3.4 10 7a13.5 13.5 0 0 1-3.3 3.9" />
+      <path d="M6.6 6.6A12.5 12.5 0 0 0 2 12c2 3.6 5.4 7 10 7a10.9 10.9 0 0 0 4.5-1" />
+      <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" />
+    </Icon>
+  );
+}

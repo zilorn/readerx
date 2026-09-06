@@ -11,7 +11,7 @@ import {
 } from "../lib/books";
 import type { LocalBook } from "../lib/booksTypes";
 import { fuzzyScore } from "../lib/fuzzy";
-import { groupName } from "../lib/groups";
+import { groupName, isHiddenGroupId } from "../lib/groups";
 import {
   hasReadingProgress,
   readingPercent,
@@ -91,7 +91,10 @@ export default function ShelfSearchPage() {
         const book = localBookById(entry.bookId);
         return book ? { entry, book } : null;
       })
-      .filter((item): item is ShelfItem => item !== null),
+      // 归入隐藏分组的书不参与书架搜索
+      .filter(
+        (item): item is ShelfItem => item !== null && !isHiddenGroupId(item.book.groupId),
+      ),
   );
 
   const results = createMemo<ScoredItem[]>(() => {
