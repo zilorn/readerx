@@ -4,8 +4,8 @@
 use crate::engine;
 use crate::host;
 use crate::models::{
-    BookItem, BookSource, BookSourceSummary, ChapterContentResult, ChapterItem, CachedAudio,
-    FetchedImage, LocalBook, SourceCallResult, TtsCacheStat,
+    BookChapterPatch, BookItem, BookSource, BookSourceSummary, ChapterContentResult, ChapterItem,
+    CachedAudio, FetchedImage, LocalBook, SourceCallResult, TtsCacheStat,
 };
 use crate::storage;
 use crate::webview_login;
@@ -43,6 +43,19 @@ pub async fn readerx_book_put(app: AppHandle, book: LocalBook) -> Result<(), Str
     tauri::async_runtime::spawn_blocking(move || storage::put_book(&app, &book))
         .await
         .map_err(|e| format!("书籍写入任务失败: {e}"))?
+}
+
+/// 只回写一本书的若干章节（在线书逐批下载正文用）：整本 JSON 仍在 Rust 侧读写，
+/// 经 IPC 只传本次变动章节，避免把大书（含 data URL 图片）反复整本拷贝到 WebView。
+#[tauri::command]
+pub async fn readerx_book_chapters_put(
+    app: AppHandle,
+    book_id: String,
+    updates: Vec<BookChapterPatch>,
+) -> Result<(), String> {
+    spawn_blocking(move || storage::put_book_chapters(&app, &book_id, &updates))
+        .await
+        .map_err(|e| format!("章节写入任务失败: {e}"))?
 }
 
 #[tauri::command]

@@ -4,7 +4,7 @@
  * - 纯浏览器开发环境：只使用内存 Map 降级，不写任何 WebView 持久化存储。
  */
 import { invoke, isTauri } from "@tauri-apps/api/core";
-import type { LocalBook } from "./booksTypes";
+import type { LocalBook, LocalBookChapter } from "./booksTypes";
 import type {
   BookItem,
   BookSource,
@@ -74,6 +74,28 @@ export async function saveRemoteBook(book: LocalBook): Promise<void> {
     return;
   }
   await invoke("readerx_book_put", { book });
+}
+
+/**
+ * 只回写一本书的若干章节（按下标）——在线书逐批下载正文用。
+ * 相比每次整本 JSON 经 IPC 传一遍（图片章节会把整本 data URL 反复拷贝，
+ * 大书会明显卡 UI 甚至内存暴涨闪退），这里只传本次真正变动的章节；
+ * Rust 侧读回书文件、原位替换后再落盘（I/O 在 blocking 线程池）。
+ */
+export async function saveRemoteBookChapters(
+  bookId: string,
+  updates: Array<{ index: number; chapter: LocalBookChapter }>,
+): Promise<void> {
+  if (!tauri) {
+    const book = memoryBooks.get(bookId);
+    if (book) {
+      for (const update of updates) {
+        book.chapters[update.index] = update.chapter;
+      }
+    }
+    return;
+  }
+  await invoke("readerx_book_chapters_put", { bookId, updates });
 }
 
 export async function deleteRemoteBook(id: string): Promise<void> {

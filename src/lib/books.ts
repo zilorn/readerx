@@ -10,6 +10,7 @@ import {
   deleteRemoteBook,
   listRemoteBooks,
   saveRemoteBook,
+  saveRemoteBookChapters,
 } from "./backend";
 import {
   DEFAULT_CHARS_PER_CHAPTER,
@@ -316,6 +317,21 @@ export async function addBookRecord(book: LocalBook): Promise<void> {
  */
 export async function commitBookContentUpdate(book: LocalBook): Promise<void> {
   await saveRemoteBook(book);
+  setBooksState((prev) => prev?.map((b) => (b.id === book.id ? book : b)) ?? prev);
+}
+
+/**
+ * 在线书「只回写部分章节」的内容更新（逐批下载正文用）：
+ * - 后端只接收本次变动的章节（saveRemoteBookChapters），不再整本 JSON 过 IPC；
+ * - book 应为“只替换了这些章节、其余章节对象原样复用”的最新整书快照，
+ *   存好后原位替换书架中的该本（reader 依据内容等价性决定是否重排当前章）。
+ */
+export async function updateBookChapters(
+  book: LocalBook,
+  updates: Array<{ index: number; chapter: LocalBookChapter }>,
+): Promise<void> {
+  if (updates.length === 0) return;
+  await saveRemoteBookChapters(book.id, updates);
   setBooksState((prev) => prev?.map((b) => (b.id === book.id ? book : b)) ?? prev);
 }
 

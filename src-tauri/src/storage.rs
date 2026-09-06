@@ -3,7 +3,7 @@
 //! - 本地书籍按 id 存为独立 JSON 文件。
 //! 全部为同步磁盘 I/O，仅对 `commands` 暴露；WebView 侧只通过 command 访问。
 
-use crate::models::{BookSource, LocalBook, TtsCacheStat};
+use crate::models::{BookChapterPatch, BookSource, LocalBook, TtsCacheStat};
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -96,6 +96,33 @@ pub(crate) fn put_book(app: &AppHandle, book: &LocalBook) -> Result<(), String> 
     let path = dir.join(format!("{}.json", book.id));
     let text = serde_json::to_string(book).map_err(|e| format!("序列化失败: {e}"))?;
     fs::write(&path, text).map_err(|e| format!("写入书籍失败: {e}"))
+}
+
+/// 只回写一本书的若干章节（在线书逐批下载正文用）：
+/// 读回书文件 → 按下标原位替换 → 整体落盘（文件 I/O 在调用方 blocking 线程池）。
+pub(crate) fn put_book_chapters(
+    app: &AppHandle,
+    id: &str,
+    updates: &[BookChapterPatch],
+) -> Result<(), String> {
+    if !valid_component(id) {
+        return Err("非法的书籍 id".to_string());
+    }
+    let dir = ensure_books_dir(app)?;
+    let path = dir.join(format!("{id}.json"));
+    if !path.exists() {
+        return Err("书籍不存在".to_string());
+    }
+    let text = fs::read_to_string(&path).map_err(|e| format!("读取书籍失败: {e}"))?;
+    let mut book: LocalBook =
+        serde_json::from_str(&text).map_err(|e| format!("解析书籍失败: {e}"))?;
+    for update in updates {
+        if update.index >= book.chapters.len() {
+            return Err(format!("章节下标越界: {}", update.index));
+        }
+        book.chapters[update.index] = update.chapter.clone();
+    }
+    put_book(app, &book)
 }
 
 pub(crate) fn list_books(app: &AppHandle) -> Result<Vec<LocalBook>, String> {

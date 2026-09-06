@@ -86,6 +86,14 @@ pub struct LocalBook {
     pub book_url: Option<String>,
 }
 
+/// 一次「只回写单章正文」的下标 + 章节数据（在线书逐批下载用）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BookChapterPatch {
+    pub index: usize,
+    pub chapter: LocalBookChapter,
+}
+
 // ---------------------------------------------------------------------------
 // 书源（Book Source）
 // ---------------------------------------------------------------------------

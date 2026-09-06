@@ -24,6 +24,7 @@ pub fn run() {
             commands::readerx_state_set,
             commands::readerx_state_remove,
             commands::readerx_book_put,
+            commands::readerx_book_chapters_put,
             commands::readerx_book_list,
             commands::readerx_book_delete,
             commands::readerx_tts_cache_put,

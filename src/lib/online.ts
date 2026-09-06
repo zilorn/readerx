@@ -11,7 +11,12 @@ import {
   fetchRemoteChapterContents,
   fetchRemoteSourceImage,
 } from "./backend";
-import { addBookRecord, commitBookContentUpdate, localBookById } from "./books";
+import {
+  addBookRecord,
+  commitBookContentUpdate,
+  localBookById,
+  updateBookChapters,
+} from "./books";
 import {
   previewChapterBookmarkReplacement,
   type BookmarkInheritPreview,
@@ -324,11 +329,34 @@ async function applyChapterBuild(
   return true;
 }
 
+/** 让出主线程一拍，保证分片解析/图片回写期间渲染与交互不被饿死 */
+function yieldToMain(): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, 0));
+}
+
+/** 把若干章节“原位替换”到一本书上：其余章节对象原样复用（不做整本深拷贝） */
+function patchChapters(
+  book: LocalBook,
+  patches: Array<{ index: number; chapter: LocalBookChapter }>,
+): LocalBook {
+  if (patches.length === 0) return book;
+  const byIndex = new Map<number, LocalBookChapter>();
+  for (const patch of patches) byIndex.set(patch.index, patch.chapter);
+  const chapters = book.chapters.map((ch, i) => byIndex.get(i) ?? ch);
+  return { ...book, chapters };
+}
+
 /**
  * 依次下载 book 中缺失正文的章节（分批；引擎正文拉取按批并发，批内图片下载限并发）。
  * - indexes 为空表示「剩余全部」（download 相位，每批统一落盘，保持批量 I/O）；
  * - window 相位按传入顺序逐章处理并逐章落盘（调用方已把当前阅读章排在前面，
  *   使其尽早可读，其余窗口章节随后在后台补齐）。
+ *
+ * 说明（在线书含图后的大书优化）：
+ * - 不再对整本做 structuredClone / 整本 JSON 过 IPC —— 只把本次真正写好的章节
+ *   增量交给后端（updateBookChapters），避免含 data URL 图片的大书反复整本拷贝，
+ *   这正是逐批下载卡顿 / 内存暴涨闪退的根因；
+ * - 章节解析等 CPU 步骤之间让出主线程（yieldToMain），渲染与翻页不被阻塞。
  */
 async function runFetch(
   bookId: string,
@@ -337,20 +365,19 @@ async function runFetch(
   onProgress?: (state: OnlineRunState) => void,
 ): Promise<void> {
   if (onlineRunBusy(bookId)) return;
-  let book = localBookById(bookId);
-  if (!book || !isOnlineBook(book)) return;
-  const sourceId = book.bookSourceId!;
-  const chapters = book.chapters;
-  const total = chapters.length;
+  const initial = localBookById(bookId);
+  if (!initial || !isOnlineBook(initial)) return;
+  const sourceId = initial.bookSourceId!;
+  const total = initial.chapters.length;
   let targets = indexes;
   if (targets === null) {
-    targets = chapters
+    targets = initial.chapters
       .map((ch, i) => (chapterHasContent(ch) ? -1 : i))
       .filter((i) => i >= 0);
   } else {
     targets = targets.filter((i) => i >= 0 && i < total);
   }
-  targets = targets.filter((i) => i >= 0 && !chapterHasContent(chapters[i]));
+  targets = targets.filter((i) => i >= 0 && !chapterHasContent(initial.chapters[i]));
   if (targets.length === 0) {
     patchRun(bookId, { phase: "idle", busy: false, total: 0, done: 0, pending: [] });
     return;
@@ -369,88 +396,120 @@ async function runFetch(
   const failed: { index: number; error: string }[] = [];
   let done = 0;
   const concurrency = Math.max(1, currentSourceParallel());
+  // 最近一次已回写/已发布到书库的书（只替换本次写入章节，深拷贝整本只发生一次：无）
+  let published = initial;
 
-  for (let start = 0; start < targets.length; start += BATCH_SIZE) {
-    if (cancellations.has(bookId)) break;
-    book = localBookById(bookId);
-    if (!book) break;
-    const slice = targets.slice(start, start + BATCH_SIZE);
-    const metas: ChapterItem[] = [];
-    for (const idx of slice) {
-      const ch = book.chapters[idx];
-      if (ch?.url) metas.push({ chapterName: ch.title, chapterUrl: ch.url });
-    }
-    const results: ChapterContentResult[] = await fetchRemoteChapterContents(
-      sourceId,
-      toBookItem(book),
-      metas,
-    );
-    if (cancellations.has(bookId)) break;
-    const nextBook = structuredClone(book);
-
-    // 把解析结果写入章节；纯图章一张图都没成功时视为失败（不落盘，供 UI 重试）
-    const applyOne = (plan: BatchPlan): Promise<boolean> =>
-      applyChapterBuild(bookId, sourceId, plan.chapter, plan.build, concurrency).then(
-        (ok) => {
-          if (!ok) {
-            failed.push({
-              index: plan.chapterIndex,
-              error: `图片加载失败（0/${plan.build.imageRefs.length}）`,
-            });
-          }
-          return ok;
-        },
+  try {
+    for (let start = 0; start < targets.length; start += BATCH_SIZE) {
+      if (cancellations.has(bookId)) break;
+      const bookNow = published;
+      const slice = targets.slice(start, start + BATCH_SIZE);
+      const metas: ChapterItem[] = [];
+      for (const idx of slice) {
+        const ch = bookNow.chapters[idx];
+        if (ch?.url) metas.push({ chapterName: ch.title, chapterUrl: ch.url });
+      }
+      const results: ChapterContentResult[] = await fetchRemoteChapterContents(
+        sourceId,
+        toBookItem(bookNow),
+        metas,
       );
+      if (cancellations.has(bookId)) break;
 
-    // 组装批次计划（引擎失败的章节直接进失败列表）
-    const plans: BatchPlan[] = [];
-    for (let offset = 0; offset < slice.length; offset++) {
-      const res = results[offset];
-      const chapterIndex = slice[offset];
-      const chapter = nextBook.chapters[chapterIndex];
-      if (!chapter) continue;
-      if (!res.ok) {
-        failed.push({ index: chapterIndex, error: res.error || "未知错误" });
-        done++;
-        continue;
-      }
-      const build = buildSourceChapterContent(res.text, chapter.url || undefined);
-      plans.push({ chapterIndex, chapter, build });
-    }
-
-    if (phase === "window") {
-      // 逐章处理并逐章落盘：当前阅读章在调用方传入顺序最前，尽快可读
-      for (const plan of plans) {
+      // 组装批次计划（引擎失败的章节直接进失败列表）；每次解析之间让出主线程
+      const plans: BatchPlan[] = [];
+      for (let offset = 0; offset < slice.length; offset++) {
         if (cancellations.has(bookId)) break;
-        const applied = await applyOne(plan);
-        done++;
-        if (applied) await commitBookContentUpdate(nextBook);
+        const res = results[offset];
+        const chapterIndex = slice[offset];
+        const chapter = bookNow.chapters[chapterIndex];
+        if (!chapter) continue;
+        if (!res.ok) {
+          failed.push({ index: chapterIndex, error: res.error || "未知错误" });
+          done++;
+          continue;
+        }
+        const build = buildSourceChapterContent(res.text, chapter.url || undefined);
+        plans.push({ chapterIndex, chapter, build });
+        if (offset % 3 === 2) await yieldToMain(); // 分片解析不长时间独占主线程
       }
-    } else {
-      for (const plan of plans) {
-        await applyOne(plan);
-        done++;
+      // plans 可能为空（本批引擎全部失败）：仍要走到底部 patchRun，把失败结果汇报给 UI
+
+      // 单章：在全新的章节对象上完成解析与图片下载；纯图章全失败视为失败
+      const fillChapter = async (
+        plan: BatchPlan,
+      ): Promise<LocalBookChapter | null> => {
+        const draft: LocalBookChapter = {
+          cid: plan.chapter.cid,
+          title: plan.chapter.title,
+          paragraphs: [],
+          blocks: undefined,
+          url: plan.chapter.url,
+        };
+        const ok = await applyChapterBuild(
+          bookId,
+          sourceId,
+          draft,
+          plan.build,
+          concurrency,
+        );
+        if (!ok) {
+          failed.push({
+            index: plan.chapterIndex,
+            error: `图片加载失败（0/${plan.build.imageRefs.length}）`,
+          });
+          return null;
+        }
+        return draft;
+      };
+
+      const batchPatch: Array<{ index: number; chapter: LocalBookChapter }> = [];
+      if (phase === "window") {
+        // 逐章处理并逐章落盘：当前阅读章在调用方传入顺序最前，尽快可读
+        for (const plan of plans) {
+          if (cancellations.has(bookId)) break;
+          const filled = await fillChapter(plan);
+          done++;
+          if (!filled) continue;
+          batchPatch.push({ index: plan.chapterIndex, chapter: filled });
+          published = patchChapters(published, batchPatch);
+          await updateBookChapters(published, [...batchPatch]);
+          batchPatch.length = 0;
+          if (plans.length > 1) await yieldToMain();
+        }
+      } else {
+        for (const plan of plans) {
+          const filled = await fillChapter(plan);
+          done++;
+          if (filled) batchPatch.push({ index: plan.chapterIndex, chapter: filled });
+        }
+        if (batchPatch.length > 0) {
+          published = patchChapters(published, batchPatch);
+          await updateBookChapters(published, batchPatch);
+        }
       }
-      await commitBookContentUpdate(nextBook);
+
+      const remaining = targets.slice(start + slice.length);
+      patchRun(bookId, {
+        done: Math.min(done, targets.length),
+        failed: [...failed],
+        pending: remaining,
+      });
+      onProgress?.(runMap()[bookId] ?? onlineRunState(bookId));
     }
-
-    const remaining = targets.slice(start + slice.length);
+  } catch (err) {
+    // 意外中断（磁盘 I/O 等）：清掉 busy 状态，避免该书永远卡在“下载中”
+    console.error("[online] 章节下载意外中断", err);
+  } finally {
+    const cancelled = cancellations.has(bookId);
+    cancellations.delete(bookId);
     patchRun(bookId, {
-      done: Math.min(done, targets.length),
-      failed: [...failed],
-      pending: remaining,
+      phase: "idle",
+      busy: false,
+      pending: [],
+      cancelled,
     });
-    onProgress?.(runMap()[bookId] ?? onlineRunState(bookId));
   }
-
-  const cancelled = cancellations.has(bookId);
-  cancellations.delete(bookId);
-  patchRun(bookId, {
-    phase: "idle",
-    busy: false,
-    pending: [],
-    cancelled,
-  });
 }
 
 /** 阅读窗口预取：确保 [idx-WINDOW, idx+WINDOW] 内章节有正文（当前章优先） */
@@ -576,11 +635,18 @@ export async function reloadChapterContent(
       settle({});
       return { applied: false, cancelled: false, error: "章节已变化，未重新加载" };
     }
-    const next = structuredClone(latest);
+    // 只构建/回写本章的新对象（不整本深拷贝），大书含图时不再反复整本过 IPC
+    const draft: LocalBookChapter = {
+      cid: target.cid,
+      title: target.title,
+      paragraphs: [],
+      blocks: undefined,
+      url: target.url,
+    };
     const okApply = await applyChapterBuild(
       bookId,
       sourceId,
-      next.chapters[chapterIndex],
+      draft,
       build,
       concurrency,
     );
@@ -594,7 +660,8 @@ export async function reloadChapterContent(
       settle({ failed: [{ index: chapterIndex, error }] });
       return { applied: false, cancelled: false, error };
     }
-    await commitBookContentUpdate(next);
+    const next = patchChapters(latest, [{ index: chapterIndex, chapter: draft }]);
+    await updateBookChapters(next, [{ index: chapterIndex, chapter: draft }]);
     settle({ done: 1, failed: [] });
     return { applied: true, cancelled: false };
   } catch (err) {

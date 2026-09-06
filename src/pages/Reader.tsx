@@ -14,7 +14,12 @@ import { LoadingScreen } from "../components/LoadingScreen";
 import { ReaderSettingsSheet } from "../components/ReaderSettingsSheet";
 import { ReplaceRulesSheet } from "../components/ReplaceRulesSheet";
 import { ScrollArea } from "../components/ScrollArea";
-import { isOnlineBook } from "../lib/booksTypes";
+import {
+  isOnlineBook,
+  type ChapterBlock,
+  type LocalBook,
+  type LocalBookChapter,
+} from "../lib/booksTypes";
 import {
   LAZY_WINDOW,
   applyOnlineTocAppend,
@@ -164,6 +169,41 @@ const menuBarPadBottom = () => 10 + Math.max(safeInsets().bottom, 16);
 /** 分页引擎的行内样式记录 → Solid 样式对象 */
 function asCss(record: CssRecord): JSX.CSSProperties {
   return record as JSX.CSSProperties;
+}
+
+/**
+ * 两份“当前章内容单元”是否逐字一致（字符串克隆后为同一值，=== 即可判定）。
+ * 在线书逐批下载会把整本对象替换掉：只要当前章内容没变就复用旧引用，
+ * 避免无谓触发正文重排 / 分页 / 分片挂载。
+ */
+function sameReaderUnits(a: ReaderBlock[], b: ReaderBlock[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i];
+    const y = b[i];
+    if (x.kind !== y.kind) return false;
+    if (x.kind === "img") {
+      const yi = y as Extract<ReaderBlock, { kind: "img" }>;
+      if (x.src !== yi.src || (x.alt ?? "") !== (yi.alt ?? "")) return false;
+    } else if (x.kind === "h") {
+      const yi = y as Extract<ReaderBlock, { kind: "h" }>;
+      if (x.text !== yi.text || x.level !== yi.level) return false;
+    } else if (x.text !== (y as Extract<ReaderBlock, { kind: "p" }>).text) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** 两本书的目录（cid 序列）是否一致：正文回写替换整书对象时目录不变 */
+function sameChapterToc(a: Pick<LocalBook, "chapters">, b: Pick<LocalBook, "chapters">): boolean {
+  const x = a.chapters;
+  const y = b.chapters;
+  if (x.length !== y.length) return false;
+  for (let i = 0; i < x.length; i++) {
+    if (x[i].cid !== y[i].cid) return false;
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -525,10 +565,12 @@ export default function ReaderPage() {
 
   // 书载入后：补建档案、按存档的精确文本位置（cid+偏移）恢复章节。
   // 以原书身份为触发源：文本替换等显示副本变化不应重置阅读位置。
+  // 在线书逐批下载会整本替换书库对象：只要目录（cid 序列）没变就只是正文回写，
+  // 不能按「重新打开书」处理（否则下载期间会不断重置页码/恢复位置导致卡顿跳动）。
   createEffect(
-    on(rawBook, () => {
-      const current = book();
+    on(rawBook, (current, prev) => {
       if (!current) return;
+      if (prev && prev.id === current.id && sameChapterToc(prev, current)) return;
       ensureShelfEntry(current.id);
       const entry = shelfEntries()[current.id];
       const target = entry ? resolveReadingTarget(current, entry) : null;
@@ -850,10 +892,28 @@ export default function ReaderPage() {
     };
   });
 
-  // 当前章节内容单元（稳定引用，分页/滚动共用）
+  // 当前章节稳定身份（字符串：整本对象被正文回写替换后仍不变，避免无谓失效）
+  const chapterCid = createMemo(() => chapter()?.cid ?? null);
+
+  // 当前章节内容单元。在线书逐批下载会整本替换书库对象，但多数提交并不改动
+  // 当前章正文：内容逐字一致时复用同一份数组引用，避免无谓触发分页重排/滚动分片
+  // 重挂载/正文 DOM 重渲（大书下载期间频繁提交正是卡顿主因之一）。
+  let unitsCacheCid: string | null = null;
+  let unitsCache: ReaderBlock[] | null = null;
   const units = createMemo<ReaderBlock[]>(() => {
     const ch = chapter();
-    return ch ? chapterUnits(ch) : [];
+    if (!ch) {
+      unitsCacheCid = null;
+      unitsCache = null;
+      return [];
+    }
+    const built = chapterUnits(ch);
+    if (ch.cid === unitsCacheCid && unitsCache && sameReaderUnits(unitsCache, built)) {
+      return unitsCache;
+    }
+    unitsCacheCid = ch.cid;
+    unitsCache = built;
+    return built;
   });
 
   // 滚动模式：正文单元分片挂载数量（0 起逐片增长）。超大章节整章一次建 DOM 会
@@ -864,7 +924,7 @@ export default function ReaderPage() {
   createEffect(() => {
     const pagedMode = isPaged();
     const list = units();
-    if (pagedMode || !chapter() || list.length === 0) {
+    if (pagedMode || !chapterCid() || list.length === 0) {
       scrollChunkToken++;
       window.cancelAnimationFrame(scrollChunkRaf);
       setScrollShown(0);
@@ -897,6 +957,58 @@ export default function ReaderPage() {
   // 章节文本镜像（单元文本按序拼接 + 单元起始偏移），书签偏移换算基准
   const mirror = createMemo(() => buildTextMirror(units()));
 
+  /**
+   * 分页输入：一个与「当前章正文」内容等价的章节视图。整本对象被逐批回写替换时，
+   * 只要当前章内容没变就复用同一引用 —— 分页 effect 只依赖本视图 / 版式 / 作者，
+   * 不再随无关提交（下载其它章节）重排当前章、闪「正在加载」。
+   */
+  const chapterAuthor = createMemo(() => book()?.author ?? null);
+  let pageSourceCache: {
+    cid: string;
+    title: string;
+    units: ReaderBlock[];
+    chapter: LocalBookChapter;
+  } | null = null;
+  const pageSource = createMemo<LocalBookChapter | null>(() => {
+    const ch = chapter();
+    const u = units();
+    if (!ch) {
+      pageSourceCache = null;
+      return null;
+    }
+    if (
+      pageSourceCache &&
+      pageSourceCache.cid === ch.cid &&
+      pageSourceCache.title === ch.title &&
+      pageSourceCache.units === u
+    ) {
+      return pageSourceCache.chapter;
+    }
+    // 由稳定单元重建同内容的最小章节视图（blocks 保留顺序与图源，供分页引擎测量）
+    const blocks: ChapterBlock[] = [];
+    const paragraphs: string[] = [];
+    for (const block of u) {
+      if (block.kind === "p") {
+        blocks.push({ kind: "p", text: block.text });
+        paragraphs.push(block.text);
+      } else if (block.kind === "h") {
+        blocks.push({ kind: "h", level: block.level, text: block.text });
+      } else {
+        blocks.push({ kind: "img", src: block.src, ...(block.alt ? { alt: block.alt } : {}) });
+      }
+    }
+    const hasStructured = blocks.some((b) => b.kind !== "p");
+    const chapterView: LocalBookChapter = {
+      cid: ch.cid,
+      title: ch.title,
+      paragraphs,
+      blocks: hasStructured || blocks.length === 0 ? blocks : undefined,
+      url: ch.url,
+    };
+    pageSourceCache = { cid: ch.cid, title: ch.title, units: u, chapter: chapterView };
+    return chapterView;
+  });
+
   // 滚动模式精确恢复进度期间正文保持隐藏：若恢复目标所在分片尚未挂载，盖“正在加载”
   // （分片追加会驱动本 memo 重算；目标挂出后 applyResume 立即落位并解除隐藏）
   const scrollResumePending = createMemo(() => {
@@ -921,12 +1033,12 @@ export default function ReaderPage() {
   // 书签区间是镜像文本全局 [charStart, charEnd)，可与多个单元（跨段落）求交。
   const unitMarks = createMemo<UnitMark[]>(() => {
     const bms = bookBookmarks();
-    const ch = chapter();
+    const cid = chapterCid();
     const mir = mirror();
-    if (!ch || bms.length === 0) return [];
+    if (!cid || bms.length === 0) return [];
     const out: UnitMark[] = [];
     for (const bm of bms) {
-      if (bm.chapterCid !== ch.cid) continue;
+      if (bm.chapterCid !== cid) continue;
       for (let u = 0; u < mir.unitLength.length; u++) {
         const len = mir.unitLength[u];
         if (len <= 0) continue;
@@ -1041,7 +1153,8 @@ export default function ReaderPage() {
   /** 当前朗读句在“本视图章节”内的高亮区间（单元局部坐标） */
   const speakMarks = createMemo<UnitMark[]>(() => {
     const f = ttsPlayer.focus();
-    if (!f || f.cid !== chapter()?.cid) return [];
+    const cid = chapterCid();
+    if (!f || !cid || f.cid !== cid) return [];
     const item = f.item;
     const unitLen = mirror().unitLength[item.unit];
     if (item.ls < 0 || item.le <= item.ls || item.le > (unitLen ?? -1)) return [];
@@ -1051,13 +1164,13 @@ export default function ReaderPage() {
   /** 搜索模式：当前章节内所有命中词（正文）的单元局部区间，当前查看项更醒目 */
   const searchMarks = createMemo<UnitMark[]>(() => {
     const s = searchSession();
-    const ch = chapter();
+    const cid = chapterCid();
     const mir = mirror();
-    if (!s || !ch || !mir || s.hits.length === 0) return [];
+    if (!s || !cid || !mir || s.hits.length === 0) return [];
     const active = s.hits[s.index];
     const out: UnitMark[] = [];
     for (const hit of s.hits) {
-      if (hit.kind !== "body" || hit.chapterCid !== ch.cid) continue;
+      if (hit.kind !== "body" || hit.chapterCid !== cid) continue;
       const kind: MarkKind = hit === active ? "searchCurrent" : "search";
       for (let u = 0; u < mir.unitLength.length; u++) {
         const len = mir.unitLength[u];
@@ -1209,12 +1322,14 @@ export default function ReaderPage() {
   let paginateTask: ReturnType<typeof startChapterPagination> | null = null;
   createEffect(() => {
     const mode = isPaged();
-    const ch = chapter();
+    // 依赖“内容等价视图”而非整本对象：下载其它章节的正文回写不会使本引用变化，
+    // 从而不会无谓地把当前章重新排版（旧实现每次提交都 setPaged(null) → 页面闪断）。
+    const src = pageSource();
     const geo = layout();
     paginateTask?.cancel();
     paginateTask = null;
     disarmPagedBusy();
-    if (!mode || !ch || !geo) {
+    if (!mode || !src || !geo) {
       setPaged(null);
       return;
     }
@@ -1226,11 +1341,11 @@ export default function ReaderPage() {
       paginateTask = null;
       disarmPagedBusy();
     });
-    const author = book()?.author ?? null;
+    const author = chapterAuthor();
     armPagedBusy();
     void (async () => {
       const sizes = new Map<string, { w: number; h: number } | null>();
-      const imageUnits = chapterUnits(ch).filter((u) => u.kind === "img");
+      const imageUnits = units().filter((u) => u.kind === "img");
       await Promise.all(
         imageUnits.map((unit) =>
           decodeImageSize((unit as { src: string }).src).then((size) =>
@@ -1238,12 +1353,12 @@ export default function ReaderPage() {
           ),
         ),
       );
-      if (dropped || !isPaged() || chapter() !== ch) return;
-      const task = startChapterPagination(ch, author, geo, sizes);
+      if (dropped || !isPaged() || pageSource() !== src) return;
+      const task = startChapterPagination(src, author, geo, sizes);
       paginateTask = task;
       const result = await task.promise;
       if (paginateTask === task) paginateTask = null;
-      if (dropped || !isPaged() || chapter() !== ch) return;
+      if (dropped || !isPaged() || pageSource() !== src) return;
       disarmPagedBusy();
       if (!result) return;
       // 回翻“上一章末页”的挂起目标在此落地（无论新旧章页数是否相同）
