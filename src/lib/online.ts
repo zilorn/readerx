@@ -13,9 +13,11 @@ import {
 } from "./backend";
 import {
   addBookRecord,
+  bookMetaById,
   commitBookContentUpdate,
   localBookById,
   updateBookChapters,
+  updateBookInfo,
 } from "./books";
 import {
   previewChapterBookmarkReplacement,
@@ -38,6 +40,7 @@ import type {
   ChapterItem,
   ChapterContentResult,
 } from "./bookSourcesTypes";
+import { loadSourceCoverThumb } from "./sourceCover";
 import { currentSourceParallel } from "./store";
 import {
   buildSourceChapterContent,
@@ -143,6 +146,21 @@ export async function fetchBookToc(
   return chapters;
 }
 
+/** 「加入书架」后按书源会话后台拉取封面缩略图并落盘（书源封面为可选字段）：
+ *  封面缺失 / 下载失败 / 期间书被删都不影响入架，书架回退程序化封面。 */
+async function attachOnlineBookCover(
+  source: BookSourceSummary,
+  book: LocalBook,
+  coverUrl: string,
+): Promise<void> {
+  const referer = book.bookUrl || source.bookSourceUrl || "";
+  const thumb = await loadSourceCoverThumb(source.id, coverUrl, referer);
+  if (!thumb) return;
+  // 等待期间书可能已被删除 / 用户已手动换封面：书还在书架才写入
+  if (!bookMetaById(book.id)) return;
+  await updateBookInfo(book.id, { cover: thumb });
+}
+
 /** 组装在线书本骨架（全 toc、空正文），加入书架 */
 export async function addOnlineBookToShelf(
   source: BookSourceSummary,
@@ -175,6 +193,13 @@ export async function addOnlineBookToShelf(
     ...(tags.length > 0 ? { tags } : {}),
   };
   await addBookRecord(book);
+  // 封面（可选）：书源返回 cover 时经书源会话下载缩略图并落盘，失败 / 无封面静默回退
+  const coverUrl = (item.cover ?? "").trim();
+  if (coverUrl) {
+    void attachOnlineBookCover(source, book, coverUrl).catch((err) => {
+      console.warn("[online] 拉取书源封面失败", err);
+    });
+  }
   return book;
 }
 

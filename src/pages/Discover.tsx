@@ -19,20 +19,13 @@ import { normalizeBookTags } from "../lib/booksTypes";
 import { rememberPicked, type PickedBook } from "../lib/online";
 import { currentSourceParallel } from "../lib/store";
 import { OnlineBookSheet } from "../components/OnlineBookSheet";
+import { SourceCover } from "../components/SourceCover";
 
 type Mode = "search" | "discover";
 
 interface ResultEntry {
   source: BookSourceSummary;
   item: BookItem;
-}
-
-function hueOf(text: string): number {
-  let hash = 0;
-  for (let i = 0; i < text.length; i++) {
-    hash = (Math.imul(hash, 31) + text.charCodeAt(i)) | 0;
-  }
-  return Math.abs(hash) % 360;
 }
 
 /** 把书源返回的裸记录归一化成 BookItem（bookName/bookUrl 必填，其余字段过滤后透传） */
@@ -66,14 +59,14 @@ function ResultRow(props: { entry: ResultEntry; onClick: () => void }) {
       class="flex w-full items-center gap-3 px-4 py-2.5 text-left active:bg-surface-2"
       onClick={props.onClick}
     >
-      <span
-        class="grid h-[52px] w-[40px] flex-none place-items-center rounded-[8px] text-[20px] font-bold text-white shadow-inner"
-        style={{
-          background: `linear-gradient(165deg, hsl(${hueOf(item.bookName)} 58% 52%), hsl(${(hueOf(item.bookName) + 24) % 360} 62% 34%))`,
-        }}
-      >
-        {item.bookName.charAt(0)}
-      </span>
+      {/* 书源返回 cover 时展示真实封面（经书源会话下载）；无封面回退首字渐变占位 */}
+      <SourceCover
+        variant="row"
+        sourceId={source.id}
+        url={item.cover}
+        referer={item.bookUrl}
+        title={item.bookName}
+      />
       <span class="flex min-w-0 flex-1 flex-col gap-0.5">
         <span class="flex items-center gap-1.5">
           <span class="truncate text-[14.5px] font-medium">{item.bookName}</span>

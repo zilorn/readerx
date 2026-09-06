@@ -16,14 +16,7 @@ import { showToast } from "../lib/toast";
 import { TagChips } from "./TagChips";
 import { BookIcon, CloseIcon, ListIcon, RefreshIcon } from "./icons";
 import { ScrollArea } from "./ScrollArea";
-
-function hueOf(text: string): number {
-  let hash = 0;
-  for (let i = 0; i < text.length; i++) {
-    hash = (Math.imul(hash, 31) + text.charCodeAt(i)) | 0;
-  }
-  return Math.abs(hash) % 360;
-}
+import { SourceCover } from "./SourceCover";
 
 /** 目录预览默认先渲染的章节数（超出折叠，避免超长书首屏卡顿） */
 const TOC_PREVIEW_CAP = 300;
@@ -87,9 +80,12 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
 
   /** 请求序号：换书 / 关闭后使仍在途的旧请求失效 */
   let seq = 0;
+  /** 当前详情（bookDetail）拉取中的 Promise；入架前等待它，确保用富化后的信息（含封面）落盘 */
+  let pendingDetail: Promise<void> | null = null;
 
   function beginLoad(p: PickedBook | null) {
     seq += 1;
+    pendingDetail = null;
     setInfo(p?.item ?? null);
     setInfoBusy(false);
     setInfoError("");
@@ -103,7 +99,7 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
     const run = seq;
     if (p.source.capabilities.detail) {
       setInfoBusy(true);
-      void loadDetail(p, run);
+      pendingDetail = loadDetail(p, run);
     }
     if (p.source.capabilities.toc) {
       setTocBusy(true);
@@ -193,6 +189,13 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
     return normalizeBookTags(info()?.tags);
   });
 
+  /** 预览封面：已在书架的书直接用已落盘的封面缩略图；否则用书源搜索/详情返回的 cover */
+  const coverSrc = createMemo(() => {
+    const shelf = existingBook();
+    if (shelf?.cover) return shelf.cover;
+    return info()?.cover;
+  });
+
   const visibleChapters = createMemo(() => {
     const all = chapters() ?? [];
     if (showAllChapters() || all.length <= TOC_PREVIEW_CAP) return all;
@@ -218,6 +221,14 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
       setAdding(true);
       setActionError("");
       try {
+        // 详情仍在加载时先等它完成，确保入架用的是富化后的信息（简介 / 封面一并落盘）
+        if (p.source.capabilities.detail && pendingDetail) {
+          try {
+            await pendingDetail;
+          } catch {
+            /* 详情失败不阻塞入架 */
+          }
+        }
         // 用富化后的信息入架（简介等一并保存）
         const book = await addOnlineBookToShelf(p.source, info() ?? p.item, list);
         bookId = book.id;
@@ -272,14 +283,14 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
             <div class="px-[18px] pb-2 pt-2.5">
               {/* 封面 + 基本信息 */}
               <div class="flex gap-3.5">
-                <span
-                  class="grid h-[132px] w-[96px] flex-none place-items-center rounded-[10px] text-[40px] font-bold text-white shadow-lg shadow-black/15"
-                  style={{
-                    background: `linear-gradient(165deg, hsl(${hueOf(info()?.bookName ?? "")} 58% 52%), hsl(${(hueOf(info()?.bookName ?? "") + 24) % 360} 62% 34%))`,
-                  }}
-                >
-                  {(info()?.bookName ?? "").charAt(0)}
-                </span>
+                {/* 书源返回 cover 时展示真实封面（经书源会话下载）；无封面回退首字渐变占位 */}
+                <SourceCover
+                  variant="sheet"
+                  sourceId={props.pick?.source.id ?? ""}
+                  url={coverSrc()}
+                  referer={info()?.bookUrl}
+                  title={info()?.bookName ?? ""}
+                />
                 <div class="flex min-w-0 flex-1 flex-col justify-center gap-1">
                   <h2 class="text-[17px] font-bold leading-snug">
                     {info()?.bookName ?? ""}

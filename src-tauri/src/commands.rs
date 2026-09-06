@@ -329,8 +329,10 @@ pub async fn readerx_source_fetch_contents(
     .map_err(|e| format!("书源正文拉取任务失败: {e}"))?
 }
 
-/// 用书源会话下载一张正文图片（正文插图/整章图片），返回 base64 与 MIME。
-/// 失败时返回 ok:false（不抛 command 错误），便于调用方做占位/整章失败判定。
+/// 用书源会话下载一张图片（正文插图 / 整章图片 / 书源封面），返回 base64 与 MIME。
+/// 失败时返回 ok:false（不抛 command 错误），便于调用方做占位 / 整章失败判定。
+/// 只校验书源整体启停——正文插图走 content 能力流程、封面走 search/discover/detail
+/// 能力流程，都不该因另一个能力开关被关而失效，故不做单项能力门控。
 #[tauri::command]
 pub async fn readerx_source_fetch_image(
     app: AppHandle,
@@ -343,9 +345,6 @@ pub async fn readerx_source_fetch_image(
             .ok_or_else(|| "书源不存在".to_string())?;
         if !source.enabled {
             return Err("书源已禁用".to_string());
-        }
-        if !source.capabilities.content {
-            return Err(format!("书源「{}」已禁用正文能力", source.name));
         }
         host::prepare_source(&source)?;
         // 重启后把该书源已保存的登录 Cookie 注入会话（进程内幂等）

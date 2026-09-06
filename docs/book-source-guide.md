@@ -33,6 +33,12 @@ async function searchBook(keyword) {
 字段除 `bookName`、`bookUrl` 都可省略；若站点给了分类/标签，可一并返回 `tags: ["玄幻", "热血"]`（详见
 [book-source-spec.md](./book-source-spec.md) 的 BookItem 形状）。
 
+若书站能给出书籍封面，搜索结果里带上 `cover: "https://…/cover.jpg"`（绝对地址）即可：
+「发现」的列表行与「书籍详情」预览会展示真实封面，「加入书架」时应用经**该书源会话**下载并
+压缩成缩略图随书保存（书架 / 详情页都显示真实封面）。封面**始终可选**——没返回、地址非法或
+下载失败都会自动回退书名首字占位封面，不影响任何流程。封面只有详情页才有的站，让 `bookDetail`
+补返回 `cover` 即可。
+
 ## 3. 目录（HTML 站 + CSS 选择器）
 
 ```js

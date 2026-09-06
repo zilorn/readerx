@@ -255,8 +255,8 @@ export async function fetchRemoteChapterContents(
 }
 
 /**
- * 用书源会话下载一张正文插图，返回 data URL；失败返回 null。
- * 图片请求自动携带该书源的默认头/Cookie/UA，Referer 可单独指定（正文页面地址）。
+ * 用书源会话下载一张图片（正文插图 / 书源封面），返回 data URL；失败返回 null。
+ * 图片请求自动携带该书源的默认头/Cookie/UA，Referer 可单独指定（正文页面 / 书页地址）。
  */
 export async function fetchRemoteSourceImage(
   sourceId: string,

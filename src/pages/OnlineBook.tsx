@@ -2,6 +2,7 @@ import { createMemo, createSignal, Show } from "solid-js";
 import { useNavigate, useParams } from "@solidjs/router";
 import { PageHeader } from "../components/PageHeader";
 import { BookIcon, RefreshIcon, SourceIcon } from "../components/icons";
+import { SourceCover } from "../components/SourceCover";
 import { bookMetaList } from "../lib/books";
 import {
   addOnlineBookToShelf,
@@ -9,14 +10,6 @@ import {
   getPicked,
 } from "../lib/online";
 import { showToast } from "../lib/toast";
-
-function hueOf(text: string): number {
-  let hash = 0;
-  for (let i = 0; i < text.length; i++) {
-    hash = (Math.imul(hash, 31) + text.charCodeAt(i)) | 0;
-  }
-  return Math.abs(hash) % 360;
-}
 
 /** 在线书预览：仅展示搜索结果已有信息；点「加入书架」时才获取一次目录 */
 export default function OnlineBookPage() {
@@ -35,6 +28,13 @@ export default function OnlineBookPage() {
         (b) => b.bookSourceId === p.source.id && b.bookUrl === p.item.bookUrl,
       ) ?? null
     );
+  });
+
+  /** 封面：已在书架的书直接用已落盘封面；否则用书源搜索返回的 cover（可选） */
+  const coverSrc = createMemo(() => {
+    const shelf = alreadyOnShelf();
+    if (shelf?.cover) return shelf.cover;
+    return pick()?.item.cover;
   });
 
   async function onAddToShelf(openReader: boolean) {
@@ -95,14 +95,14 @@ export default function OnlineBookPage() {
       >
         <div class="px-[18px] pb-[calc(40px+env(safe-area-inset-bottom))] pt-2">
           <div class="flex gap-3.5">
-            <span
-              class="grid h-[132px] w-[96px] flex-none place-items-center rounded-[10px] text-[40px] font-bold text-white shadow-lg shadow-black/15"
-              style={{
-                background: `linear-gradient(165deg, hsl(${hueOf(meta().name)} 58% 52%), hsl(${(hueOf(meta().name) + 24) % 360} 62% 34%))`,
-              }}
-            >
-              {meta().name.charAt(0)}
-            </span>
+            {/* 书源返回 cover 时展示真实封面（经书源会话下载）；无封面回退首字渐变占位 */}
+            <SourceCover
+              variant="sheet"
+              sourceId={pick()?.source.id ?? ""}
+              url={coverSrc()}
+              referer={pick()?.item.bookUrl}
+              title={pick()?.item.bookName ?? ""}
+            />
             <div class="flex min-w-0 flex-1 flex-col justify-center gap-1">
               <h2 class="text-[17px] font-bold leading-snug">{meta().name}</h2>
               <p class="truncate text-[12.5px] text-text-3">
