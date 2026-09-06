@@ -71,6 +71,7 @@ import {
   BOOKMARK_MAX_LEN,
   addBookmark,
   bookmarkAtExactRange,
+  bookmarkOverlappingRange,
   buildTextMirror,
   ensureBookmarksLoaded,
   makeBookmark,
@@ -2740,6 +2741,9 @@ export default function ReaderPage() {
   /**
    * 在镜像区间 [lo, hi) 上“新增 / 再点一次则移除”书签。
    * 区间允许横跨多个段落/标题（跨段落书签）；由调用方先收起选区。
+   * 不允许与已有书签部分重叠：一段文字只能属于一条书签（完全同区间=移除；
+   * 相交但不同区间——含一部分已书签、或选中已有书签内的一段——拒绝新增），
+   * 避免同一文字同时落在多条书签里造成下划线叠影。
    */
   function toggleBookmarkAtSpan(rawLo: number, rawHi: number): void {
     const b = book();
@@ -2760,6 +2764,10 @@ export default function ReaderPage() {
       clearVisibleSelection();
       removeBookmark(existed.id);
       showToast("已移除书签");
+      return;
+    }
+    if (bookmarkOverlappingRange(b.id, ch.cid, charStart, charEnd)) {
+      showToast("所选文字与已有书签重叠，无法添加书签", true);
       return;
     }
     if (charEnd - charStart > BOOKMARK_MAX_LEN) {

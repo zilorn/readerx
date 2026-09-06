@@ -151,6 +151,27 @@ export function bookmarkAtExactRange(
   );
 }
 
+/**
+ * 与同章已有书签【部分重叠】的书签（区间相交但不完全相等）。
+ * 书签区间互不重叠是基本约束：允许相邻（前一区间终点恰好等于后一区间起点）但禁止
+ * 交叉或互相包含——否则同一段文字会同时落在多条书签里，下划线叠影、展示与删除语义
+ * 都会混乱。用于“新增前拦截部分重叠的选区”（完全同区间走移除逻辑，不在此列）。
+ */
+export function bookmarkOverlappingRange(
+  bookId: string,
+  chapterCid: string,
+  charStart: number,
+  charEnd: number,
+): Bookmark | undefined {
+  return bookmarksFor(bookId).find(
+    (bm) =>
+      bm.chapterCid === chapterCid &&
+      (bm.charStart !== charStart || bm.charEnd !== charEnd) &&
+      charStart < bm.charEnd &&
+      charEnd > bm.charStart,
+  );
+}
+
 export function addBookmark(bookmark: Bookmark): void {
   const map = { ...bookmarkMap() };
   const list = map[bookmark.bookId] ?? [];
