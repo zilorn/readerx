@@ -6,22 +6,18 @@ import { PageHeader } from "../components/PageHeader";
 import { ChevronRightIcon, CloseIcon, SearchIcon } from "../components/icons";
 import {
   ensureLocalBooksLoaded,
-  localBookById,
-  localBooksReady,
+  bookMetaById,
+  bookMetasReady,
 } from "../lib/books";
-import type { LocalBook } from "../lib/booksTypes";
+import type { BookMeta } from "../lib/booksTypes";
 import { fuzzyScore } from "../lib/fuzzy";
 import { groupName, isHiddenGroupId } from "../lib/groups";
-import {
-  hasReadingProgress,
-  readingPercent,
-  resolveReadingTarget,
-} from "../lib/progress";
+import { metaCardStatus } from "../lib/progress";
 import { shelfOrder, type ShelfEntry } from "../lib/store";
 
 interface ShelfItem {
   entry: ShelfEntry;
-  book: LocalBook;
+  book: BookMeta;
 }
 
 /** 候选字段：0=书名 1=作者 2=文件名 3=分组，越小优先级越高 */
@@ -61,20 +57,14 @@ function scoreItem(rawQuery: string, item: ShelfItem): ScoredItem | null {
   return best;
 }
 
-/** 已读进度摘要：与书架卡片同一套口径（正文字符百分比） */
-function readSummary(entry: ShelfEntry, book: LocalBook): {
+/** 已读进度摘要：与书架卡片同一套口径（元数据字符百分比，不物化整书） */
+function readSummary(entry: ShelfEntry, book: BookMeta): {
   finished: boolean;
   percent: number;
 } | null {
-  if (!hasReadingProgress(entry)) return null;
-  const loc = resolveReadingTarget(book, entry);
-  if (loc === null) return null;
-  const percent = Math.round(
-    readingPercent(book, loc.chapterIndex, loc.charOffset),
-  );
-  const finished =
-    loc.chapterIndex + 1 >= book.chapters.length && percent >= 99.5;
-  return { finished, percent: Math.max(1, Math.min(100, percent)) };
+  const status = metaCardStatus(book, entry);
+  if (!status.hasRead) return null;
+  return { finished: status.finished, percent: status.percent };
 }
 
 export default function ShelfSearchPage() {
@@ -88,7 +78,7 @@ export default function ShelfSearchPage() {
   const items = createMemo<ShelfItem[]>(() =>
     shelfOrder()
       .map((entry) => {
-        const book = localBookById(entry.bookId);
+        const book = bookMetaById(entry.bookId);
         return book ? { entry, book } : null;
       })
       // 归入隐藏分组的书不参与书架搜索
@@ -148,7 +138,7 @@ export default function ShelfSearchPage() {
       </PageHeader>
 
       <div class="px-[18px] pb-[calc(28px+env(safe-area-inset-bottom))] pt-1">
-        <Show when={localBooksReady()} fallback={<LoadingScreen label="加载本地书库…" />}>
+        <Show when={bookMetasReady()} fallback={<LoadingScreen label="加载本地书库…" />}>
           <Show
             when={keyword().trim() !== ""}
             fallback={

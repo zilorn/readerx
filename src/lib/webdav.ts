@@ -14,7 +14,7 @@ import {
   persistBookDraft,
   type BookDraft,
 } from "./books";
-import type { LocalBook } from "./booksTypes";
+import type { BookMeta, LocalBook } from "./booksTypes";
 import { ensureShelfEntry } from "./store";
 
 export interface DavServer {
@@ -410,7 +410,7 @@ export async function importDavFile(
  */
 export function davEntryImportedBook(
   entry: DavEntry,
-  books: LocalBook[],
-): LocalBook | undefined {
+  books: BookMeta[],
+): BookMeta | undefined {
   return books.find((book) => book.fileName === entry.name);
 }

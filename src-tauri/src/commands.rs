@@ -4,8 +4,8 @@
 use crate::engine;
 use crate::host;
 use crate::models::{
-    BookChapterPatch, BookItem, BookSource, BookSourceSummary, ChapterContentResult, ChapterItem,
-    CachedAudio, FetchedImage, LocalBook, SourceCallResult, TtsCacheStat,
+    BookChapterPatch, BookItem, BookMeta, BookSource, BookSourceSummary, ChapterContentResult,
+    ChapterItem, CachedAudio, FetchedImage, LocalBook, SourceCallResult, TtsCacheStat,
 };
 use crate::storage;
 use crate::webview_login;
@@ -58,11 +58,33 @@ pub async fn readerx_book_chapters_put(
         .map_err(|e| format!("章节写入任务失败: {e}"))?
 }
 
+/// 书库元数据列表（章节仅留标题/字数，不含正文）。
+/// 应用启动 / 书架渲染只调用它——正文经 readerx_book_get 按需单本拉取。
 #[tauri::command]
-pub async fn readerx_book_list(app: AppHandle) -> Result<Vec<LocalBook>, String> {
-    tauri::async_runtime::spawn_blocking(move || storage::list_books(&app))
+pub async fn readerx_book_list_meta(app: AppHandle) -> Result<Vec<BookMeta>, String> {
+    tauri::async_runtime::spawn_blocking(move || storage::list_book_meta(&app))
+        .await
+        .map_err(|e| format!("书库元数据读取任务失败: {e}"))?
+}
+
+/// 读取单本书全文（阅读页打开时按需调用）；文件不存在返回 null。
+#[tauri::command]
+pub async fn readerx_book_get(app: AppHandle, id: String) -> Result<Option<LocalBook>, String> {
+    tauri::async_runtime::spawn_blocking(move || storage::get_book(&app, &id))
         .await
         .map_err(|e| format!("书籍读取任务失败: {e}"))?
+}
+
+/// 单本元信息补丁（分组 / 书名 / 封面 / 标签…）：正文整体留在磁盘，不整本传回 WebView。
+#[tauri::command]
+pub async fn readerx_book_patch_meta(
+    app: AppHandle,
+    id: String,
+    patch: crate::models::BookMetaPatch,
+) -> Result<(), String> {
+    spawn_blocking(move || storage::patch_book_meta(&app, &id, &patch))
+        .await
+        .map_err(|e| format!("书籍元信息写入任务失败: {e}"))?
 }
 
 #[tauri::command]

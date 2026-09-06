@@ -9,25 +9,25 @@ import { EditIcon, LinkIcon } from "../components/icons";
 import { openExternal } from "../lib/external";
 import {
   ensureLocalBooksLoaded,
-  localBookById,
-  localBooksReady,
+  bookMetaById,
+  bookMetasReady,
 } from "../lib/books";
 import {
   bookSourceOf,
   formatFileSize,
-  totalChars,
-  type LocalBook,
+  type BookFormat,
+  type BookMeta,
 } from "../lib/booksTypes";
 import { groupName } from "../lib/groups";
 
-function formatName(format: LocalBook["format"]): string {
+function formatName(format: BookFormat): string {
   if (format === "online") return "在线书";
   if (format === "epub") return "EPUB";
   if (format === "txt") return "TXT";
   return format;
 }
 
-function sourceName(book: LocalBook): string {
+function sourceName(book: BookMeta): string {
   const source = bookSourceOf(book);
   return source === "online"
     ? "在线书"
@@ -49,8 +49,8 @@ interface MetaRow {
   url?: string;
 }
 
-function bookMetaRows(book: LocalBook): MetaRow[] {
-  const chars = totalChars(book);
+function bookMetaRows(book: BookMeta): MetaRow[] {
+  const chars = book.chapters.reduce((sum, chapter) => sum + (chapter.chars || 0), 0);
   const rows: MetaRow[] = [
     { label: "书名", value: book.title },
     { label: "作者", value: book.author || "佚名" },
@@ -108,7 +108,7 @@ export default function BookDetailPage() {
   const params = useParams();
 
   const bookId = () => params.id ?? "";
-  const book = createMemo(() => localBookById(bookId()));
+  const book = createMemo(() => bookMetaById(bookId()));
   const [editOpen, setEditOpen] = createSignal(false);
 
   createEffect(() => {
@@ -141,7 +141,7 @@ export default function BookDetailPage() {
       />
 
       <Show
-        when={localBooksReady()}
+        when={bookMetasReady()}
         fallback={<LoadingScreen label="加载本地书库…" />}
       >
         <Show

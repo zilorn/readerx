@@ -24,23 +24,23 @@ import {
 } from "../components/icons";
 import {
   ensureLocalBooksLoaded,
-  localBookById,
-  localBooksReady,
+  bookMetaById,
+  bookMetasReady,
   removeLocalBook,
   setLocalBookGroup,
 } from "../lib/books";
-import { bookSourceOf, type BookSource, type LocalBook } from "../lib/booksTypes";
+import {
+  bookSourceOf,
+  type BookMeta,
+  type BookSource,
+} from "../lib/booksTypes";
 import {
   groupList,
   HIDDEN_GROUP_ID,
   HIDDEN_GROUP_NAME,
   isHiddenGroupId,
 } from "../lib/groups";
-import {
-  hasReadingProgress,
-  readingPercent,
-  resolveReadingTarget,
-} from "../lib/progress";
+import { metaCardStatus } from "../lib/progress";
 import {
   lastShelfFilterKey,
   removeShelfEntry,
@@ -53,7 +53,7 @@ import {
 
 interface ShelfItem {
   entry: ShelfEntry;
-  book: LocalBook;
+  book: BookMeta;
 }
 
 /**
@@ -93,25 +93,15 @@ function restoreShelfFilter(key: string): ShelfFilter {
 }
 
 /**
- * 按“正文文本位置”计算进度：已读章节累计字符 + 当前章节内偏移 → 整书百分比。
- * 不使用页码（受字号 / 版面影响），同一偏移在任意排版下都指向同一段文字。
+ * 按“正文文本位置”计算进度（基于书库元数据的章节字符数，不物化整书）：
+ * 已读章节累计字符 + 当前章节内偏移 → 整书百分比。
  */
-function cardProgress(entry: ShelfEntry, book: LocalBook): {
+function cardProgress(entry: ShelfEntry, book: BookMeta): {
   hasRead: boolean;
   finished: boolean;
   percent: number;
 } {
-  const loc = resolveReadingTarget(book, entry);
-  const hasRead = hasReadingProgress(entry);
-  const percent = Math.round(
-    readingPercent(book, loc?.chapterIndex ?? entry.chapter, loc?.charOffset ?? null),
-  );
-  const finished =
-    hasRead &&
-    loc !== null &&
-    loc.chapterIndex + 1 >= book.chapters.length &&
-    percent >= 99.5;
-  return { hasRead, finished, percent: Math.max(1, Math.min(100, percent)) };
+  return metaCardStatus(book, entry);
 }
 
 /** 单本书卡片：支持单击打开、长按进入多选、选中状态下点击切换选中 */
@@ -374,7 +364,7 @@ export default function BookshelfPage() {
   const items = createMemo<ShelfItem[]>(() =>
     shelfOrder()
       .map((entry) => {
-        const book = localBookById(entry.bookId);
+        const book = bookMetaById(entry.bookId);
         return book ? { entry, book } : null;
       })
       .filter((item): item is ShelfItem => item !== null),
@@ -597,7 +587,7 @@ export default function BookshelfPage() {
   function sharedGroup(): string | null | undefined {
     const ids = selectedIds();
     if (ids.length === 0) return undefined;
-    const groups = ids.map((id) => localBookById(id)?.groupId ?? null);
+    const groups = ids.map((id) => bookMetaById(id)?.groupId ?? null);
     return groups.every((g) => g === groups[0]) ? groups[0] : undefined;
   }
 
@@ -701,7 +691,7 @@ export default function BookshelfPage() {
           "pb-[calc(28px+env(safe-area-inset-bottom))]": !selecting(),
         }}
       >
-        <Show when={localBooksReady()} fallback={<LoadingScreen label="加载本地书库…" />}>
+        <Show when={bookMetasReady()} fallback={<LoadingScreen label="加载本地书库…" />}>
           <Show
             when={visibleItems().length > 0}
             fallback={

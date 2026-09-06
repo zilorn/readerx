@@ -10,7 +10,7 @@ import { useNavigate } from "@solidjs/router";
 import { callRemoteSource } from "../lib/backend";
 import type { BookItem, ChapterItem } from "../lib/bookSourcesTypes";
 import { normalizeBookTags } from "../lib/booksTypes";
-import { localBookList } from "../lib/books";
+import { bookMetaList } from "../lib/books";
 import { addOnlineBookToShelf, fetchBookToc, type PickedBook } from "../lib/online";
 import { showToast } from "../lib/toast";
 import { TagChips } from "./TagChips";
@@ -170,7 +170,7 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
     const p = props.pick;
     if (!p) return null;
     return (
-      localBookList().find(
+      bookMetaList().find(
         (b) => b.bookSourceId === p.source.id && b.bookUrl === p.item.bookUrl,
       ) ?? null
     );

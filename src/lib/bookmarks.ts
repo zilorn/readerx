@@ -317,7 +317,10 @@ function bestMatchStart(mirror: TextMirror, bm: Bookmark): { start: number; cert
  * 优先结构化偏移（书签的字符区间本身就精确），内容漂移/重排后再退化到文字锚定。
  * 找不到返回 null。
  */
-export function resolveBookmarkTarget(book: LocalBook, bm: Bookmark): ResolvedTarget | null {
+export function resolveBookmarkTarget(
+  book: Pick<LocalBook, "chapters">,
+  bm: Bookmark,
+): ResolvedTarget | null {
   const chapters = book.chapters;
   if (chapters.length === 0) return null;
   let chapterIndex = chapters.findIndex((ch) => ch.cid === bm.chapterCid);
@@ -423,9 +426,10 @@ export async function previewChapterBookmarkReplacement(
  * - 能明确命中（certain）的书签视为可继承（其余保持不变）；
  * - 找不到或只能就近猜测的计入 failedCount —— 重新导入后它们会失效或跳错。
  * 只做评估，不修改任何已存数据；导入前调用方可据此提示用户或放弃重新导入。
+ * 只需书 id（用于取该书签列表）；旧正文不参与评估（整本被新草稿替换）。
  */
 export async function previewBookmarkInheritance(
-  book: LocalBook,
+  book: Pick<LocalBook, "id">,
   nextChapters: LocalBookChapter[],
 ): Promise<BookmarkInheritPreview> {
   await ensureBookmarksLoaded();
@@ -433,8 +437,11 @@ export async function previewBookmarkInheritance(
   const total = list.length;
   if (total === 0) return { total, failedCount: 0, samples: [] };
 
-  // 模拟重新导入写入后的书籍（cid 归一化与 replaceBookContent 落库一致）
-  const virtual: LocalBook = { ...book, chapters: assignChapterCids(nextChapters) };
+  // 模拟重新导入写入后的书籍（cid 归一化与 replaceBookContent 落库一致；
+  // 只用旧书 id + 新章节做虚拟书，旧书其余字段不参与定位）
+  const virtual: Pick<LocalBook, "chapters"> = {
+    chapters: assignChapterCids(nextChapters),
+  };
 
   let failedCount = 0;
   const samples: BookmarkInheritPreview["samples"] = [];

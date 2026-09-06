@@ -9,7 +9,7 @@ import {
   replaceBookContent,
   type BookDraft,
 } from "../lib/books";
-import type { LocalBook } from "../lib/booksTypes";
+import type { BookMeta, LocalBook } from "../lib/booksTypes";
 import {
   previewBookmarkInheritance,
   type BookmarkInheritPreview,
@@ -27,14 +27,14 @@ interface ImportButtonProps {
 }
 
 interface SameNameConflict {
-  /** 书架中已存在的同名书（重新导入的目标） */
-  existing: LocalBook;
+  /** 书架中已存在的同名书（重新导入的目标；元数据即可，正文整本被新草稿替换） */
+  existing: BookMeta;
   /** 已解析好、尚未落库的新文件草稿 */
   draft: BookDraft;
 }
 
 interface PendingRisk {
-  existing: LocalBook;
+  existing: BookMeta;
   draft: BookDraft;
   preview: BookmarkInheritPreview;
 }

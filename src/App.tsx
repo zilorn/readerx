@@ -1,4 +1,4 @@
-import { lazy, onMount, Show, createEffect } from "solid-js";
+import { lazy, onMount, onCleanup, Show, createEffect } from "solid-js";
 import type { Component } from "solid-js";
 import { Router, Route, type RouteSectionProps } from "@solidjs/router";
 import { RouteStage } from "./components/RouteStage";
@@ -51,17 +51,22 @@ const AppShell: Component<RouteSectionProps> = (props) => {
 };
 
 function App() {
-  // 尽早载入本地书库（幂等），让书架/阅读页直接消费响应式数据
+  // 尽早载入本地书库（幂等），让书架/阅读页直接消费响应式数据。
+  // 注意：这里不能阻塞首帧 —— index.tsx 的首帧只等轻量偏好，
+  // 本 effect 在首帧之后跑，书架页在数据就绪前显示加载占位。
   createEffect(() => {
     void ensureLocalBooksLoaded();
   });
 
-  // 预热三个主 Tab 页面块：切 Tab 时正文即刻可渲染，
-  // 页面切换动画（淡入淡出）能把标题栏一并淡入，而不是先空白/加载占位。
+  // 预热其它主 Tab 页面块（Discover / Settings），让切 Tab 时正文即刻可渲染、
+  // 页面切换动画（淡入淡出）不先空白。预热放到首帧交互之后（延迟执行），
+  // 避免与书架首次渲染/书库加载抢解析时间；首页自身的块由路由按需加载。
   onMount(() => {
-    void import("./pages/Bookshelf");
-    void import("./pages/Discover");
-    void import("./pages/Settings");
+    const warmupTimer = window.setTimeout(() => {
+      void import("./pages/Discover");
+      void import("./pages/Settings");
+    }, 1500);
+    onCleanup(() => window.clearTimeout(warmupTimer));
   });
 
   return (

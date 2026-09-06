@@ -4,7 +4,7 @@
  * - 纯浏览器开发环境：只使用内存 Map 降级，不写任何 WebView 持久化存储。
  */
 import { invoke, isTauri } from "@tauri-apps/api/core";
-import type { LocalBook, LocalBookChapter } from "./booksTypes";
+import { bookToMeta, type BookMeta, type LocalBook, type LocalBookChapter } from "./booksTypes";
 import type {
   BookItem,
   BookSource,
@@ -61,11 +61,25 @@ export async function removeState(key: string): Promise<void> {
   }
 }
 
-export async function listRemoteBooks(): Promise<LocalBook[]> {
+/** 书库元数据列表（章节无正文）：启动 / 书架渲染用，避免把整库正文搬进 WebView */
+export async function listRemoteBookMetas(): Promise<BookMeta[]> {
   if (!tauri) {
-    return [...memoryBooks.values()];
+    return [...memoryBooks.values()].map((book) => bookToMeta(book));
   }
-  return invoke<LocalBook[]>("readerx_book_list");
+  return invoke<BookMeta[]>("readerx_book_list_meta");
+}
+
+/** 读取单本书全文（阅读页打开时按需调用）；不存在返回 null */
+export async function getRemoteBook(id: string): Promise<LocalBook | null> {
+  if (!tauri) {
+    return memoryBooks.get(id) ?? null;
+  }
+  try {
+    return await invoke<LocalBook | null>("readerx_book_get", { id });
+  } catch (err) {
+    console.error(`[backend] 读取书籍 ${id} 失败`, err);
+    return null;
+  }
 }
 
 export async function saveRemoteBook(book: LocalBook): Promise<void> {
@@ -106,13 +120,48 @@ export async function deleteRemoteBook(id: string): Promise<void> {
   await invoke("readerx_book_delete", { id });
 }
 
+/** 单本元信息补丁入参：外层 undefined = 不改动；null = 清除（intro/cover/tags/groupId） */
+export interface BookMetaPatchInput {
+  title?: string;
+  author?: string;
+  intro?: string | null;
+  cover?: string | null;
+  tags?: string[] | null;
+  groupId?: string | null;
+}
+
+/** 只改一本书的元信息（分组 / 书名 / 封面 / 标签…）；正文留在 Rust 侧磁盘，不整本回传 */
+export async function patchRemoteBookMeta(
+  id: string,
+  patch: BookMetaPatchInput,
+): Promise<void> {
+  if (!tauri) {
+    const book = memoryBooks.get(id);
+    if (!book) return;
+    if (patch.title !== undefined) book.title = patch.title.trim() || "未命名书籍";
+    if (patch.author !== undefined) book.author = patch.author.trim() || "佚名";
+    if (patch.intro !== undefined) {
+      const intro = patch.intro?.trim();
+      book.intro = intro ? intro : undefined;
+    }
+    if (patch.cover !== undefined) book.cover = patch.cover ?? undefined;
+    if (patch.tags !== undefined) {
+      const tags = patch.tags ?? [];
+      book.tags = tags.length > 0 ? tags : undefined;
+    }
+    if (patch.groupId !== undefined) book.groupId = patch.groupId;
+    return;
+  }
+  await invoke("readerx_book_patch_meta", { id, patch });
+}
+
 export async function clearRemoteBooks(): Promise<void> {
   if (!tauri) {
     memoryBooks.clear();
     return;
   }
-  const books = await listRemoteBooks();
-  await Promise.all(books.map((book) => deleteRemoteBook(book.id)));
+  const metas = await listRemoteBookMetas();
+  await Promise.all(metas.map((meta) => deleteRemoteBook(meta.id)));
 }
 
 /** 读取随应用打包的 LICENSE 全文；仅 Tauri 环境可用，浏览器开发环境返回 null */

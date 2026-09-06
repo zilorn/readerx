@@ -1,16 +1,23 @@
 /**
- * 本地书籍仓库：
- * - 书籍数据由 Rust 后端按 id 存为 JSON 文件（应用数据目录）；
- * - 前端维护一份模块级响应式 signal，供页面同步渲染；
- * - 提供 txt（正则/字数分章）与 epub（按目录结构）两种导入解析入口。
+ * 本地书籍仓库（两级加载）：
+ * - 书库「元数据」由 Rust 后端按 id 存为 JSON 文件；书籍正文同样在文件里，
+ *   但启动 / 书架只拉「章节头 + 字数」这份轻量数据（readerx_book_list_meta）；
+ * - 单本书「全量（含正文）」只有在打开阅读页等真正需要内容时才按需取回
+ *   （readerx_book_get）并进入本模块的响应式全量缓存；
+ * - 提供 txt（正则/字数分章）与 epub（按目录结构）两种导入解析入口；
+ * - 分组 / 元信息编辑走 Rust 侧就地打补丁（readerx_book_patch_meta），
+ *   正文不整本经 IPC 传回 WebView。
  */
 import { createSignal } from "solid-js";
 import {
   clearRemoteBooks,
   deleteRemoteBook,
-  listRemoteBooks,
+  getRemoteBook,
+  listRemoteBookMetas,
+  patchRemoteBookMeta,
   saveRemoteBook,
   saveRemoteBookChapters,
+  type BookMetaPatchInput,
 } from "./backend";
 import {
   DEFAULT_CHARS_PER_CHAPTER,
@@ -21,11 +28,18 @@ import {
 import type { ChapterRule, TextSplitResult } from "./chapterRules";
 import type {
   BookFormat,
+  BookMeta,
   BookSource,
   LocalBook,
   LocalBookChapter,
 } from "./booksTypes";
-import { bookSourceOf, assignChapterCids, chapterCid, normalizeBookTags } from "./booksTypes";
+import {
+  bookSourceOf,
+  bookToMeta,
+  assignChapterCids,
+  chapterCid,
+  normalizeBookTags,
+} from "./booksTypes";
 import { parseEpubFile } from "./epub";
 import { ensureShelfEntry } from "./store";
 import { clearAllBookmarks, removeBookmarksForBook } from "./bookmarks";
@@ -53,54 +67,158 @@ export interface BookDraft {
 }
 
 // ---------------------------------------------------------------------------
-// 响应式书籍清单（null 表示尚未从后端载入）
+// 两级响应式状态：
+// - metas：书库元数据（章节只有轻量头，无正文）——书架 / 搜索 / 详情等全部页面消费；
+// - fulls：已物化的全量书（含正文）——只有打开阅读页等真正需要正文时才进入这里。
+// null 表示元数据尚未从后端载入；两者由本模块的写路径保持同步。
+// ---------------------------------------------------------------------------
 
-const [booksState, setBooksState] = createSignal<LocalBook[] | null>(null);
-let ensurePromise: Promise<void> | null = null;
+const [metasState, setMetasState] = createSignal<BookMeta[] | null>(null);
+const [fullsState, setFullsState] = createSignal<LocalBook[]>([]);
+let ensureMetaPromise: Promise<void> | null = null;
+const materializing = new Map<string, Promise<LocalBook | null>>();
 
+function sortByImportedAt<T extends { importedAt: number }>(arr: T[]): T[] {
+  return arr.sort((a, b) => b.importedAt - a.importedAt);
+}
+
+/** 把一本全量书 upsert 进「已物化」缓存（同 id 替换） */
+function upsertFull(book: LocalBook): void {
+  setFullsState((prev) => sortByImportedAt([...prev.filter((b) => b.id !== book.id), book]));
+}
+
+/** 把一本全量书（或另一个元数据对象）同步进书库元数据列表 */
+function upsertMetaFromFull(book: LocalBook): void {
+  const meta = bookToMeta(book);
+  setMetasState((prev) => {
+    if (prev === null) return null; // 元数据尚未载入时不提前建表
+    return sortByImportedAt([...prev.filter((m) => m.id !== book.id), meta]);
+  });
+}
+
+function removeFromBoth(id: string): void {
+  setMetasState((prev) => (prev === null ? prev : prev.filter((m) => m.id !== id)));
+  setFullsState((prev) => prev.filter((b) => b.id !== id));
+}
+
+/** 元数据响应式清单（书架等页面直接消费） */
+export function bookMetaList(): BookMeta[] {
+  return metasState() ?? [];
+}
+
+/** 元数据是否已就绪（书架渲染的门闩） */
+export function bookMetasReady(): boolean {
+  return metasState() !== null;
+}
+
+/** 按 id 取书库元数据 */
+export function bookMetaById(id: string): BookMeta | undefined {
+  return bookMetaList().find((book) => book.id === id);
+}
+
+/** 已物化（含正文）的响应式书缓存；只读，写入请走下方带 save 的导出函数 */
 export function localBookList(): LocalBook[] {
-  return booksState() ?? [];
+  return fullsState();
 }
 
-export function localBooksReady(): boolean {
-  return booksState() !== null;
-}
-
+/** 按 id 取「已物化」的全量书；未打开过阅读页的书不在其中，请先用 ensureLocalBookContent */
 export function localBookById(id: string): LocalBook | undefined {
-  return localBookList().find((book) => book.id === id);
+  return fullsState().find((book) => book.id === id);
 }
 
-/** 应用启动 / 页面首次需要书籍数据时调用（幂等） */
+/**
+ * 载入书库元数据（幂等，单飞）。启动 / 书架只拉轻量元数据，
+ * 正文不在此处出现——需要时由 ensureLocalBookContent 单本取回。
+ */
 export function ensureLocalBooksLoaded(): Promise<void> {
-  if (booksState() !== null) return Promise.resolve();
-  if (!ensurePromise) {
-    ensurePromise = (async () => {
+  if (metasState() !== null) return Promise.resolve();
+  if (!ensureMetaPromise) {
+    ensureMetaPromise = (async () => {
       try {
-        const all = await listRemoteBooks();
-        // 兼容旧书库：为缺失/重复 cid 的章节补齐或修正，并回写后端
-        const migrated = all.map((book) => {
-          const chapters = assignChapterCids(book.chapters);
-          const changed = chapters.some(
-            (chapter, index) => chapter.cid !== book.chapters[index]?.cid,
-          );
-          return changed ? { book: { ...book, chapters }, changed } : { book, changed };
-        });
-        for (const { book, changed } of migrated) {
-          if (changed) void saveRemoteBook(book);
-        }
-        const books = migrated.map((item) => item.book);
-        books.sort((a, b) => b.importedAt - a.importedAt);
-        setBooksState(books);
+        const metas = await listRemoteBookMetas();
+        setMetasState(sortByImportedAt(metas));
       } catch {
         /* 后端暂不可用（如纯浏览器调试）时按空书库渲染 */
-        setBooksState([]);
+        setMetasState([]);
       } finally {
-        ensurePromise = null;
+        ensureMetaPromise = null;
       }
     })();
   }
-  return ensurePromise;
+  return ensureMetaPromise;
 }
+
+/**
+ * 把某本书的「全量内容（含正文）」按需取回并进入响应式缓存。
+ * 返回该书的全量对象；书不存在 / 已被删除时返回 null。
+ * 同 id 并发调用共享同一次后端读取。
+ */
+export function ensureLocalBookContent(id: string): Promise<LocalBook | null> {
+  const cached = localBookById(id);
+  if (cached) return Promise.resolve(cached);
+  const pending = materializing.get(id);
+  if (pending) return pending;
+  const task = (async (): Promise<LocalBook | null> => {
+    await ensureLocalBooksLoaded();
+    if (!bookMetaById(id)) return null; // 元数据里已没有该书
+    try {
+      const full = await getRemoteBook(id);
+      if (!full) return null;
+      upsertFull(full);
+      upsertMetaFromFull(full);
+      return full;
+    } finally {
+      materializing.delete(id);
+    }
+  })();
+  materializing.set(id, task);
+  return task;
+}
+
+// ---------------------------------------------------------------------------
+// 元信息补丁的本地同步（patchRemoteBookMeta 成功后，把改动落到两级状态）
+// ---------------------------------------------------------------------------
+
+function applyMetaPatchLocal<T extends {
+  title: string;
+  author: string;
+  intro?: string;
+  cover?: string;
+  tags?: string[];
+  groupId?: string | null;
+}>(obj: T, patch: BookMetaPatchInput): T {
+  const next = { ...obj };
+  if (patch.title !== undefined) next.title = patch.title.trim() || "未命名书籍";
+  if (patch.author !== undefined) next.author = patch.author.trim() || "佚名";
+  if (patch.intro !== undefined) {
+    const intro = patch.intro?.trim();
+    next.intro = intro ? intro : undefined;
+  }
+  if (patch.cover !== undefined) next.cover = patch.cover ?? undefined;
+  if (patch.tags !== undefined) {
+    const tags = patch.tags ?? [];
+    next.tags = tags.length > 0 ? tags : undefined;
+  }
+  if (patch.groupId !== undefined) next.groupId = patch.groupId;
+  return next;
+}
+
+/** 书架分组 id 写入（磁盘就地打补丁 + 本地状态同步） */
+async function setBookGroupLocal(id: string, groupId: string | null): Promise<void> {
+  const meta = bookMetaById(id);
+  if (!meta) return;
+  await patchRemoteBookMeta(id, { groupId: groupId ?? null });
+  setMetasState((prev) =>
+    prev ? prev.map((m) => (m.id === id ? { ...m, groupId } : m)) : prev,
+  );
+  setFullsState((prev) =>
+    prev.map((b) => (b.id === id ? { ...b, groupId } : b)),
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 书籍写入路径：磁盘操作成功后同步两级状态
+// ---------------------------------------------------------------------------
 
 function newBookId(): string {
   return `local-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
@@ -116,6 +234,7 @@ function hueFromTitle(title: string): number {
 
 // ---------------------------------------------------------------------------
 // 文件读取与导入
+// ---------------------------------------------------------------------------
 
 function stripControlChars(text: string): string {
   return text.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "");
@@ -267,7 +386,7 @@ export async function parseEpubFileDraft(
   );
 }
 
-/** 将确认后的草稿交给 Rust 后端持久化并同步到响应式清单 */
+/** 将确认后的草稿交给 Rust 后端持久化并同步到两级响应式清单 */
 export async function persistBookDraft(
   draft: BookDraft,
   source: BookSource = "local",
@@ -289,11 +408,8 @@ export async function persistBookDraft(
     ...(source === "webdav" ? { source: "webdav" as const } : {}),
   };
   await saveRemoteBook(book);
-  setBooksState((prev) => {
-    const next = [...(prev ?? []), book];
-    next.sort((a, b) => b.importedAt - a.importedAt);
-    return next;
-  });
+  upsertMetaFromFull(book);
+  upsertFull(book);
   return book;
 }
 
@@ -304,11 +420,8 @@ export async function persistBookDraft(
 export async function addBookRecord(book: LocalBook): Promise<void> {
   await saveRemoteBook(book);
   ensureShelfEntry(book.id);
-  setBooksState((prev) => {
-    const next = [...(prev ?? []).filter((b) => b.id !== book.id), book];
-    next.sort((a, b) => b.importedAt - a.importedAt);
-    return next;
-  });
+  upsertMetaFromFull(book);
+  upsertFull(book);
 }
 
 /**
@@ -317,7 +430,8 @@ export async function addBookRecord(book: LocalBook): Promise<void> {
  */
 export async function commitBookContentUpdate(book: LocalBook): Promise<void> {
   await saveRemoteBook(book);
-  setBooksState((prev) => prev?.map((b) => (b.id === book.id ? book : b)) ?? prev);
+  upsertMetaFromFull(book);
+  upsertFull(book);
 }
 
 /**
@@ -332,7 +446,8 @@ export async function updateBookChapters(
 ): Promise<void> {
   if (updates.length === 0) return;
   await saveRemoteBookChapters(book.id, updates);
-  setBooksState((prev) => prev?.map((b) => (b.id === book.id ? book : b)) ?? prev);
+  upsertMetaFromFull(book);
+  upsertFull(book);
 }
 
 /**
@@ -341,6 +456,7 @@ export async function updateBookChapters(
  * - cover：undefined 不改动，null 清除自定义封面（回退程序化封面），
  *   data URL 则替换封面。书名 / 作者留空时回落默认值，保持全库一致；
  * - tags：undefined 不改动，空数组清除现有标签，非空数组替换标签。
+ * 磁盘侧由 Rust 就地打补丁，正文不整本传回。
  */
 export interface BookInfoPatch {
   title?: string;
@@ -351,38 +467,40 @@ export interface BookInfoPatch {
 }
 
 export async function updateBookInfo(id: string, patch: BookInfoPatch): Promise<void> {
-  const book = localBookById(id);
-  if (!book) return;
-  const next: LocalBook = { ...book };
-  if (patch.title !== undefined) next.title = patch.title.trim() || "未命名书籍";
-  if (patch.author !== undefined) next.author = patch.author.trim() || "佚名";
+  const meta = bookMetaById(id);
+  if (!meta) return;
+  const remote: BookMetaPatchInput = {};
+  if (patch.title !== undefined) remote.title = patch.title;
+  if (patch.author !== undefined) remote.author = patch.author;
   if (patch.intro !== undefined) {
     const intro = patch.intro.trim();
-    next.intro = intro || undefined;
+    remote.intro = intro ? intro : null;
   }
-  if (patch.cover !== undefined) {
-    next.cover = patch.cover ?? undefined;
-  }
+  if (patch.cover !== undefined) remote.cover = patch.cover ?? null;
   if (patch.tags !== undefined) {
     const tags = normalizeBookTags(patch.tags);
-    if (tags.length > 0) next.tags = tags;
-    else delete next.tags;
+    remote.tags = tags.length > 0 ? tags : null;
   }
-  await saveRemoteBook(next);
-  setBooksState((prev) => prev?.map((b) => (b.id === id ? next : b)) ?? prev);
+  await patchRemoteBookMeta(id, remote);
+  // 本地两级状态同步（磁盘已经落定）
+  const apply = <T,>(obj: T): T => applyMetaPatchLocal(obj as never, remote) as never as T;
+  setMetasState((prev) => (prev ? prev.map((m) => (m.id === id ? apply(m) : m)) : prev));
+  setFullsState((prev) => prev.map((b) => (b.id === id ? apply(b) : b)));
 }
 
 /** 用一份新解析出的草稿**原位替换**某本已导入书（同一 id 与书架记录）。
  * 用于「重新导入」（本地同名文件 / WebDAV 长按）：保留来源标记、分组与阅读进度，
  * 仅正文/元信息随新文件更新；书签记录因同 id 保留，由阅读时按新内容重新定位。
  * 调用方如需“书签继承”提示，可先用 previewBookmarkInheritance 预演再决定是否落库。
+ * 参数 existing 为书库元数据即可（正文整本被草稿替换，无需先物化）。
  */
 export async function replaceBookContent(
-  existing: LocalBook,
+  existing: LocalBook | BookMeta,
   draft: BookDraft,
 ): Promise<LocalBook> {
+  const base = existing as LocalBook;
   const next: LocalBook = {
-    ...existing,
+    ...base,
     title: draft.title.trim() || titleFromFileName(draft.fileName),
     author: draft.author.trim() || "佚名",
     // 文件自身不带简介（如 TXT）时保留原书简介，避免「重新导入」丢字
@@ -398,7 +516,8 @@ export async function replaceBookContent(
   };
   invalidateBookLengths(next.id);
   await saveRemoteBook(next);
-  setBooksState((prev) => prev?.map((b) => (b.id === next.id ? next : b)) ?? prev);
+  upsertMetaFromFull(next);
+  upsertFull(next);
   return next;
 }
 
@@ -417,10 +536,10 @@ export async function parseBookFile(file: File): Promise<BookDraft> {
 /**
  * 书架中与本次导入“同名”的本地书：
  * 优先 fileName 完全一致，未命中再按书名一致兜底（排除在线书，避免误匹配网络书籍）。
- * 候选均按书架现有顺序（最近导入在前）取第一本。
+ * 候选均按书架现有顺序（最近导入在前）取第一本。返回值为元数据。
  */
-export function findSameNameImportedBook(draft: BookDraft): LocalBook | undefined {
-  const candidates = localBookList().filter(
+export function findSameNameImportedBook(draft: BookDraft): BookMeta | undefined {
+  const candidates = bookMetaList().filter(
     (book) => bookSourceOf(book) !== "online",
   );
   const byFile = candidates.find((book) => book.fileName === draft.fileName);
@@ -450,38 +569,27 @@ export async function importLocalBookFile(file: File): Promise<LocalBook> {
 export async function removeLocalBook(id: string): Promise<void> {
   await deleteRemoteBook(id);
   removeBookmarksForBook(id);
-  setBooksState((prev) => prev?.filter((book) => book.id !== id) ?? prev);
+  removeFromBoth(id);
 }
 
-/** 设置本地书所属书架分组 */
+/** 设置本地书所属书架分组（磁盘就地打补丁，正文不整本传回） */
 export async function setLocalBookGroup(
   id: string,
   groupId: string | null,
 ): Promise<void> {
-  const book = localBookById(id);
-  if (!book) return;
-  const next = { ...book, groupId: groupId ?? null };
-  await saveRemoteBook(next);
-  setBooksState((prev) => prev?.map((item) => (item.id === id ? next : item)) ?? prev);
+  await setBookGroupLocal(id, groupId);
 }
 
 /** 分组删除后，把该书架内本地书退回未分组 */
 export async function clearLocalGroup(groupId: string): Promise<void> {
-  const affected = localBookList().filter((book) => book.groupId === groupId);
-  await Promise.all(
-    affected.map(async (book) => {
-      const next = { ...book, groupId: null };
-      await saveRemoteBook(next);
-      setBooksState(
-        (prev) => prev?.map((item) => (item.id === book.id ? next : item)) ?? prev,
-      );
-    }),
-  );
+  const affected = bookMetaList().filter((book) => book.groupId === groupId);
+  await Promise.all(affected.map((book) => setBookGroupLocal(book.id, null)));
 }
 
 /** 清空全部本地书籍（不可恢复，书签一并清空） */
 export async function clearLocalBooks(): Promise<void> {
   await clearRemoteBooks();
   clearAllBookmarks();
-  setBooksState([]);
+  setMetasState([]);
+  setFullsState([]);
 }

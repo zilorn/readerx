@@ -1,5 +1,5 @@
 import { Show, createEffect, createMemo, createSignal } from "solid-js";
-import { localBookById } from "../lib/books";
+import { bookMetaById } from "../lib/books";
 
 type CoverVariant = "grid" | "thumb" | "row";
 
@@ -20,7 +20,7 @@ export function BookCover(props: BookCoverProps) {
   const variant = props.variant ?? "grid";
   const [imgFailed, setImgFailed] = createSignal(false);
 
-  const book = createMemo(() => localBookById(props.bookId));
+  const book = createMemo(() => bookMetaById(props.bookId));
   const showCover = createMemo(() => {
     const b = book();
     // 有真实封面即展示（EPUB 导入提取或详情页用户设置的自定义封面）

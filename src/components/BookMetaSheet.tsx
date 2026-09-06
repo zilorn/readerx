@@ -9,7 +9,7 @@ import { updateBookInfo } from "../lib/books";
 import {
   MAX_BOOK_TAG_COUNT,
   MAX_BOOK_TAG_LENGTH,
-  type LocalBook,
+  type BookMeta,
 } from "../lib/booksTypes";
 import { fileToCoverThumb } from "../lib/coverImage";
 import { showToast } from "../lib/toast";
@@ -18,7 +18,7 @@ import { CloseIcon, ImageIcon, PlusIcon, TrashIcon } from "./icons";
 import { ScrollArea } from "./ScrollArea";
 
 interface BookMetaSheetProps {
-  book: LocalBook;
+  book: BookMeta;
   onClose: () => void;
 }
 

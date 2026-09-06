@@ -7,7 +7,7 @@ import {
   listTtsAudioCaches,
   type TtsCacheStat,
 } from "../lib/audioCache";
-import { ensureLocalBooksLoaded, localBookById } from "../lib/books";
+import { ensureLocalBooksLoaded, bookMetaById } from "../lib/books";
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -68,7 +68,7 @@ export default function TtsCachePage() {
       .finally(() => setCacheBusy(false));
   }
 
-  const bookTitle = (id: string) => localBookById(id)?.title || id;
+  const bookTitle = (id: string) => bookMetaById(id)?.title || id;
 
   return (
     <div class="page">

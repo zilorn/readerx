@@ -25,11 +25,11 @@ import {
 } from "../components/icons";
 import {
   ensureLocalBooksLoaded,
-  localBookList,
+  bookMetaList,
   replaceBookContent,
   type BookDraft,
 } from "../lib/books";
-import type { LocalBook } from "../lib/booksTypes";
+import type { BookMeta } from "../lib/booksTypes";
 import {
   previewBookmarkInheritance,
   type BookmarkInheritPreview,
@@ -73,7 +73,7 @@ let pendingBrowseSnapshot: DavBrowseSnapshot | null = null;
 
 /** “重新导入”已确认但书签继承失效：等待用户决定是否仍替换（draft 已拉取，避免二次下载） */
 interface PendingReimportRisk {
-  existing: LocalBook;
+  existing: BookMeta;
   draft: BookDraft;
   preview: BookmarkInheritPreview;
 }
@@ -145,7 +145,7 @@ function SelectableBookRow(props: {
 /** 已导入书籍的文件行：点击直接阅读本地副本，长按询问是否重新导入 */
 function ImportedBookRow(props: {
   entry: DavEntry;
-  book: LocalBook;
+  book: BookMeta;
   onOpen: (bookId: string) => void;
   onLongPress: (entry: DavEntry) => void;
 }) {
@@ -324,9 +324,9 @@ export default function WebdavImportPage() {
   );
 
   /** 远程书文件 → 本地已存在的同名书（按文件名匹配，远端有更新也识别为已导入） */
-  const importedByPath = createMemo<Record<string, LocalBook>>(() => {
-    const books = localBookList();
-    const map: Record<string, LocalBook> = {};
+  const importedByPath = createMemo<Record<string, BookMeta>>(() => {
+    const books = bookMetaList();
+    const map: Record<string, BookMeta> = {};
     for (const f of files()) {
       const hit = davEntryImportedBook(f, books);
       if (hit) map[f.path] = hit;

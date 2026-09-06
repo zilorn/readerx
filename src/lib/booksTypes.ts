@@ -40,6 +40,46 @@ export interface LocalBookChapter {
   url?: string;
 }
 
+/** 章节稳定 id，如 c0001、c0002 …（旧数据可能在载入时回填） */
+export type ChapterHead = Pick<LocalBookChapter, "cid" | "title" | "url"> & {
+  /** 章节正文镜像文本的字符数（UTF-16；仅 p/h 文本，图片不计）。书架进度/详情字数以它为口径 */
+  chars: number;
+};
+
+/** 书库元数据：LocalBook 去掉正文，章节仅保留轻量头。
+ *  应用启动只拉这份（readerx_book_list_meta），正文按需单本读取后再物化。 */
+export type BookMeta = Omit<LocalBook, "chapters"> & { chapters: ChapterHead[] };
+
+/** 章节正文“镜像文本”字符数（UTF-16）：
+ *  有结构化 blocks 时只数 p/h 文本；否则退回 paragraphs。 */
+export function chapterMirrorCharsOf(chapter: LocalBookChapter): number {
+  const blocks = chapter.blocks;
+  if (blocks && blocks.length > 0) {
+    let total = 0;
+    for (const block of blocks) {
+      if (block.kind === "p" || block.kind === "h") total += block.text?.length ?? 0;
+    }
+    return total;
+  }
+  let total = 0;
+  for (const paragraph of chapter.paragraphs) total += paragraph.length;
+  return total;
+}
+
+/** 整书 → 书库元数据（章节裁剪为轻量头） */
+export function bookToMeta(book: LocalBook): BookMeta {
+  const { chapters, ...meta } = book;
+  return {
+    ...meta,
+    chapters: chapters.map((chapter) => ({
+      cid: chapter.cid,
+      title: chapter.title,
+      ...(chapter.url ? { url: chapter.url } : {}),
+      chars: chapterMirrorCharsOf(chapter),
+    })),
+  };
+}
+
 /** 生成章节 cid：下标 0 → c0001 */
 export function chapterCid(index: number): string {
   return `c${String(index + 1).padStart(4, "0")}`;

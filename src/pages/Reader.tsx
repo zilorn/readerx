@@ -63,8 +63,8 @@ import {
 } from "../components/icons";
 import {
   ensureLocalBooksLoaded,
+  ensureLocalBookContent,
   localBookById,
-  localBooksReady,
 } from "../lib/books";
 import { withDisplayReplacements } from "../lib/textReplacements";
 import {
@@ -522,6 +522,31 @@ export default function ReaderPage() {
     void ensureLocalBooksLoaded();
   });
 
+  /**
+   * 单本正文「按需物化」状态：
+   * 启动只载书库元数据（不含正文），进入阅读页时才把当前这本书的全文取回。
+   * ready 之前正文渲染不会发生；missing = 元数据/磁盘里已无此书。
+   */
+  const [contentLoad, setContentLoad] = createSignal<"loading" | "ready" | "missing">(
+    "loading",
+  );
+  createEffect(
+    on(bookId, () => {
+      let stale = false;
+      setContentLoad("loading");
+      void (async () => {
+        await ensureLocalBooksLoaded();
+        if (stale) return;
+        const full = await ensureLocalBookContent(bookId());
+        if (stale) return;
+        setContentLoad(full ? "ready" : "missing");
+      })();
+      onCleanup(() => {
+        stale = true;
+      });
+    }),
+  );
+
   /** 书架中的原书（对象身份只随书库内容更新变化，用作「打开书」类副作用触发源） */
   const rawBook = createMemo(() => localBookById(bookId()));
   /**
@@ -862,14 +887,19 @@ export default function ReaderPage() {
     ),
   );
 
-  // 阅读区几何（分页排版依赖真实尺寸；书就绪且元素挂载后测量）
+  // 阅读区几何（分页排版依赖真实尺寸；正文就绪且元素挂载后测量）。
+  // 触发时机不能只看 rawBook 身份：书已在全量缓存中（本次会话再次打开/从阅读页返回
+  // 再进入）时，rawBook 初值即有，但此时正文字符内容还没进入「门闩后」的挂载阶段，
+  // areaRef 尚未赋值；必须等 contentLoad 转 ready（阅读区 DOM 挂载后）再量一次。
+  // 在线书逐批回写只换对象引用：届时重新量一次即可，不反复重建 ResizeObserver。
   const [area, setArea] = createSignal({ w: 0, h: 0 });
   let areaRef: HTMLDivElement | undefined;
   let areaObserver: ResizeObserver | null = null;
-  createEffect(
-    on(rawBook, () => {
-      const el = areaRef;
-      if (!el || areaObserver) return;
+  createEffect(() => {
+    const ready = contentLoad() === "ready" && !!rawBook();
+    const el = areaRef;
+    if (!ready || !el) return;
+    if (!areaObserver) {
       const measure = () => setArea({ w: el.clientWidth, h: el.clientHeight });
       measure();
       areaObserver = new ResizeObserver(measure);
@@ -878,8 +908,10 @@ export default function ReaderPage() {
         areaObserver?.disconnect();
         areaObserver = null;
       });
-    }),
-  );
+    } else {
+      setArea({ w: el.clientWidth, h: el.clientHeight });
+    }
+  });
 
   const layout = createMemo<PaginateLayout | null>(() => {
     const a = area();
@@ -2924,7 +2956,25 @@ export default function ReaderPage() {
 
   return (
     <div class="relative flex h-full min-h-0 flex-col overflow-hidden bg-bg">
-      <Show when={localBooksReady()} fallback={<LoadingScreen label="加载书籍…" />}>
+      {/* 门闩：进入阅读页后按需物化当前书全文（元数据不含正文）；缺失给「不存在」页 */}
+      <Show
+        when={book() && contentLoad() === "ready"}
+        fallback={
+          contentLoad() === "missing" ? (
+            <div class="flex flex-1 flex-col items-center justify-center gap-4 text-sm text-text-2">
+              <p>本地书籍不存在或已被删除</p>
+              <button
+                class="inline-flex items-center justify-center gap-1.5 rounded-xl bg-accent px-[22px] py-[11px] text-sm font-semibold text-on-accent shadow-lg shadow-accent/30 transition-[scale,opacity] duration-100 active:scale-[0.97] active:opacity-90"
+                onClick={goBack}
+              >
+                返回书架
+              </button>
+            </div>
+          ) : (
+            <LoadingScreen label="加载书籍…" />
+          )
+        }
+      >
         <Show
           when={book()}
           fallback={

@@ -9,7 +9,8 @@
  *   为「快照文字 + 就近唯一匹配」兜底；
  * - 整书百分比按“正文文本字符”计算：已读章节累计字符 + 当前章节内偏移。
  */
-import type { LocalBook, LocalBookChapter } from "./booksTypes";
+import type { BookMeta, LocalBook, LocalBookChapter } from "./booksTypes";
+import { chapterMirrorCharsOf } from "./booksTypes";
 import { buildTextMirror, type TextMirror } from "./bookmarks";
 import { chapterUnits } from "./pagination";
 
@@ -44,17 +45,7 @@ export function progressContextAt(text: string, offset: number): string {
 
 /** 章节正文镜像文本长度（p/h 文本按序拼接；图片不占字符） */
 export function chapterMirrorLength(chapter: LocalBookChapter): number {
-  const blocks = chapter.blocks;
-  if (blocks && blocks.length > 0) {
-    let total = 0;
-    for (const block of blocks) {
-      if (block.kind === "p" || block.kind === "h") total += block.text.length;
-    }
-    return total;
-  }
-  let total = 0;
-  for (const paragraph of chapter.paragraphs) total += paragraph.length;
-  return total;
+  return chapterMirrorCharsOf(chapter);
 }
 
 interface Lengths {
@@ -193,4 +184,113 @@ export function resolveReadingTarget(
 /** 判定一条进度是否“真正读过一点”（章节内偏移 > 0 或已翻过第 1 章） */
 export function hasReadingProgress(loc: ProgressLocator): boolean {
   return (loc?.chapter ?? 0) > 0 || (loc?.charOffset ?? 0) > 0;
+}
+
+// ---------------------------------------------------------------------------
+// 基于「书库元数据」（章节轻量头，无正文）的进度计算。
+// 书架 / 书架搜索等页面只拿得到 BookMeta，用不到正文：章节头自带每章字符数，
+// 进度百分比与「是否读完」按同一套字符口径计算，无需物化整书。
+// 正文有内容的完整书（阅读页）继续走上面的 lengthsOf / resolveReadingTarget。
+// ---------------------------------------------------------------------------
+
+interface MetaLengths {
+  /** cum[i] = 第 i 章之前全部正文的字符数（cum[0]=0，cum[n]=total） */
+  cum: number[];
+  total: number;
+}
+
+const metaLengthsCache = new WeakMap<BookMeta, MetaLengths>();
+
+function metaLengthsOf(meta: BookMeta): MetaLengths {
+  const cached = metaLengthsCache.get(meta);
+  if (cached) return cached;
+  const chapters = meta.chapters;
+  const cum: number[] = new Array(chapters.length + 1);
+  cum[0] = 0;
+  for (let i = 0; i < chapters.length; i++) {
+    cum[i + 1] = cum[i] + (chapters[i].chars || 0);
+  }
+  const entry: MetaLengths = { cum, total: cum[chapters.length] };
+  metaLengthsCache.set(meta, entry);
+  return entry;
+}
+
+/** 元数据版整书阅读百分比（0–100，字符口径；与完整书 readingPercent 同公式） */
+export function metaReadingPercent(
+  meta: BookMeta,
+  chapterIndex: number,
+  charOffset: number | null | undefined,
+): number {
+  const chapters = meta.chapters;
+  const { cum, total } = metaLengthsOf(meta);
+  if (total <= 0 || chapters.length === 0) return 0;
+  const ci = Math.min(chapters.length - 1, Math.max(0, Math.floor(chapterIndex) || 0));
+  const chapterLen = cum[ci + 1] - cum[ci];
+  const inside =
+    Number.isFinite(charOffset as number) && (charOffset as number) > 0
+      ? Math.min(chapterLen, Math.max(0, Math.floor(charOffset as number)))
+      : 0;
+  return Math.min(100, ((cum[ci] + inside) / total) * 100);
+}
+
+/**
+ * 元数据版阅读目标解析（书架展示用）：
+ * 只做「cid 或下标 → 章节 + 偏移钳制」，不做正文漂移校验（展示口径足够）。
+ */
+export function metaResolveReadingTarget(
+  meta: BookMeta,
+  loc: ProgressLocator,
+): ResolvedReadingTarget | null {
+  const chapters = meta.chapters;
+  if (!loc || chapters.length === 0) return null;
+  let chapterIndex = loc.chapterCid
+    ? chapters.findIndex((chapter) => chapter.cid === loc.chapterCid)
+    : -1;
+  if (chapterIndex < 0) {
+    chapterIndex = Math.min(chapters.length - 1, Math.max(0, Math.floor(loc.chapter) || 0));
+  }
+  const chapterChars = chapters[chapterIndex].chars || 0;
+  const rawOffset =
+    Number.isFinite(loc.charOffset as number) && (loc.charOffset as number) >= 0
+      ? Math.floor(loc.charOffset as number)
+      : null;
+  if (rawOffset === null) {
+    return {
+      chapterIndex,
+      chapterCid: chapters[chapterIndex].cid,
+      charOffset: 0,
+      certain: true,
+    };
+  }
+  return {
+    chapterIndex,
+    chapterCid: chapters[chapterIndex].cid,
+    charOffset: Math.min(chapterChars, rawOffset),
+    certain: true,
+  };
+}
+
+/**
+ * 书架卡片进度（与旧整书版 cardProgress 同一口径）：
+ * 返回「是否有进度 / 是否读完 / 百分比」；读完需读到末章且 >=99.5%。
+ */
+export function metaCardStatus(
+  meta: BookMeta,
+  loc: ProgressLocator,
+): { hasRead: boolean; finished: boolean; percent: number } {
+  const hasRead = hasReadingProgress(loc);
+  const target = metaResolveReadingTarget(meta, loc);
+  const percent = Math.round(
+    metaReadingPercent(
+      meta,
+      target?.chapterIndex ?? loc.chapter,
+      target?.charOffset ?? null,
+    ),
+  );
+  const finished =
+    hasRead &&
+    target !== null &&
+    target.chapterIndex + 1 >= meta.chapters.length &&
+    percent >= 99.5;
+  return { hasRead, finished, percent: Math.max(1, Math.min(100, percent)) };
 }

@@ -3,7 +3,9 @@
 //! - 本地书籍按 id 存为独立 JSON 文件。
 //! 全部为同步磁盘 I/O，仅对 `commands` 暴露；WebView 侧只通过 command 访问。
 
-use crate::models::{BookChapterPatch, BookSource, LocalBook, TtsCacheStat};
+use crate::models::{
+    BookChapterPatch, BookMeta, BookSource, ChapterHead, LocalBook, LocalBookChapter, TtsCacheStat,
+};
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -125,7 +127,66 @@ pub(crate) fn put_book_chapters(
     put_book(app, &book)
 }
 
-pub(crate) fn list_books(app: &AppHandle) -> Result<Vec<LocalBook>, String> {
+/// 章节正文镜像字符数（UTF-16 口径，与前端 chapterMirrorLength 一致）：
+/// 有结构化 blocks 时只统计 p/h 文本；否则退回首段文本统计。
+/// 书架进度 / 详情字数都以它为口径，保证与原「整书字符」算法吻合。
+fn chapter_mirror_chars(chapter: &LocalBookChapter) -> u64 {
+    let mut total: u64 = 0;
+    match &chapter.blocks {
+        Some(blocks) if !blocks.is_empty() => {
+            for block in blocks {
+                if block.kind == "p" || block.kind == "h" {
+                    if let Some(text) = &block.text {
+                        total += text.encode_utf16().count() as u64;
+                    }
+                }
+            }
+        }
+        _ => {
+            for paragraph in &chapter.paragraphs {
+                total += paragraph.encode_utf16().count() as u64;
+            }
+        }
+    }
+    total
+}
+
+/// 把整书（含正文）裁剪为书库元数据（章节仅留轻量头）。
+/// 仅在「列表 / 单本已全量在内存」时调用；不做磁盘 I/O。
+fn book_to_meta(book: &LocalBook) -> BookMeta {
+    BookMeta {
+        id: book.id.clone(),
+        title: book.title.clone(),
+        author: book.author.clone(),
+        intro: book.intro.clone(),
+        format: book.format.clone(),
+        file_name: book.file_name.clone(),
+        size: book.size,
+        imported_at: book.imported_at,
+        hue: book.hue,
+        split_desc: book.split_desc.clone(),
+        cover: book.cover.clone(),
+        chapters: book
+            .chapters
+            .iter()
+            .map(|chapter| ChapterHead {
+                cid: chapter.cid.clone(),
+                title: chapter.title.clone(),
+                url: chapter.url.clone(),
+                chars: chapter_mirror_chars(chapter),
+            })
+            .collect(),
+        group_id: book.group_id.clone(),
+        source: book.source.clone(),
+        book_source_id: book.book_source_id.clone(),
+        book_url: book.book_url.clone(),
+        tags: book.tags.clone(),
+    }
+}
+
+/// 书库元数据列表（不含任何章节正文）：应用启动 / 书架只拉这一份，
+/// 避免把每本书的全文经 IPC 搬到 WebView（含在线书内嵌的 data URL 大图）。
+pub(crate) fn list_book_meta(app: &AppHandle) -> Result<Vec<BookMeta>, String> {
     let dir = ensure_books_dir(app)?;
     let mut books = Vec::new();
     let entries = fs::read_dir(&dir).map_err(|e| format!("读取书库失败: {e}"))?;
@@ -136,12 +197,51 @@ pub(crate) fn list_books(app: &AppHandle) -> Result<Vec<LocalBook>, String> {
         }
         if let Ok(text) = fs::read_to_string(&path) {
             if let Ok(book) = serde_json::from_str::<LocalBook>(&text) {
-                books.push(book);
+                books.push(book_to_meta(&book));
             }
         }
     }
     books.sort_by_key(|book| std::cmp::Reverse(book.imported_at));
     Ok(books)
+}
+
+/// 读取单本书（含章节正文）。文件缺失返回 Ok(None)；阅读页打开时按需调用。
+pub(crate) fn get_book(app: &AppHandle, id: &str) -> Result<Option<LocalBook>, String> {
+    if !valid_component(id) {
+        return Err("非法的书籍 id".to_string());
+    }
+    let path = ensure_books_dir(app)?.join(format!("{id}.json"));
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = fs::read_to_string(&path).map_err(|e| format!("读取书籍失败: {e}"))?;
+    let book = serde_json::from_str::<LocalBook>(&text).map_err(|e| format!("解析书籍失败: {e}"))?;
+    Ok(Some(book))
+}
+
+/// 给某本书打「元信息补丁」（分组 / 书名 / 封面 / 标签…）。
+/// 正文整体保留在磁盘文件里：只在 Rust 侧读回、改字段、写回，不经过 IPC 传全文。
+/// 没有任何字段需要改动（changed=false）时也返回 Ok，不发不必要的写盘。
+pub(crate) fn patch_book_meta(
+    app: &AppHandle,
+    id: &str,
+    patch: &crate::models::BookMetaPatch,
+) -> Result<(), String> {
+    if !valid_component(id) {
+        return Err("非法的书籍 id".to_string());
+    }
+    let dir = ensure_books_dir(app)?;
+    let path = dir.join(format!("{id}.json"));
+    if !path.exists() {
+        return Err("书籍不存在".to_string());
+    }
+    let text = fs::read_to_string(&path).map_err(|e| format!("读取书籍失败: {e}"))?;
+    let mut book: LocalBook =
+        serde_json::from_str(&text).map_err(|e| format!("解析书籍失败: {e}"))?;
+    if patch.apply_to(&mut book) {
+        put_book(app, &book)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn delete_book(app: &AppHandle, id: &str) -> Result<(), String> {

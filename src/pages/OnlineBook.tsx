@@ -2,7 +2,7 @@ import { createMemo, createSignal, Show } from "solid-js";
 import { useNavigate, useParams } from "@solidjs/router";
 import { PageHeader } from "../components/PageHeader";
 import { BookIcon, RefreshIcon, SourceIcon } from "../components/icons";
-import { localBookList } from "../lib/books";
+import { bookMetaList } from "../lib/books";
 import {
   addOnlineBookToShelf,
   fetchBookToc,
@@ -31,7 +31,7 @@ export default function OnlineBookPage() {
     const p = pick();
     if (!p) return null;
     return (
-      localBookList().find(
+      bookMetaList().find(
         (b) => b.bookSourceId === p.source.id && b.bookUrl === p.item.bookUrl,
       ) ?? null
     );

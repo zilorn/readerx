@@ -89,12 +89,138 @@ pub struct LocalBook {
     pub tags: Option<Vec<String>>,
 }
 
+/// 章节「轻量头」：书库列表 / 书架 / 目录进度所需的章节信息，不含正文。
+/// chars 为章节正文镜像字符数（UTF-16 口径，与前端 string.length 一致），
+/// 用于书架进度百分比与详情「字数」统计，避免启动时把全文搬运进 WebView。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChapterHead {
+    pub cid: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    pub chars: u64,
+}
+
+/// 书库元数据（不含章节正文）：
+/// 与 LocalBook 字段同构，仅 chapters 替换为轻量头。启动只拉这份，正文按需取单本。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BookMeta {
+    pub id: String,
+    pub title: String,
+    pub author: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intro: Option<String>,
+    pub format: String,
+    pub file_name: String,
+    pub size: u64,
+    pub imported_at: u64,
+    pub hue: u32,
+    pub split_desc: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cover: Option<String>,
+    pub chapters: Vec<ChapterHead>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub book_source_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub book_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+}
+
 /// 一次「只回写单章正文」的下标 + 章节数据（在线书逐批下载用）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BookChapterPatch {
     pub index: usize,
     pub chapter: LocalBookChapter,
+}
+
+/// 书籍「元信息补丁」（书架分组 / 详情页编辑用）：
+/// 只改书文件里的元信息字段，正文整体保留在磁盘，不经过 IPC 传回 WebView。
+/// 外层 Option 缺省 = 不改动；内层 null = 清除（intro / cover / tags / groupId）。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct BookMetaPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intro: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cover: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Option<Vec<String>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<Option<String>>,
+}
+
+impl BookMetaPatch {
+    /// 应用到整书（只动本补丁涉及字段；返回值表示是否有任何字段被改动）。
+    pub fn apply_to(&self, book: &mut LocalBook) -> bool {
+        let mut changed = false;
+        if let Some(title) = &self.title {
+            let title = title.trim().to_string();
+            let title = if title.is_empty() {
+                "未命名书籍".to_string()
+            } else {
+                title
+            };
+            if book.title != title {
+                book.title = title;
+                changed = true;
+            }
+        }
+        if let Some(author) = &self.author {
+            let author = author.trim().to_string();
+            let author = if author.is_empty() { "佚名".to_string() } else { author };
+            if book.author != author {
+                book.author = author;
+                changed = true;
+            }
+        }
+        if let Some(intro) = &self.intro {
+            let next = intro.as_deref().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+            let next = next.unwrap_or_default();
+            let prev = book.intro.clone().unwrap_or_default();
+            if prev != next {
+                book.intro = if next.is_empty() { None } else { Some(next) };
+                changed = true;
+            }
+        }
+        if let Some(cover) = &self.cover {
+            let prev = book.cover.clone();
+            let next = cover.clone().unwrap_or_default();
+            let prev = prev.unwrap_or_default();
+            if prev != next {
+                book.cover = if next.is_empty() { None } else { Some(next) };
+                changed = true;
+            }
+        }
+        if let Some(tags) = &self.tags {
+            let next = tags.clone().unwrap_or_default();
+            let prev = book.tags.clone().unwrap_or_default();
+            if prev != next {
+                book.tags = if next.is_empty() { None } else { Some(next) };
+                changed = true;
+            }
+        }
+        if let Some(group_id) = &self.group_id {
+            let prev = book.group_id.clone();
+            let next = group_id.clone();
+            if prev != next {
+                book.group_id = next;
+                changed = true;
+            }
+        }
+        changed
+    }
 }
 
 // ---------------------------------------------------------------------------
