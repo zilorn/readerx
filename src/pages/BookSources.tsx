@@ -2,9 +2,9 @@ import { For, Show, createEffect, createMemo, createSignal } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 import { PageHeader } from "../components/PageHeader";
 import {
+  ClipboardIcon,
   CloseIcon,
   DownloadIcon,
-  FolderIcon,
   LinkIcon,
   PlusIcon,
   SourceIcon,
@@ -39,13 +39,17 @@ import { lastSourceGroupFilter, rememberSourceGroupFilter } from "../lib/store";
 import { getRemoteSource, saveRemoteSource } from "../lib/backend";
 import type { BookSource } from "../lib/bookSourcesTypes";
 import { showToast } from "../lib/toast";
-import { ScrollArea } from "../components/ScrollArea";
-import { ToggleSwitch } from "../components/ToggleSwitch";
 import { SourceGroupChips, sourceGroupChips } from "../components/SourceGroupChips";
 import { SourceGroupPicker } from "../components/SourceGroupPicker";
 import { SourceGroupManagerSheet } from "../components/SourceGroupManager";
 import { BookSourceRow } from "../components/BookSourceRow";
 import { SourceSelectionBar } from "../components/SourceSelectionBar";
+import { SourceImportConfirmSheet } from "../components/SourceImportConfirmSheet";
+import {
+  SourcePasteImportSheet,
+  looksLikeSourceUrl,
+  type PasteImportResult,
+} from "../components/SourcePasteImportSheet";
 
 /**
  * 书源管理：列表 / 新建 / 导入导出 / 删除
@@ -70,6 +74,8 @@ export default function BookSourcesPage() {
   const [urlInput, setUrlInput] = createSignal("");
   const [urlBusy, setUrlBusy] = createSignal(false);
   const [urlError, setUrlError] = createSignal("");
+  /** 粘贴导入（剪贴板 / 手输 JSON 或网址）：抽屉开合 */
+  const [pasteDialog, setPasteDialog] = createSignal(false);
   /** 多选：长按书源行进入；选中项跨筛选保留，批量操作进行中忽略重复触发 */
   const [selecting, setSelecting] = createSignal(false);
   const [selectedIds, setSelectedIds] = createSignal<string[]>([]);
@@ -254,18 +260,6 @@ export default function BookSourcesPage() {
     });
   }
 
-  /** 去掉协议与末尾斜杠的站点缩写，列表与覆盖行共用 */
-  function siteLabel(url: string): string {
-    return url.replace(/^https?:\/\//, "").replace(/\/+$/, "");
-  }
-
-  /** 当前导入计划中实际会执行的覆盖数（扣除被跳过的项） */
-  const activeOverwriteCount = () => {
-    const plan = confirmPlan();
-    if (!plan) return 0;
-    return plan.overwrite.length - skippedOverwrites().size;
-  };
-
   function goBack() {
     if (window.history.length > 1) navigate(-1);
     else navigate("/discover");
@@ -292,16 +286,41 @@ export default function BookSourcesPage() {
     input.value = "";
   }
 
-  function onPasteImport() {
-    void (async () => {
-      const text = await navigator.clipboard.readText().catch(() => "");
-      if (!text) {
-        showToast("剪贴板没有可导入的内容", true);
-        return;
+  /** 粘贴导入入口：与文件 / 网址导入并列，不必先有文件或网址 */
+  function openPasteImport() {
+    setConfirmPlan(null);
+    setSkippedOverwrites(new Set<number>());
+    void bootstrap().then(() => setPasteDialog(true));
+  }
+
+  function closePasteImport() {
+    setPasteDialog(false);
+  }
+
+  /**
+   * 粘贴导入的提交：内容是指向书源 JSON 的网址就走网络拉取，否则直接按 JSON 解析。
+   * 两者都汇入同一条「确认导入」流程；失败原因回给抽屉就地提示。
+   */
+  async function submitPastedImport(text: string): Promise<PasteImportResult> {
+    await bootstrap();
+    try {
+      const plan = looksLikeSourceUrl(text)
+        ? await planBookSourceNetworkImport(text)
+        : planBookSourceImport(text);
+      if (plan.create.length + plan.overwrite.length === 0) {
+        const issue = plan.issues[0];
+        return {
+          ok: false,
+          message: issue
+            ? `未识别到书源：${issue.message}`
+            : "没有识别到可导入的书源",
+        };
       }
-      await bootstrap();
-      presentImportPlan(planBookSourceImport(text));
-    })();
+      presentImportPlan(plan);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, message: err instanceof Error ? err.message : String(err) };
+    }
   }
 
   function openUrlImport() {
@@ -449,6 +468,13 @@ export default function BookSourcesPage() {
                   </button>
                   <button
                     class="grid h-10 w-10 place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
+                    aria-label="粘贴导入"
+                    onClick={openPasteImport}
+                  >
+                    <ClipboardIcon size={21} />
+                  </button>
+                  <button
+                    class="grid h-10 w-10 place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
                     aria-label="从网址导入"
                     onClick={openUrlImport}
                   >
@@ -531,6 +557,13 @@ export default function BookSourcesPage() {
                     >
                       <PlusIcon size={16} />
                       新建
+                    </button>
+                    <button
+                      class="inline-flex items-center gap-1.5 rounded-xl bg-surface-2 px-4 py-2.5 text-[13px] font-semibold text-text-2 active:scale-[0.97]"
+                      onClick={openPasteImport}
+                    >
+                      <ClipboardIcon size={16} />
+                      粘贴导入
                     </button>
                     <button
                       class="inline-flex items-center gap-1.5 rounded-xl bg-surface-2 px-4 py-2.5 text-[13px] font-semibold text-text-2 active:scale-[0.97]"
@@ -704,132 +737,29 @@ export default function BookSourcesPage() {
         </div>
       </Show>
 
-      {/* 导入确认（含免责声明） */}
-      <Show when={confirmPlan() !== null}>
-        <div
-          class="fixed inset-0 z-40 animate-sheet-fade bg-black/45 backdrop-blur-[2px]"
-          onClick={closeImportPlan}
+      {/* 粘贴导入：剪贴板 / 手输 JSON 或 JSON 网址 */}
+      <Show when={pasteDialog()}>
+        <SourcePasteImportSheet
+          detectUrl={looksLikeSourceUrl}
+          onSubmit={submitPastedImport}
+          onClose={closePasteImport}
         />
-        <div
-          class="fixed inset-x-0 bottom-0 z-[41] mx-auto flex max-h-[78%] max-w-[480px] animate-sheet-up flex-col overflow-hidden rounded-t-[16px] bg-surface shadow-[0_-10px_34px_rgb(0_0_0/0.22)]"
-          role="dialog"
-          aria-label="导入书源"
-        >
-          <div class="flex flex-none items-center gap-2 border-b border-border px-4 py-3">
-            <span class="text-[15px] font-bold">导入书源</span>
-            <span class="flex-1 text-xs text-text-3">
-              {confirmPlan()!.create.length} 新增 · {activeOverwriteCount()} 覆盖
-            </span>
-            <button
-              class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 active:bg-surface-2"
-              aria-label="关闭"
-              onClick={closeImportPlan}
-            >
-              <CloseIcon />
-            </button>
-          </div>
-          <ScrollArea
-            class="min-h-0 flex-1"
-            contentClass="space-y-2.5 px-4 py-4"
-          >
-            <p class="rounded-[12px] bg-surface-2 px-3.5 py-3 text-[12px] leading-[1.7] text-text-2">
-              社区/第三方制作的书源与 ReaderX 及其作者无关，作者未参与任何书源制作。书源 JS
-              会在本地沙箱执行，但作者无法保证其安全性——仅导入可信来源。
-            </p>
-            <Show when={confirmPlan()!.issues.length > 0}>
-              <p class="rounded-[10px] bg-danger-weak px-3 py-2 text-[11.5px] leading-[1.5] text-danger">
-                跳过 {confirmPlan()!.issues.length} 条无法解析的条目：
-                {confirmPlan()!.issues
-                  .slice(0, 3)
-                  .map((i) => `#${i.index} ${i.message}`)
-                  .join("；")}
-              </p>
-            </Show>
-            {/* 与本机重复（同名 + 同站点）的书源：可逐条关闭覆盖，保留本机版本 */}
-            <Show when={confirmPlan()!.overwrite.length > 0}>
-              <div class="overflow-hidden rounded-[12px] border border-border bg-bg">
-                <p class="border-b border-border bg-surface-2/60 px-3.5 py-2 text-[11.5px] font-semibold text-text-3">
-                  与本机重复的书源（同名 · 同站点），默认用导入内容覆盖
-                </p>
-                <div class="divide-y divide-border">
-                  <For each={confirmPlan()!.overwrite}>
-                    {(item, index) => (
-                      <div class="flex items-center gap-3 px-3.5 py-2.5">
-                        <span class="flex min-w-0 flex-1 flex-col gap-0.5">
-                          <span class="truncate text-[13px] font-medium text-text-2">
-                            {item.entry.source.name}
-                          </span>
-                          <span class="truncate text-[11px] text-text-3">
-                            {siteLabel(item.entry.source.bookSourceUrl)}
-                          </span>
-                        </span>
-                        <span class="flex flex-none items-center gap-2">
-                          <span class="text-[11px] font-semibold tabular-nums text-text-3">
-                            {skippedOverwrites().has(index()) ? "跳过" : "覆盖"}
-                          </span>
-                          <ToggleSwitch
-                            on={!skippedOverwrites().has(index())}
-                            label={`覆盖书源 ${item.entry.source.name}`}
-                            onChange={() => toggleOverwrite(index())}
-                          />
-                        </span>
-                      </div>
-                    )}
-                  </For>
-                </div>
-              </div>
-            </Show>
-            {/* 导入内容携带的分组：可整体关闭（关闭后新导书源落未分组） */}
-            <Show when={confirmPlan()!.groups.length > 0}>
-              <div class="overflow-hidden rounded-[12px] border border-border bg-bg">
-                <div class="flex items-center gap-2 border-b border-border bg-surface-2/60 px-3.5 py-2">
-                  <span class="flex-1 text-[11.5px] font-semibold text-text-3">
-                    导入内容里的分组
-                  </span>
-                  <span class="text-[11px] font-semibold tabular-nums text-text-3">
-                    {importGroups() ? "归入分组" : "未分组"}
-                  </span>
-                  <ToggleSwitch
-                    on={importGroups()}
-                    label="按分组名导入分组"
-                    onChange={() => setImportGroups(!importGroups())}
-                  />
-                </div>
-                <div class="divide-y divide-border">
-                  <For each={confirmPlan()!.groups}>
-                    {(group) => (
-                      <div class="flex items-center gap-2.5 px-3.5 py-2">
-                        <FolderIcon size={14} class="flex-none text-text-3" />
-                        <span class="min-w-0 flex-1 truncate text-[12.5px] text-text-2">
-                          {group.name}
-                        </span>
-                        <span class="flex-none text-[11px] tabular-nums text-text-3">
-                          {group.count} 个 · {group.existing ? "已有" : "新建"}
-                        </span>
-                      </div>
-                    )}
-                  </For>
-                </div>
-              </div>
-            </Show>
-            <button
-              class="mt-2 inline-flex w-full items-center justify-center gap-1.5 rounded-xl bg-accent px-4 py-3 text-[14px] font-semibold text-on-accent active:scale-[0.98] disabled:pointer-events-none disabled:opacity-50"
-              disabled={confirmPlan()!.create.length + activeOverwriteCount() === 0}
-              onClick={() => void applyImport()}
-            >
-              仍要导入
-            </button>
-            <p class="text-center text-[11px] text-text-3">
-              或{" "}
-              <button
-                class="text-accent underline"
-                onClick={() => void onPasteImport()}
-              >
-                从剪贴板粘贴导入
-              </button>
-            </p>
-          </ScrollArea>
-        </div>
+      </Show>
+
+      {/* 导入确认（含免责声明） */}
+      <Show when={confirmPlan()}>
+        {(plan) => (
+          <SourceImportConfirmSheet
+            plan={plan()}
+            skipped={skippedOverwrites()}
+            importGroups={importGroups()}
+            onToggleOverwrite={toggleOverwrite}
+            onToggleImportGroups={() => setImportGroups(!importGroups())}
+            onApply={() => void applyImport()}
+            onClose={closeImportPlan}
+            onPasteImport={openPasteImport}
+          />
+        )}
       </Show>
     </div>
   );
