@@ -7,16 +7,33 @@
 
 use crate::models::BookSource;
 use crate::webview_login;
+use aes_gcm::aead::{AeadInPlace, KeyInit};
+use aes_gcm::{Aes256Gcm, Nonce};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
-use md5::{Digest as _, Md5};
+use digest::Digest;
+use hmac::{Hmac, Mac};
+use md5::Md5;
 use scraper::{ElementRef, Html, Selector};
 use serde_json::{json, Map, Value};
 use sha1::Sha1;
+use sha2::Sha256;
 use std::collections::HashMap;
 use std::io::Read;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
+
+/// AES-256 密钥长度（字节）
+const AES_GCM_KEY_LEN: usize = 32;
+/// AES-GCM IV 长度（字节，GCM 推荐值）
+const AES_GCM_IV_LEN: usize = 12;
+/// AES-GCM 认证标签长度（字节）
+const AES_GCM_TAG_LEN: usize = 16;
+
+/// HMAC 实例（RFC 2104；三种摘要都走同一套收尾逻辑）
+type HmacMd5 = Hmac<Md5>;
+type HmacSha1 = Hmac<Sha1>;
+type HmacSha256 = Hmac<Sha256>;
 
 /// 响应体读取上限（32 MiB），超限截断
 pub const BODY_LIMIT: u64 = 32 * 1024 * 1024;
@@ -1189,18 +1206,58 @@ pub(crate) fn sleep_ms(ms: u64) {
     std::thread::sleep(Duration::from_millis(ms));
 }
 
-pub(crate) fn base64_encode(text: &str) -> String {
-    B64.encode(text.as_bytes())
+// ---------------------------------------------------------------------------
+// 编码 / 摘要 / HMAC / AES-256-GCM（书源 JS 的 base64 与 cryptoUtil）
+//
+// 编码契约（见 docs/book-source-api.md）：
+// - data 一律按 **UTF-8 文本**取字节；要喂二进制就在 JS 侧用 `base64.decode` /
+//   `cryptoUtil.hexDecode` 转成字符串再传进来（1 字节 = 1 字符，不丢真）；
+// - key / iv 字符串按 **base64 优先**解析（与密文同一套编码，可原样回传），
+//   解不出正确长度时退回 UTF-8 字面量（口令型写法，如 32 个 0）。十六进制密钥
+//   请用 `cryptoUtil.hexDecode` 转换 —— hex 不会被当成 base64，但会让 32 字符的
+//   hex 串被误读成 24 字节，故不做隐式兼容；
+// - 摘要 / HMAC 默认小写 hex 输出（可选 base64），加解密默认 base64 输出。
+// ---------------------------------------------------------------------------
+
+/// `base64` 包对非规范输入报错，而各语言宽松解码的口径并不一致；这里先归一化：
+/// 去空白、`-`/`_` → `+`/`/`、补回省略的 `=`；真正非法的字符仍交由解码器报错。
+fn normalized_b64(text: &str) -> String {
+    let cleaned: String = text
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace())
+        .map(|c| match c {
+            '-' => '+',
+            '_' => '/',
+            other => other,
+        })
+        .collect();
+    let body_len = cleaned.trim_end_matches('=').len();
+    let mut out = cleaned;
+    out.truncate(body_len);
+    for _ in 0..(4 - body_len % 4) % 4 {
+        out.push('=');
+    }
+    out
 }
 
-pub(crate) fn base64_decode(text: &str) -> Result<String, String> {
-    let bytes = B64
-        .decode(text.trim().as_bytes())
-        .map_err(|e| format!("base64 解码失败: {e}"))?;
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
+fn b64_decode(text: &str, what: &str) -> Result<Vec<u8>, String> {
+    B64.decode(normalized_b64(text).as_bytes())
+        .map_err(|e| format!("{what}不是合法的 base64: {e}"))
 }
 
-fn hex_digest(bytes: &[u8]) -> String {
+/// 归一化后解码、再重新编码，结果与归一化输入逐字符相同才算「真 base64」。
+/// 这一步挡的是 `key` / `iv` 的歧义输入：`"0123456789abcdef0123456789abcdef"`
+/// （32 字节口令）归一化后也能被解出 24 字节，宽松解码会让它静默变成另一把密钥；
+/// 真正的 base64（重新编码后与输入一致、或仅补了省略的 `=`）仍原样通过。
+fn is_canonical_b64(text: &str) -> bool {
+    let want = normalized_b64(text);
+    match B64.decode(want.as_bytes()) {
+        Ok(bytes) => B64.encode(&bytes) == want,
+        Err(_) => false,
+    }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for b in bytes {
         out.push_str(&format!("{b:02x}"));
@@ -1208,16 +1265,328 @@ fn hex_digest(bytes: &[u8]) -> String {
     out
 }
 
+/// 十六进制解码（容忍空白 / 冒号分隔 / 大小写 / `0x` 前缀，奇数字节或非 hex 报错）
+fn hex_decode(text: &str) -> Result<Vec<u8>, String> {
+    let cleaned: String = text
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace() && *c != ':' && *c != '-')
+        .collect();
+    let cleaned = cleaned
+        .strip_prefix("0x")
+        .or_else(|| cleaned.strip_prefix("0X"))
+        .unwrap_or(&cleaned);
+    if cleaned.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !cleaned.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("十六进制字符串含非 0-9a-f 字符".to_string());
+    }
+    if !cleaned.len().is_multiple_of(2) {
+        return Err("十六进制字符串长度为奇数".to_string());
+    }
+    let mut out = Vec::with_capacity(cleaned.len() / 2);
+    let bytes = cleaned.as_bytes();
+    for pair in bytes.chunks(2) {
+        let s = std::str::from_utf8(pair).map_err(|_| "十六进制字符串非法".to_string())?;
+        out.push(u8::from_str_radix(s, 16).map_err(|e| format!("十六进制解析失败: {e}"))?);
+    }
+    Ok(out)
+}
+
+/// 输出编码（摘要 / HMAC / 加解密共用）：默认小写 hex，可选 base64
+fn encode_bytes(bytes: &[u8], encoding: Option<&str>) -> Result<String, String> {
+    match encoding.unwrap_or("hex") {
+        "hex" => Ok(hex_encode(bytes)),
+        "base64" => Ok(B64.encode(bytes)),
+        other => Err(format!("不支持的编码「{other}」（可用 hex / base64）")),
+    }
+}
+
+/// 摘要 / HMAC 的输出编码：缺省 hex，空串也按缺省处理
+fn digest_encoding(text: &str) -> Result<&'static str, String> {
+    let text = text.trim();
+    let text = if text.is_empty() { "hex" } else { text };
+    match text {
+        "hex" => Ok("hex"),
+        "base64" => Ok("base64"),
+        other => Err(format!("不支持的编码「{other}」（可用 hex / base64）")),
+    }
+}
+
+/// key / iv 取字节，按 **字节数** 精确匹配（不做静默填充 / 截断）。
+/// 与密文字段同一套判据：base64（含 `+` `/` `=` 的真 base64，见 [`is_canonical_b64`]）→
+/// 十六进制（`cipher.keyHex` 这类）→ UTF-8 字面量（`"0".repeat(32)`），
+/// 取第一个正好 `want` 字节的解释；三种都对不上才报错并列出各自解出的字节数。
+fn key_bytes(text: &str, want: usize, what: &str) -> Result<Vec<u8>, String> {
+    let as_b64 = if is_canonical_b64(text) {
+        b64_decode(text, what).ok()
+    } else {
+        None
+    };
+    if let Some(bytes) = as_b64.as_ref() {
+        if bytes.len() == want {
+            return Ok(bytes.clone());
+        }
+    }
+    let as_hex = hex_decode(text).ok();
+    if let Some(bytes) = as_hex.as_ref() {
+        if bytes.len() == want {
+            return Ok(bytes.clone());
+        }
+    }
+    let raw = text.as_bytes();
+    if raw.len() == want {
+        return Ok(raw.to_vec());
+    }
+    let mut seen: Vec<String> = Vec::new();
+    if let Some(bytes) = as_b64.as_ref() {
+        seen.push(format!("base64 解出 {} 字节", bytes.len()));
+    }
+    if let Some(bytes) = as_hex.as_ref() {
+        seen.push(format!("hex 解出 {} 字节", bytes.len()));
+    }
+    seen.push(format!("UTF-8 文本 {} 字节", raw.len()));
+    Err(format!(
+        "{what}长度不对：需要 {want} 字节；当前 {} 字符（{}）",
+        text.chars().count(),
+        seen.join("，")
+    ))
+}
+
+/// 随机 IV（12 字节，AES-GCM 推荐长度）
+fn random_iv() -> Result<[u8; AES_GCM_IV_LEN], String> {
+    let mut iv = [0u8; AES_GCM_IV_LEN];
+    getrandom::getrandom(&mut iv).map_err(|e| format!("生成随机 IV 失败: {e}"))?;
+    Ok(iv)
+}
+
+/// 不含 iv / aad 的 aesGcmEncrypt 参数错误提示
+const AES_OPTS_HINT: &str =
+    "参数需为对象：{ data, key, iv?, aad?, encoding? }";
+
+/// 字节 → JS 字符串：每个字节映射成一个 U+0000–U+00FF 字符（Latin-1）。
+/// 这是 base64 / hex 解码的输出形式：JS 里一个字符就是一个字节，文本可直接比较、
+/// 拼接、丢回 `cryptoUtil`（`hexEncode` / `aesGcmEncrypt` 再按同一规则还原字节），
+/// 不需要额外的类型；对纯 ASCII 而言与普通字符串完全一致。
+fn bytes_to_js_string(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| *b as char).collect()
+}
+
+pub(crate) fn base64_encode(text: &str) -> String {
+    B64.encode(text.as_bytes())
+}
+
+/// `base64.decode` → **字节保留**字符串（1 字符 = 1 字节，见 [`bytes_to_js_string`]）
+pub(crate) fn base64_decode(text: &str) -> Result<String, String> {
+    Ok(bytes_to_js_string(&b64_decode(text, "输入")?))
+}
+
+pub(crate) fn hex_encode_utf8(text: &str) -> String {
+    hex_encode(text.as_bytes())
+}
+
+/// `cryptoUtil.hexDecode` → **字节保留**字符串（与 [`base64_decode`] 同一套约定）
+pub(crate) fn hex_decode_to_string(text: &str) -> Result<String, String> {
+    Ok(bytes_to_js_string(&hex_decode(text)?))
+}
+
 pub(crate) fn md5_hex(text: &str) -> String {
-    let mut hasher = Md5::new();
-    hasher.update(text.as_bytes());
-    hex_digest(&hasher.finalize())
+    hex_encode(&Md5::digest(text.as_bytes()))
 }
 
 pub(crate) fn sha1_hex(text: &str) -> String {
-    let mut hasher = Sha1::new();
-    hasher.update(text.as_bytes());
-    hex_digest(&hasher.finalize())
+    hex_encode(&Sha1::digest(text.as_bytes()))
+}
+
+pub(crate) fn sha256_hex(text: &str) -> String {
+    hex_encode(&Sha256::digest(text.as_bytes()))
+}
+
+/// `cryptoUtil.md5|sha1|sha256(data, encoding?)`：
+/// `dataEncoding: "hex"` 表示 `data` 是十六进制（JS 侧二进制安全路径），缺省按 UTF-8 文本；
+/// `encoding` 是**输出**编码（hex 默认 / base64）。
+/// 历史写法 `md5(data)` / `sha1(data)` 与 `cryptoUtil.md5(data)` 走缺省 UTF-8 分支，行为不变。
+pub(crate) fn digest_json(args: &str, kind: &str) -> Result<String, String> {
+    let (data, encoding) = text_encoding_args(args, kind)?;
+    let bytes = decode_data_arg(&data, args)?;
+    match kind {
+        "md5" => encode_bytes(&Md5::digest(&bytes), Some(encoding)),
+        "sha1" => encode_bytes(&Sha1::digest(&bytes), Some(encoding)),
+        "sha256" => encode_bytes(&Sha256::digest(&bytes), Some(encoding)),
+        other => Err(format!("不支持的摘要算法「{other}」")),
+    }
+}
+
+/// 取 `data` 的原始字节：`dataEncoding` 为 `"hex"` / `"base64"` 时先解码（二进制安全路径），
+/// 否则按 UTF-8 文本（普通书源写法）。
+fn decode_data_arg(data: &str, args: &str) -> Result<Vec<u8>, String> {
+    let parsed: Value = serde_json::from_str(args).unwrap_or(Value::Null);
+    match parsed
+        .get("dataEncoding")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "hex" => hex_decode(data),
+        "base64" => b64_decode(data, "data"),
+        _ => Ok(data.as_bytes().to_vec()),
+    }
+}
+
+/// `cryptoUtil.hmac(algorithm, key, data, encoding?)`
+pub(crate) fn hmac_json(args: &str) -> Result<String, String> {
+    let parsed: Value = serde_json::from_str(args)
+        .map_err(|_| "参数需为对象：{ algorithm, key, data, encoding? }".to_string())?;
+    let algorithm = parsed
+        .get("algorithm")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['-', '_', ' '], "");
+    // 容忍 "HMAC-SHA256" / "hmac_sha256" 这类写法
+    let algorithm = algorithm
+        .strip_prefix("hmac")
+        .unwrap_or(&algorithm)
+        .to_string();
+    let key = parsed.get("key").and_then(Value::as_str).unwrap_or("");
+    let data = parsed.get("data").and_then(Value::as_str).unwrap_or("");
+    let data_bytes = decode_data_arg(data, args)?;
+    let encoding = digest_encoding(parsed.get("encoding").and_then(Value::as_str).unwrap_or(""))?;
+    match algorithm.as_str() {
+        "md5" => hmac_digest(key, &data_bytes, encoding, <HmacMd5 as Mac>::new_from_slice),
+        "sha1" => hmac_digest(key, &data_bytes, encoding, <HmacSha1 as Mac>::new_from_slice),
+        "sha256" => hmac_digest(key, &data_bytes, encoding, <HmacSha256 as Mac>::new_from_slice),
+        other => Err(format!(
+            "不支持的 HMAC 算法「{other}」（可用 md5 / sha1 / sha256）"
+        )),
+    }
+}
+
+/// HMAC 收尾：`build` 只负责按算法建实例（RFC 2104 下三种摘要都接受任意长度密钥，
+/// 实际不会返回 Err，仍按规范映射成错误）。
+fn hmac_digest<M, F>(key: &str, data: &[u8], encoding: &str, build: F) -> Result<String, String>
+where
+    M: Mac,
+    F: FnOnce(&[u8]) -> Result<M, digest::InvalidLength>,
+{
+    let mut mac = build(key.as_bytes()).map_err(|e| format!("HMAC 密钥非法: {e}"))?;
+    mac.update(data);
+    encode_bytes(&mac.finalize().into_bytes(), Some(encoding))
+}
+
+/// `cryptoUtil.aesGcmEncrypt({ data, key, iv?, aad?, encoding? })`
+/// → JSON 文本 `{ iv, ivHex, key, keyHex, encoding, hex, base64, text }`。
+/// `data` 按 UTF-8 文本取字节（JS 侧决定是明文还是 base64.decode 出来的原始字节）。
+pub(crate) fn aes_gcm_encrypt_json(args: &str) -> Result<String, String> {
+    let parsed: Value = serde_json::from_str(args).map_err(|_| AES_OPTS_HINT.to_string())?;
+    let data = parsed
+        .get("data")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("缺少 data（明文文本）；{AES_OPTS_HINT}"))?;
+    let key = parsed.get("key").and_then(Value::as_str).unwrap_or("");
+    let key = key_bytes(key, AES_GCM_KEY_LEN, "AES-256 密钥")?;
+    let iv = match parsed.get("iv").and_then(Value::as_str) {
+        Some(text) => key_bytes(text, AES_GCM_IV_LEN, "IV（12 字节）")?,
+        None => random_iv()?.to_vec(),
+    };
+    let aad = parsed
+        .get("aad")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .as_bytes()
+        .to_vec();
+    let encoding = parsed
+        .get("encoding")
+        .and_then(Value::as_str)
+        .unwrap_or("base64");
+
+    let cipher = Aes256Gcm::new_from_slice(&key).map_err(|e| format!("AES 密钥非法: {e}"))?;
+    let nonce = Nonce::from_slice(&iv);
+    let mut buf = data.as_bytes().to_vec();
+    let tag = cipher
+        .encrypt_in_place_detached(nonce, &aad, &mut buf)
+        .map_err(|e| format!("AES-GCM 加密失败: {e}"))?;
+    // 密文尾部接 16 字节认证标签，与 WebCrypto 的 `ciphertext||tag` 一致
+    buf.extend_from_slice(&tag);
+    let key_b64 = B64.encode(&key);
+    let iv_b64 = B64.encode(&iv);
+    Ok(json!({
+        "iv": iv_b64,
+        "ivHex": hex_encode(&iv),
+        "key": key_b64,
+        "keyHex": hex_encode(&key),
+        "encoding": encoding,
+        "hex": hex_encode(&buf),
+        "base64": B64.encode(&buf),
+        // 字节保留字符串（1 字符 = 1 字节）：可直接拼接进 body，也可原样回传给解密
+        "text": bytes_to_js_string(&buf),
+    })
+    .to_string())
+}
+
+/// `cryptoUtil.aesGcmDecrypt({ data, iv, key, aad?, encoding? })` → 明文字符串。
+/// `data` / `iv` 当作 key 一样按 base64 优先解析（`cipher.base64` / `cipher.iv` 可原样回传）。
+pub(crate) fn aes_gcm_decrypt_json(args: &str) -> Result<String, String> {
+    let parsed: Value = serde_json::from_str(args)
+        .map_err(|_| "参数需为对象：{ data, iv, key, aad?, encoding? }".to_string())?;
+    let payload = parsed
+        .get("data")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "缺少 data（密文）".to_string())?;
+    let key = parsed.get("key").and_then(Value::as_str).unwrap_or("");
+    let key = key_bytes(key, AES_GCM_KEY_LEN, "AES-256 密钥")?;
+    let iv_text = parsed
+        .get("iv")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "缺少 iv（应回传 aesGcmEncrypt 返回的 iv）".to_string())?;
+    let iv = key_bytes(iv_text, AES_GCM_IV_LEN, "IV（12 字节）")?;
+    let aad = parsed
+        .get("aad")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .as_bytes()
+        .to_vec();
+
+    // 密文：先试十六进制（`cipher.hex` 只有 0-9a-f，base64 解码器会把这类串当乱码
+    // 收下一半字节），再试 base64（`cipher.base64`）；两种都解不出就报 base64 的错误。
+    let mut buf = match hex_decode(payload) {
+        Ok(bytes) => bytes,
+        Err(_) => b64_decode(payload, "密文")?,
+    };
+    if buf.len() < AES_GCM_TAG_LEN {
+        return Err(format!(
+            "密文长度不足：AES-GCM 密文至少包含 {} 字节认证标签",
+            AES_GCM_TAG_LEN
+        ));
+    }
+    let tag_at = buf.len() - AES_GCM_TAG_LEN;
+    let tag: [u8; AES_GCM_TAG_LEN] = buf[tag_at..]
+        .try_into()
+        .map_err(|_| "认证标签长度异常".to_string())?;
+    buf.truncate(tag_at);
+
+    let cipher = Aes256Gcm::new_from_slice(&key).map_err(|e| format!("AES 密钥非法: {e}"))?;
+    cipher
+        .decrypt_in_place_detached(Nonce::from_slice(&iv), &aad, &mut buf, &tag.into())
+        .map_err(|_| "AES-GCM 解密失败：密钥 / IV / AAD 不匹配，或密文被篡改".to_string())?;
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// 摘要类函数的入参：兼容 `sha256(data)` 与 `sha256(data, encoding)` 两种调用形态
+/// （JS 侧统一打包成 `{ data }` / `{ data, encoding }`）。
+fn text_encoding_args(args: &str, what: &str) -> Result<(String, &'static str), String> {
+    let parsed: Value = serde_json::from_str(args)
+        .map_err(|_| format!("{what} 参数非法（内部编码错误）"))?;
+    let data = parsed
+        .get("data")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let encoding = digest_encoding(parsed.get("encoding").and_then(Value::as_str).unwrap_or(""))?;
+    Ok((data, encoding))
 }
 
 // ---------------------------------------------------------------------------
@@ -1424,5 +1793,375 @@ mod tests {
         huge.extend_from_slice(&4_000_000_000u32.to_le_bytes());
         huge.extend_from_slice(&4_000_000_000u32.to_le_bytes());
         assert_eq!(image_dimensions(&huge), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // base64 / 摘要 / HMAC / AES-GCM
+    // 期望值由 Python hashlib/hmac 与 Node crypto（WebCrypto 同语义）独立算出，
+    // 明文统一为 "hello 书源"（UTF-8 含中文，覆盖非 ASCII 路径）。
+    // -----------------------------------------------------------------------
+
+    const SAMPLES: &str = "hello 书源";
+
+    fn ok(result: Result<String, String>) -> String {
+        match result {
+            Ok(text) => text,
+            Err(err) => panic!("期望成功，实际报错: {err}"),
+        }
+    }
+
+    fn err(result: Result<String, String>) -> String {
+        match result {
+            Ok(text) => panic!("期望报错，实际返回: {text}"),
+            Err(err) => err,
+        }
+    }
+
+    fn encrypt(args: Value) -> Value {
+        serde_json::from_str(&ok(aes_gcm_encrypt_json(&args.to_string())))
+            .expect("aesGcmEncrypt 应返回 JSON 对象")
+    }
+
+    #[test]
+    fn base64_accepts_common_variants() {
+        // 标准 / URL-safe / 省略 padding / 带空白都应解出同一份字节
+        let bytes = "hello 书源".as_bytes();
+        let standard = B64.encode(bytes);
+        assert_eq!(b64_decode(&standard, "输入").unwrap(), bytes);
+        assert_eq!(
+            b64_decode(&standard.trim_end_matches('='), "输入").unwrap(),
+            bytes
+        );
+        let url_safe = standard.replace('+', "-").replace('/', "_");
+        assert_eq!(b64_decode(&url_safe, "输入").unwrap(), bytes);
+        assert_eq!(
+            b64_decode(&format!(" {} \n", standard), "输入").unwrap(),
+            bytes
+        );
+        assert!(b64_decode("!!!非法!!!", "输入").is_err());
+    }
+
+    #[test]
+    fn hex_round_trip_and_tolerance() {
+        let bytes = "hello 书源".as_bytes();
+        assert_eq!(hex_encode(bytes), "68656c6c6f20e4b9a6e6ba90");
+        assert_eq!(hex_decode(&hex_encode(bytes)).unwrap(), bytes);
+        // 大写 / 空白 / 冒号分隔 / 0x 前缀都是常见写法
+        assert_eq!(hex_decode("68 65:6C 6C6F").unwrap(), b"hello");
+        assert_eq!(hex_decode("0x68656c6c6f").unwrap(), b"hello");
+        assert_eq!(hex_decode("").unwrap(), Vec::<u8>::new());
+        assert!(hex_decode("abc").is_err()); // 奇数长度
+        assert!(hex_decode("zz").is_err()); // 非 hex 字符
+        // 与 base64 互相独立：hex 解码失败时不应静默给出别的字节
+        assert_eq!(ok(hex_decode_to_string("6869")), "hi");
+    }
+
+    #[test]
+    fn digests_match_reference_vectors() {
+        assert_eq!(md5_hex(SAMPLES), "44a24962f6b0e616c0ed0fdf91b943cd");
+        assert_eq!(sha1_hex(SAMPLES), "3662e0b52fc079e6cd8854ad86d8c5997826be62");
+        assert_eq!(
+            sha256_hex(SAMPLES),
+            "9744786d75102275f714407c6edee01b65716eb3cfc7d56ea1e940897236dfb3"
+        );
+        // 空输入是历史写法容易踩的边界
+        assert_eq!(
+            md5_hex(""),
+            "d41d8cd98f00b204e9800998ecf8427e"
+        );
+        assert_eq!(sha1_hex(""), "da39a3ee5e6b4b0d3255bfef95601890afd80709");
+        assert_eq!(
+            sha256_hex(""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn digest_json_keeps_hex_default_and_supports_base64() {
+        // 只传 data（历史写法）→ 小写 hex
+        assert_eq!(
+            ok(digest_json(&json!({ "data": SAMPLES }).to_string(), "md5")),
+            "44a24962f6b0e616c0ed0fdf91b943cd"
+        );
+        assert_eq!(
+            ok(digest_json(&json!({ "data": SAMPLES }).to_string(), "sha1")),
+            "3662e0b52fc079e6cd8854ad86d8c5997826be62"
+        );
+        assert_eq!(
+            ok(digest_json(&json!({ "data": SAMPLES }).to_string(), "sha256")),
+            "9744786d75102275f714407c6edee01b65716eb3cfc7d56ea1e940897236dfb3"
+        );
+        // 显式 hex / base64
+        assert_eq!(
+            ok(digest_json(
+                &json!({ "data": SAMPLES, "encoding": "base64" }).to_string(),
+                "sha256"
+            )),
+            "l0R4bXUQInX3FEB8bt7gG2VxbrPPx9VuoelAiXI237M="
+        );
+        assert_eq!(
+            ok(digest_json(
+                &json!({ "data": SAMPLES, "encoding": "base64" }).to_string(),
+                "md5"
+            )),
+            "RKJJYvaw5hbA7Q/fkblDzQ=="
+        );
+        assert_eq!(
+            ok(digest_json(
+                &json!({ "data": SAMPLES, "encoding": "base64" }).to_string(),
+                "sha1"
+            )),
+            "NmLgtS/AeebNiFSthtjFmXgmvmI="
+        );
+        assert!(digest_json(&json!({ "data": SAMPLES, "encoding": "base32" }).to_string(), "sha256").is_err());
+    }
+
+    #[test]
+    fn hmac_matches_reference_vectors() {
+        let md5 = ok(hmac_json(
+            &json!({ "algorithm": "md5", "key": "0123456789ab", "data": SAMPLES }).to_string(),
+        ));
+        let sha1 = ok(hmac_json(
+            &json!({ "algorithm": "sha1", "key": "0123456789ab", "data": SAMPLES }).to_string(),
+        ));
+        let sha256 = ok(hmac_json(
+            &json!({ "algorithm": "sha256", "key": "0123456789ab", "data": SAMPLES }).to_string(),
+        ));
+        assert_eq!(md5, "2ae3172de63671084bc3b1deb19317d0");
+        assert_eq!(sha1, "425f5aab0ef2c4f036c633e7a6bc3d529f0338de");
+        assert_eq!(
+            sha256,
+            "d052845a12f557e4efeed421fad7149e3e7495beab35f7bef8adb0c115e8a2f3"
+        );
+        // 算法名容忍大小写与连字符（"HMAC-SHA256" / "sha-256" 都常见）
+        assert_eq!(
+            ok(hmac_json(
+                &json!({ "algorithm": "HMAC-SHA256", "key": "0123456789ab", "data": SAMPLES })
+                    .to_string(),
+            )),
+            sha256
+        );
+        // base64 输出
+        assert_eq!(
+            ok(hmac_json(
+                &json!({ "algorithm": "sha256", "key": "0123456789ab", "data": SAMPLES, "encoding": "base64" })
+                    .to_string(),
+            )),
+            "0FKEWhL1V+Tv7tQh+tcUnj50lb6rNfe++K2wwRXoovM="
+        );
+        // RFC 4231 用例 1（HMAC-SHA256）
+        assert_eq!(
+            ok(hmac_json(
+                &json!({
+                    "algorithm": "sha256",
+                    "key": "key",
+                    "data": "The quick brown fox jumps over the lazy dog"
+                })
+                .to_string(),
+            )),
+            "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8"
+        );
+        assert!(hmac_json(
+            &json!({ "algorithm": "sha3", "key": "k", "data": "d" }).to_string()
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn aes_gcm_matches_webcrypto_vectors() {
+        let key32 = "ReaderX-AES-key-0123456789abcdef"; // 正好 32 字节 UTF-8
+        let zero_iv = "0".repeat(12);
+        // 已知向量：固定 key / iv、无 AAD（Python cryptography 独立算出）
+        let cipher = encrypt(json!({
+            "data": SAMPLES,
+            "key": key32,
+            "iv": zero_iv,
+            "encoding": "hex",
+        }));
+        assert_eq!(cipher["keyHex"].as_str().unwrap(), hex_encode(key32.as_bytes()));
+        assert_eq!(cipher["ivHex"].as_str().unwrap(), hex_encode(zero_iv.as_bytes()));
+        assert_eq!(
+            cipher["hex"].as_str().unwrap(),
+            "9eb433b2fd772257d75fe1ceebf424ccda2006adbf1347de7749406b"
+        );
+        assert_eq!(
+            cipher["base64"].as_str().unwrap(),
+            "nrQzsv13IlfXX+HO6/QkzNogBq2/E0fed0lAaw=="
+        );
+        // 密文 = 明文（12 字节）+ 16 字节 GCM 标签
+        assert_eq!(cipher["hex"].as_str().unwrap().len() / 2, SAMPLES.len() + AES_GCM_TAG_LEN);
+        // AAD 参与认证（同一 key/iv 下密文与标签都不同）
+        let with_aad = encrypt(json!({
+            "data": SAMPLES,
+            "key": key32,
+            "iv": zero_iv,
+            "aad": "aad-extra",
+            "encoding": "hex",
+        }));
+        assert_eq!(
+            with_aad["hex"].as_str().unwrap(),
+            "9eb433b2fd772257d75fe1ce0a93c329e75a29e830879bd93ffa8c9d"
+        );
+        assert_ne!(with_aad["hex"], cipher["hex"]);
+    }
+
+    #[test]
+    fn aes_gcm_round_trips_and_rejects_tampering() {
+        let key32 = "ReaderX-AES-key-0123456789abcdef";
+        let args = json!({
+            "data": SAMPLES,
+            "key": key32,
+            "iv": B64.encode("0".repeat(12).as_bytes()),
+        });
+        let cipher = encrypt(args.clone());
+        let data = cipher["base64"].as_str().unwrap().to_string();
+        let iv = cipher["iv"].as_str().unwrap().to_string();
+        // 默认编码就是 base64，cipher.base64 / cipher.iv 可原样回传给解密
+        assert_eq!(cipher["encoding"], "base64");
+        assert_eq!(
+            ok(aes_gcm_decrypt_json(
+                &json!({ "data": data, "iv": iv, "key": key32 }).to_string()
+            )),
+            SAMPLES
+        );
+        // key 用 base64 形式同样可解（{ key } 与 { keyHex } 等价）
+        assert_eq!(
+            ok(aes_gcm_decrypt_json(
+                &json!({ "data": data, "iv": iv, "key": cipher["key"] }).to_string()
+            )),
+            SAMPLES
+        );
+        // 十六进制密文 + hex 形式的 iv 也能解
+        assert_eq!(
+            ok(aes_gcm_decrypt_json(
+                &json!({
+                    "data": cipher["hex"],
+                    "iv": cipher["ivHex"],
+                    "key": cipher["keyHex"],
+                })
+                .to_string()
+            )),
+            SAMPLES
+        );
+
+        // AAD 必须一致
+        let with_aad = encrypt(json!({
+            "data": SAMPLES,
+            "key": key32,
+            "iv": "0".repeat(12),
+            "aad": "extra",
+        }));
+        assert_eq!(
+            with_aad["hex"].as_str().unwrap(),
+            "9eb433b2fd772257d75fe1ce3966db020174ae3302e8d63693dcad72"
+        );
+        let aad_args = json!({
+            "data": with_aad["base64"],
+            "iv": with_aad["iv"],
+            "key": key32,
+        });
+        assert!(aes_gcm_decrypt_json(&aad_args.to_string()).is_err());
+        let mut ok_args = aad_args.clone();
+        ok_args["aad"] = json!("extra");
+        assert_eq!(ok(aes_gcm_decrypt_json(&ok_args.to_string())), SAMPLES);
+
+        // 篡改密文 / 换错密钥 / 换错 IV：一律报错，绝不返回半截明文
+        let mut tampered = data.clone().into_bytes();
+        tampered[0] = if tampered[0] == b'A' { b'B' } else { b'A' };
+        let tampered = String::from_utf8(tampered).unwrap();
+        assert!(aes_gcm_decrypt_json(
+            &json!({ "data": tampered, "iv": iv, "key": key32 }).to_string()
+        )
+        .is_err());
+        let other_key = "ReaderX-AES-key-0123456789abcdeZ";
+        assert!(aes_gcm_decrypt_json(
+            &json!({ "data": data, "iv": iv, "key": other_key }).to_string()
+        )
+        .is_err());
+        assert!(aes_gcm_decrypt_json(
+            &json!({ "data": data, "iv": B64.encode("1".repeat(12).as_bytes()), "key": key32 })
+                .to_string()
+        )
+        .is_err());
+        // 密文长度不足一个标签
+        assert!(aes_gcm_decrypt_json(
+            &json!({ "data": B64.encode(b"short"), "iv": iv, "key": key32 }).to_string()
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn aes_gcm_random_iv_and_key_errors() {
+        // 不给 iv：随机生成（12 字节），且碰巧与另一个随机 iv 相同的概率可忽略
+        let key32 = "ReaderX-AES-key-0123456789abcdef";
+        let first = encrypt(json!({ "data": SAMPLES, "key": key32 }));
+        let second = encrypt(json!({ "data": SAMPLES, "key": key32 }));
+        assert_eq!(B64.decode(first["iv"].as_str().unwrap()).unwrap().len(), AES_GCM_IV_LEN);
+        assert_ne!(first["iv"], second["iv"]);
+        // Random IV 也要能解回来
+        assert_eq!(
+            ok(aes_gcm_decrypt_json(
+                &json!({ "data": first["base64"], "iv": first["iv"], "key": key32 })
+                    .to_string()
+            )),
+            SAMPLES
+        );
+
+        // 长度不对一律拒绝（不做静默填充 / 截断）
+        let short = err(aes_gcm_encrypt_json(
+            &json!({ "data": SAMPLES, "key": "1234567890123456" }).to_string(),
+        ));
+        assert!(short.contains("AES-256 密钥长度不对"), "{short}");
+        // 十六进制写法：64 字符 hex → 32 字节密钥、24 字符 hex → 12 字节 IV，可直接用
+        let hex_key = encrypt(json!({
+            "data": SAMPLES,
+            "key": "0".repeat(64),
+            "iv": "0".repeat(12),
+        }));
+        assert_eq!(hex_key["keyHex"].as_str().unwrap(), "0".repeat(64));
+        // 24 字符 hex → 12 字节 IV，与 hexDecode 出的字节完全等价
+        let hex_iv = encrypt(json!({
+            "data": SAMPLES,
+            "key": "ReaderX-AES-key-0123456789abcdef",
+            "iv": "0".repeat(24),
+        }));
+        assert_eq!(hex_iv["ivHex"].as_str().unwrap(), "0".repeat(24));
+        // 长度对不上（30 字符，base64 / hex / UTF-8 都不是 32 字节）走长度错误分支
+        let bad_key = err(aes_gcm_encrypt_json(
+            &json!({ "data": SAMPLES, "key": "00112233445566778899aabbccddee" }).to_string(),
+        ));
+        assert!(bad_key.contains("长度不对"), "{bad_key}");
+        // base64 密钥（44 字符）与同内容的 UTF-8 字面量等价
+        let key32 = "ReaderX-AES-key-0123456789abcdef"; // 32 字节 UTF-8，非 hex
+        assert_eq!(key32.len(), AES_GCM_KEY_LEN);
+        let as_b64 = encrypt(json!({
+            "data": SAMPLES,
+            "key": B64.encode(key32.as_bytes()),
+            "iv": "0".repeat(12),
+        }));
+        let as_text = encrypt(json!({ "data": SAMPLES, "key": key32, "iv": "0".repeat(12) }));
+        assert_eq!(as_b64["base64"], as_text["base64"]);
+        assert_eq!(
+            as_text["hex"].as_str().unwrap(),
+            "9eb433b2fd772257d75fe1ceebf424ccda2006adbf1347de7749406b"
+        );
+        assert_eq!(
+            ok(aes_gcm_decrypt_json(
+                &json!({ "data": as_text["base64"], "iv": as_text["iv"], "key": key32 })
+                    .to_string()
+            )),
+            SAMPLES
+        );
+        // IV 长度不对（3 字节既非 12 字节 base64 也非 12 字节文本）
+        let iv_err = err(aes_gcm_encrypt_json(
+            &json!({ "data": SAMPLES, "key": key32, "iv": "abc" }).to_string(),
+        ));
+        assert!(iv_err.contains("IV（12 字节）"), "{iv_err}");
+        // 缺少必填项
+        assert!(aes_gcm_encrypt_json(&json!({ "key": key32 }).to_string()).is_err());
+        assert!(aes_gcm_decrypt_json(
+            &json!({ "data": "AAAA", "key": key32 }).to_string()
+        )
+        .is_err());
     }
 }

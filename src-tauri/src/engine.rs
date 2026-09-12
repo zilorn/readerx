@@ -134,8 +134,34 @@ fn arg_string(arg: &JsValue, context: &mut Context) -> String {
         .unwrap_or_default()
 }
 
+/// 二进制安全版 [`arg_string`]：把 U+0000–U+00FF 的每个字符还原成一个字节
+/// （host 侧 `base64_decode` / `hex_decode_to_string` / `aesGcmEncrypt().text` 的编码）。
+/// 超出该范围的字符（真正的中文 / emoji 文本）按 UTF-8 取字节，保证普通字符串不受影响。
+fn arg_bytes(arg: &JsValue, context: &mut Context) -> Vec<u8> {
+    let text = arg_string(arg, context);
+    let mut out = Vec::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch as u32 {
+            cp @ 0..=0xFF => out.push(cp as u8),
+            _ => {
+                let mut buf = [0u8; 4];
+                out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+            }
+        }
+    }
+    out
+}
+
 fn ret_string(s: String) -> JsResult<JsValue> {
     Ok(JsValue::from(JsString::from(s)))
+}
+
+/// 失败结果包成 `{"__rxError":"…"}`，由 `__rxUnwrap` 还原成 JS 异常（与 `base64.decode` 同一约定）
+fn ret_error(message: String) -> JsResult<JsValue> {
+    ret_string(format!(
+        "{{\"__rxError\":{}}}",
+        serde_json::to_string(&message).unwrap_or_default()
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -247,6 +273,78 @@ fn nv_sha1(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsV
     ret_string(host::sha1_hex(&text))
 }
 
+fn nv_sha256(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let text = args.first().map(|a| arg_string(a, context)).unwrap_or_default();
+    ret_string(host::sha256_hex(&text))
+}
+
+/// 摘要：参数 JSON 里的 data 已是十六进制（见 PROLOGUE 的 `__digestArgs`），
+/// 二进制字符串也能逐字节参与；`kind` 与注册名一一对应。
+fn crypto_digest(
+    args: &[JsValue],
+    context: &mut Context,
+    kind: &str,
+) -> JsResult<JsValue> {
+    let opts = args.first().map(|a| arg_string(a, context)).unwrap_or_default();
+    match host::digest_json(&opts, kind) {
+        Ok(out) => ret_string(out),
+        Err(message) => ret_error(message),
+    }
+}
+
+fn nv_crypto_md5(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    crypto_digest(args, context, "md5")
+}
+
+fn nv_crypto_sha1(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    crypto_digest(args, context, "sha1")
+}
+
+fn nv_crypto_sha256(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    crypto_digest(args, context, "sha256")
+}
+
+fn nv_crypto_hmac(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let opts = args.first().map(|a| arg_string(a, context)).unwrap_or_default();
+    match host::hmac_json(&opts) {
+        Ok(out) => ret_string(out),
+        Err(message) => ret_error(message),
+    }
+}
+
+fn nv_hex_encode(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    // 输入按“一个字符 = 一个字节”还原，保证 base64.decode → hexEncode 的字节不被 UTF-8 改写
+    let raw = args.first().map(|a| arg_bytes(a, context)).unwrap_or_default();
+    let text = String::from_utf8_lossy(&raw).into_owned();
+    ret_string(host::hex_encode_utf8(&text))
+}
+
+fn nv_hex_decode(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    // 输入按“一个字符 = 一个字节”还原，保证 base64.decode → hexEncode 的字节不被 UTF-8 改写
+    let raw = args.first().map(|a| arg_bytes(a, context)).unwrap_or_default();
+    let text = String::from_utf8_lossy(&raw).into_owned();
+    match host::hex_decode_to_string(&text) {
+        Ok(out) => ret_string(out),
+        Err(message) => ret_error(message),
+    }
+}
+
+fn nv_aes_gcm_encrypt(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let opts = args.first().map(|a| arg_string(a, context)).unwrap_or_default();
+    match host::aes_gcm_encrypt_json(&opts) {
+        Ok(out) => ret_string(out),
+        Err(message) => ret_error(message),
+    }
+}
+
+fn nv_aes_gcm_decrypt(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let opts = args.first().map(|a| arg_string(a, context)).unwrap_or_default();
+    match host::aes_gcm_decrypt_json(&opts) {
+        Ok(out) => ret_string(out),
+        Err(message) => ret_error(message),
+    }
+}
+
 fn nv_url_join(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let base = args.first().map(|a| arg_string(a, context)).unwrap_or_default();
     let rel = args.get(1).map(|a| arg_string(a, context)).unwrap_or_default();
@@ -283,6 +381,15 @@ fn native_registry() -> Vec<(&'static str, usize, NativeFunction)> {
         ("__base64Decode", 1, NativeFunction::from_fn_ptr(nv_base64_decode)),
         ("__md5", 1, NativeFunction::from_fn_ptr(nv_md5)),
         ("__sha1", 1, NativeFunction::from_fn_ptr(nv_sha1)),
+        ("__sha256", 1, NativeFunction::from_fn_ptr(nv_sha256)),
+        ("__cryptoMd5", 1, NativeFunction::from_fn_ptr(nv_crypto_md5)),
+        ("__cryptoSha1", 1, NativeFunction::from_fn_ptr(nv_crypto_sha1)),
+        ("__cryptoSha256", 1, NativeFunction::from_fn_ptr(nv_crypto_sha256)),
+        ("__cryptoHmac", 1, NativeFunction::from_fn_ptr(nv_crypto_hmac)),
+        ("__hexEncode", 1, NativeFunction::from_fn_ptr(nv_hex_encode)),
+        ("__hexDecode", 1, NativeFunction::from_fn_ptr(nv_hex_decode)),
+        ("__aesGcmEncrypt", 1, NativeFunction::from_fn_ptr(nv_aes_gcm_encrypt)),
+        ("__aesGcmDecrypt", 1, NativeFunction::from_fn_ptr(nv_aes_gcm_decrypt)),
         ("__urlJoin", 2, NativeFunction::from_fn_ptr(nv_url_join)),
         ("__queryString", 1, NativeFunction::from_fn_ptr(nv_query_string)),
         ("__queryParse", 1, NativeFunction::from_fn_ptr(nv_query_parse)),
@@ -298,6 +405,22 @@ const PROLOGUE: &str = r#"
     const o = JSON.parse(raw);
     if (o && typeof o === "object" && "__rxError" in o) throw new Error(o.__rxError);
     return o;
+  }
+  // 摘要 / HMAC 返回的是纯文本（hex / base64），只做错误检查、不 JSON.parse
+  function __rxText(raw) {
+    if (typeof raw === "string" && raw.lastIndexOf("{\"__rxError\"", 0) === 0) {
+      throw new Error(JSON.parse(raw).__rxError);
+    }
+    return raw;
+  }
+  // 摘要 / HMAC 参数打包：data 一律转成十六进制再交给宿主，
+  // 二进制字符串（base64.decode 的产物）也能逐字节参与；key 按文本参与 HMAC。
+  function __digestArgs(data, encoding) {
+    return JSON.stringify({
+      data: __hexEncode(data == null ? "" : String(data)),
+      dataEncoding: "hex",
+      encoding: encoding == null ? "hex" : String(encoding)
+    });
   }
   globalThis.http = {
     request(method, url, opts) {
@@ -338,11 +461,49 @@ const PROLOGUE: &str = r#"
   };
   globalThis.base64 = {
     encode(s) { return __base64Encode(String(s)); },
-    decode(s) { return __rxUnwrap(__base64Decode(String(s))); }
+    // 解码结果可能是任意二进制（1 字符 = 1 字节），不是 JSON，故用 __rxText 只查错误
+    decode(s) { return __rxText(__base64Decode(String(s))); }
   };
   globalThis.cryptoUtil = {
-    md5(s) { return __md5(String(s)); },
-    sha1(s) { return __sha1(String(s)); }
+    // 二进制安全的文本编码（1 字符 = 1 字节）：hash / hmac / 加解密都吃这种字符串
+    toHex(s) { return __hexEncode(String(s)); },
+    fromHex(s) { return __rxText(__hexDecode(String(s))); },
+    hexEncode(s) { return __hexEncode(String(s)); },
+    hexDecode(s) { return __rxText(__hexDecode(String(s))); },
+    md5(s, encoding) { return __rxText(__cryptoMd5(__digestArgs(s, encoding))); },
+    sha1(s, encoding) { return __rxText(__cryptoSha1(__digestArgs(s, encoding))); },
+    sha256(s, encoding) { return __rxText(__cryptoSha256(__digestArgs(s, encoding))); },
+    hmac(algorithm, key, data, encoding) {
+      return __rxText(__cryptoHmac(JSON.stringify({
+        algorithm: String(algorithm),
+        key: key == null ? "" : String(key),
+        data: __hexEncode(data == null ? "" : String(data)),
+        dataEncoding: "hex",
+        encoding: encoding == null ? "hex" : String(encoding)
+      })));
+    },
+    aesGcmEncrypt(opts) {
+      const o = opts || {};
+      if (o.data == null) throw new Error("aesGcmEncrypt 需要 data（明文文本）");
+      if (o.key == null) throw new Error("aesGcmEncrypt 需要 key（32 字节）");
+      const args = {
+        data: String(o.data),
+        key: String(o.key),
+        encoding: o.encoding == null ? "base64" : String(o.encoding)
+      };
+      if (o.iv != null) args.iv = String(o.iv);
+      if (o.aad != null) args.aad = String(o.aad);
+      return __rxUnwrap(__aesGcmEncrypt(JSON.stringify(args)));
+    },
+    aesGcmDecrypt(opts) {
+      const o = opts || {};
+      if (o.data == null || o.iv == null || o.key == null) {
+        throw new Error("aesGcmDecrypt 需要 data / iv / key");
+      }
+      const args = { data: String(o.data), iv: String(o.iv), key: String(o.key) };
+      if (o.aad != null) args.aad = String(o.aad);
+      return __rxText(__aesGcmDecrypt(JSON.stringify(args)));
+    }
   };
   const __rxLogFn = function () {
     const parts = [];
@@ -721,6 +882,73 @@ mod tests {
             .expect("命令层不应返回 Err");
         assert!(!result.ok);
         assert!(result.error.unwrap_or_default().contains("站点改版了"));
+    }
+
+    /// `cryptoUtil` 端到端：摘要 / HMAC / hex 编解码 / AES-256-GCM 在**真实 JS 调用链**上可用。
+    /// 期望值见 host::tests（Python cryptography 独立算出），这里验证的是宿主桥接与编码契约。
+    #[test]
+    fn crypto_util_round_trips_through_js() {
+        let js = r#"
+        function searchBook() {
+          const text = "hello 书源";
+          // 摘要：中文按 UTF-8 参与，MD5/SHA1 与历史写法一致
+          const md5 = cryptoUtil.md5(text);
+          if (md5 !== "44a24962f6b0e616c0ed0fdf91b943cd") throw new Error("md5=" + md5);
+          const sha1 = cryptoUtil.sha1(text);
+          if (sha1 !== "3662e0b52fc079e6cd8854ad86d8c5997826be62") throw new Error("sha1=" + sha1);
+          // SHA-256：hex 默认 / base64 可选
+          const sha256 = cryptoUtil.sha256(text);
+          if (sha256 !== "9744786d75102275f714407c6edee01b65716eb3cfc7d56ea1e940897236dfb3") {
+            throw new Error("sha256=" + sha256);
+          }
+          const sha256b64 = cryptoUtil.sha256(text, "base64");
+          if (sha256b64 !== "l0R4bXUQInX3FEB8bt7gG2VxbrPPx9VuoelAiXI237M=") {
+            throw new Error("sha256 b64=" + sha256b64);
+          }
+          // HMAC（算法名容忍 HMAC-SHA256 写法）
+          const hmac = cryptoUtil.hmac("sha256", "0123456789ab", text);
+          if (hmac !== "d052845a12f557e4efeed421fad7149e3e7495beab35f7bef8adb0c115e8a2f3") {
+            throw new Error("hmac=" + hmac);
+          }
+          if (cryptoUtil.hmac("HMAC-SHA1", "0123456789ab", text)
+              !== "425f5aab0ef2c4f036c633e7a6bc3d529f0338de") throw new Error("hmac sha1");
+          // hex 编解码是二进制安全的：base64.decode 出来的字节经 hexEncode → hexDecode 不变
+          const raw = base64.decode("aGVsbG8g5Lmm5rqQ");
+          if (cryptoUtil.hexEncode(raw) !== "68656c6c6f20e4b9a6e6ba90") {
+            throw new Error("hexEncode=" + cryptoUtil.hexEncode(raw));
+          }
+          if (cryptoUtil.hexDecode("68656c6c6f") !== "hello") throw new Error("hexDecode");
+          // 二进制字节串（含 >0x7f 的字节）喂给摘要，结果与直接传文本一致
+          if (cryptoUtil.md5(raw) !== md5) throw new Error("md5(binary)=" + cryptoUtil.md5(raw));
+          // AES-256-GCM：32 字节密钥 + 随机 IV，密文可原样解回
+          const key = "0123456789abcdef0123456789abcdef";
+          const cipher = cryptoUtil.aesGcmEncrypt({ data: text, key: key, aad: "aad" });
+          if (cipher.encoding !== "base64" || !cipher.iv || !cipher.base64) throw new Error("cipher 字段缺失");
+          const back = cryptoUtil.aesGcmDecrypt({
+            data: cipher.base64, iv: cipher.iv, key: key, aad: "aad"
+          });
+          if (back !== text) throw new Error("解密结果不对: " + back);
+          // hex 形式的密文 / iv / 密钥同样可解（cipher.hex / ivHex / keyHex 可直接回传）
+          const back2 = cryptoUtil.aesGcmDecrypt({
+            data: cipher.hex, iv: cipher.ivHex, key: cipher.keyHex, aad: "aad"
+          });
+          if (back2 !== text) throw new Error("hex 回传解密失败: " + back2);
+          // AAD 不一致必须失败（抛错而不是返回半截明文）
+          let failed = false;
+          try {
+            cryptoUtil.aesGcmDecrypt({ data: cipher.base64, iv: cipher.iv, key: key });
+          } catch (e) {
+            failed = true;
+          }
+          if (!failed) throw new Error("AAD 不一致时必须报错");
+          return { md5: md5, sha256: sha256, cipher: cipher.base64 };
+        }
+        "#;
+        let result = call_source_function("test-source", js, "searchBook", &json!([]), 5_000)
+            .expect("命令层不应返回 Err");
+        assert!(result.ok, "{:?}", result.error);
+        let value = result.value.unwrap_or(Value::Null);
+        assert_eq!(value["md5"], json!("44a24962f6b0e616c0ed0fdf91b943cd"));
     }
     /// 死循环在**完整调用链**（glue → eval → 结算）上必须变成一条中文可读错误，
     /// 而不是一直转圈或只剩一句英文引擎报错。

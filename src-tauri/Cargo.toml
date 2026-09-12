@@ -37,8 +37,17 @@ boa_engine = { version = "0.22", default-features = false }
 scraper = "0.27"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "cookies", "gzip", "json", "rustls-tls"] }
 encoding_rs = "0.8"
+# 书源 JS 的摘要 / 签名 / 对称加密（cryptoUtil，见 docs/book-source-api.md）
 md-5 = "0.10"
 sha1 = "0.10"
+sha2 = "0.10"
+hmac = "0.12"
+# 显式依赖 digest 只为在泛型 HMAC 辅助函数上写 Digest 约束、并统一取摘要 trait
+# （md-5 / sha1 / sha2 都 re-export 同一份 digest 0.10，不存在重复版本）
+digest = "0.10"
+aes-gcm = "0.10"
+# AES-GCM 未给 IV 时生成随机 12 字节（与 rand_core 0.6 / getrandom 0.2 同源，不新增体积）
+getrandom = "0.2"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

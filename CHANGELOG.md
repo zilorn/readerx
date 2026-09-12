@@ -39,6 +39,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   用户跳章 / 听书跨章时立即改以新章为中心，批量下载开始时让位，「停止下载」即时停下
   （同一章不会刚停就自动重启），下载面板按阶段显示图片进度。图片预取在正文预取结束后
   才开跑，因此不会挤占正在读的那一章的正文加载。
+- **书源加密工具补齐 SHA-256 / HMAC / AES-256-GCM**：`cryptoUtil` 在原有的 MD5 / SHA-1
+  之上新增 `sha256`、`hmac(algorithm, key, data, encoding?)`（MD5 / SHA-1 / SHA-256）与
+  `aesGcmEncrypt` / `aesGcmDecrypt`（AES-256-GCM，`key` 32 字节、`iv` 12 字节，未给 IV 时
+  随机生成，支持 AAD，密文尾部按 WebCrypto 约定带 16 字节认证标签），摘要与 HMAC 可输出
+  hex（默认）或 base64；另加 `hexEncode` / `hexDecode` 两个十六进制工具。`base64.decode` 与
+  `hexDecode` 改为**字节保留**字符串（1 字符 = 1 字节），解码出的密钥 / 密文可以直接喂回
+  `cryptoUtil` 或拼进请求体，不再被 UTF-8 往返改写；密钥 / IV 支持 base64、hex、UTF-8
+  字面量三种写法（按字节数精确匹配，长度不对直接报错，不做静默填充或截断）。
+  规范见 `docs/book-source-api.md`。
 
 ### Changed
 

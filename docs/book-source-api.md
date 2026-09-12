@@ -159,8 +159,96 @@ const list = items.map((li) => ({
 
 ## `base64` / `cryptoUtil`
 
-- `base64.encode(str)` / `base64.decode(str)`（解码失败抛错）
-- `cryptoUtil.md5(str)` / `cryptoUtil.sha1(str)` → 小写 hex
+加解密与摘要都吃**字节保留字符串**：`base64.decode` / `cryptoUtil.hexDecode` 解码出来的字符串
+里「1 个字符 = 1 个字节」（U+0000–U+00FF），可以直接当密钥 / 明文 / 密文再传回来，也可以拼进
+请求体。传进去的普通文本按 **UTF-8** 取字节（中文一个字 3 字节）。
+
+### `base64`
+
+| 成员 | 说明 |
+| --- | --- |
+| `base64.encode(s)` | → base64 文本 |
+| `base64.decode(s)` | → 字节保留字符串；容忍 URL-safe（`-_`）、省略的 `=` 与空白，非法输入抛错 |
+
+### 摘要
+
+| 成员 | 说明 |
+| --- | --- |
+| `cryptoUtil.md5(s, encoding?)` | → 小写 hex（默认）或 base64 |
+| `cryptoUtil.sha1(s, encoding?)` | 同上 |
+| `cryptoUtil.sha256(s, encoding?)` | 同上 |
+
+`encoding` 取 `"hex"`（默认）/ `"base64"`。三个摘要都接受字节保留字符串，所以
+`cryptoUtil.sha256(base64.decode(resp.data))` 签的是**原始字节**，不会被再编码一次。
+
+### HMAC
+
+| 成员 | 说明 |
+| --- | --- |
+| `cryptoUtil.hmac(algorithm, key, data, encoding?)` | `algorithm` 取 `md5` / `sha1` / `sha256`（写法随意：`HMAC-SHA256`、`sha-256` 都认），返回小写 hex 或 base64 |
+
+`key` 按 UTF-8 文本取字节，长度不限（RFC 2104）。
+
+```js
+const sign = cryptoUtil.hmac("sha256", "secret", "page=2&q=" + keyword);
+```
+
+### 十六进制
+
+| 成员 | 说明 |
+| --- | --- |
+| `cryptoUtil.hexEncode(s)` | 字节保留字符串 → 小写 hex（别名 `toHex`） |
+| `cryptoUtil.hexDecode(s)` | hex → 字节保留字符串（别名 `fromHex`）；容忍空白 / 冒号分隔 / 大写 / `0x` 前缀，非法输入抛错 |
+
+### AES-256-GCM
+
+| 成员 | 说明 |
+| --- | --- |
+| `cryptoUtil.aesGcmEncrypt(opts)` | 加密，返回 `{ iv, ivHex, key, keyHex, encoding, hex, base64, text }` |
+| `cryptoUtil.aesGcmDecrypt(opts)` | 解密，返回明文字符串；认证失败 / 参数不对抛 `Error` |
+
+`aesGcmEncrypt` 的 `opts`：
+
+```js
+{
+  data: "明文",            // 必填
+  key:  "32 字节密钥",      // 必填；见下方「密钥与 IV 的写法」
+  iv:   "12 字节 IV",      // 选填；不给则随机生成（12 字节，每次调用都不同）
+  aad:  "附加认证数据",      // 选填；给了就必须在解密时给同一份
+  encoding: "base64"       // 选填：hex | base64，只影响返回值里的 hex / base64 字段
+}
+```
+
+返回的 `iv` / `key` 是 **base64**、`ivHex` / `keyHex` 是 **hex**，`hex` / `base64` 是同一份密文
+（密文尾部已按 WebCrypto 约定接上 16 字节认证标签）的两种写法，`text` 是字节保留字符串。
+解密时 `{ data, iv, key }` 三者任选一种写法混搭都行——最省事的做法是原样回传：
+
+```js
+const key = "0123456789abcdef0123456789abcdef"; // 32 字节
+const cipher = cryptoUtil.aesGcmEncrypt({ data: JSON.stringify(payload), key: key });
+// 请求体里带上 cipher.base64 与 cipher.iv
+const resp = await http.post(API, JSON.stringify({ data: cipher.base64, iv: cipher.iv }), {
+  headers: { "Content-Type": "application/json" }
+});
+// 站方原样返回 data / iv 时：
+const plain = cryptoUtil.aesGcmDecrypt({ data: resp.data, iv: resp.iv, key: key });
+const payload = JSON.parse(plain);
+```
+
+### 密钥与 IV 的写法
+
+`key` 必须是 **32 字节**、`iv` 必须是 **12 字节**（AES-256-GCM）。三种写法都认，
+按「base64 → hex → UTF-8 字面量」的顺序取第一个刚好对上字节数的解释：
+
+| 写法 | 例子 |
+| --- | --- |
+| base64 | `cipher.key` / `base64.encode(密钥字节)` |
+| hex | `"0".repeat(64)`、`cipher.keyHex`；`cryptoUtil.hexDecode(...)` 转换出的字节串同样可以 |
+| UTF-8 字面量 | `"0123456789abcdef0123456789abcdef"`（正好 32 字符） |
+
+长度对不上会**直接抛错**并列出各解释解出的字节数，不做静默填充或截断——把口令当密钥用，
+或者想把 32 字符的 hex 串当密钥，都会是另一把密钥而不是「差不多能用」。真要按 hex 用，
+先 `cryptoUtil.hexDecode(...)` 转出来再把结果传进去（或直接用 64 字符的写法）。
 
 ## `console`
 
