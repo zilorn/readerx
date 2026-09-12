@@ -5,7 +5,7 @@
  * 状态全部由 SourceEditor 页面持有（此处只收发值），便于切 Tab 不丢草稿。
  */
 import { For } from "solid-js";
-import { ClearIcon, GlobeKeyIcon } from "./icons";
+import { ChevronRightIcon, ClearIcon, FolderIcon, GlobeKeyIcon } from "./icons";
 import { ToggleSwitch } from "./ToggleSwitch";
 import { CAPABILITY_LABELS, type BookSourceCapabilities } from "../lib/bookSourcesTypes";
 
@@ -18,6 +18,9 @@ export interface SourceInfoFormProps {
   onAuthor: (value: string) => void;
   version: string;
   onVersion: (value: string) => void;
+  /** 所属书源分组名（空 = 未分组） */
+  groupName: string;
+  onPickGroup: () => void;
   enabled: boolean;
   onEnabled: (value: boolean) => void;
   caps: BookSourceCapabilities;
@@ -81,6 +84,22 @@ export function SourceInfoForm(props: SourceInfoFormProps) {
               onInput={(e) => props.onVersion(e.currentTarget.value)}
             />
           </label>
+        </div>
+        <div class="flex flex-col gap-1">
+          <span class={LABEL_CLASS}>分组</span>
+          <button
+            class="flex items-center gap-2 rounded-[10px] border border-border bg-surface px-3 py-2 text-left text-[13px] outline-none active:bg-surface-2"
+            onClick={props.onPickGroup}
+          >
+            <FolderIcon size={15} class="flex-none text-text-3" />
+            <span
+              class="min-w-0 flex-1 truncate"
+              classList={{ "text-text-3": !props.groupName }}
+            >
+              {props.groupName || "未分组"}
+            </span>
+            <ChevronRightIcon size={15} class="flex-none text-text-3" />
+          </button>
         </div>
       </section>
 

@@ -26,6 +26,7 @@ const MENU_SLIDER_NODES_KEY = "readerx.menuSliderNodes";
 const SOURCE_PARALLEL_KEY = "readerx.onlineConcurrency";
 const SHELF_SOURCE_FILTER_KEY = "readerx.shelfSourceFilter";
 const SHELF_FILTER_KEY = "readerx.shelfFilter";
+const SOURCE_GROUP_FILTER_KEY = "readerx.sourceGroupFilter";
 
 export const FONT_MIN = 15;
 export const FONT_MAX = 28;
@@ -56,7 +57,7 @@ let initialized = false;
 export async function initReaderState(): Promise<void> {
   if (initialized) return;
   initialized = true;
-  const [storedTheme, storedShelf, storedFont, storedSpacing, storedPageMode, storedStatusBar, storedScope, storedSourceParallel, storedShelfSourceFilter, storedMenuSlider, storedMenuSliderNodes, storedShelfFilter] =
+  const [storedTheme, storedShelf, storedFont, storedSpacing, storedPageMode, storedStatusBar, storedScope, storedSourceParallel, storedShelfSourceFilter, storedMenuSlider, storedMenuSliderNodes, storedShelfFilter, storedSourceGroupFilter] =
     await Promise.all([
       readState<string>(THEME_KEY),
       readState<Record<string, ShelfEntry>>(SHELF_KEY),
@@ -70,6 +71,7 @@ export async function initReaderState(): Promise<void> {
       readState<boolean>(MENU_SLIDER_KEY),
       readState<boolean>(MENU_SLIDER_NODES_KEY),
       readState<string>(SHELF_FILTER_KEY),
+      readState<string>(SOURCE_GROUP_FILTER_KEY),
     ]);
 
   // 未保存过偏好时默认护眼(sepia)，不再跟随系统深浅色
@@ -109,6 +111,9 @@ export async function initReaderState(): Promise<void> {
   }
   if (typeof storedShelfFilter === "string" && storedShelfFilter.trim()) {
     setShelfFilterKeySignal(storedShelfFilter.trim());
+  }
+  if (typeof storedSourceGroupFilter === "string" && storedSourceGroupFilter.trim()) {
+    setSourceGroupFilterSignal(storedSourceGroupFilter.trim());
   }
 }
 
@@ -470,6 +475,34 @@ export function rememberShelfFilter(key: string): void {
   if (next === shelfFilterKey()) return;
   setShelfFilterKeySignal(next);
   persistShelfFilterKey(next);
+}
+
+// ---------------------------------------------------------------------------
+// 书源分组筛选记忆（全局偏好）
+// 书源管理页的筛选条与发现页的「按分组限定书源」共用同一个选中值
+// （all / none / sg-<id>）：在管理页筛到某组，去发现页搜索就只跑该组的书源。
+// 分组被删、值失效时由页面经 resolveSourceFilter 回落「全部」。
+
+const [sourceGroupFilter, setSourceGroupFilterSignal] = createSignal<string>("all");
+let sourceGroupFilterWriteQueue: Promise<void> = Promise.resolve();
+
+/** 上次选中的书源分组筛选值（all / none / sg-<id>） */
+export function lastSourceGroupFilter(): string {
+  return sourceGroupFilter();
+}
+
+function persistSourceGroupFilter(key: string): void {
+  sourceGroupFilterWriteQueue = sourceGroupFilterWriteQueue.then(() =>
+    writeState(SOURCE_GROUP_FILTER_KEY, key),
+  );
+}
+
+/** 记住当前书源分组筛选值（点击分组 chip 时调用；重复值不重复落盘） */
+export function rememberSourceGroupFilter(key: string): void {
+  const next = key || "all";
+  if (next === sourceGroupFilter()) return;
+  setSourceGroupFilterSignal(next);
+  persistSourceGroupFilter(next);
 }
 
 // ---------------------------------------------------------------------------

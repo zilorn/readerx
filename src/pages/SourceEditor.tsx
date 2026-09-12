@@ -4,6 +4,7 @@ import { PageHeader } from "../components/PageHeader";
 import { PageTabs, type PageTab } from "../components/PageTabs";
 import { JsCodeEditor } from "../components/JsCodeEditor";
 import { SourceInfoForm } from "../components/SourceInfoForm";
+import { SourceGroupPicker } from "../components/SourceGroupPicker";
 import { SourceTestPanel, defaultArgs, type SourceTestResult } from "../components/SourceTestPanel";
 import { ScrollArea } from "../components/ScrollArea";
 import { SaveIcon, TrashIcon } from "../components/icons";
@@ -11,6 +12,7 @@ import {
   TEMPLATE_JS,
   blankBookSource,
   bookSourceList,
+  buildBookSourceExportText,
   clearSourceEditor,
   currentEditorSource,
   newBookSourceId,
@@ -18,6 +20,7 @@ import {
   removeBookSource,
   setEditorSourceDraft,
 } from "../lib/bookSources";
+import { ensureSourceGroupsLoaded, sourceGroupById, sourceGroupName } from "../lib/sourceGroups";
 import {
   callRemoteSource,
   clearSourceLogin,
@@ -65,6 +68,8 @@ export default function SourceEditorPage() {
   );
   const [js, setJs] = createSignal(draft().js);
   const [caps, setCaps] = createSignal<BookSourceCapabilities>({ ...draft().capabilities });
+  const [groupId, setGroupId] = createSignal<string | undefined>(draft().groupId);
+  const [groupPickerOpen, setGroupPickerOpen] = createSignal(false);
 
   const [fnName, setFnName] = createSignal<string>("searchBook");
   const [argsText, setArgsText] = createSignal(defaultArgs("searchBook"));
@@ -81,6 +86,7 @@ export default function SourceEditorPage() {
   onMount(() => {
     if (!initial) setEditorSourceDraft(draft());
     void isSourceLoginSupported().then(setLoginSupported);
+    void ensureSourceGroupsLoaded();
   });
 
   function goBack() {
@@ -99,7 +105,7 @@ export default function SourceEditorPage() {
       if (key) headers[key] = value;
     }
     const id = draft().id;
-    return {
+    const next: BookSource = {
       schemaVersion: 1,
       id,
       name: name().trim() || "未命名书源",
@@ -115,6 +121,10 @@ export default function SourceEditorPage() {
       updateTime: draft().updateTime || Date.now(),
       js: js(),
     };
+    // 分组可能在编辑期间被删掉，落盘前确认它还在
+    const gid = groupId();
+    if (gid && sourceGroupById(gid)) next.groupId = gid;
+    return next;
   }
 
   function validate(source: BookSource): string | null {
@@ -195,7 +205,10 @@ export default function SourceEditorPage() {
   async function onCopyJson() {
     const source = await getRemoteSource(draft().id);
     if (!source) return;
-    await navigator.clipboard.writeText(JSON.stringify(source, null, 2)).catch(() => undefined);
+    // 与列表页「复制导出 JSON」同一条导出路径：不带本机分组 id，只带分组名
+    await navigator.clipboard
+      .writeText(buildBookSourceExportText([source]))
+      .catch(() => undefined);
     showToast("书源 JSON 已复制");
   }
 
@@ -276,6 +289,8 @@ export default function SourceEditorPage() {
             onAuthor={setAuthor}
             version={version()}
             onVersion={setVersion}
+            groupName={sourceGroupName(groupId())}
+            onPickGroup={() => setGroupPickerOpen(true)}
             enabled={enabled()}
             onEnabled={setEnabled}
             caps={caps()}
@@ -345,6 +360,14 @@ export default function SourceEditorPage() {
             onExportJson={() => void onCopyJson()}
           />
         </ScrollArea>
+      </Show>
+      {/* 归入分组（选择即写入草稿，随保存落盘） */}
+      <Show when={groupPickerOpen()}>
+        <SourceGroupPicker
+          value={groupId()}
+          onSelect={(next) => setGroupId(next ?? undefined)}
+          onClose={() => setGroupPickerOpen(false)}
+        />
       </Show>
     </div>
   );

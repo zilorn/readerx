@@ -618,6 +618,36 @@ pub(crate) fn delete_book_source(app: &AppHandle, id: &str) -> Result<(), String
     Ok(())
 }
 
+/// 清除全部书源上指向该分组的归属（书源分组被删除时调用），返回受影响的书源数量。
+/// 组清单存在前端偏好里，源文件里的 `groupId` 必须在删组时一并清掉，
+/// 否则会留下指向已删分组的悬空引用。整批改写都在 Rust 侧完成，不走 IPC 往返。
+pub(crate) fn clear_book_source_group(app: &AppHandle, group_id: &str) -> Result<u64, String> {
+    let dir = ensure_sources_dir(app)?;
+    let entries = fs::read_dir(&dir).map_err(|e| format!("读取书源目录失败: {e}"))?;
+    let mut cleared = 0u64;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(mut source) = serde_json::from_str::<BookSource>(&text) else {
+            continue;
+        };
+        if source.group_id.as_deref() != Some(group_id) {
+            continue;
+        }
+        source.group_id = None;
+        let text =
+            serde_json::to_string_pretty(&source).map_err(|e| format!("序列化书源失败: {e}"))?;
+        fs::write(&path, text).map_err(|e| format!("写入书源失败: {e}"))?;
+        cleared += 1;
+    }
+    Ok(cleared)
+}
+
 // ---------------------------------------------------------------------------
 // 书源网页登录 Cookie：<appData>/source_sessions/<id>.json
 // 与书源 JSON 分开放，避免把用户私人 Cookie 带进书源导出/导入。

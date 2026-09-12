@@ -13,12 +13,22 @@ import {
   bookSourcesReady,
   ensureBookSourcesLoaded,
 } from "../lib/bookSources";
+import {
+  SOURCE_FILTER_ALL,
+  SOURCE_FILTER_NONE,
+  ensureSourceGroupsLoaded,
+  filterSourcesByGroup,
+  resolveSourceFilter,
+  sourceGroupById,
+  sourceGroupList,
+} from "../lib/sourceGroups";
+import { SourceGroupChips, sourceGroupChips } from "../components/SourceGroupChips";
 import { callRemoteSource } from "../lib/backend";
 import type { BookItem, BookSourceSummary } from "../lib/bookSourcesTypes";
 import { normalizeBookTags } from "../lib/booksTypes";
 import { hanText } from "../lib/hanDisplay";
 import { rememberPicked, type PickedBook } from "../lib/online";
-import { currentSourceParallel } from "../lib/store";
+import { currentSourceParallel, lastSourceGroupFilter, rememberSourceGroupFilter } from "../lib/store";
 import { OnlineBookSheet } from "../components/OnlineBookSheet";
 import { SourceCover } from "../components/SourceCover";
 
@@ -109,6 +119,7 @@ function ResultRow(props: { entry: ResultEntry; onClick: () => void }) {
 export default function DiscoverPage() {
   const navigate = useNavigate();
   void ensureBookSourcesLoaded();
+  void ensureSourceGroupsLoaded();
 
   const [mode, setMode] = createSignal<Mode>("search");
   const [keyword, setKeyword] = createSignal("");
@@ -132,13 +143,64 @@ export default function DiscoverPage() {
   const [discBusy, setDiscBusy] = createSignal(false);
   const [discError, setDiscError] = createSignal("");
 
-  const discoverSources = createMemo(() =>
-    bookSourceList().filter((s) => s.enabled && s.capabilities.discover),
+  /** 当前生效的书源分组筛选（与书源管理页共用同一个记忆值；分组被删则回落「全部」） */
+  const groupFilter = (): string => resolveSourceFilter(lastSourceGroupFilter());
+
+  /** 参与搜索 / 发现的书源：已启用 + 对应能力 + 落在当前分组内 */
+  const searchSources = createMemo(() =>
+    filterSourcesByGroup(
+      bookSourceList().filter((s) => s.enabled && s.capabilities.search),
+      groupFilter(),
+    ),
   );
 
-  const canSearch = createMemo(
-    () => bookSourceList().filter((s) => s.enabled && s.capabilities.search).length > 0,
+  const discoverSources = createMemo(() =>
+    filterSourcesByGroup(
+      bookSourceList().filter((s) => s.enabled && s.capabilities.discover),
+      groupFilter(),
+    ),
   );
+
+  const canSearch = createMemo(() => searchSources().length > 0);
+
+  /** 分组筛选条的数量：按当前模式统计该分组内可用的书源数 */
+  const groupChipCounts = createMemo<Record<string, number>>(() => {
+    const usable = bookSourceList().filter(
+      (s) => s.enabled && (mode() === "search" ? s.capabilities.search : s.capabilities.discover),
+    );
+    const counts: Record<string, number> = {
+      [SOURCE_FILTER_ALL]: usable.length,
+      [SOURCE_FILTER_NONE]: 0,
+    };
+    for (const source of usable) {
+      if (!sourceGroupById(source.groupId)) {
+        counts[SOURCE_FILTER_NONE] += 1;
+        continue;
+      }
+      counts[source.groupId!] = (counts[source.groupId!] ?? 0) + 1;
+    }
+    return counts;
+  });
+
+  const filterChips = createMemo(() => sourceGroupChips(groupChipCounts(), groupFilter()));
+
+  // 分组筛选把当前发现源排除在外时（切分组 / 该书源被停用）收起其分类与结果，
+  // 避免「加载更多」继续向筛选范围外的书源要数据
+  createEffect(() => {
+    const id = discoverSourceId();
+    if (!id || discoverSources().some((source) => source.id === id)) return;
+    setDiscoverSourceId("");
+    setCategories([]);
+    setCategoryUrl("");
+    setDiscResults([]);
+    setDiscError("");
+  });
+
+  /** 分组把可用书源筛空时的说明（与全局没有可用书源区分开） */
+  const emptyScopeText = (what: string): string =>
+    groupFilter() === SOURCE_FILTER_ALL
+      ? `没有${what}的已启用书源`
+      : `该分组没有${what}的已启用书源`;
 
   function openPreview(entry: ResultEntry) {
     // 仍登记会话级 pick，保持与 /online/:key 深链的兼容
@@ -183,7 +245,7 @@ export default function DiscoverPage() {
   async function onSearch(rawKw?: string) {
     const kw = (rawKw ?? keyword()).trim();
     if (!kw) return;
-    const sources = bookSourceList().filter((s) => s.enabled && s.capabilities.search);
+    const sources = searchSources();
     const seq = ++searchSeq;
     setSearching(true);
     setSearchDone(false);
@@ -354,6 +416,17 @@ export default function DiscoverPage() {
               </div>
             }
           >
+            {/* 分组筛选：在管理页分的组可以直接限定本页搜索 / 发现用的书源 */}
+            <Show when={sourceGroupList().length > 0 || groupFilter() !== SOURCE_FILTER_ALL}>
+              <div class="mb-1">
+                <SourceGroupChips
+                  chips={filterChips()}
+                  value={groupFilter()}
+                  onSelect={(key) => rememberSourceGroupFilter(key)}
+                />
+              </div>
+            </Show>
+
             <Show when={mode() === "search"}>
               <div class="mb-3 flex items-center gap-2">
                 <div class="flex min-w-0 flex-1 items-center gap-2 rounded-[10px] border border-border bg-surface px-3 py-2">
@@ -377,6 +450,11 @@ export default function DiscoverPage() {
                   <SearchIcon size={19} />
                 </button>
               </div>
+              <Show when={!canSearch()}>
+                <p class="pb-2 text-center text-[12px] text-text-3">
+                  {emptyScopeText("可搜索")}
+                </p>
+              </Show>
               <Show when={searching()}>
                 <div
                   class="flex items-center justify-center gap-2 text-[12.5px] text-text-3"
@@ -411,7 +489,7 @@ export default function DiscoverPage() {
             <Show when={mode() === "discover"}>
               <Show when={discoverSources().length === 0}>
                 <p class="py-8 text-center text-[12.5px] text-text-3">
-                  没有支持「发现」的已启用书源
+                  {emptyScopeText("支持「发现」")}
                 </p>
               </Show>
               <Show when={discoverSources().length > 0}>

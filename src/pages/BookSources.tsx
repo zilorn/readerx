@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createSignal } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 import { PageHeader } from "../components/PageHeader";
 import {
@@ -6,6 +6,7 @@ import {
   CloseIcon,
   DownloadIcon,
   FileTextIcon,
+  FolderIcon,
   LinkIcon,
   PlusIcon,
   SourceIcon,
@@ -22,8 +23,20 @@ import {
   planBookSourceNetworkImport,
   refreshBookSources,
   removeBookSource,
+  resolveImportEntryGroup,
+  setBookSourceGroup,
   type ImportPlan,
 } from "../lib/bookSources";
+import {
+  SOURCE_FILTER_ALL,
+  SOURCE_FILTER_NONE,
+  ensureSourceGroupsLoaded,
+  filterSourcesByGroup,
+  resolveSourceFilter,
+  sourceGroupById,
+  sourceGroupName,
+} from "../lib/sourceGroups";
+import { lastSourceGroupFilter, rememberSourceGroupFilter } from "../lib/store";
 import {
   getRemoteSource,
   saveRemoteSource,
@@ -32,6 +45,9 @@ import { CAPABILITY_LABELS } from "../lib/bookSourcesTypes";
 import { showToast } from "../lib/toast";
 import { ScrollArea } from "../components/ScrollArea";
 import { ToggleSwitch } from "../components/ToggleSwitch";
+import { SourceGroupChips, sourceGroupChips } from "../components/SourceGroupChips";
+import { SourceGroupPicker } from "../components/SourceGroupPicker";
+import { SourceGroupManagerSheet } from "../components/SourceGroupManager";
 
 /**
  * 书源管理：列表 / 新建 / 导入导出 / 删除
@@ -39,12 +55,18 @@ import { ToggleSwitch } from "../components/ToggleSwitch";
 export default function BookSourcesPage() {
   const navigate = useNavigate();
   void ensureBookSourcesLoaded();
+  void ensureSourceGroupsLoaded();
   const [confirmPlan, setConfirmPlan] = createSignal<ImportPlan | null>(null);
   /** 导入计划中逐条选择「跳过覆盖」的覆盖项下标（默认全部覆盖） */
   const [skippedOverwrites, setSkippedOverwrites] = createSignal<ReadonlySet<number>>(
     new Set<number>(),
   );
+  /** 导入时是否按文件里的分组名归组（关闭则新导书源落未分组、覆盖项保留本机分组） */
+  const [importGroups, setImportGroups] = createSignal(true);
   const [deleteId, setDeleteId] = createSignal<string | null>(null);
+  /** 正在归组的书源 id / 分组管理抽屉开合 */
+  const [groupPickerId, setGroupPickerId] = createSignal<string | null>(null);
+  const [groupManagerOpen, setGroupManagerOpen] = createSignal(false);
   /** 网络导入（从网址拉取 JSON）：弹层开合 / 输入 / 拉取中 / 错误 */
   const [urlDialog, setUrlDialog] = createSignal(false);
   const [urlInput, setUrlInput] = createSignal("");
@@ -57,8 +79,39 @@ export default function BookSourcesPage() {
     if (urlDialog()) urlInputRef?.focus();
   });
 
+  /** 当前生效的分组筛选（分组被删 / 记忆值失效时回落「全部」） */
+  const filter = (): string => resolveSourceFilter(lastSourceGroupFilter());
+
+  /** 各筛选值下的书源数量（未分组口径与筛选口径一致） */
+  const groupCounts = createMemo<Record<string, number>>(() => {
+    const counts: Record<string, number> = {
+      [SOURCE_FILTER_ALL]: bookSourceList().length,
+      [SOURCE_FILTER_NONE]: 0,
+    };
+    for (const source of bookSourceList()) {
+      if (!sourceGroupById(source.groupId)) {
+        counts[SOURCE_FILTER_NONE] += 1;
+        continue;
+      }
+      counts[source.groupId!] = (counts[source.groupId!] ?? 0) + 1;
+    }
+    return counts;
+  });
+
+  const visibleSources = createMemo(() =>
+    filterSourcesByGroup(bookSourceList(), filter()),
+  );
+
+  const filterChips = createMemo(() => sourceGroupChips(groupCounts(), filter()));
+
+  /** 文件 / 剪贴板 / 网址导入前都要先备好清单：分组名要对本机分组解析 */
+  async function bootstrap(): Promise<void> {
+    await Promise.all([ensureBookSourcesLoaded(), ensureSourceGroupsLoaded()]);
+  }
+
   function presentImportPlan(plan: ImportPlan): void {
     setSkippedOverwrites(new Set<number>());
+    setImportGroups(true);
     setConfirmPlan(plan);
   }
 
@@ -89,7 +142,11 @@ export default function BookSourcesPage() {
   }
 
   function onNew() {
-    openSourceEditor(blankBookSource());
+    // 正筛在某个分组里新建时，默认就归入该分组（未分组 / 全部则不预设）
+    const current = filter();
+    const groupId =
+      current === SOURCE_FILTER_ALL || current === SOURCE_FILTER_NONE ? undefined : current;
+    openSourceEditor(blankBookSource(groupId ? { groupId } : undefined));
     navigate("/source-editor");
   }
 
@@ -99,6 +156,7 @@ export default function BookSourcesPage() {
     if (!file) return;
     void (async () => {
       const text = await file.text();
+      await bootstrap();
       presentImportPlan(planBookSourceImport(text));
     })();
     input.value = "";
@@ -111,6 +169,7 @@ export default function BookSourcesPage() {
         showToast("剪贴板没有可导入的内容", true);
         return;
       }
+      await bootstrap();
       presentImportPlan(planBookSourceImport(text));
     })();
   }
@@ -160,12 +219,14 @@ export default function BookSourcesPage() {
     const plan = confirmPlan();
     if (!plan) return;
     const skipped = skippedOverwrites();
+    const useGroups = importGroups();
     let created = 0;
     let overwritten = 0;
     let kept = 0;
     try {
-      for (const source of plan.create) {
-        await saveRemoteSource(source);
+      // 分组名 → 本机分组：已有同名分组直接复用，没有则新建
+      for (const entry of plan.create) {
+        await saveRemoteSource(resolveImportEntryGroup(entry, useGroups));
         created++;
       }
       for (const [index, item] of plan.overwrite.entries()) {
@@ -173,7 +234,7 @@ export default function BookSourcesPage() {
           kept++;
           continue;
         }
-        await saveRemoteSource(item.source);
+        await saveRemoteSource(resolveImportEntryGroup(item.entry, useGroups));
         overwritten++;
       }
       const keptText = kept > 0 ? `，保留本机 ${kept} 个` : "";
@@ -209,6 +270,17 @@ export default function BookSourcesPage() {
     await saveRemoteSource(source);
     // 启停是直接写盘：重拉清单让状态立即在列表与「发现」页生效
     await refreshBookSources();
+  }
+
+  /** 归组（null = 未分组）：走 patchBookSourceField 落盘，清单信号自动同步 */
+  async function onAssignGroup(id: string, groupId: string | null) {
+    try {
+      if (!(await setBookSourceGroup(id, groupId))) return;
+      const name = sourceGroupName(groupId);
+      showToast(name ? `已归入「${name}」` : "已移出分组");
+    } catch (err) {
+      showToast(String(err), true);
+    }
   }
 
   async function copyExport(id: string) {
@@ -259,43 +331,63 @@ export default function BookSourcesPage() {
       />
 
       <div class="px-[18px] pb-[calc(36px+env(safe-area-inset-bottom))] pt-2">
+        <Show when={bookSourcesReady() && bookSourceList().length > 0}>
+          <div class="-mx-[18px] px-[18px]">
+            <SourceGroupChips
+              chips={filterChips()}
+              value={filter()}
+              onSelect={(key) => rememberSourceGroupFilter(key)}
+              onManage={() => setGroupManagerOpen(true)}
+              manageLabel="分组管理"
+            />
+          </div>
+        </Show>
         <Show
-          when={bookSourcesReady() && bookSourceList().length > 0}
+          when={visibleSources().length > 0}
           fallback={
-            <div class="flex flex-col items-center gap-2 px-6 py-16 text-center text-text-3">
-              <SourceIcon size={44} class="mb-1 text-text-3/70" />
-              <p class="text-[15px] font-semibold text-text-2">还没有书源</p>
-              <p class="mt-1 text-[12px] leading-[1.6]">
-                从社区导入 JSON，或在「发现」页使用模板新建
+            <Show
+              when={bookSourcesReady() && bookSourceList().length > 0}
+              fallback={
+                <div class="flex flex-col items-center gap-2 px-6 py-16 text-center text-text-3">
+                  <SourceIcon size={44} class="mb-1 text-text-3/70" />
+                  <p class="text-[15px] font-semibold text-text-2">还没有书源</p>
+                  <p class="mt-1 text-[12px] leading-[1.6]">
+                    从社区导入 JSON，或在「发现」页使用模板新建
+                  </p>
+                  <div class="mt-3 flex flex-wrap items-center justify-center gap-2">
+                    <button
+                      class="inline-flex items-center gap-1.5 rounded-xl bg-accent px-4 py-2.5 text-[13px] font-semibold text-on-accent active:scale-[0.97]"
+                      onClick={() => fileInput?.click()}
+                    >
+                      <DownloadIcon size={16} />
+                      导入 JSON
+                    </button>
+                    <button
+                      class="inline-flex items-center gap-1.5 rounded-xl bg-surface-2 px-4 py-2.5 text-[13px] font-semibold text-text-2 active:scale-[0.97]"
+                      onClick={onNew}
+                    >
+                      <PlusIcon size={16} />
+                      新建
+                    </button>
+                    <button
+                      class="inline-flex items-center gap-1.5 rounded-xl bg-surface-2 px-4 py-2.5 text-[13px] font-semibold text-text-2 active:scale-[0.97]"
+                      onClick={openUrlImport}
+                    >
+                      <LinkIcon size={16} />
+                      从网址导入
+                    </button>
+                  </div>
+                </div>
+              }
+            >
+              <p class="py-14 text-center text-[12.5px] text-text-3">
+                {filter() === SOURCE_FILTER_NONE ? "没有未分组的书源" : "该分组还没有书源"}
               </p>
-              <div class="mt-3 flex flex-wrap items-center justify-center gap-2">
-                <button
-                  class="inline-flex items-center gap-1.5 rounded-xl bg-accent px-4 py-2.5 text-[13px] font-semibold text-on-accent active:scale-[0.97]"
-                  onClick={() => fileInput?.click()}
-                >
-                  <DownloadIcon size={16} />
-                  导入 JSON
-                </button>
-                <button
-                  class="inline-flex items-center gap-1.5 rounded-xl bg-surface-2 px-4 py-2.5 text-[13px] font-semibold text-text-2 active:scale-[0.97]"
-                  onClick={onNew}
-                >
-                  <PlusIcon size={16} />
-                  新建
-                </button>
-                <button
-                  class="inline-flex items-center gap-1.5 rounded-xl bg-surface-2 px-4 py-2.5 text-[13px] font-semibold text-text-2 active:scale-[0.97]"
-                  onClick={openUrlImport}
-                >
-                  <LinkIcon size={16} />
-                  从网址导入
-                </button>
-              </div>
-            </div>
+            </Show>
           }
         >
           <div class="divide-y divide-border overflow-hidden rounded-[14px] border border-border bg-surface">
-            <For each={bookSourceList()}>
+            <For each={visibleSources()}>
               {(summary) => (
                 <div class="flex items-center gap-3 px-4 py-[12px]">
                   <button
@@ -318,6 +410,12 @@ export default function BookSourcesPage() {
                       </span>
                     </span>
                     <span class="flex flex-wrap items-center gap-1">
+                      <Show when={sourceGroupName(summary.groupId)}>
+                        <i class="not-italic flex max-w-[110px] items-center gap-0.5 truncate rounded-full bg-accent-weak px-1.5 py-0.5 text-[9.5px] font-semibold text-accent">
+                          <FolderIcon size={10} class="flex-none" />
+                          <span class="truncate">{sourceGroupName(summary.groupId)}</span>
+                        </i>
+                      </Show>
                       {(Object.keys(CAPABILITY_LABELS) as (keyof typeof CAPABILITY_LABELS)[])
                         .filter((key) => summary.capabilities[key])
                         .map((key) => (
@@ -346,6 +444,14 @@ export default function BookSourcesPage() {
                     <span class="flex items-center gap-0.5">
                       <button
                         class="grid h-7 w-7 place-items-center rounded-lg text-text-3 active:bg-surface-2"
+                        classList={{ "text-accent": !!sourceGroupName(summary.groupId) }}
+                        aria-label={`归入分组：${summary.name}`}
+                        onClick={() => setGroupPickerId(summary.id)}
+                      >
+                        <FolderIcon size={15} />
+                      </button>
+                      <button
+                        class="grid h-7 w-7 place-items-center rounded-lg text-text-3 active:bg-surface-2"
                         aria-label="复制导出 JSON"
                         onClick={() => void copyExport(summary.id)}
                       >
@@ -366,11 +472,25 @@ export default function BookSourcesPage() {
             </For>
           </div>
           <p class="mt-2.5 text-center text-[11px] leading-[1.6] text-text-3">
-            已启用 {bookSourceList().filter((s) => s.enabled).length} /{" "}
-            {bookSourceList().length} 个书源
+            已启用 {visibleSources().filter((s) => s.enabled).length} /{" "}
+            {visibleSources().length} 个书源
           </p>
         </Show>
       </div>
+
+      {/* 归入分组 */}
+      <Show when={groupPickerId() !== null}>
+        <SourceGroupPicker
+          value={bookSourceList().find((s) => s.id === groupPickerId())?.groupId}
+          onSelect={(groupId) => void onAssignGroup(groupPickerId()!, groupId)}
+          onClose={() => setGroupPickerId(null)}
+        />
+      </Show>
+
+      {/* 分组管理（新建 / 重命名 / 删除 / 整组启停） */}
+      <Show when={groupManagerOpen()}>
+        <SourceGroupManagerSheet onClose={() => setGroupManagerOpen(false)} />
+      </Show>
 
       {/* 删除确认 */}
       <Show when={deleteId() !== null}>
@@ -515,10 +635,10 @@ export default function BookSourcesPage() {
                       <div class="flex items-center gap-3 px-3.5 py-2.5">
                         <span class="flex min-w-0 flex-1 flex-col gap-0.5">
                           <span class="truncate text-[13px] font-medium text-text-2">
-                            {item.source.name}
+                            {item.entry.source.name}
                           </span>
                           <span class="truncate text-[11px] text-text-3">
-                            {siteLabel(item.source.bookSourceUrl)}
+                            {siteLabel(item.entry.source.bookSourceUrl)}
                           </span>
                         </span>
                         <span class="flex flex-none items-center gap-2">
@@ -527,9 +647,42 @@ export default function BookSourcesPage() {
                           </span>
                           <ToggleSwitch
                             on={!skippedOverwrites().has(index())}
-                            label={`覆盖书源 ${item.source.name}`}
+                            label={`覆盖书源 ${item.entry.source.name}`}
                             onChange={() => toggleOverwrite(index())}
                           />
+                        </span>
+                      </div>
+                    )}
+                  </For>
+                </div>
+              </div>
+            </Show>
+            {/* 导入内容携带的分组：可整体关闭（关闭后新导书源落未分组） */}
+            <Show when={confirmPlan()!.groups.length > 0}>
+              <div class="overflow-hidden rounded-[12px] border border-border bg-bg">
+                <div class="flex items-center gap-2 border-b border-border bg-surface-2/60 px-3.5 py-2">
+                  <span class="flex-1 text-[11.5px] font-semibold text-text-3">
+                    导入内容里的分组
+                  </span>
+                  <span class="text-[11px] font-semibold tabular-nums text-text-3">
+                    {importGroups() ? "归入分组" : "未分组"}
+                  </span>
+                  <ToggleSwitch
+                    on={importGroups()}
+                    label="按分组名导入分组"
+                    onChange={() => setImportGroups(!importGroups())}
+                  />
+                </div>
+                <div class="divide-y divide-border">
+                  <For each={confirmPlan()!.groups}>
+                    {(group) => (
+                      <div class="flex items-center gap-2.5 px-3.5 py-2">
+                        <FolderIcon size={14} class="flex-none text-text-3" />
+                        <span class="min-w-0 flex-1 truncate text-[12.5px] text-text-2">
+                          {group.name}
+                        </span>
+                        <span class="flex-none text-[11px] tabular-nums text-text-3">
+                          {group.count} 个 · {group.existing ? "已有" : "新建"}
                         </span>
                       </div>
                     )}

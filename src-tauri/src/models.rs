@@ -294,6 +294,10 @@ pub struct BookSource {
     /// 编辑页手动「网页登录」不受影响。默认开启，可单独关闭。
     #[serde(default = "yes")]
     pub auto_auth: bool,
+    /// 所属书源分组 id（分组清单由前端偏好存 `readerx.sourceGroups`）。
+    /// 纯本机归属：导出时不带该 id，只带可读的 `groupName`（见 docs/book-source-spec.md）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
     /// 缺省请求 UA（空 = 使用内置默认）
     #[serde(default)]
     pub user_agent: String,
@@ -318,6 +322,7 @@ impl BookSource {
             version: self.version.clone(),
             enabled: self.enabled,
             capabilities: self.capabilities.clone(),
+            group_id: self.group_id.clone(),
             update_time: self.update_time,
             js_length: self.js.chars().count() as u64,
         }
@@ -335,6 +340,9 @@ pub struct BookSourceSummary {
     pub version: String,
     pub enabled: bool,
     pub capabilities: BookSourceCapabilities,
+    /// 所属书源分组 id；未分组 / 分组已被删除时为 None
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
     pub update_time: u64,
     pub js_length: u64,
 }

@@ -218,6 +218,15 @@ export async function deleteRemoteSource(id: string): Promise<void> {
   await invoke("readerx_source_delete", { id });
 }
 
+/**
+ * 书源分组被删除：清空全部书源上该分组的归属，返回受影响的书源数量。
+ * 源文件里的 groupId 由 Rust 侧整批改写，避免前端逐源读写。
+ */
+export async function clearRemoteSourceGroup(groupId: string): Promise<number> {
+  if (!tauri) return 0;
+  return await invoke<number>("readerx_source_group_clear", { groupId });
+}
+
 /** 执行一次书源入口函数；浏览器开发环境返回错误结果 */
 export async function callRemoteSource(
   sourceId: string,
@@ -350,6 +359,7 @@ function toSummary(source: BookSource): BookSourceSummary {
     version: source.version,
     enabled: source.enabled,
     capabilities: source.capabilities,
+    groupId: source.groupId,
     updateTime: source.updateTime,
     jsLength: source.js.length,
   };

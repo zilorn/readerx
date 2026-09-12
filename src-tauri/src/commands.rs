@@ -214,6 +214,11 @@ fn validate_source(source: &BookSource) -> Result<(), String> {
     if source.js.chars().count() > 2_000_000 {
         return Err("书源 JS 代码过大（超过 200 万字符）".to_string());
     }
+    if let Some(group_id) = &source.group_id {
+        if group_id.trim().is_empty() || group_id.chars().count() > 64 {
+            return Err("非法的书源分组 id".to_string());
+        }
+    }
     Ok(())
 }
 
@@ -231,6 +236,19 @@ pub async fn readerx_source_put(app: AppHandle, source: BookSource) -> Result<()
 #[tauri::command]
 pub async fn readerx_source_delete(app: AppHandle, id: String) -> Result<(), String> {
     blocking("书源删除", move || storage::delete_book_source(&app, &id)).await
+}
+
+/// 书源分组被删除：把全部书源上指向该分组的归属清空，返回受影响的书源数量
+#[tauri::command]
+pub async fn readerx_source_group_clear(app: AppHandle, group_id: String) -> Result<u64, String> {
+    let group_id = group_id.trim().to_string();
+    if group_id.is_empty() || group_id.chars().count() > 64 {
+        return Err("非法的书源分组 id".to_string());
+    }
+    blocking("书源分组清理", move || {
+        storage::clear_book_source_group(&app, &group_id)
+    })
+    .await
 }
 
 /// 入口函数 → 能力开关 映射（调用前校验对应能力已启用）

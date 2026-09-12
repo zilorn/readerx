@@ -1,7 +1,8 @@
 /**
  * 书源仓库：
  * - 列表信号由 Rust 后端管理（booksource 文件）；
- * - 提供新建模板 / 能力与启停更新 / JSON 导入导出归一化。
+ * - 提供新建模板 / 能力与启停更新 / JSON 导入导出归一化；
+ * - 分组归属（groupId）随书源落盘，分组清单见 lib/sourceGroups.ts。
  */
 import { createSignal } from "solid-js";
 import { httpFetch } from "./http";
@@ -11,6 +12,14 @@ import {
   listRemoteSources,
   saveRemoteSource,
 } from "./backend";
+import {
+  SOURCE_GROUP_NAME_MAX,
+  ensureSourceGroup,
+  ensureSourceGroupsLoaded,
+  sourceGroupById,
+  sourceGroupList,
+  sourceGroupName,
+} from "./sourceGroups";
 import type {
   BookSource,
   BookSourceCapabilities,
@@ -84,6 +93,7 @@ function applySummary(source: BookSource): BookSourceSummary {
     version: source.version,
     enabled: source.enabled,
     capabilities: source.capabilities,
+    groupId: source.groupId,
     updateTime: source.updateTime,
     jsLength: source.js.length,
   };
@@ -199,6 +209,49 @@ export async function patchBookSourceField(
 }
 
 // ---------------------------------------------------------------------------
+// 分组归属
+// ---------------------------------------------------------------------------
+
+/** 复制一份并设置 / 清除分组归属（undefined 的字段不会落进 JSON） */
+function withSourceGroup(source: BookSource, groupId: string | null): BookSource {
+  const next = { ...source };
+  if (groupId) next.groupId = groupId;
+  else delete next.groupId;
+  return next;
+}
+
+/** 把一本书源归入分组（null = 未分组）后落盘；清单信号由 persistBookSource 同步 */
+export async function setBookSourceGroup(id: string, groupId: string | null): Promise<boolean> {
+  const target = groupId && sourceGroupById(groupId) ? groupId : null;
+  return patchBookSourceField(id, (source) => {
+    if (target) source.groupId = target;
+    else delete source.groupId;
+  });
+}
+
+/**
+ * 整组批量启停：只改写状态与目标不一致的书源，返回实际改写数量。
+ * 逐个走 patchBookSourceField，每写完一个清单信号即更新，界面无需整体重拉。
+ */
+export async function setBookSourcesEnabled(
+  ids: readonly string[],
+  enabled: boolean,
+): Promise<number> {
+  const targets = ids.filter((id) => {
+    const summary = bookSourceSummaryById(id);
+    return summary ? summary.enabled !== enabled : false;
+  });
+  await Promise.all(
+    targets.map((id) =>
+      patchBookSourceField(id, (source) => {
+        source.enabled = enabled;
+      }),
+    ),
+  );
+  return targets.length;
+}
+
+// ---------------------------------------------------------------------------
 // 编辑会话（SourceEditor 路由与列表页之间传递；null 表示新建）
 // ---------------------------------------------------------------------------
 
@@ -230,25 +283,63 @@ export interface ImportIssue {
   message: string;
 }
 
+/** 一条待导入的书源：源本体 + 文件携带的分组引用 / 本机保留的归属 */
+export interface ImportEntry {
+  source: BookSource;
+  /**
+   * 导入内容里携带的分组名（导出时按本机分组名写入，换设备 / 分享后能还原分组）；
+   * 缺省 = 文件没有带分组信息。
+   */
+  groupName?: string;
+  /**
+   * 覆盖导入且文件未带分组时沿用的本机分组 id；
+   * 新建条目与文件自带分组的条目都为空。
+   */
+  groupId?: string;
+}
+
+/** 导入内容涉及的一个分组（确认页展示「新建 / 已有」） */
+export interface ImportGroupRef {
+  name: string;
+  /** 本机已有同名分组：导入时直接复用，不新建 */
+  existing: boolean;
+  /** 该分组下的书源条数 */
+  count: number;
+}
+
 export interface ImportPlan {
   /** 需要新建的书源（已生成新 id） */
-  create: BookSource[];
-  /** 与本机已有书源同 id 或同名同站，需覆盖（value 为已有 id） */
-  overwrite: { id: string; source: BookSource }[];
+  create: ImportEntry[];
+  /** 与本机已有书源同 id 或同名同站，需覆盖（id 为已有书源 id） */
+  overwrite: { id: string; entry: ImportEntry }[];
+  /** 文件里出现的分组（按出现顺序去重） */
+  groups: ImportGroupRef[];
   issues: ImportIssue[];
 }
 
-function normalizeEntry(raw: unknown): { source: BookSource | null; issue?: string } {
+/**
+ * 解析条目携带的分组引用：优先认本机分组 id（同机拷贝出来的文件），
+ * 其次认分组名（导出 / 分享的文件只带名字）。
+ */
+function readGroupName(r: Record<string, unknown>): string {
+  const rawId = typeof r.groupId === "string" ? r.groupId.trim() : "";
+  const byId = sourceGroupById(rawId);
+  if (byId) return byId.name;
+  const rawName = typeof r.groupName === "string" ? r.groupName.trim() : "";
+  return rawName.slice(0, SOURCE_GROUP_NAME_MAX);
+}
+
+function normalizeEntry(raw: unknown): { entry: ImportEntry | null; issue?: string } {
   if (!raw || typeof raw !== "object") {
-    return { source: null, issue: "不是对象" };
+    return { entry: null, issue: "不是对象" };
   }
   const r = raw as Record<string, unknown>;
   const name = typeof r.name === "string" ? r.name.trim() : "";
   const bookSourceUrl = typeof r.bookSourceUrl === "string" ? r.bookSourceUrl.trim() : "";
   const js = typeof r.js === "string" ? r.js : "";
-  if (!name) return { source: null, issue: "缺少名称 name" };
-  if (!bookSourceUrl) return { source: null, issue: "缺少站点地址 bookSourceUrl" };
-  if (!js.trim()) return { source: null, issue: "缺少 JS 代码 js" };
+  if (!name) return { entry: null, issue: "缺少名称 name" };
+  if (!bookSourceUrl) return { entry: null, issue: "缺少站点地址 bookSourceUrl" };
+  if (!js.trim()) return { entry: null, issue: "缺少 JS 代码 js" };
   const capsRaw =
     r.capabilities && typeof r.capabilities === "object"
       ? (r.capabilities as Record<string, unknown>)
@@ -269,6 +360,7 @@ function normalizeEntry(raw: unknown): { source: BookSource | null; issue?: stri
     }
   }
   const rawId = typeof r.id === "string" ? r.id.trim() : "";
+  const groupName = readGroupName(r);
   const source: BookSource = {
     schemaVersion: 1,
     id: rawId || newBookSourceId(),
@@ -285,12 +377,12 @@ function normalizeEntry(raw: unknown): { source: BookSource | null; issue?: stri
     updateTime: typeof r.updateTime === "number" ? r.updateTime : Date.now(),
     js,
   };
-  return { source };
+  return { entry: { source, ...(groupName ? { groupName } : {}) } };
 }
 
 /** 解析导入文本（支持单个对象或数组），返回需要落地/覆盖/错误 */
 export function planBookSourceImport(text: string): ImportPlan {
-  const plan: ImportPlan = { create: [], overwrite: [], issues: [] };
+  const plan: ImportPlan = { create: [], overwrite: [], groups: [], issues: [] };
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
@@ -299,11 +391,24 @@ export function planBookSourceImport(text: string): ImportPlan {
   }
   const list = Array.isArray(parsed) ? parsed : [parsed];
   const existing = bookSourceList();
-  list.forEach((entry, index) => {
-    const { source, issue } = normalizeEntry(entry);
-    if (issue || !source) {
+  const groupRefs = new Map<string, ImportGroupRef>();
+  list.forEach((raw, index) => {
+    const { entry, issue } = normalizeEntry(raw);
+    if (issue || !entry) {
       plan.issues.push({ index: index + 1, message: issue ?? "无法解析" });
       return;
+    }
+    const { source } = entry;
+    if (entry.groupName) {
+      const ref = groupRefs.get(entry.groupName);
+      if (ref) ref.count += 1;
+      else {
+        groupRefs.set(entry.groupName, {
+          name: entry.groupName,
+          existing: sourceGroupList().some((group) => group.name === entry.groupName),
+          count: 1,
+        });
+      }
     }
     const dup =
       existing.find((s) => s.id === source.id) ??
@@ -315,17 +420,44 @@ export function planBookSourceImport(text: string): ImportPlan {
               source.bookSourceUrl.replace(/\/+$/, "")),
       );
     if (dup) {
-      plan.overwrite.push({ id: dup.id, source: { ...source, id: dup.id } });
+      // 文件没带分组时保留本机归属（覆盖书源不该顺手把分组清掉）
+      const keepGroupId = sourceGroupById(dup.groupId)?.id;
+      plan.overwrite.push({
+        id: dup.id,
+        entry: { ...entry, source: { ...source, id: dup.id }, groupId: keepGroupId },
+      });
     } else {
-      plan.create.push(source);
+      plan.create.push(entry);
     }
   });
+  plan.groups = [...groupRefs.values()];
   return plan;
+}
+
+/**
+ * 按「是否随导入分组」定下一条书源的最终归属：
+ * - 关闭时不动分组：新建条目不分组，覆盖条目保留本机分组；
+ * - 文件未带分组名时同上（没有可依据的分组信息）。
+ */
+export function resolveImportEntryGroup(entry: ImportEntry, useGroups: boolean): BookSource {
+  if (!useGroups || !entry.groupName) {
+    return withSourceGroup(entry.source, entry.groupId ?? null);
+  }
+  return withSourceGroup(entry.source, ensureSourceGroup(entry.groupName)?.id ?? null);
+}
+
+/** 导出用条目：本地分组 id 不外带，只带可读分组名（导入端按名匹配 / 新建） */
+function toExportEntry(source: BookSource): Record<string, unknown> {
+  const entry: Record<string, unknown> = { ...source };
+  delete entry.groupId;
+  const groupName = sourceGroupName(source.groupId);
+  if (groupName) entry.groupName = groupName;
+  return entry;
 }
 
 /** 导出 JSON 文本（单条或数组） */
 export function buildBookSourceExportText(sources: BookSource[]): string {
-  const list = sources.map(({ js, ...rest }) => ({ ...rest, js }));
+  const list = sources.map(toExportEntry);
   return JSON.stringify(list.length === 1 ? list[0] : list, null, 2);
 }
 
@@ -358,6 +490,8 @@ export async function planBookSourceNetworkImport(url: string): Promise<ImportPl
     const body = await res.text();
     const text = body.replace(/^\uFEFF/, "").trim();
     if (!text) throw new Error("该网址没有返回可导入的内容");
+    // 分组名要对着本机分组清单解析（已有同名分组直接复用）
+    await ensureSourceGroupsLoaded();
     return planBookSourceImport(text);
   } catch (err) {
     if (controller.signal.aborted) {

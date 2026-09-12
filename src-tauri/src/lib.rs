@@ -95,6 +95,7 @@ pub fn run() {
             commands::readerx_source_get,
             commands::readerx_source_put,
             commands::readerx_source_delete,
+            commands::readerx_source_group_clear,
             commands::readerx_source_call,
             commands::readerx_source_fetch_contents,
             commands::readerx_source_fetch_image,

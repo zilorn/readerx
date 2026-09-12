@@ -33,6 +33,11 @@ export interface BookSource {
    * 也受此开关约束。编辑页手动「网页登录」不受影响。默认开启。
    */
   autoAuth: boolean;
+  /**
+   * 所属书源分组 id（分组清单见 lib/sourceGroups.ts，存 readerx.sourceGroups）。
+   * 纯本机归属：导出时丢掉该 id，改带可读的 `groupName`（换设备 / 分享后仍能还原分组）。
+   */
+  groupId?: string;
   updateTime: number;
   js: string;
 }
@@ -47,6 +52,8 @@ export interface BookSourceSummary {
   version: string;
   enabled: boolean;
   capabilities: BookSourceCapabilities;
+  /** 所属书源分组 id；未分组 / 分组已被删除时缺省 */
+  groupId?: string;
   updateTime: number;
   jsLength: number;
 }
