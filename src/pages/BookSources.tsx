@@ -2,19 +2,17 @@ import { For, Show, createEffect, createMemo, createSignal } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 import { PageHeader } from "../components/PageHeader";
 import {
-  ChevronRightIcon,
   CloseIcon,
   DownloadIcon,
-  FileTextIcon,
   FolderIcon,
   LinkIcon,
   PlusIcon,
   SourceIcon,
-  TrashIcon,
 } from "../components/icons";
 import {
   blankBookSource,
   bookSourceList,
+  bookSourceSummaryById,
   bookSourcesReady,
   buildBookSourceExportText,
   ensureBookSourcesLoaded,
@@ -25,6 +23,7 @@ import {
   removeBookSource,
   resolveImportEntryGroup,
   setBookSourceGroup,
+  setBookSourcesEnabled,
   type ImportPlan,
 } from "../lib/bookSources";
 import {
@@ -37,17 +36,16 @@ import {
   sourceGroupName,
 } from "../lib/sourceGroups";
 import { lastSourceGroupFilter, rememberSourceGroupFilter } from "../lib/store";
-import {
-  getRemoteSource,
-  saveRemoteSource,
-} from "../lib/backend";
-import { CAPABILITY_LABELS } from "../lib/bookSourcesTypes";
+import { getRemoteSource, saveRemoteSource } from "../lib/backend";
+import type { BookSource } from "../lib/bookSourcesTypes";
 import { showToast } from "../lib/toast";
 import { ScrollArea } from "../components/ScrollArea";
 import { ToggleSwitch } from "../components/ToggleSwitch";
 import { SourceGroupChips, sourceGroupChips } from "../components/SourceGroupChips";
 import { SourceGroupPicker } from "../components/SourceGroupPicker";
 import { SourceGroupManagerSheet } from "../components/SourceGroupManager";
+import { BookSourceRow } from "../components/BookSourceRow";
+import { SourceSelectionBar } from "../components/SourceSelectionBar";
 
 /**
  * 书源管理：列表 / 新建 / 导入导出 / 删除
@@ -72,6 +70,11 @@ export default function BookSourcesPage() {
   const [urlInput, setUrlInput] = createSignal("");
   const [urlBusy, setUrlBusy] = createSignal(false);
   const [urlError, setUrlError] = createSignal("");
+  /** 多选：长按书源行进入；选中项跨筛选保留，批量操作进行中忽略重复触发 */
+  const [selecting, setSelecting] = createSignal(false);
+  const [selectedIds, setSelectedIds] = createSignal<string[]>([]);
+  const [batchBusy, setBatchBusy] = createSignal(false);
+  const [batchGroupPicker, setBatchGroupPicker] = createSignal(false);
   let fileInput: HTMLInputElement | undefined;
   let urlInputRef: HTMLInputElement | undefined;
 
@@ -103,6 +106,133 @@ export default function BookSourcesPage() {
   );
 
   const filterChips = createMemo(() => sourceGroupChips(groupCounts(), filter()));
+
+  // ---------------------------------------------------------------------------
+  // 多选：长按行进入，页头「全选」只作用于当前筛选可见的书源，
+  // 批量操作统一收口到 runBatch（跑完退出多选）。
+  // ---------------------------------------------------------------------------
+
+  /** 仍存在的选中项（书源被删掉后不计入数量） */
+  function selectedSourceIds(): string[] {
+    const alive = new Set(bookSourceList().map((source) => source.id));
+    return selectedIds().filter((id) => alive.has(id));
+  }
+
+  const selectedCount = () => selectedSourceIds().length;
+
+  /** 底部操作条只在有选中项时出现（0 个时不必占位） */
+  const showSelectionBar = () => selecting() && selectedCount() > 0;
+
+  /** 当前筛选可见的书源是否已全部选中（决定页头按钮是「全选」还是「取消全选」） */
+  function allVisibleSelected(): boolean {
+    const list = visibleSources();
+    return list.length > 0 && list.every((source) => selectedIds().includes(source.id));
+  }
+
+  function toggleSelect(id: string): void {
+    setSelectedIds((prev) =>
+      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id],
+    );
+  }
+
+  /** 全选 / 取消全选：只作用于当前筛选可见的书源 */
+  function toggleSelectAll(): void {
+    const ids = visibleSources().map((source) => source.id);
+    if (ids.length === 0) return;
+    setSelectedIds((prev) => {
+      if (allVisibleSelected()) {
+        const drop = new Set(ids);
+        return prev.filter((id) => !drop.has(id));
+      }
+      return [...new Set([...prev, ...ids])];
+    });
+  }
+
+  /** 长按行：进入多选并选中该行（已在多选中则只切换选中） */
+  function enterSelect(id: string): void {
+    if (!selecting()) {
+      setSelecting(true);
+      setBatchGroupPicker(false);
+    }
+    toggleSelect(id);
+  }
+
+  function cancelSelect(): void {
+    setSelecting(false);
+    setSelectedIds([]);
+    setBatchGroupPicker(false);
+  }
+
+  /** 所选书源是否同属一个分组（同组则抽屉里预选它，否则不预选） */
+  function sharedSelectedGroup(): string | null | undefined {
+    const ids = selectedSourceIds();
+    if (ids.length === 0) return undefined;
+    const groups = ids.map((id) => bookSourceSummaryById(id)?.groupId ?? null);
+    return groups.every((groupId) => groupId === groups[0]) ? groups[0] : undefined;
+  }
+
+  /** 批量操作统一收口：进行中忽略重复触发，完成后退出多选；task 返回结果文案 */
+  async function runBatch(task: (ids: string[]) => Promise<string>): Promise<void> {
+    if (batchBusy()) return;
+    const ids = selectedSourceIds();
+    if (ids.length === 0) return;
+    setBatchBusy(true);
+    try {
+      showToast(await task(ids));
+    } catch (err) {
+      showToast(String(err), true);
+    }
+    setBatchBusy(false);
+    cancelSelect();
+  }
+
+  function batchSetEnabled(enabled: boolean): void {
+    void runBatch(async (ids) => {
+      const changed = await setBookSourcesEnabled(ids, enabled);
+      return changed > 0
+        ? `已${enabled ? "启用" : "停用"} ${changed} 个书源`
+        : "所选书源状态未变化";
+    });
+  }
+
+  function batchAssignGroup(groupId: string | null): void {
+    void runBatch(async (ids) => {
+      let moved = 0;
+      for (const id of ids) {
+        if (await setBookSourceGroup(id, groupId)) moved += 1;
+      }
+      const name = sourceGroupName(groupId);
+      return name ? `${moved} 个书源已归入「${name}」` : `${moved} 个书源已移出分组`;
+    });
+  }
+
+  function batchExport(): void {
+    void runBatch(async (ids) => {
+      const fetched = await Promise.all(ids.map((id) => getRemoteSource(id)));
+      const sources = fetched.filter((source): source is BookSource => source !== null);
+      if (sources.length === 0) return "所选书源已不存在";
+      await navigator.clipboard
+        .writeText(buildBookSourceExportText(sources))
+        .catch(() => undefined);
+      return `已复制 ${sources.length} 个书源的 JSON`;
+    });
+  }
+
+  function batchDelete(): void {
+    void runBatch(async (ids) => {
+      for (const id of ids) await removeBookSource(id);
+      return `已删除 ${ids.length} 个书源`;
+    });
+  }
+
+  /** 打开编辑器要拿整份书源（列表里只有摘要） */
+  function openSource(id: string): void {
+    void getRemoteSource(id).then((source) => {
+      if (!source) return;
+      openSourceEditor(source);
+      navigate("/source-editor");
+    });
+  }
 
   /** 文件 / 剪贴板 / 网址导入前都要先备好清单：分组名要对本机分组解析 */
   async function bootstrap(): Promise<void> {
@@ -294,17 +424,11 @@ export default function BookSourcesPage() {
   return (
     <div class="page">
       <PageHeader
-        title="书源管理"
+        title={selecting() ? "选中书源" : "书源管理"}
+        subtitle={selecting() ? `已选 ${selectedCount()} 个` : undefined}
         onBack={goBack}
         right={
           <div class="flex flex-none items-center gap-1">
-            <button
-              class="grid h-10 w-10 place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-              aria-label="导入 JSON"
-              onClick={() => fileInput?.click()}
-            >
-              <DownloadIcon size={21} />
-            </button>
             <input
               ref={fileInput}
               type="file"
@@ -312,32 +436,71 @@ export default function BookSourcesPage() {
               class="hidden"
               onChange={onPickFile}
             />
-            <button
-              class="grid h-10 w-10 place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-              aria-label="从网址导入"
-              onClick={openUrlImport}
+            <Show
+              when={selecting()}
+              fallback={
+                <>
+                  <button
+                    class="grid h-10 w-10 place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
+                    aria-label="导入 JSON"
+                    onClick={() => fileInput?.click()}
+                  >
+                    <DownloadIcon size={21} />
+                  </button>
+                  <button
+                    class="grid h-10 w-10 place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
+                    aria-label="从网址导入"
+                    onClick={openUrlImport}
+                  >
+                    <LinkIcon size={21} />
+                  </button>
+                  <button
+                    class="grid h-10 w-10 place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
+                    aria-label="新建书源"
+                    onClick={onNew}
+                  >
+                    <PlusIcon size={21} />
+                  </button>
+                </>
+              }
             >
-              <LinkIcon size={21} />
-            </button>
-            <button
-              class="grid h-10 w-10 place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-              aria-label="新建书源"
-              onClick={onNew}
-            >
-              <PlusIcon size={21} />
-            </button>
+              <button
+                class="h-10 rounded-xl px-2.5 text-[13.5px] font-medium text-accent transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2 disabled:opacity-35"
+                aria-label={
+                  allVisibleSelected() ? "取消全选当前筛选的书源" : "全选当前筛选的书源"
+                }
+                disabled={visibleSources().length === 0}
+                onClick={toggleSelectAll}
+              >
+                {allVisibleSelected() ? "取消全选" : "全选"}
+              </button>
+              <button
+                class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
+                aria-label="退出多选"
+                onClick={cancelSelect}
+              >
+                <CloseIcon />
+              </button>
+            </Show>
           </div>
         }
       />
 
-      <div class="px-[18px] pb-[calc(36px+env(safe-area-inset-bottom))] pt-2">
+      <div
+        class="px-[18px] pt-2"
+        classList={{
+          // 多选时给底部固定操作条让位，避免最后一行书源被遮住
+          "pb-[calc(116px+env(safe-area-inset-bottom))]": showSelectionBar(),
+          "pb-[calc(36px+env(safe-area-inset-bottom))]": !showSelectionBar(),
+        }}
+      >
         <Show when={bookSourcesReady() && bookSourceList().length > 0}>
           <div class="-mx-[18px] px-[18px]">
             <SourceGroupChips
               chips={filterChips()}
               value={filter()}
               onSelect={(key) => rememberSourceGroupFilter(key)}
-              onManage={() => setGroupManagerOpen(true)}
+              onManage={selecting() ? undefined : () => setGroupManagerOpen(true)}
               manageLabel="分组管理"
             />
           </div>
@@ -386,88 +549,26 @@ export default function BookSourcesPage() {
             </Show>
           }
         >
+          <Show when={selecting()}>
+            <p class="mx-0.5 mb-1.5 mt-2.5 text-xs text-text-3">
+              长按书源进入多选；点击已选书源可取消，底部可批量启停、分组、导出或删除
+            </p>
+          </Show>
           <div class="divide-y divide-border overflow-hidden rounded-[14px] border border-border bg-surface">
             <For each={visibleSources()}>
               {(summary) => (
-                <div class="flex items-center gap-3 px-4 py-[12px]">
-                  <button
-                    class="flex min-w-0 flex-1 flex-col items-start gap-1 text-left"
-                    onClick={() => {
-                      void getRemoteSource(summary.id).then((s) => {
-                        if (s) {
-                          openSourceEditor(s);
-                          navigate("/source-editor");
-                        }
-                      });
-                    }}
-                  >
-                    <span class="flex w-full items-center gap-1.5">
-                      <span class="truncate text-[14.5px] font-medium">
-                        {summary.name}
-                      </span>
-                      <span class="shrink-0 truncate text-[11px] text-text-3">
-                        {summary.bookSourceUrl.replace(/^https?:\/\//, "").replace(/\/$/, "")}
-                      </span>
-                    </span>
-                    <span class="flex flex-wrap items-center gap-1">
-                      <Show when={sourceGroupName(summary.groupId)}>
-                        <i class="not-italic flex max-w-[110px] items-center gap-0.5 truncate rounded-full bg-accent-weak px-1.5 py-0.5 text-[9.5px] font-semibold text-accent">
-                          <FolderIcon size={10} class="flex-none" />
-                          <span class="truncate">{sourceGroupName(summary.groupId)}</span>
-                        </i>
-                      </Show>
-                      {(Object.keys(CAPABILITY_LABELS) as (keyof typeof CAPABILITY_LABELS)[])
-                        .filter((key) => summary.capabilities[key])
-                        .map((key) => (
-                          <i class="not-italic rounded-full bg-surface-2 px-1.5 py-0.5 text-[9.5px] font-semibold text-text-3">
-                            {CAPABILITY_LABELS[key]}
-                          </i>
-                        ))}
-                      <span class="text-[10px] text-text-3/80">JS {summary.jsLength}</span>
-                    </span>
-                  </button>
-                  <div class="flex flex-none flex-col items-end gap-1.5">
-                    <button
-                      role="switch"
-                      aria-checked={summary.enabled}
-                      class={`relative h-6 w-11 flex-none rounded-full transition-colors duration-150 ${
-                        summary.enabled ? "bg-accent" : "bg-surface-2"
-                      }`}
-                      onClick={() => void onToggle(summary.id, !summary.enabled)}
-                    >
-                      <span
-                        class={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-[left] duration-150 ${
-                          summary.enabled ? "left-[22px]" : "left-0.5"
-                        }`}
-                      />
-                    </button>
-                    <span class="flex items-center gap-0.5">
-                      <button
-                        class="grid h-7 w-7 place-items-center rounded-lg text-text-3 active:bg-surface-2"
-                        classList={{ "text-accent": !!sourceGroupName(summary.groupId) }}
-                        aria-label={`归入分组：${summary.name}`}
-                        onClick={() => setGroupPickerId(summary.id)}
-                      >
-                        <FolderIcon size={15} />
-                      </button>
-                      <button
-                        class="grid h-7 w-7 place-items-center rounded-lg text-text-3 active:bg-surface-2"
-                        aria-label="复制导出 JSON"
-                        onClick={() => void copyExport(summary.id)}
-                      >
-                        <FileTextIcon size={15} />
-                      </button>
-                      <button
-                        class="grid h-7 w-7 place-items-center rounded-lg text-text-3 active:bg-surface-2"
-                        aria-label="删除书源"
-                        onClick={() => setDeleteId(summary.id)}
-                      >
-                        <TrashIcon size={15} />
-                      </button>
-                      <ChevronRightIcon size={16} class="text-text-3/80" />
-                    </span>
-                  </div>
-                </div>
+                <BookSourceRow
+                  summary={summary}
+                  selectMode={selecting()}
+                  selected={selectedIds().includes(summary.id)}
+                  onOpen={openSource}
+                  onLongPress={enterSelect}
+                  onToggleSelect={toggleSelect}
+                  onToggleEnabled={(id, enabled) => void onToggle(id, enabled)}
+                  onAssignGroup={(id) => setGroupPickerId(id)}
+                  onCopyExport={(id) => void copyExport(id)}
+                  onDelete={(id) => setDeleteId(id)}
+                />
               )}
             </For>
           </div>
@@ -490,6 +591,27 @@ export default function BookSourcesPage() {
       {/* 分组管理（新建 / 重命名 / 删除 / 整组启停） */}
       <Show when={groupManagerOpen()}>
         <SourceGroupManagerSheet onClose={() => setGroupManagerOpen(false)} />
+      </Show>
+
+      {/* 批量归组：把所选书源一起归入 / 移出分组 */}
+      <Show when={batchGroupPicker()}>
+        <SourceGroupPicker
+          value={sharedSelectedGroup()}
+          onSelect={(groupId) => batchAssignGroup(groupId)}
+          onClose={() => setBatchGroupPicker(false)}
+        />
+      </Show>
+
+      {/* 多选底部操作条 */}
+      <Show when={selecting()}>
+        <SourceSelectionBar
+          count={selectedCount()}
+          busy={batchBusy()}
+          onSetEnabled={batchSetEnabled}
+          onAssignGroup={() => setBatchGroupPicker(true)}
+          onExport={batchExport}
+          onDelete={batchDelete}
+        />
       </Show>
 
       {/* 删除确认 */}

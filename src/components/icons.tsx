@@ -234,6 +234,16 @@ export function UpdateIcon(p: SvgIconProps) {
   );
 }
 
+/** 电源（书源批量启用 / 停用） */
+export function PowerIcon(p: SvgIconProps) {
+  return (
+    <Icon {...p}>
+      <path d="M12 3v9" />
+      <path d="M18.36 6.64a9 9 0 1 1-12.73 0" />
+    </Icon>
+  );
+}
+
 /** 文件夹（书架分组） */
 export function FolderIcon(p: SvgIconProps) {
   return (
