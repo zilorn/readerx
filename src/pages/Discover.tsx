@@ -24,6 +24,9 @@ import { SourceCover } from "../components/SourceCover";
 
 type Mode = "search" | "discover";
 
+/** 搜索/发现列表最多展示的条数（搜索结果边到边上屏，超出部分丢弃） */
+const RESULT_LIMIT = 120;
+
 interface ResultEntry {
   source: BookSourceSummary;
   item: BookItem;
@@ -185,10 +188,11 @@ export default function DiscoverPage() {
     setSearching(true);
     setSearchDone(false);
     setErrorText("");
+    setResults([]);
     setSearchProgress(0);
     setSearchTotal(sources.length);
-    const out: ResultEntry[] = [];
     const errors: string[] = [];
+    let found = 0;
     // 并发运行的书源数取用户设置；固定 worker 池逐源分发，避免一次性压满全部源
     const limit = Math.max(
       1,
@@ -198,10 +202,17 @@ export default function DiscoverPage() {
     let doneSources = 0;
     async function runOne(source: BookSourceSummary): Promise<void> {
       const r = await callRemoteSource(source.id, "searchBook", [kw]);
+      if (seq !== searchSeq) return; // 已被更新的搜索接管，不再写入本轮结果
       if (r.ok && Array.isArray(r.value)) {
+        const batch: ResultEntry[] = [];
         for (const raw of r.value as unknown[]) {
           const item = toItem(raw);
-          if (item) out.push({ source, item });
+          if (item) batch.push({ source, item });
+        }
+        if (batch.length > 0) {
+          // 该源一出结果就上屏（不等其余书源跑完），列表顺序即书源返回顺序
+          found += batch.length;
+          setResults((prev) => [...prev, ...batch].slice(0, RESULT_LIMIT));
         }
       } else if (r.error) {
         errors.push(`${source.name}: ${r.error}`);
@@ -219,11 +230,9 @@ export default function DiscoverPage() {
     const workers = Math.min(limit, sources.length);
     await Promise.all(Array.from({ length: workers }, () => worker()));
     if (seq !== searchSeq) return; // 已被更新的搜索接管，丢弃本次结果
-    out.sort((a, b) => a.source.name.localeCompare(b.source.name, "zh"));
-    setResults(out.slice(0, 120));
     setSearching(false);
     setSearchDone(true);
-    if (errors.length > 0 && out.length === 0) {
+    if (errors.length > 0 && found === 0) {
       setErrorText(errors[0]);
     }
   }
@@ -369,7 +378,10 @@ export default function DiscoverPage() {
                 </button>
               </div>
               <Show when={searching()}>
-                <div class="flex items-center justify-center gap-2 py-8 text-[12.5px] text-text-3">
+                <div
+                  class="flex items-center justify-center gap-2 text-[12.5px] text-text-3"
+                  classList={{ "py-8": results().length === 0, "py-3": results().length > 0 }}
+                >
                   <RefreshIcon size={16} class="animate-spin" />
                   正在搜索书源 {searchProgress()} / {searchTotal() || "…"}（并发
                   {currentSourceParallel()}）
@@ -380,7 +392,7 @@ export default function DiscoverPage() {
                   {errorText() ? `搜索失败：${errorText()}` : "没有找到结果"}
                 </p>
               </Show>
-              <Show when={!searching() && results().length > 0}>
+              <Show when={results().length > 0}>
                 <div class="overflow-hidden rounded-[14px] border border-border bg-surface">
                   <For each={results()}>
                     {(entry) => (
@@ -389,7 +401,9 @@ export default function DiscoverPage() {
                   </For>
                 </div>
                 <p class="mt-2 text-center text-[11px] text-text-3">
-                  {results().length} 条结果 · 点击查看详情并加入书架
+                  {searching()
+                    ? `已找到 ${results().length} 条 · 仍在搜索其他书源…`
+                    : `${results().length} 条结果 · 点击查看详情并加入书架`}
                 </p>
               </Show>
             </Show>
