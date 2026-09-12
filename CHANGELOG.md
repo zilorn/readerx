@@ -7,8 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-09-12
+
 ### Added
 
+- **书源编辑页重排为常驻三 Tab**（书源信息 / JS代码 / 测试）：切 Tab 不丢草稿，
+  页头保存按钮与 Tab 栏始终在位，长表单（信息 / 测试）在各自 Tab 内滚动；
+  - **JS代码**：编辑器占满整页剩余空间，带**行号槽**与语法高亮（关键字 / 字符串 /
+    模板串与 `${}` 插值 / 正则 / 数字 / 注释 / 书源宿主 API `http`·`html`·`util`·
+    `base64`·`cryptoUtil`·`webview`·`console` 单独配色）；长行横向滚动不折行，
+    滚动时行号与高亮层同步，配色随浅色 / 深色 / 护眼主题切换；
+    输入层是原生输入框，中文输入法与长按选词照常；
+  - 「填入模板」在已有代码时需再点一次确认，避免一键抹掉正在写的内容；
+  - 入口函数与测试参数在切 Tab 后仍保留（不会切走再切回就被重置）。
 - **处理不了的异常会明确提示用户**（不再只写日志 / 控制台）：
   - Rust 侧任何漏网的 panic（书源引擎、第三方解析库、命令线程……）都会经 panic hook
     以 `readerx-internal-error` 事件推给前端，弹出错误提示条并附「消息 + 位置」，停留 8 秒；
@@ -186,4 +197,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 搜索全书，书架书籍功能
 - webdav支持
 - 书源
-

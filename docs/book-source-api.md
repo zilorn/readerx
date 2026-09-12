@@ -164,7 +164,7 @@ const list = items.map((li) => ({
 
 ## `console`
 
-`console.log/info/warn/error(...)`：写入本次调用的日志缓冲（≤200 行），编辑页「测试」面板可见。
+`console.log/info/warn/error(...)`：写入本次调用的日志缓冲（≤200 行），编辑页「测试」Tab 可见。
 
 ## 可用但注意语义的内建
 

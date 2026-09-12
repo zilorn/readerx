@@ -1,7 +1,12 @@
-import { createSignal, For, onMount, Show } from "solid-js";
+import { createSignal, onMount, Show } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 import { PageHeader } from "../components/PageHeader";
-import { SaveIcon, TestIcon, TrashIcon, GlobeKeyIcon, ClearIcon } from "../components/icons";
+import { PageTabs, type PageTab } from "../components/PageTabs";
+import { JsCodeEditor } from "../components/JsCodeEditor";
+import { SourceInfoForm } from "../components/SourceInfoForm";
+import { SourceTestPanel, defaultArgs, type SourceTestResult } from "../components/SourceTestPanel";
+import { ScrollArea } from "../components/ScrollArea";
+import { SaveIcon, TrashIcon } from "../components/icons";
 import {
   TEMPLATE_JS,
   blankBookSource,
@@ -20,31 +25,20 @@ import {
   isSourceLoginSupported,
   loginSourceWebview,
 } from "../lib/backend";
-import {
-  CAPABILITY_LABELS,
-  ENTRY_FUNCTION_META,
-  type BookSource,
-  type BookSourceCapabilities,
-} from "../lib/bookSourcesTypes";
+import { type BookSource, type BookSourceCapabilities } from "../lib/bookSourcesTypes";
 import { showToast } from "../lib/toast";
 
-function defaultArgs(fnName: string): string {
-  switch (fnName) {
-    case "searchBook":
-      return '["搜索关键词"]';
-    case "discoverBooks":
-      return '[{ "name": "", "url": "" }]';
-    case "discoverCategories":
-      return "[]";
-    case "bookDetail":
-      return '[{ "bookName": "书名", "bookUrl": "https://" }]';
-    case "bookToc":
-      return '[{ "bookName": "书名", "bookUrl": "https://" }]';
-    case "bookContent":
-      return '[\n  { "chapterName": "第一章", "chapterUrl": "https://" },\n  { "bookName": "书名", "bookUrl": "https://" }\n]';
-  }
-  return "[]";
-}
+/** 编辑页内的三块内容（常驻 Tab；不是路由） */
+type EditorTab = "info" | "code" | "test";
+
+const EDITOR_TABS: readonly PageTab<EditorTab>[] = [
+  { key: "info", label: "书源信息" },
+  { key: "code", label: "JS代码" },
+  { key: "test", label: "测试" },
+];
+
+const CODE_DOC_HINT = "入口函数与宿主 API 见 docs/book-source-spec.md / docs/book-source-api.md";
+const FOOT_PAD = "pb-[calc(28px+env(safe-area-inset-bottom))]";
 
 /** 书源编辑页（新建与编辑共用；会话来自 bookSources.currentEditorSource） */
 export default function SourceEditorPage() {
@@ -54,6 +48,8 @@ export default function SourceEditorPage() {
   const draft = () =>
     initial ??
     blankBookSource({ id: newBookSourceId(), js: TEMPLATE_JS });
+
+  const [tab, setTab] = createSignal<EditorTab>("info");
 
   const [name, setName] = createSignal(draft().name);
   const [bookSourceUrl, setBookSourceUrl] = createSignal(draft().bookSourceUrl);
@@ -72,9 +68,10 @@ export default function SourceEditorPage() {
 
   const [fnName, setFnName] = createSignal<string>("searchBook");
   const [argsText, setArgsText] = createSignal(defaultArgs("searchBook"));
-  const [result, setResult] = createSignal<{ text: string; error: boolean } | null>(null);
+  const [result, setResult] = createSignal<SourceTestResult | null>(null);
   const [testing, setTesting] = createSignal(false);
   const [confirmDelete, setConfirmDelete] = createSignal(false);
+  const [confirmTemplate, setConfirmTemplate] = createSignal(false);
 
   // 网页登录（WebView，仅 Android）
   const [loginUrl, setLoginUrl] = createSignal(draft().bookSourceUrl);
@@ -202,6 +199,17 @@ export default function SourceEditorPage() {
     showToast("书源 JSON 已复制");
   }
 
+  /** 填入模板：已有代码时需再点一次确认（避免一键抹掉正在写的内容） */
+  function onFillTemplate() {
+    if (js().trim() && !confirmTemplate()) {
+      setConfirmTemplate(true);
+      window.setTimeout(() => setConfirmTemplate(false), 3000);
+      return;
+    }
+    setConfirmTemplate(false);
+    setJs(TEMPLATE_JS);
+  }
+
   async function onWebLogin() {
     if (loginBusy()) return;
     const url = (loginUrl().trim() || bookSourceUrl().trim() || draft().bookSourceUrl).trim();
@@ -235,10 +243,8 @@ export default function SourceEditorPage() {
     showToast(removed > 0 ? "已清空登录 Cookie" : "没有保存的登录 Cookie");
   }
 
-  const capabilityKeys = (): (keyof BookSourceCapabilities)[] => Object.keys(CAPABILITY_LABELS) as (keyof BookSourceCapabilities)[];
-
   return (
-    <div class="page">
+    <div class="page flex h-full min-h-0 flex-col">
       <PageHeader
         title={isNew ? "新建书源" : "编辑书源"}
         onBack={goBack}
@@ -253,277 +259,93 @@ export default function SourceEditorPage() {
         }
       />
 
-      <div class="space-y-5 px-[18px] pb-[calc(40px+env(safe-area-inset-bottom))] pt-3">
-        {/* 元信息 */}
-        <section class="space-y-2.5">
-          <label class="flex flex-col gap-1">
-            <span class="text-[11.5px] font-semibold text-text-3">名称</span>
-            <input
-              class="rounded-[10px] border border-border bg-surface px-3 py-2 text-[13.5px] outline-none focus:border-accent"
-              value={name()}
-              onInput={(e) => setName(e.currentTarget.value)}
-            />
-          </label>
-          <label class="flex flex-col gap-1">
-            <span class="text-[11.5px] font-semibold text-text-3">站点地址（bookSourceUrl）</span>
-            <input
-              class="rounded-[10px] border border-border bg-surface px-3 py-2 text-[13px] outline-none focus:border-accent"
-              value={bookSourceUrl()}
-              onInput={(e) => setBookSourceUrl(e.currentTarget.value)}
-            />
-          </label>
-          <div class="flex gap-2.5">
-            <label class="flex min-w-0 flex-1 flex-col gap-1">
-              <span class="text-[11.5px] font-semibold text-text-3">作者</span>
-              <input
-                class="rounded-[10px] border border-border bg-surface px-3 py-2 text-[13px] outline-none focus:border-accent"
-                value={author()}
-                onInput={(e) => setAuthor(e.currentTarget.value)}
-              />
-            </label>
-            <label class="flex w-24 flex-col gap-1">
-              <span class="text-[11.5px] font-semibold text-text-3">版本</span>
-              <input
-                class="rounded-[10px] border border-border bg-surface px-3 py-2 text-[13px] outline-none focus:border-accent"
-                value={version()}
-                onInput={(e) => setVersion(e.currentTarget.value)}
-              />
-            </label>
-          </div>
-        </section>
+      <PageTabs tabs={EDITOR_TABS} value={tab()} onChange={setTab} label="书源编辑" />
 
-        {/* 启用与能力开关 */}
-        <section class="rounded-[14px] border border-border bg-surface">
-          <button
-            class="flex w-full items-center justify-between px-4 py-3"
-            onClick={() => setEnabled(!enabled())}
-          >
-            <span class="text-[14px] font-medium">启用书源</span>
-            <span
-              class={`relative h-6 w-11 flex-none rounded-full transition-colors duration-150 ${
-                enabled() ? "bg-accent" : "bg-surface-2"
-              }`}
-            >
-              <span
-                class={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-[left] duration-150 ${
-                  enabled() ? "left-[22px]" : "left-0.5"
-                }`}
-              />
-            </span>
-          </button>
-          <div class="divide-y divide-border border-t border-border">
-            <For each={capabilityKeys()}>
-              {(key) => (
-                <button
-                  class="flex w-full items-center justify-between px-4 py-2.5"
-                  onClick={() =>
-                    setCaps({ ...caps(), [key]: !caps()[key] })
-                  }
-                >
-                  <span class="text-[13.5px] text-text-2">{CAPABILITY_LABELS[key]}</span>
-                  <span
-                    class={`relative h-6 w-11 flex-none rounded-full transition-colors duration-150 ${
-                      caps()[key] ? "bg-accent" : "bg-surface-2"
-                    }`}
-                  >
-                    <span
-                      class={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-[left] duration-150 ${
-                        caps()[key] ? "left-[22px]" : "left-0.5"
-                      }`}
-                    />
-                  </span>
-                </button>
-              )}
-            </For>
-          </div>
-        </section>
-
-        {/* 请求与会话 */}
-        <section class="space-y-2.5">
-          <label class="flex flex-col gap-1">
-            <span class="text-[11.5px] font-semibold text-text-3">
-              User-Agent（留空用内置默认；过 CF 等站点可在此填浏览器 UA）
-            </span>
-            <input
-              class="rounded-[10px] border border-border bg-surface px-3 py-2 text-[12px] outline-none focus:border-accent"
-              value={userAgent()}
-              onInput={(e) => setUserAgent(e.currentTarget.value)}
-            />
-          </label>
-          <label class="flex flex-col gap-1">
-            <span class="text-[11.5px] font-semibold text-text-3">
-              默认请求头（每行「名称: 值」，Cookie 等可在此粘贴，CF 站点见 docs/cloudflare.md）
-            </span>
-            <textarea
-              class="min-h-16 resize-y rounded-[10px] border border-border bg-surface px-3 py-2 font-mono text-[11.5px] leading-[1.6] outline-none focus:border-accent"
-              rows={3}
-              value={headersText()}
-              onInput={(e) => setHeadersText(e.currentTarget.value)}
-            />
-          </label>
-
-          {/* 网页登录（WebView，仅 Android） */}
-          <div class="space-y-2 rounded-[14px] border border-border bg-surface p-3.5">
-            <div class="flex items-center gap-1.5">
-              <GlobeKeyIcon size={16} class="text-text-2" />
-              <span class="text-[13px] font-semibold text-text-2">网页登录</span>
-              <span class="text-[10.5px] text-text-3">WebView 浮层内完成登录，捕获含 httpOnly 的 Cookie</span>
-            </div>
-            <button
-              class="flex w-full items-center justify-between gap-3 rounded-[12px] border border-border px-3 py-2.5"
-              onClick={() => setAutoAuth(!autoAuth())}
-            >
-              <span class="text-left">
-                <span class="block text-[12.5px] font-medium text-text-2">自动网页认证</span>
-                <span class="mt-0.5 block text-[10.5px] leading-[1.45] text-text-3">
-                  请求遇 Cloudflare 挑战时自动弹窗认证并重试（令牌过期自动刷新）；书源代码 webview.login 同受此开关控制
-                </span>
-              </span>
-              <span
-                class={`relative h-6 w-11 flex-none rounded-full transition-colors duration-150 ${
-                  autoAuth() ? "bg-accent" : "bg-surface-2"
-                }`}
-              >
-                <span
-                  class={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-[left] duration-150 ${
-                    autoAuth() ? "left-[22px]" : "left-0.5"
-                  }`}
-                />
-              </span>
-            </button>
-            <Show when={!autoAuth()}>
-              <p class="text-[10.5px] leading-[1.5] text-text-3">
-                已关闭：该书源请求被拦截时不会自动弹出认证窗，书源代码的 webview.login 也会返回不可用；编辑页「打开登录页」不受影响
-              </p>
-            </Show>
-            <input
-              class="w-full rounded-[10px] border border-border bg-surface px-3 py-2 font-mono text-[12px] outline-none focus:border-accent"
-              placeholder="https://example.com/login"
-              value={loginUrl()}
-              onInput={(e) => setLoginUrl(e.currentTarget.value)}
-            />
-            <div class="flex items-center gap-2.5">
-              <button
-                class="inline-flex flex-1 items-center justify-center gap-1.5 rounded-xl bg-accent px-3 py-2 text-[12.5px] font-semibold text-on-accent active:scale-[0.98] disabled:opacity-45"
-                disabled={loginBusy() || !loginSupported()}
-                onClick={() => void onWebLogin()}
-              >
-                {loginBusy() ? "登录窗口已打开…" : "打开登录页"}
-              </button>
-              <button
-                class="inline-flex items-center justify-center gap-1.5 rounded-xl bg-surface-2 px-3 py-2 text-[12.5px] font-semibold text-text-2 active:scale-[0.98] disabled:opacity-45"
-                disabled={loginBusy()}
-                onClick={() => void onClearLogin()}
-              >
-                <ClearIcon size={14} />
-                清空登录 Cookie
-              </button>
-            </div>
-            <Show when={!loginSupported()}>
-              <p class="text-[10.5px] leading-[1.5] text-text-3">
-                当前平台不支持网页登录（仅 Android 端可用）；可在代码里用
-                <code class="font-mono"> webview.login(url) </code>
-                触发。
-              </p>
-            </Show>
-          </div>
-        </section>
-
-        {/* JS 代码 */}
-        <section class="space-y-2">
-          <div class="flex items-center justify-between">
-            <span class="text-[11.5px] font-semibold text-text-3">JS 代码（书源函数）</span>
-            <button
-              class="rounded-lg bg-surface-2 px-2 py-1 text-[11px] text-text-2 active:scale-[0.96]"
-              onClick={() => {
-                if (!js().trim()) setJs(TEMPLATE_JS);
-              }}
-            >
-              填入模板
-            </button>
-          </div>
-          <textarea
-            class="min-h-72 w-full resize-y rounded-[12px] border border-border bg-surface px-3 py-2.5 font-mono text-[12px] leading-[1.6] outline-none focus:border-accent"
-            spellcheck={false}
-            value={js()}
-            onInput={(e) => setJs(e.currentTarget.value)}
+      {/* 书源信息 */}
+      <Show when={tab() === "info"}>
+        <ScrollArea
+          class="min-h-0 flex-1"
+          contentClass={`space-y-5 px-[18px] pt-3 ${FOOT_PAD}`}
+        >
+          <SourceInfoForm
+            name={name()}
+            onName={setName}
+            bookSourceUrl={bookSourceUrl()}
+            onBookSourceUrl={setBookSourceUrl}
+            author={author()}
+            onAuthor={setAuthor}
+            version={version()}
+            onVersion={setVersion}
+            enabled={enabled()}
+            onEnabled={setEnabled}
+            caps={caps()}
+            onCaps={setCaps}
+            userAgent={userAgent()}
+            onUserAgent={setUserAgent}
+            headersText={headersText()}
+            onHeadersText={setHeadersText}
+            autoAuth={autoAuth()}
+            onAutoAuth={setAutoAuth}
+            loginUrl={loginUrl()}
+            onLoginUrl={setLoginUrl}
+            loginBusy={loginBusy()}
+            loginSupported={loginSupported()}
+            onWebLogin={() => void onWebLogin()}
+            onClearLogin={() => void onClearLogin()}
           />
-          <p class="text-[11px] leading-[1.6] text-text-3">
-            入口函数与宿主 API 见 docs/book-source-spec.md / docs/book-source-api.md
-          </p>
-        </section>
 
-        {/* 测试面板 */}
-        <section class="rounded-[14px] border border-border bg-surface">
-          <div class="flex items-center gap-2 border-b border-border px-4 py-2.5">
-            <span class="text-[13px] font-bold">测试</span>
-            <span class="text-[11px] text-text-3">保存当前代码后运行</span>
-          </div>
-          <div class="space-y-2.5 px-4 py-3">
-            <div class="flex flex-wrap gap-1.5">
-              {ENTRY_FUNCTION_META.map((m) => (
-                <button
-                  class="rounded-lg px-2.5 py-1.5 text-[12px] font-semibold"
-                  classList={{
-                    "bg-accent text-on-accent": fnName() === m.fnName,
-                    "bg-surface-2 text-text-2": fnName() !== m.fnName,
-                    "opacity-45": !caps()[m.capability],
-                  }}
-                  onClick={() => {
-                    setFnName(m.fnName);
-                    setArgsText(defaultArgs(m.fnName));
-                    setResult(null);
-                  }}
-                >
-                  {m.label}
-                </button>
-              ))}
-            </div>
-            <textarea
-              class="min-h-12 w-full resize-y rounded-[10px] border border-border bg-surface px-3 py-2 font-mono text-[11.5px] leading-[1.5] outline-none focus:border-accent"
-              rows={2}
-              value={argsText()}
-              onInput={(e) => setArgsText(e.currentTarget.value)}
-            />
-            <div class="flex items-center gap-2.5">
-              <button
-                class="inline-flex flex-1 items-center justify-center gap-1.5 rounded-xl bg-accent px-4 py-2.5 text-[13.5px] font-semibold text-on-accent active:scale-[0.98] disabled:opacity-50"
-                disabled={testing()}
-                onClick={() => void onTest()}
-              >
-                <TestIcon size={16} />
-                {testing() ? "运行中…" : "保存并测试"}
-              </button>
-              <button
-                class="rounded-xl bg-surface-2 px-3.5 py-2.5 text-[13px] font-semibold text-text-2 active:scale-[0.98]"
-                onClick={() => void onCopyJson()}
-              >
-                导出 JSON
-              </button>
-            </div>
-            <Show when={result() !== null}>
-              <pre
-                class={`max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-[10px] px-3 py-2.5 text-[11px] leading-[1.6] ${
-                  result()!.error ? "bg-danger-weak text-danger" : "bg-surface-2 text-text-2"
-                }`}
-              >
-                {result()!.text}
-              </pre>
-            </Show>
-          </div>
-        </section>
+          <Show when={!isNew}>
+            <button
+              class="flex w-full items-center justify-center gap-1.5 rounded-xl bg-danger-weak px-4 py-2.5 text-[13px] font-semibold text-danger active:scale-[0.98]"
+              onClick={() => void onDelete()}
+            >
+              <TrashIcon size={15} />
+              {confirmDelete() ? "再点一次确认删除" : "删除书源"}
+            </button>
+          </Show>
+        </ScrollArea>
+      </Show>
 
-        {/* 删除 */}
-        <Show when={!isNew}>
-          <button
-            class="flex w-full items-center justify-center gap-1.5 rounded-xl bg-danger-weak px-4 py-2.5 text-[13px] font-semibold text-danger active:scale-[0.98]"
-            onClick={() => void onDelete()}
-          >
-            <TrashIcon size={15} />
-            {confirmDelete() ? "再点一次确认删除" : "删除书源"}
-          </button>
-        </Show>
-      </div>
+      {/* JS 代码：编辑器占满整页剩余空间 */}
+      <Show when={tab() === "code"}>
+        <div class="flex min-h-0 flex-1 flex-col">
+          <div class="flex flex-none items-center justify-between gap-2 px-[18px] pb-1.5 pt-2.5">
+            <span class="truncate text-[11px] text-text-3">{CODE_DOC_HINT}</span>
+            <button
+              class="flex-none rounded-lg bg-surface-2 px-2 py-1 text-[11px] text-text-2 active:scale-[0.96]"
+              onClick={onFillTemplate}
+            >
+              {confirmTemplate() ? "再点一次覆盖" : "填入模板"}
+            </button>
+          </div>
+          <JsCodeEditor
+            class="min-h-0 flex-1 border-t border-border"
+            value={js()}
+            onInput={setJs}
+            label="书源 JS 代码"
+          />
+        </div>
+      </Show>
+
+      {/* 测试 */}
+      <Show when={tab() === "test"}>
+        <ScrollArea class="min-h-0 flex-1" contentClass={`px-[18px] pt-3 ${FOOT_PAD}`}>
+          <SourceTestPanel
+            caps={caps()}
+            fnName={fnName()}
+            onFnName={(fn) => {
+              setFnName(fn);
+              setResult(null);
+            }}
+            argsText={argsText()}
+            onArgsText={setArgsText}
+            testing={testing()}
+            result={result()}
+            onRun={() => void onTest()}
+            onExportJson={() => void onCopyJson()}
+          />
+        </ScrollArea>
+      </Show>
     </div>
   );
 }

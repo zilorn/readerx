@@ -1,6 +1,6 @@
 [package]
 name = "readerx"
-version = "0.1.4-beta.1"
+version = "0.1.4"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -51,6 +51,7 @@ opt-level = 3
 # 用户只看到应用闪退、拿不到任何原因。（体积略增，换可诊断性）
 panic = "unwind"
 strip = true
+
 
 
 

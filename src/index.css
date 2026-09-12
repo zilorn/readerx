@@ -34,6 +34,15 @@
   --dot-light: #ffffff;
   --dot-dark: #262c36;
   --dot-sepia: #d9b98a;
+  /* 书源 JS 编辑器语法高亮 */
+  --code-keyword: #8250df;
+  --code-string: #0a7d3c;
+  --code-number: #b5560d;
+  --code-comment: #6e7781;
+  --code-literal: #0550ae;
+  --code-builtin: #0550ae;
+  --code-api: #0b6e79;
+  --code-fn: #1f6feb;
 }
 
 :root[data-theme="dark"] {
@@ -56,6 +65,15 @@
   --dot-light: #f1f3f5;
   --dot-dark: #262c36;
   --dot-sepia: #e6cf9e;
+  /* 书源 JS 编辑器语法高亮 */
+  --code-keyword: #d2a8ff;
+  --code-string: #7ee787;
+  --code-number: #ffab70;
+  --code-comment: #8b949e;
+  --code-literal: #79c0ff;
+  --code-builtin: #79c0ff;
+  --code-api: #56d4dd;
+  --code-fn: #a5d6ff;
 }
 
 :root[data-theme="sepia"] {
@@ -78,6 +96,15 @@
   --dot-light: #fffdf7;
   --dot-dark: #37352f;
   --dot-sepia: #c9a566;
+  /* 书源 JS 编辑器语法高亮 */
+  --code-keyword: #7b3f9d;
+  --code-string: #3f6b2b;
+  --code-number: #a34f1c;
+  --code-comment: #9c8f72;
+  --code-literal: #1f5b8f;
+  --code-builtin: #1f5b8f;
+  --code-api: #0d6b74;
+  --code-fn: #2a5f9e;
 }
 
 /* 把主题变量注册为 Tailwind 颜色 token（inline：生成的工具类直接引用变量） */
@@ -101,6 +128,14 @@
   --color-dot-dark: var(--dot-dark);
   --color-dot-sepia: var(--dot-sepia);
   --color-accent-deep: var(--accent-deep);
+  --color-code-keyword: var(--code-keyword);
+  --color-code-string: var(--code-string);
+  --color-code-number: var(--code-number);
+  --color-code-comment: var(--code-comment);
+  --color-code-literal: var(--code-literal);
+  --color-code-builtin: var(--code-builtin);
+  --color-code-api: var(--code-api);
+  --color-code-fn: var(--code-fn);
 }
 
 @theme {
@@ -207,6 +242,17 @@
   &::-webkit-scrollbar {
     width: 0;
     height: 0;
+  }
+}
+
+/* 书源 JS 编辑器的输入层：文字透明、只留光标，让下层高亮层显出来；
+   选区必须是半透明底色，否则会盖住下层的高亮文字 */
+@utility code-input {
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  caret-color: var(--accent);
+  &::selection {
+    background-color: color-mix(in srgb, var(--accent) 30%, transparent);
   }
 }
 

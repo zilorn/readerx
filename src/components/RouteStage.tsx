@@ -40,6 +40,13 @@ const TAB_ROUTES = new Set(["/", "/discover", "/settings"]);
 const isTabRoute = (path: string) => TAB_ROUTES.has(path);
 const isReaderPath = (path: string) => path.startsWith("/book/");
 
+/**
+ * 自管整页高度的页面：内容区不滚动、页面内部再分栏（如书源编辑页的常驻 Tab +
+ * JS 编辑器）。这些页面不能带内容区底部留白，否则会多出可滚动的几像素。
+ */
+const FULL_HEIGHT_ROUTES = new Set(["/source-editor"]);
+const isFullHeightPath = (path: string) => isReaderPath(path) || FULL_HEIGHT_ROUTES.has(path);
+
 /* 与阅读器翻页动画同一套缓动曲线 */
 const EASE = "cubic-bezier(0.22, 1, 0.36, 1)";
 const DUR_SLIDE = 300;
@@ -310,7 +317,7 @@ export function RouteStage(props: { children?: JSX.Element }) {
           >
             <ScrollArea
               class="min-h-0 flex-1"
-              contentClass={isReaderPath(pane.path) ? "" : "pb-4"}
+              contentClass={isFullHeightPath(pane.path) ? "" : "pb-4"}
               onEl={(el) => {
                 scrollById.set(pane.id, el);
                 if (pane.id === targetPaneId) registerAppScrollEl(el);
