@@ -2,7 +2,8 @@
  * 在线书会话与内容缓存：
  * - 书源搜索/发现命中的“待预览书”暂存（会话级）；
  * - 「加入书架」= 只落 toc 元数据的本地书（format: online），正文按需下载；
- * - 阅读时按「当前章 ±5 章」窗口预取并落盘（逐批写回同一本 LocalBook）；
+ * - 阅读时按「当前章 ±5 章」窗口预取并落盘（逐批写回同一本 LocalBook）：
+ *   正在读的那一章单独先取、取回即落盘，其余窗口章节后台补齐；
  * - 显式批量下载剩余全部正文（并发可配、可取消）。
  */
 import { createSignal } from "solid-js";
@@ -38,7 +39,6 @@ import type {
   BookItem,
   BookSourceSummary,
   ChapterItem,
-  ChapterContentResult,
 } from "./bookSourcesTypes";
 import { loadSourceCoverThumb } from "./sourceCover";
 import { currentSourceParallel } from "./store";
@@ -48,11 +48,11 @@ import {
 } from "./sourceContent";
 
 /** 预取窗口半径（前后各 N 章，共 2N+1 章）：后台把这一圈章节的正文抓下来落盘，
- *  顺序阅读 / 听书跨章时下一章永远已经就绪。
+ *  顺序阅读 / 听书跨章时下一章永远已经就绪；正在读的那一章永远最先取（见 runWindowFetch）。
  *  注意：这是「提前抓」的半径，与阅读视图实际读取的范围无关 ——
  *  渲染只读当前章 ±1 章（见 Reader 的 RENDER_WINDOW），窗口外章节的落盘不会惊动前端。 */
 export const LAZY_WINDOW = 5;
-/** 单批拉取章节数 */
+/** 单批拉取章节数（批量下载用；窗口预取按书源并发另定批大小，见 runWindowFetch） */
 const BATCH_SIZE = 20;
 
 // ---------------------------------------------------------------------------
@@ -408,46 +408,254 @@ function patchChapters(
   return { ...book, chapters };
 }
 
+// ---------------------------------------------------------------------------
+// 拉取流程：窗口预取（阅读时按需补齐）与批量下载（离线全本）
+//
+// 共同约定（在线书含图后的大书优化）：
+// - 不对整本做 structuredClone / 整本 JSON 过 IPC —— 只把本次真正写好的章节增量交给后端
+//   （updateBookChapters），避免含 data URL 图片的大书反复整本拷贝（逐批下载卡顿 /
+//   内存暴涨闪退的根因）；
+// - 章节解析等 CPU 步骤之间让出主线程（yieldToMain），渲染与翻页不被阻塞；
+// - 写入前重新取「最新的书库对象」当基底原位替换，不长期攥着旧快照。
+// ---------------------------------------------------------------------------
+
+/** 一次拉取 run 内失败的章节（下标 + 可读原因） */
+type FailedChapter = { index: number; error: string };
+
+/** 离 center 一个预取窗口（LAZY_WINDOW）之内、还没有正文的章节下标；skip 中的跳过 */
+function windowMissing(
+  book: Pick<LocalBook, "chapters">,
+  center: number,
+  skip?: ReadonlySet<number>,
+): number[] {
+  const lo = Math.max(0, center - LAZY_WINDOW);
+  const hi = Math.min(book.chapters.length - 1, center + LAZY_WINDOW);
+  const missing: number[] = [];
+  for (let i = lo; i <= hi; i++) {
+    if (skip?.has(i)) continue;
+    if (!chapterHasContent(book.chapters[i])) missing.push(i);
+  }
+  // 近的先取（同距按下标升序）：center 本身永远排在最前
+  missing.sort((a, b) => Math.abs(a - center) - Math.abs(b - center) || a - b);
+  return missing;
+}
+
 /**
- * 依次下载 book 中缺失正文的章节（分批；引擎正文拉取按批并发，批内图片下载限并发）。
- * - indexes 为空表示「剩余全部」（download 相位，每批统一落盘，保持批量 I/O）；
- * - window 相位按传入顺序逐章处理并逐章落盘（调用方已把当前阅读章排在前面，
- *   使其尽早可读，其余窗口章节随后在后台补齐）。
- *
- * 说明（在线书含图后的大书优化）：
- * - 不再对整本做 structuredClone / 整本 JSON 过 IPC —— 只把本次真正写好的章节
- *   增量交给后端（updateBookChapters），避免含 data URL 图片的大书反复整本拷贝，
- *   这正是逐批下载卡顿 / 内存暴涨闪退的根因；
- * - 章节解析等 CPU 步骤之间让出主线程（yieldToMain），渲染与翻页不被阻塞。
+ * 拉取任务的「阅读焦点」：当前正在读的章节下标。用户切章时由 ensureReadingWindow 更新，
+ * 在跑的窗口预取 / 批量下载于下一批之后读取它并改以新焦点为准 —— 读到哪一章就先取哪一章，
+ * 不必等它把别的章节取完（一本书同一时刻只有一个 run，此处只换优先级，不并发写书）。
  */
-async function runFetch(
+const windowFocus = new Map<string, number>();
+
+/** 取回并解析一批章节（引擎失败的章节计入 failed）；解析之间让出主线程。
+ *  章节地址缺失的章节直接计失败，保证返回结果与请求顺序严格对应。 */
+async function fetchChapterPlans(
   bookId: string,
-  indexes: number[] | null,
-  phase: OnlineRunPhase,
+  sourceId: string,
+  book: LocalBook,
+  slice: number[],
+  failed: FailedChapter[],
+): Promise<BatchPlan[]> {
+  const jobs: Array<{ index: number; item: ChapterItem }> = [];
+  for (const idx of slice) {
+    const chapter = book.chapters[idx];
+    if (chapter?.url) {
+      jobs.push({ index: idx, item: { chapterName: chapter.title, chapterUrl: chapter.url } });
+    } else {
+      failed.push({ index: idx, error: "章节缺少地址" });
+    }
+  }
+  if (jobs.length === 0) return [];
+  const results = await fetchRemoteChapterContents(
+    sourceId,
+    toBookItem(book),
+    jobs.map((job) => job.item),
+  );
+  if (cancellations.has(bookId)) return [];
+  const plans: BatchPlan[] = [];
+  for (let offset = 0; offset < jobs.length; offset++) {
+    const job = jobs[offset];
+    const chapter = book.chapters[job.index];
+    const res = results[offset];
+    if (!chapter) continue;
+    if (!res?.ok) {
+      failed.push({ index: job.index, error: res?.error || "未知错误" });
+      continue;
+    }
+    plans.push({
+      chapterIndex: job.index,
+      chapter,
+      build: buildSourceChapterContent(res.text, chapter.url || undefined),
+    });
+    if (offset % 3 === 2) await yieldToMain(); // 分片解析不长时间独占主线程
+  }
+  return plans;
+}
+
+/** 单章：在全新的章节对象上完成解析与图片下载；纯图章全失败视为失败 */
+async function fillChapterDraft(
+  bookId: string,
+  sourceId: string,
+  plan: BatchPlan,
+  concurrency: number,
+  failed: FailedChapter[],
+): Promise<LocalBookChapter | null> {
+  const draft: LocalBookChapter = {
+    cid: plan.chapter.cid,
+    title: plan.chapter.title,
+    paragraphs: [],
+    blocks: undefined,
+    url: plan.chapter.url,
+  };
+  const ok = await applyChapterBuild(bookId, sourceId, draft, plan.build, concurrency);
+  if (!ok) {
+    failed.push({
+      index: plan.chapterIndex,
+      error: `图片加载失败（0/${plan.build.imageRefs.length}）`,
+    });
+    return null;
+  }
+  return draft;
+}
+
+/** 把本次写好的章节落盘并原位替换书库（只把变动的章节交给后端，不整本深拷贝） */
+async function persistChapters(
+  bookId: string,
+  patches: Array<{ index: number; chapter: LocalBookChapter }>,
+): Promise<void> {
+  if (patches.length === 0) return;
+  const base = localBookById(bookId);
+  if (!base) return;
+  await updateBookChapters(patchChapters(base, patches), patches);
+}
+
+/**
+ * 阅读窗口预取：把 [center ± LAZY_WINDOW] 内缺正文的章节取回来。
+ *
+ * 两条规则保证「正在读的那一章」不必陪跑其余预取：
+ * - 该章单独请求、取回即落盘 —— 阅读器拿到本章正文就能显示，不等其余窗口章节；
+ * - 其余章节按小批（约 2×书源并发）后台补齐、逐章落盘，每批之后复查 windowFocus：
+ *   用户跳到别的章节就立刻转向新章（新章同样单独先取），不必等旧窗口跑完。
+ */
+async function runWindowFetch(bookId: string, center: number): Promise<void> {
+  if (onlineRunBusy(bookId)) return;
+  const initial = localBookById(bookId);
+  if (!initial || !isOnlineBook(initial)) return;
+  const sourceId = initial.bookSourceId!;
+  const concurrency = Math.max(1, currentSourceParallel());
+  // 非当前章一批取多少：吃满书源并发即可（批越小，跳章之后转向越快）
+  const bulk = Math.max(1, Math.min(BATCH_SIZE, concurrency * 2));
+  cancellations.delete(bookId);
+  const failed: FailedChapter[] = [];
+  // 本 run 已请求过的章节：失败 / 空正文的章节不在同一轮里反复重取（重试走 UI 入口）
+  const attempted = new Set<number>();
+  let focus = Math.max(0, Math.min(center, initial.chapters.length - 1));
+  windowFocus.set(bookId, focus);
+  let done = 0;
+  let pending = windowMissing(initial, focus);
+  patchRun(bookId, {
+    phase: "window",
+    busy: true,
+    total: pending.length,
+    done: 0,
+    failed: [],
+    pending,
+    cancelled: false,
+  });
+  try {
+    let focusFirst = true; // 本次焦点章还没单独取过
+    for (;;) {
+      if (cancellations.has(bookId)) break;
+      const bookNow = localBookById(bookId) ?? initial;
+      const missing = windowMissing(bookNow, focus, attempted);
+      if (missing.length === 0) break;
+      const slice = missing.slice(0, focusFirst && missing[0] === focus ? 1 : bulk);
+      focusFirst = false;
+      const plans = await fetchChapterPlans(bookId, sourceId, bookNow, slice, failed);
+      for (const idx of slice) attempted.add(idx);
+      done += slice.length;
+      // 逐章补齐图片并落盘：焦点章一落盘阅读器即可显示，其余章节随后陆续就位
+      for (const plan of plans) {
+        if (cancellations.has(bookId)) break;
+        const filled = await fillChapterDraft(bookId, sourceId, plan, concurrency, failed);
+        if (filled) {
+          await persistChapters(bookId, [{ index: plan.chapterIndex, chapter: filled }]);
+        }
+        if (plans.length > 1) await yieldToMain();
+      }
+      const latest = localBookById(bookId) ?? bookNow;
+      pending = windowMissing(latest, focus, attempted);
+      patchRun(bookId, { total: done + pending.length, done, failed: [...failed], pending });
+      // 阅读章变了（用户跳章 / 听书跨章）：立刻改以新章为中心，新章同样单独先取
+      const want = windowFocus.get(bookId);
+      if (want !== undefined && want !== focus) {
+        focus = Math.max(0, Math.min(want, latest.chapters.length - 1));
+        focusFirst = true;
+      }
+    }
+  } catch (err) {
+    // 意外中断（磁盘 I/O 等）：清掉 busy 状态，避免该书永远卡在“获取中”
+    console.error("[online] 窗口预取意外中断", err);
+  } finally {
+    windowFocus.delete(bookId);
+    const cancelled = cancellations.has(bookId);
+    cancellations.delete(bookId);
+    patchRun(bookId, { phase: "idle", busy: false, pending: [], cancelled });
+  }
+}
+
+/**
+ * 批量下载剩余全部正文（下载按钮）：一次算好缺正文章节，按批取回、按批落盘（保持批量 I/O）。
+ * 下载期间用户在阅读页读到未缓存的章节时，先把那一章单独取回，不按目录顺序排在后面。
+ */
+async function runDownloadFetch(
+  bookId: string,
   onProgress?: (state: OnlineRunState) => void,
 ): Promise<void> {
   if (onlineRunBusy(bookId)) return;
   const initial = localBookById(bookId);
   if (!initial || !isOnlineBook(initial)) return;
   const sourceId = initial.bookSourceId!;
-  const total = initial.chapters.length;
-  let targets = indexes;
-  if (targets === null) {
-    targets = initial.chapters
-      .map((ch, i) => (chapterHasContent(ch) ? -1 : i))
-      .filter((i) => i >= 0);
-  } else {
-    targets = targets.filter((i) => i >= 0 && i < total);
+  const targets: number[] = [];
+  for (let i = 0; i < initial.chapters.length; i++) {
+    if (!chapterHasContent(initial.chapters[i])) targets.push(i);
   }
-  targets = targets.filter((i) => i >= 0 && !chapterHasContent(initial.chapters[i]));
   if (targets.length === 0) {
     patchRun(bookId, { phase: "idle", busy: false, total: 0, done: 0, pending: [] });
     return;
   }
-
+  const concurrency = Math.max(1, currentSourceParallel());
   cancellations.delete(bookId);
+  const failed: FailedChapter[] = [];
+  const handled = new Set<number>();
+  const syncRun = (): void => {
+    patchRun(bookId, {
+      done: handled.size,
+      failed: [...failed],
+      pending: targets.filter((i) => !handled.has(i)),
+    });
+  };
+  /** 阅读焦点章优先：正在阅读页上未缓存的那一章先单独取回并落盘 */
+  const fetchFocused = async (): Promise<void> => {
+    const idx = windowFocus.get(bookId);
+    if (idx === undefined || handled.has(idx) || !targets.includes(idx)) return;
+    handled.add(idx);
+    const plans = await fetchChapterPlans(
+      bookId,
+      sourceId,
+      localBookById(bookId) ?? initial,
+      [idx],
+      failed,
+    );
+    const plan = plans[0];
+    if (plan) {
+      const filled = await fillChapterDraft(bookId, sourceId, plan, concurrency, failed);
+      if (filled) await persistChapters(bookId, [{ index: idx, chapter: filled }]);
+    }
+    syncRun();
+  };
   patchRun(bookId, {
-    phase,
+    phase: "download",
     busy: true,
     total: targets.length,
     done: 0,
@@ -455,142 +663,57 @@ async function runFetch(
     pending: [...targets],
     cancelled: false,
   });
-  const failed: { index: number; error: string }[] = [];
-  let done = 0;
-  const concurrency = Math.max(1, currentSourceParallel());
-  // 最近一次已回写/已发布到书库的书（只替换本次写入章节，深拷贝整本只发生一次：无）
-  let published = initial;
-
   try {
     for (let start = 0; start < targets.length; start += BATCH_SIZE) {
       if (cancellations.has(bookId)) break;
-      const bookNow = published;
-      const slice = targets.slice(start, start + BATCH_SIZE);
-      const metas: ChapterItem[] = [];
-      for (const idx of slice) {
-        const ch = bookNow.chapters[idx];
-        if (ch?.url) metas.push({ chapterName: ch.title, chapterUrl: ch.url });
-      }
-      const results: ChapterContentResult[] = await fetchRemoteChapterContents(
-        sourceId,
-        toBookItem(bookNow),
-        metas,
-      );
+      // 读到哪一章就先取哪一章：不必等下载按目录顺序排到它
+      await fetchFocused();
       if (cancellations.has(bookId)) break;
-
-      // 组装批次计划（引擎失败的章节直接进失败列表）；每次解析之间让出主线程
-      const plans: BatchPlan[] = [];
-      for (let offset = 0; offset < slice.length; offset++) {
-        if (cancellations.has(bookId)) break;
-        const res = results[offset];
-        const chapterIndex = slice[offset];
-        const chapter = bookNow.chapters[chapterIndex];
-        if (!chapter) continue;
-        if (!res.ok) {
-          failed.push({ index: chapterIndex, error: res.error || "未知错误" });
-          done++;
-          continue;
-        }
-        const build = buildSourceChapterContent(res.text, chapter.url || undefined);
-        plans.push({ chapterIndex, chapter, build });
-        if (offset % 3 === 2) await yieldToMain(); // 分片解析不长时间独占主线程
+      const slice = targets.slice(start, start + BATCH_SIZE).filter((i) => !handled.has(i));
+      if (slice.length === 0) continue;
+      const bookNow = localBookById(bookId) ?? initial;
+      const plans = await fetchChapterPlans(bookId, sourceId, bookNow, slice, failed);
+      // 这一批的网络请求期间用户可能又读到了未缓存的章节：立即单独取回，
+      // 不等本批的解析 / 图片下载 / 写盘走完
+      await fetchFocused();
+      if (cancellations.has(bookId)) break;
+      const patches: Array<{ index: number; chapter: LocalBookChapter }> = [];
+      for (const plan of plans) {
+        const filled = await fillChapterDraft(bookId, sourceId, plan, concurrency, failed);
+        if (filled) patches.push({ index: plan.chapterIndex, chapter: filled });
       }
-      // plans 可能为空（本批引擎全部失败）：仍要走到底部 patchRun，把失败结果汇报给 UI
-
-      // 单章：在全新的章节对象上完成解析与图片下载；纯图章全失败视为失败
-      const fillChapter = async (
-        plan: BatchPlan,
-      ): Promise<LocalBookChapter | null> => {
-        const draft: LocalBookChapter = {
-          cid: plan.chapter.cid,
-          title: plan.chapter.title,
-          paragraphs: [],
-          blocks: undefined,
-          url: plan.chapter.url,
-        };
-        const ok = await applyChapterBuild(
-          bookId,
-          sourceId,
-          draft,
-          plan.build,
-          concurrency,
-        );
-        if (!ok) {
-          failed.push({
-            index: plan.chapterIndex,
-            error: `图片加载失败（0/${plan.build.imageRefs.length}）`,
-          });
-          return null;
-        }
-        return draft;
-      };
-
-      const batchPatch: Array<{ index: number; chapter: LocalBookChapter }> = [];
-      if (phase === "window") {
-        // 逐章处理并逐章落盘：当前阅读章在调用方传入顺序最前，尽快可读
-        for (const plan of plans) {
-          if (cancellations.has(bookId)) break;
-          const filled = await fillChapter(plan);
-          done++;
-          if (!filled) continue;
-          batchPatch.push({ index: plan.chapterIndex, chapter: filled });
-          published = patchChapters(published, batchPatch);
-          await updateBookChapters(published, [...batchPatch]);
-          batchPatch.length = 0;
-          if (plans.length > 1) await yieldToMain();
-        }
-      } else {
-        for (const plan of plans) {
-          const filled = await fillChapter(plan);
-          done++;
-          if (filled) batchPatch.push({ index: plan.chapterIndex, chapter: filled });
-        }
-        if (batchPatch.length > 0) {
-          published = patchChapters(published, batchPatch);
-          await updateBookChapters(published, batchPatch);
-        }
-      }
-
-      const remaining = targets.slice(start + slice.length);
-      patchRun(bookId, {
-        done: Math.min(done, targets.length),
-        failed: [...failed],
-        pending: remaining,
-      });
+      for (const idx of slice) handled.add(idx);
+      if (patches.length > 0) await persistChapters(bookId, patches);
+      syncRun();
       onProgress?.(runMap()[bookId] ?? onlineRunState(bookId));
     }
   } catch (err) {
     // 意外中断（磁盘 I/O 等）：清掉 busy 状态，避免该书永远卡在“下载中”
     console.error("[online] 章节下载意外中断", err);
   } finally {
+    windowFocus.delete(bookId);
     const cancelled = cancellations.has(bookId);
     cancellations.delete(bookId);
-    patchRun(bookId, {
-      phase: "idle",
-      busy: false,
-      pending: [],
-      cancelled,
-    });
+    patchRun(bookId, { phase: "idle", busy: false, pending: [], cancelled });
   }
 }
 
-/** 阅读窗口预取：确保 [idx-WINDOW, idx+WINDOW] 内章节有正文（当前章优先） */
+/** 阅读窗口预取：确保 [idx ± LAZY_WINDOW] 内章节有正文（当前章优先）。
+ *  已有拉取任务在跑时不新起一轮，只把焦点换成新的阅读章：窗口预取会在下一批之后以本章
+ *  为中心继续，批量下载也会把本章提前取回 —— 读到哪一章就先出哪一章，不必等别的章节。 */
 export async function ensureReadingWindow(
   bookId: string,
   chapterIndex: number,
 ): Promise<void> {
   const book = localBookById(bookId);
-  if (!book || !isOnlineBook(book) || onlineRunBusy(bookId)) return;
-  const lo = Math.max(0, chapterIndex - LAZY_WINDOW);
-  const hi = Math.min(book.chapters.length - 1, chapterIndex + LAZY_WINDOW);
-  const missing: number[] = [];
-  for (let i = lo; i <= hi; i++) {
-    if (!chapterHasContent(book.chapters[i])) missing.push(i);
+  if (!book || !isOnlineBook(book)) return;
+  const run = onlineRunState(bookId);
+  if (run.busy) {
+    if (run.phase !== "idle") windowFocus.set(bookId, chapterIndex);
+    return;
   }
-  if (missing.length === 0) return;
-  // 离当前章近的先拉（同距按下标升序），runFetch 按此顺序逐章落盘，阅读无需等整窗
-  missing.sort((a, b) => Math.abs(a - chapterIndex) - Math.abs(b - chapterIndex) || a - b);
-  await runFetch(bookId, missing, "window");
+  if (windowMissing(book, chapterIndex).length === 0) return;
+  await runWindowFetch(bookId, chapterIndex);
 }
 
 /** 批量下载剩余全部正文（下载按钮） */
@@ -600,7 +723,7 @@ export async function downloadRemainingChapters(
 ): Promise<void> {
   const book = localBookById(bookId);
   if (!book || !isOnlineBook(book)) return;
-  await runFetch(bookId, null, "download", onProgress);
+  await runDownloadFetch(bookId, onProgress);
 }
 
 export interface ReloadChapterOutcome {

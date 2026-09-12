@@ -884,6 +884,9 @@ export default function ReaderPage() {
   // 触发源用渲染窗口：只有当前章 ±1 变化（或本次拉取的状态变化）才需要重新检查；
   // 真正判断缺哪些章节由 ensureReadingWindow 读实时的书库对象，这里拿到旧对象也只是
   // 保守地多触发一次空检查，不会重复下载。
+  // 拉取进行中时：正在读的这一章还没有正文就把「阅读焦点」交给在跑的任务 —— 窗口预取会在
+  // 下一批之后以本章为中心接着取，批量下载也会把本章提前取回，读到哪一章就先出哪一章，
+  // 不用等它把其余章节取完。本章已有正文则不动在跑的任务（不打断它给别处补正文）。
   createEffect(() => {
     const current = renderBook();
     if (!current || !isOnlineBook(current)) return;
@@ -892,7 +895,13 @@ export default function ReaderPage() {
     const run = onlineRunState(current.id);
     void run.busy;
     void run.phase;
-    if (run.busy || run.phase !== "idle") return;
+    const ch = current.chapters[idx];
+    const bodyMissing = !!ch && !chapterHasContent(ch);
+    if (run.busy) {
+      if (bodyMissing) void ensureReadingWindow(current.id, idx);
+      return;
+    }
+    if (run.phase !== "idle") return;
     const needAny = current.chapters.some(
       (c, i) =>
         Math.abs(i - idx) <= LAZY_WINDOW &&
@@ -904,7 +913,7 @@ export default function ReaderPage() {
   });
 
   // 取消跟读后视图不再随朗读章移动，引擎跨章只在内部推进、可能读出视图窗口之外。
-  // 在线书：以播放器当前朗读章为中心补一轮窗口预取（读某章期间就绪其后的窗口），
+  // 在线书：把预取焦点交给朗读所在章（已在跑的窗口预取会在下一批之后转向本章），
   // 保证引擎继续向后朗读时正文可用；视图仍在跟随或引擎未运行时无需处理。
   // ensureReadingWindow 对无缺失章节直接返回，此处无需再按距离过滤。
   createEffect(
@@ -913,11 +922,7 @@ export default function ReaderPage() {
       (ci) => {
         if (followEnabled() || ci < 0) return;
         const current = book();
-        const run = onlineRunState(bookId());
-        void run.busy;
-        void run.phase;
         if (!current || !isOnlineBook(current)) return;
-        if (run.busy || run.phase !== "idle") return;
         void ensureReadingWindow(current.id, ci);
       },
     ),
