@@ -15,7 +15,16 @@ import type { LocalBookChapter } from "./booksTypes";
 export type ReaderBlock =
   | { kind: "p"; text: string }
   | { kind: "h"; level: number; text: string }
-  | { kind: "img"; src: string; alt?: string; remote?: string };
+  | {
+      kind: "img";
+      /** 可直接渲染的地址（在线书为网络地址）；老数据可能是 data URL */
+      src: string;
+      alt?: string;
+      /** 在线书：图片原始网络地址（图片身份） */
+      remote?: string;
+      /** 已下载副本的文件名（应用数据目录 images/ 下） */
+      local?: string;
+    };
 
 export const READING_LINE_HEIGHT = 1.95;
 export const READING_LETTER_SPACING_EM = 0.01;
@@ -61,6 +70,8 @@ export type PageFragment =
       alt?: string;
       /** 在线书图片的网络地址（图片身份）：本地副本未落盘时用它取会话内下载结果 */
       remote?: string;
+      /** 已下载副本的文件名（见 lib/imageAssets.ts） */
+      local?: string;
       w: number;
       h: number;
     };
@@ -68,6 +79,17 @@ export type PageFragment =
 export interface PaginatedChapter {
   /** 每页的片段序列（页 0 起始含章节标题） */
   pages: PageFragment[][];
+}
+
+/**
+ * 图片尺寸表的键：优先**网络地址**（图片身份）—— 分页视图与「本会话刚下载好、块还没回写」
+ * 的视图在这上面一致；其次是可渲染地址；只有连地址都没有的本地副本才退到文件名
+ * （本地 / EPUB 图迁移后 `src` 可能为空，多张图会撞到同一个空串键）。
+ */
+export function readerImageKey(unit: { src: string; local?: string; remote?: string }): string {
+  if (unit.remote) return unit.remote;
+  if (unit.src) return unit.src;
+  return unit.local ? `local:${unit.local}` : "";
 }
 
 /** 把章节内容归一化成统一单元序列（图片缺失也保留占位） */
@@ -78,9 +100,10 @@ export function chapterUnits(chapter: LocalBookChapter): ReaderBlock[] {
       if (block.kind === "img") {
         return {
           kind: "img",
-          src: block.src,
+          src: block.src ?? "",
           alt: block.alt,
           ...(block.remote ? { remote: block.remote } : {}),
+          ...(block.local ? { local: block.local } : {}),
         };
       }
       if (block.kind === "h") {
@@ -332,7 +355,7 @@ export function* paginateChapterSteps(
 
   const units = chapterUnits(chapter);
   for (const unit of units) {
-    if (unit.kind === "img" && !imageSizes.has(unit.src)) return null;
+    if (unit.kind === "img" && !imageSizes.has(readerImageKey(unit))) return null;
   }
 
   const measurer = buildMeasurer(layout);
@@ -455,17 +478,33 @@ export function* paginateChapterSteps(
         );
         continue;
       }
-      const natural = imageSizes.get(unit.src) ?? null;
+      const natural = imageSizes.get(readerImageKey(unit)) ?? null;
       const disp = imageDisplaySize(layout, natural);
       if (disp.missing) {
         pushAtomic(
-          { kind: "img", src: unit.src, alt: unit.alt, remote: unit.remote, w: 0, h: 0 },
+          {
+            kind: "img",
+            src: unit.src,
+            alt: unit.alt,
+            remote: unit.remote,
+            local: unit.local,
+            w: 0,
+            h: 0,
+          },
           MISSING_IMAGE_HEIGHT,
           em(layout.fontSize, 1),
         );
       } else {
         pushAtomic(
-          { kind: "img", src: unit.src, alt: unit.alt, remote: unit.remote, w: disp.w, h: disp.h },
+          {
+            kind: "img",
+            src: unit.src,
+            alt: unit.alt,
+            remote: unit.remote,
+            local: unit.local,
+            w: disp.w,
+            h: disp.h,
+          },
           disp.h,
           em(layout.fontSize, 1),
         );

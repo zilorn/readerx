@@ -81,7 +81,7 @@ export interface ChapterContentResult {
   error: string;
 }
 
-/** 经书源会话下载一张正文插图的结果（图片可能带防盗链，必须走书源 Cookie/头） */
+/** 经书源会话下载一张图片（书源封面用）的结果：图片可能带防盗链，必须走书源 Cookie/头 */
 export interface FetchedImage {
   ok: boolean;
   /** 图片 MIME（如 image/jpeg）；失败时为空 */
@@ -89,6 +89,27 @@ export interface FetchedImage {
   /** 图片字节（base64）；失败时为空 */
   data: string;
   error: string;
+}
+
+/** 章节插图下载并落盘的结果（图片字节留在 Rust 侧文件里，不回传 base64） */
+export interface BookImageFile {
+  ok: boolean;
+  /** 本地副本文件名（应用数据目录 images/ 下）；失败时为空 */
+  local: string;
+  /** 原始像素宽 / 高（由 Rust 读文件头解析，不解码；解析不出为 0） */
+  width: number;
+  height: number;
+  /** 图片字节数 */
+  bytes: number;
+  error: string;
+}
+
+/** 已落盘章节插图的尺寸 / 体积 */
+export interface BookImageInfo {
+  local: string;
+  width: number;
+  height: number;
+  bytes: number;
 }
 
 /** 一次书源函数调用的结果 */

@@ -5,11 +5,13 @@
 //! （不阻塞 IPC 事件循环），又把内部 panic 收敛成前端可读的错误字符串 —— 任何一处
 //! 意外异常只让这次调用失败，用户能看到原因，而不是应用直接闪退。
 
+use crate::book_images;
 use crate::engine;
 use crate::host;
 use crate::models::{
-    BookChapterPatch, BookItem, BookMeta, BookSource, BookSourceSummary, ChapterContentResult,
-    ChapterItem, CachedAudio, FetchedImage, LocalBook, SourceCallResult, TtsCacheStat,
+    BookChapterPatch, BookImageFile, BookImageInfo, BookItem, BookMeta, BookSource,
+    BookSourceSummary, CachedAudio, ChapterContentResult, ChapterItem, FetchedImage, LocalBook,
+    SourceCallResult, TtsCacheStat,
 };
 use crate::panic_guard;
 use crate::storage;
@@ -318,10 +320,70 @@ pub async fn readerx_source_fetch_contents(
     .await
 }
 
+/// 用书源会话下载一张**章节插图**并落盘，只回传本地引用与尺寸（不回传图片字节）。
+/// 图片字节经 IPC 进 WebView 会以 base64 + JS 字符串的形式成倍占用内存，
+/// 一章几百张图时足以把应用撑崩 —— 因此正文图片一律走这里存成文件，
+/// 渲染时由 `readerx-img` 自定义协议直接从文件读取（见 book_images.rs）。
+///
+/// `book_id` 仅用于给文件命名与删除时清理；`url` 为图片身份（去重 / 重试按它对应）。
+/// 请求失败 / 写盘失败都返回 ok:false（不抛 command 错误），便于阅读页显示可重试占位。
+#[tauri::command]
+pub async fn readerx_book_image_fetch(
+    app: AppHandle,
+    source_id: String,
+    book_id: String,
+    url: String,
+    referer: Option<String>,
+) -> Result<BookImageFile, String> {
+    blocking("图片下载", move || -> Result<BookImageFile, String> {
+        let source = storage::get_book_source(&app, &source_id)?
+            .ok_or_else(|| "书源不存在".to_string())?;
+        if !source.enabled {
+            return Err("书源已禁用".to_string());
+        }
+        host::prepare_source(&source)?;
+        // 重启后把该书源已保存的登录 Cookie 注入会话（进程内幂等）
+        let _ = webview_login::seed_source_session(&app, &source.id);
+        let root = book_images::images_root(&app)?;
+        match host::fetch_image_bytes(&source.id, &url, referer.as_deref().unwrap_or("")) {
+            Ok((mime, bytes)) => Ok(book_images::fetch_result(
+                &root, &book_id, &url, &mime, &bytes,
+            )),
+            Err(error) => Ok(BookImageFile {
+                ok: false,
+                local: String::new(),
+                width: 0,
+                height: 0,
+                bytes: 0,
+                error,
+            }),
+        }
+    })
+    .await
+}
+
+/// 取若干张已落盘章节插图的尺寸 / 体积（只读文件头，不解码）。
+/// 分页排版需要每张图的真实尺寸：由 Rust 读文件头给出，
+/// WebView 因此不必为了量尺寸把整章图片解码一遍。
+#[tauri::command]
+pub async fn readerx_book_image_info(
+    app: AppHandle,
+    locals: Vec<String>,
+) -> Result<Vec<BookImageInfo>, String> {
+    blocking("读取图片信息", move || {
+        let root = book_images::images_root(&app)?;
+        Ok(book_images::info(&root, &locals))
+    })
+    .await
+}
+
 /// 用书源会话下载一张图片（正文插图 / 整章图片 / 书源封面），返回 base64 与 MIME。
 /// 失败时返回 ok:false（不抛 command 错误），便于调用方做占位 / 整章失败判定。
 /// 只校验书源整体启停——正文插图走 content 能力流程、封面走 search/discover/detail
 /// 能力流程，都不该因另一个能力开关被关而失效，故不做单项能力门控。
+///
+/// 仅供**书源封面**使用：封面会在 WebView 里压成几百 px 的缩略图再随书保存，
+/// 体积可控；章节插图请用 [`readerx_book_image_fetch`]（落文件，不过 IPC）。
 #[tauri::command]
 pub async fn readerx_source_fetch_image(
     app: AppHandle,

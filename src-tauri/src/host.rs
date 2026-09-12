@@ -651,6 +651,130 @@ fn sniff_image_mime(bytes: &[u8]) -> Option<&'static str> {
     None
 }
 
+fn u16_be(bytes: &[u8], at: usize) -> Option<u16> {
+    let slice = bytes.get(at..at + 2)?;
+    Some(u16::from_be_bytes([slice[0], slice[1]]))
+}
+
+fn u32_be(bytes: &[u8], at: usize) -> Option<u32> {
+    let slice = bytes.get(at..at + 4)?;
+    Some(u32::from_be_bytes([slice[0], slice[1], slice[2], slice[3]]))
+}
+
+fn u32_le(bytes: &[u8], at: usize) -> Option<u32> {
+    let slice = bytes.get(at..at + 4)?;
+    Some(u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]))
+}
+
+fn junk_dimensions(width: u32, height: u32) -> Option<(u32, u32)> {
+    // 上限兜底：明显离谱的数值（解析错位 / 畸形文件）视为解析失败，
+    // 让前端退回占位而不是按天文数字排版
+    if width == 0 || height == 0 || width > 100_000 || height > 100_000 {
+        return None;
+    }
+    Some((width, height))
+}
+
+/// 从图片字节头解析原始像素尺寸（**不解码整张图**）。
+/// 支持 JPEG / PNG / GIF / BMP / WebP；SVG、AVIF 或畸形数据返回 None。
+///
+/// 阅读器排版需要每张图的真实尺寸：旧实现在 WebView 里用 `new Image()` 逐张解码，
+/// 一章几百张图时会一次性申请巨量位图内存（应用直接闪退）；改读文件头后
+/// 尺寸获取与「解码」解耦，整章图片也不再需要全部解码。
+pub(crate) fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    // PNG：IHDR 固定紧跟在 8 字节签名 + 4 字节长度 + 4 字节类型之后
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") && bytes.len() >= 24 {
+        return junk_dimensions(u32_be(bytes, 16)?, u32_be(bytes, 20)?);
+    }
+    // GIF：逻辑屏幕宽高为小端 u16
+    if bytes.starts_with(b"GIF8") && bytes.len() >= 10 {
+        let width = u16::from_le_bytes([bytes[6], bytes[7]]) as u32;
+        let height = u16::from_le_bytes([bytes[8], bytes[9]]) as u32;
+        return junk_dimensions(width, height);
+    }
+    // BMP：BITMAPINFOHEADER 的宽高（高度可能为负，表示自上而下）
+    if bytes.starts_with(b"BM") && bytes.len() >= 26 {
+        let width = u32_le(bytes, 18)? as i32;
+        let height = u32_le(bytes, 22)? as i32;
+        return junk_dimensions(width.unsigned_abs(), height.unsigned_abs());
+    }
+    if bytes.starts_with(b"RIFF") && bytes.len() >= 16 && &bytes[8..12] == b"WEBP" {
+        return webp_dimensions(bytes);
+    }
+    if bytes.starts_with(b"\xFF\xD8\xFF") {
+        return jpeg_dimensions(bytes);
+    }
+    None
+}
+
+/// JPEG：顺序扫段，命中 SOF0-SOF15（排除 DHT/JPG/DAC）即取段内高、宽
+fn jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    let mut i = 2usize;
+    while i + 4 <= bytes.len() {
+        if bytes[i] != 0xFF {
+            i += 1;
+            continue;
+        }
+        let marker = bytes[i + 1];
+        // 填充字节（0xFF 0xFF …）
+        if marker == 0xFF {
+            i += 1;
+            continue;
+        }
+        // 无长度字段的独立标记
+        if marker == 0xD8 || marker == 0x01 || (0xD0..=0xD7).contains(&marker) {
+            i += 2;
+            continue;
+        }
+        let length = u16_be(bytes, i + 2)? as usize;
+        if length < 2 {
+            return None;
+        }
+        let is_sof = (0xC0..=0xCF).contains(&marker)
+            && marker != 0xC4
+            && marker != 0xC8
+            && marker != 0xCC;
+        if is_sof {
+            return junk_dimensions(u16_be(bytes, i + 7)? as u32, u16_be(bytes, i + 5)? as u32);
+        }
+        i += 2 + length;
+    }
+    None
+}
+
+/// WebP：VP8（有损）/ VP8L（无损）/ VP8X（扩展）三种容器各自的头部布局
+fn webp_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    match &bytes[12..16] {
+        b"VP8 " => {
+            // 3 字节 frame tag + 3 字节同步码 0x9D012A 之后是小端 14 位宽高
+            if bytes.len() < 30 || &bytes[23..26] != b"\x9D\x01\x2A" {
+                return None;
+            }
+            let width = u16::from_le_bytes([bytes[26], bytes[27]]) as u32 & 0x3FFF;
+            let height = u16::from_le_bytes([bytes[28], bytes[29]]) as u32 & 0x3FFF;
+            junk_dimensions(width, height)
+        }
+        b"VP8L" => {
+            if bytes.len() < 25 || bytes[20] != 0x2F {
+                return None;
+            }
+            let bits = u32_le(bytes, 21)?;
+            let width = (bits & 0x3FFF) + 1;
+            let height = ((bits >> 14) & 0x3FFF) + 1;
+            junk_dimensions(width, height)
+        }
+        b"VP8X" => {
+            if bytes.len() < 30 {
+                return None;
+            }
+            let width = 1 + (bytes[24] as u32 | (bytes[25] as u32) << 8 | (bytes[26] as u32) << 16);
+            let height = 1 + (bytes[27] as u32 | (bytes[28] as u32) << 8 | (bytes[29] as u32) << 16);
+            junk_dimensions(width, height)
+        }
+        _ => None,
+    }
+}
+
 /// 识别图片 MIME：优先响应头 Content-Type；否则按 URL 扩展名；最后嗅探字节头。
 fn image_mime(url: &str, content_type: &str, bytes: &[u8]) -> String {
     let ct = content_type
@@ -1245,5 +1369,60 @@ mod tests {
         assert_eq!(html_to_text("", "\n"), "");
         assert_eq!(html_to_text("a &amp; b", ""), "a & b");
         assert_eq!(html_to_text("<p>中文</p><p>正文</p>", "\n").trim(), "中文\n正文");
+    }
+
+    #[test]
+    fn image_dimensions_reads_common_formats() {
+        // PNG：签名 + 长度 + IHDR + 宽高（大端）
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend_from_slice(&13u32.to_be_bytes());
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&800u32.to_be_bytes());
+        png.extend_from_slice(&600u32.to_be_bytes());
+        assert_eq!(image_dimensions(&png), Some((800, 600)));
+
+        // GIF：逻辑屏幕宽高小端
+        let mut gif = b"GIF89a".to_vec();
+        gif.extend_from_slice(&320u16.to_le_bytes());
+        gif.extend_from_slice(&240u16.to_le_bytes());
+        assert_eq!(image_dimensions(&gif), Some((320, 240)));
+
+        // BMP：BITMAPINFOHEADER，高度为负表示自上而下
+        let mut bmp = b"BM".to_vec();
+        bmp.resize(18, 0);
+        bmp.extend_from_slice(&64u32.to_le_bytes());
+        bmp.extend_from_slice(&(-48i32).to_le_bytes());
+        assert_eq!(image_dimensions(&bmp), Some((64, 48)));
+
+        // JPEG：SOI + APP0 段 + SOF0（高 1080、宽 1920）
+        let mut jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
+        jpeg.extend_from_slice(&[0u8; 14]);
+        jpeg.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x11, 0x08]);
+        jpeg.extend_from_slice(&1080u16.to_be_bytes());
+        jpeg.extend_from_slice(&1920u16.to_be_bytes());
+        assert_eq!(image_dimensions(&jpeg), Some((1920, 1080)));
+
+        // WebP（无损 VP8L）：signature 0x2F + 14 位宽高（各减 1）
+        let mut webp = b"RIFF".to_vec();
+        webp.extend_from_slice(&0u32.to_le_bytes());
+        webp.extend_from_slice(b"WEBP");
+        webp.extend_from_slice(b"VP8L");
+        webp.extend_from_slice(&0u32.to_le_bytes());
+        webp.push(0x2F);
+        let bits: u32 = (199) | ((99) << 14);
+        webp.extend_from_slice(&bits.to_le_bytes());
+        assert_eq!(image_dimensions(&webp), Some((200, 100)));
+
+        // 解析不出 / 畸形输入：返回 None，绝不 panic
+        assert_eq!(image_dimensions(b""), None);
+        assert_eq!(image_dimensions(b"\x89PNG\r\n\x1a\n"), None);
+        assert_eq!(image_dimensions(b"\xFF\xD8\xFF"), None);
+        assert_eq!(image_dimensions(&[0xFF, 0xD8, 0xFF, 0xC0, 0xFF, 0xFF]), None);
+        // 尺寸离谱（解析错位 / 畸形文件）也按失败处理，避免按天文数字排版
+        let mut huge = b"BM".to_vec();
+        huge.resize(18, 0);
+        huge.extend_from_slice(&4_000_000_000u32.to_le_bytes());
+        huge.extend_from_slice(&4_000_000_000u32.to_le_bytes());
+        assert_eq!(image_dimensions(&huge), None);
     }
 }

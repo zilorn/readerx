@@ -15,6 +15,7 @@ import {
 import {
   ensureChapterImages,
   retryChapterImage,
+  type ChapterImageFile,
 } from "./chapterImages";
 import {
   addBookRecord,
@@ -679,15 +680,16 @@ async function runDownloadImages(
     if (cancellations.has(bookId)) break;
     const results = await ensureChapterImages({
       sourceId,
+      bookId,
       referer: job.chapter.url ?? null,
       urls: job.urls,
       force: true,
       shouldStop: () => cancellations.has(bookId),
     });
     if (cancellations.has(bookId)) break;
-    const ready = new Map<string, string>();
-    for (const [url, data] of results) {
-      if (data) ready.set(url, data);
+    const ready = new Map<string, ChapterImageFile>();
+    for (const [url, file] of results) {
+      if (file) ready.set(url, file);
       else failedImages++;
     }
     done += job.urls.length;
@@ -731,7 +733,7 @@ export async function downloadRemainingChapters(
 
 /**
  * 章节里还没本地化的图片地址（去重、保序）。
- * 只认 img 块的 remote（在线图片身份）：已下载成 data URL 的不再请求。
+ * 只认 img 块的 remote（在线图片身份）：已经写好本地副本（`local`）的不再请求。
  */
 function pendingImageUrls(chapter: LocalBookChapter): string[] {
   const blocks = chapter.blocks;
@@ -741,7 +743,7 @@ function pendingImageUrls(chapter: LocalBookChapter): string[] {
   for (const block of blocks) {
     if (block.kind !== "img") continue;
     const remote = block.remote;
-    if (!remote || block.src.startsWith("data:")) continue;
+    if (!remote || block.local) continue;
     if (seen.has(remote)) continue;
     seen.add(remote);
     urls.push(remote);
@@ -749,11 +751,17 @@ function pendingImageUrls(chapter: LocalBookChapter): string[] {
   return urls;
 }
 
-/** 把本次下载好的图片写回章节（只替换仍是网络地址的图块，一次写盘） */
+/**
+ * 把本次下载好的图片写回章节：只补上本地副本引用（`local`），**不动 src / remote**。
+ * src 保持网络地址、remote 保持图片身份，因此：
+ * - 书籍 JSON 体积与图片字节无关（Rust 侧文件才是图片本体）；
+ * - 图片身份不变 → 阅读器的「当前章内容等价」判定不受影响，不会因下图触发整章重排。
+ * 一次写盘（只提交本章）。
+ */
 async function persistReadyImages(
   bookId: string,
   chapterIndex: number,
-  ready: ReadonlyMap<string, string>,
+  ready: ReadonlyMap<string, ChapterImageFile>,
 ): Promise<void> {
   if (ready.size === 0) return;
   const base = localBookById(bookId);
@@ -762,10 +770,10 @@ async function persistReadyImages(
   let changed = false;
   const blocks = chapter.blocks.map((block): ChapterBlock => {
     if (block.kind !== "img" || !block.remote) return block;
-    const data = ready.get(block.remote);
-    if (!data || block.src === data) return block;
+    const file = ready.get(block.remote);
+    if (!file || block.local === file.local) return block;
     changed = true;
-    return { ...block, src: data };
+    return { ...block, local: file.local };
   });
   if (!changed) return;
   const next: LocalBookChapter = { ...chapter, blocks };
@@ -773,15 +781,16 @@ async function persistReadyImages(
 }
 
 /**
- * 阅读时备好一章的图片：经书源会话逐张下载，成功即写回本地书库（离线可读、不再重复请求）。
- * 返回「地址 → data URL」（失败为 null），供分页按真实尺寸排版。
+ * 阅读时备好一章的图片：经书源会话逐张下载（图片由 Rust 落成本地文件），
+ * 成功即把本地副本文件名写回本地书库（离线可读、不再重复请求）。
+ * 返回「地址 → 本地副本」（失败为 null），供分页按真实尺寸排版。
  * shouldStop 用于「用户已离开这一章」时放弃还没发出的请求（已发出的等它结束，结果照常缓存）。
  */
 export async function loadReadingChapterImages(
   bookId: string,
   chapterIndex: number,
   shouldStop?: () => boolean,
-): Promise<Map<string, string | null>> {
+): Promise<Map<string, ChapterImageFile | null>> {
   const book = localBookById(bookId);
   if (!book || !isOnlineBook(book)) return new Map();
   const chapter = book.chapters[chapterIndex];
@@ -790,13 +799,14 @@ export async function loadReadingChapterImages(
   if (urls.length === 0) return new Map();
   const results = await ensureChapterImages({
     sourceId: book.bookSourceId!,
+    bookId,
     referer: chapter.url ?? null,
     urls,
     ...(shouldStop ? { shouldStop } : {}),
   });
-  const ready = new Map<string, string>();
-  for (const [url, data] of results) {
-    if (data) ready.set(url, data);
+  const ready = new Map<string, ChapterImageFile>();
+  for (const [url, file] of results) {
+    if (file) ready.set(url, file);
   }
   await persistReadyImages(bookId, chapterIndex, ready);
   return results;
@@ -807,13 +817,13 @@ export async function retryReadingImage(
   bookId: string,
   chapterIndex: number,
   url: string,
-): Promise<string | null> {
+): Promise<ChapterImageFile | null> {
   const book = localBookById(bookId);
   if (!book || !isOnlineBook(book) || !url) return null;
   const chapter = book.chapters[chapterIndex];
-  const data = await retryChapterImage(book.bookSourceId!, url, chapter?.url ?? null);
-  if (data) await persistReadyImages(bookId, chapterIndex, new Map([[url, data]]));
-  return data;
+  const file = await retryChapterImage(book.bookSourceId!, bookId, url, chapter?.url ?? null);
+  if (file) await persistReadyImages(bookId, chapterIndex, new Map([[url, file]]));
+  return file;
 }
 
 export interface ReloadChapterOutcome {

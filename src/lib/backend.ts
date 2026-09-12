@@ -7,6 +7,8 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { bookToMeta, type BookMeta, type LocalBook, type LocalBookChapter } from "./booksTypes";
 import { reportFailure } from "./errorReport";
 import type {
+  BookImageFile,
+  BookImageInfo,
   BookItem,
   BookSource,
   BookSourceSummary,
@@ -264,8 +266,9 @@ export interface SourceImageResult {
 }
 
 /**
- * 用书源会话下载一张图片（正文插图 / 书源封面），返回 data URL 或失败原因。
- * 图片请求自动携带该书源的默认头/Cookie/UA，Referer 可单独指定（正文页面 / 书页地址）。
+ * 用书源会话下载一张图片（**书源封面**用），返回 data URL 或失败原因。
+ * 封面会在 WebView 内压成几百 px 的缩略图再随书保存，体积可控；
+ * 章节插图请用 [`fetchRemoteChapterImageFile`]：图片落 Rust 侧文件，不过 IPC。
  */
 export async function fetchRemoteSourceImage(
   sourceId: string,
@@ -284,6 +287,56 @@ export async function fetchRemoteSourceImage(
   } catch (err) {
     console.error("[backend] 图片下载失败", err);
     return { data: "", error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
+ * 用书源会话下载一张**章节插图**并落盘（Rust 侧文件，不经 IPC 回传字节）。
+ * 返回本地引用与原始尺寸；失败返回 error（由调用方显示可重试占位）。
+ * 大量图片时这一步的内存开销与图片数量无关，不会再把应用撑崩。
+ */
+export async function fetchRemoteChapterImageFile(
+  sourceId: string,
+  bookId: string,
+  url: string,
+  referer: string | null,
+): Promise<BookImageFile> {
+  const failed = (error: string): BookImageFile => ({
+    ok: false,
+    local: "",
+    width: 0,
+    height: 0,
+    bytes: 0,
+    error,
+  });
+  if (!tauri) return failed("书源图片仅应用内可用");
+  try {
+    const r = await invoke<BookImageFile>("readerx_book_image_fetch", {
+      sourceId,
+      bookId,
+      url,
+      referer: referer || null,
+    });
+    if (!r.ok || !r.local) return failed(r.error || "图片下载失败");
+    return r;
+  } catch (err) {
+    console.error("[backend] 章节图片下载失败", err);
+    return failed(err instanceof Error ? err.message : String(err));
+  }
+}
+
+/** 取若干张已落盘章节插图的尺寸 / 体积（Rust 读文件头，不解码整张图） */
+export async function readChapterImageInfo(
+  locals: readonly string[],
+): Promise<BookImageInfo[]> {
+  if (!tauri || locals.length === 0) return [];
+  try {
+    return await invoke<BookImageInfo[]>("readerx_book_image_info", {
+      locals: [...locals],
+    });
+  } catch (err) {
+    console.error("[backend] 读取章节图片信息失败", err);
+    return [];
   }
 }
 

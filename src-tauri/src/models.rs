@@ -11,10 +11,19 @@ pub struct ChapterBlock {
     pub text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub level: Option<u32>,
+    /// 可直接渲染的地址：在线书未下载时为网络地址，下载后仍保留网络地址
+    /// （本地副本由 `local` 指向的文件提供，避免把图片字节写进书籍 JSON）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub src: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alt: Option<String>,
+    /// 在线书：图片原始网络地址（图片身份：下载去重 / 失败重试按它对应）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<String>,
+    /// 本地副本文件名（位于应用数据目录 images/ 下，见 book_images.rs）：
+    /// 图片下载成功后只把引用写回章节，图片字节留在文件里
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -393,6 +402,40 @@ pub struct FetchedImage {
     pub data: String,
     #[serde(default)]
     pub error: String,
+}
+
+/// 章节插图下载并落盘后的结果：只回传「本地引用 + 尺寸」，不回传图片字节
+/// （图片字节经 IPC 传给 WebView 会成倍占用内存，大量图片时直接把应用撑崩）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BookImageFile {
+    pub ok: bool,
+    /// 本地副本文件名（应用数据目录 images/ 下）；失败时为空
+    #[serde(default)]
+    pub local: String,
+    /// 原始像素宽 / 高（读文件头解析，不解码；解析不出为 0）
+    #[serde(default)]
+    pub width: u32,
+    #[serde(default)]
+    pub height: u32,
+    /// 图片字节数
+    #[serde(default)]
+    pub bytes: u64,
+    #[serde(default)]
+    pub error: String,
+}
+
+/// 已落盘章节图片的尺寸 / 体积（排版按真实尺寸，无需在 WebView 里解码整章图片）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BookImageInfo {
+    pub local: String,
+    #[serde(default)]
+    pub width: u32,
+    #[serde(default)]
+    pub height: u32,
+    #[serde(default)]
+    pub bytes: u64,
 }
 
 /// 一次书源函数调用的统一结果

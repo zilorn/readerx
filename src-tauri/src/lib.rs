@@ -1,3 +1,4 @@
+mod book_images;
 mod commands;
 mod engine;
 mod host;
@@ -9,6 +10,12 @@ mod webview_login;
 use std::panic::AssertUnwindSafe;
 use std::sync::OnceLock;
 use tauri::{AppHandle, Emitter};
+
+/// 章节插图的自定义协议名：前端用 `convertFileSrc(local, "readerx-img")` 得到
+/// 平台正确的完整 URL（Android/Windows 为 `http://readerx-img.localhost/…`，
+/// 其余平台为 `readerx-img://localhost/…`），由 [`book_images::serve`] 直接读文件应答。
+/// 图片不进 IPC、不进 WebView 的 JS 字符串，内存占用与图片数量解耦。
+const BOOK_IMAGE_PROTOCOL: &str = "readerx-img";
 
 /// 推给前端的「内部异常」事件名（前端监听见 src/lib/errorReport.ts）。
 /// 处理不了的异常必须让用户看到原因，而不是只留在日志里。
@@ -51,6 +58,16 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_tts::init())
         .plugin(tauri_plugin_webview_login::init())
+        // 章节插图：按本地文件名直接读文件应答（只接受本应用写出的图片文件名）
+        .register_uri_scheme_protocol(BOOK_IMAGE_PROTOCOL, |ctx, request| {
+            match book_images::images_root(ctx.app_handle()) {
+                Ok(root) => book_images::serve(&root, &request),
+                Err(error) => tauri::http::Response::builder()
+                    .status(tauri::http::StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(error.into_bytes())
+                    .unwrap_or_else(|_| tauri::http::Response::new(Vec::new())),
+            }
+        })
         .setup(|app| {
             // panic hook 需要 AppHandle 才能把内部异常推给前端
             let _ = APP_HANDLE.set(app.handle().clone());
@@ -81,6 +98,8 @@ pub fn run() {
             commands::readerx_source_call,
             commands::readerx_source_fetch_contents,
             commands::readerx_source_fetch_image,
+            commands::readerx_book_image_fetch,
+            commands::readerx_book_image_info,
             commands::readerx_source_login_supported,
             commands::readerx_source_login_webview,
             commands::readerx_source_login_clear
