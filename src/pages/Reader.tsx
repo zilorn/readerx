@@ -887,6 +887,9 @@ export default function ReaderPage() {
   const [reloadRisk, setReloadRisk] = createSignal<BookmarkInheritPreview | null>(null);
   let reloadRiskResolve: ((proceed: boolean) => void) | null = null;
 
+  /** 「重新加载本章」进行中（阅读区显示覆盖层，禁止翻页 / 呼出菜单） */
+  const [reloadingChapter, setReloadingChapter] = createSignal(false);
+
   /** 弹出「书签可能失效」询问，等待用户选择（仍在拉取中的重载流程等待此结果） */
   function askReloadRisk(preview: BookmarkInheritPreview): Promise<boolean> {
     reloadRiskResolve?.(false); // 上一次未决询问先按取消处理
@@ -910,19 +913,38 @@ export default function ReaderPage() {
     const targetIndex = chapterIdx();
     setReaderSettingsOpen(false);
     setMenuOpen(false);
-    const outcome = await reloadChapterContent(current.id, targetIndex, {
-      confirmRisk: askReloadRisk,
-    });
-    if (outcome.cancelled) return; // 用户放弃：正文与书签均未改动
-    if (!outcome.applied) {
-      showToast(`重新加载失败：${outcome.error ?? "未知错误"}`, true);
-      return;
-    }
-    // 重载后回到本章开头（旧正文的偏移/页码已无意义）
-    if (chapterIdx() === targetIndex) {
-      setResumeTarget(null);
-      setPageIdx(0);
-      setViewOffset(0);
+    // 覆盖层出现前先记下当前进度：重载失败时正文未变，按原位置回退（分页 + 段落文字双保险）
+    const from = current.chapters[targetIndex];
+    const snapshot = from
+      ? { cid: from.cid, char: viewOffset(), page: pageIdx() }
+      : null;
+    setReloadingChapter(true);
+    try {
+      const outcome = await reloadChapterContent(current.id, targetIndex, {
+        confirmRisk: askReloadRisk,
+      });
+      if (outcome.cancelled) return; // 用户放弃：正文与书签均未改动
+      if (!outcome.applied) {
+        const error = outcome.error ?? "未知错误";
+        // 重载已放弃，正文仍是原来的：把视口退回重载前的位置，不让阅读进度跟着漂
+        if (snapshot && chapterIdx() === targetIndex && chapter()?.cid === snapshot.cid) {
+          setPageIdx(snapshot.page);
+          setViewOffset(snapshot.char);
+          if (snapshot.char > 0) setResumeTarget({ cid: snapshot.cid, char: snapshot.char });
+        }
+        showToast(`重新加载失败，已回到原进度：${error}`, true);
+        return;
+      }
+      // 重载后回到本章开头（旧正文的偏移/页码已无意义）
+      if (chapterIdx() === targetIndex) {
+        setResumeTarget(null);
+        setPageIdx(0);
+        setViewOffset(0);
+        if (scrollRef) scrollRef.scrollTop = 0;
+      }
+      showToast(`已重新加载「${current.chapters[targetIndex]?.title ?? "本章"}」`);
+    } finally {
+      setReloadingChapter(false);
     }
   }
 
@@ -1777,6 +1799,7 @@ export default function ReaderPage() {
   /** 提示可见条件：有未决原位置，且没有菜单/抽屉/搜索/加载等界面盖住阅读区 */
   const jumpBackHint = createMemo(() => {
     if (jumpOrigin() === null) return false;
+    if (reloadingChapter()) return false;
     if (
       menuOpen() ||
       tocOpen() ||
@@ -2941,7 +2964,7 @@ export default function ReaderPage() {
 
   function onSurfacePointerDown(e: PointerEvent) {
     if (e.pointerType === "mouse" && e.button !== 0) return;
-    if (isUiTarget(e)) return;
+    if (isUiTarget(e) || reloadingChapter()) return;
     // 自绘选区：记录按下候选（触屏等待长按；鼠标/笔等待拖拽起选）
     if (!selDrag && selEngineUsable()) {
       const pointerType = e.pointerType;
@@ -2975,7 +2998,7 @@ export default function ReaderPage() {
     if (e.pointerType === "mouse" && e.button !== 0) return;
     const start = gestureStart;
     gestureStart = null;
-    if (!start || isUiTarget(e)) return;
+    if (!start || isUiTarget(e) || reloadingChapter()) return;
     // 已有自绘选区时：这次轻点只收起选区（再点才翻页/呼菜单）
     if (selSpan() !== null) {
       setSelSpan(null);
@@ -3561,6 +3584,35 @@ export default function ReaderPage() {
               </div>
             </Show>
 
+            {/* 「重新加载本章」进行中：覆盖层盖住正文（旧正文已作废），禁止翻页 / 呼出菜单，
+                给出进度反馈与取消入口；失败时由 reloadCurrentChapter 回退原进度并提示 */}
+            <Show when={reloadingChapter()}>
+              <div
+                data-reader-ui
+                class="absolute inset-0 z-[30] flex flex-col items-center justify-center gap-4 px-8 text-center"
+                style={{ background: "var(--bg)" }}
+                role="status"
+                aria-live="polite"
+              >
+                <span class="grid h-11 w-11 place-items-center rounded-full bg-surface-2 text-accent">
+                  <RefreshIcon size={22} class="animate-spin [animation-duration:1.2s]" />
+                </span>
+                <div class="flex flex-col gap-1.5">
+                  <p class="text-[14px] font-semibold text-text-2">正在重新加载本章…</p>
+                  <p class="text-[12px] leading-[1.6] text-text-3">
+                    已从书源重新获取正文，完成后会覆盖本章
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  class="rounded-xl bg-surface-2 px-4 py-2.5 text-[13px] font-semibold text-text-2 active:scale-[0.97]"
+                  onClick={() => cancelOnlineRun(bookId())}
+                >
+                  取消
+                </button>
+              </div>
+            </Show>
+
             {/* 分页自绘选区手柄：跨页连选时拖住端点继续翻页扩选 */}
             <Show when={isPaged() && selSpan() && selHandles()}>
               <div class="pointer-events-none absolute inset-0 z-[26]" aria-hidden="true">
@@ -4117,6 +4169,7 @@ export default function ReaderPage() {
                 isRemoteBook()
                   ? {
                       disabled: remoteRun().busy,
+                      busy: reloadingChapter(),
                       onReload: () => {
                         void reloadCurrentChapter();
                       },

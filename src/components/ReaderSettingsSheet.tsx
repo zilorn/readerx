@@ -37,6 +37,8 @@ export interface ReaderSettingsSheetProps {
   /** 在线书「重新加载本章」：提供即在设置中显示该入口（下载进行中时 disabled） */
   onlineReload?: {
     disabled: boolean;
+    /** 正在重新获取本章正文（图标旋转、文案切换） */
+    busy: boolean;
     onReload: () => void;
   };
   /** 在线书「检查书籍更新」：提供即在设置中显示该入口（检查/下载进行中时 disabled） */
@@ -78,6 +80,7 @@ function OnlineActionRow(props: {
       class="flex w-full items-center gap-3 px-4 py-[13px] text-left transition-[background-color,opacity] duration-150 disabled:pointer-events-none disabled:opacity-45 active:bg-surface-2"
       disabled={props.disabled}
       onClick={props.onClick}
+      aria-busy={props.busy ? "true" : undefined}
     >
       <span class="grid h-9 w-9 flex-none place-items-center rounded-[10px] bg-surface-2 text-accent">
         <Show when={props.busy} fallback={props.icon}>
@@ -248,6 +251,8 @@ export function ReaderSettingsSheet(props: ReaderSettingsSheetProps) {
                         : "从书源重新获取当前章节正文"
                     }
                     disabled={props.onlineReload?.disabled}
+                    busy={props.onlineReload?.busy}
+                    busyLabel="正在重新加载本章…"
                     onClick={() => props.onlineReload?.onReload()}
                   />
                 </Show>
