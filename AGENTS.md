@@ -24,6 +24,18 @@
 
 > 端口 1420 可能已被 `tauri android dev` 占用，勿再起第二个 dev server。
 
+## 构建期产物
+
+- `src/generated/han-dict-<方向>.bin`（简繁转换词典，gzip）由 `scripts/han-dict.mjs` 生成，
+  `vite.config.ts` 的 `hanDict` 插件在 dev / build 启动时自动调用它（词典未变则不写盘）；
+  **不入库**（见 `.gitignore`），不要手写或提交。词典内容取自 `node_modules/opencc-js` 的当前版本，
+  随依赖更新，无需手动同步。
+- 改动简繁词典分区时，必须同时改 `scripts/han-dict.mjs` 的 `HAN_DICT_SECTIONS` 与
+  `src/lib/hanDict.ts` 的 `SECTIONS`（资源格式头 `readerx-han-dict/1` 对不上会在运行时报错，
+  而不是静默给出错误转换）。
+- 大块纯数据（词典、字表之类）不要以 JS 模块形式引入：走「构建期压缩成资源 + 运行时按需取用」，
+  否则又会打出一个超过 500 kB 的 chunk 并拖慢 WebView 解析。
+
 ## 路由与懒加载约定
 
 - 路由集中在 `src/App.tsx`，用 `@solidjs/router` v1 的 JSX API：

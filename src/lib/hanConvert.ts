@@ -6,23 +6,21 @@
  * - 只影响展示（书名、作者、简介、标签、目录、正文、书源搜索结果……），
  *   绝不改动书库原文、书源返回的数据，也不影响用户手输内容（编辑表单始终是原文）；
  * - 词典来自 opencc-js（OpenCC 的纯 JS 实现，MIT / Apache-2.0）：
- *   简 → 繁约 1.1 MB、繁 → 简约 110 KB，**按方向动态加载**——
- *   没开启该功能的用户既不下发也不解析词典，开启后也只需要等一个本地 chunk。
+ *   简 → 繁约 450 KB、繁 → 简约 23 KB（均已 gzip），**按方向动态加载**——
+ *   没开启该功能的用户既不下发也不解析词典，开启后也只需要取一个本地资源文件。
+ *   词典的压缩与装载见 src/lib/hanDict.ts。
  *
  * 持久化走 Rust 后端 readState / writeState（WebView 不落盘）。
  */
 import { createSignal } from "solid-js";
+import type { HanConverter, HanDirection } from "./hanDict";
 import { readState, writeState } from "./backend";
 import { reportFailure } from "./errorReport";
 
+export type { HanConverter, HanDirection } from "./hanDict";
+
 /** 转换模式：off = 不转换；s2t = 简 → 繁；t2s = 繁 → 简 */
-export type HanMode = "off" | "s2t" | "t2s";
-
-/** 需要词典的转换方向（off 之外的两种模式） */
-export type HanDirection = Exclude<HanMode, "off">;
-
-/** 转换函数：只换字形，不换含义；未收录的字符原样保留 */
-export type HanConverter = (text: string) => string;
+export type HanMode = "off" | HanDirection;
 
 const STORAGE_KEY = "readerx.hanConvert";
 
@@ -44,12 +42,10 @@ function normalizeMode(value: unknown): HanMode {
 function ensureConverter(direction: HanDirection): Promise<void> {
   const running = loads.get(direction);
   if (running) return running;
+  // 转换器与词典都按需分块：没开启简繁转换的用户既不下发也不解析
   const task = (async () => {
-    // 两个方向各自成块：只加载用户真正选中的那一种
-    const convert =
-      direction === "s2t"
-        ? (await import("opencc-js/cn2t")).Converter({ from: "cn", to: "t" })
-        : (await import("opencc-js/t2cn")).Converter({ from: "t", to: "cn" });
+    const { loadHanConverter } = await import("./hanDict");
+    const convert = await loadHanConverter(direction);
     converters.set(direction, convert);
     setDictEpoch((epoch) => epoch + 1);
   })().catch((error: unknown) => {

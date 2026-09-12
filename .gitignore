@@ -1,2 +1,4 @@
 node_modules
 dist
+# 简繁转换词典资源：由 scripts/han-dict.mjs 在 dev / build 启动时生成，不入库
+src/generated

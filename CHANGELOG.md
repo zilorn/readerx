@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **构建产物瘦身：简繁转换词典改为按需取用的压缩资源**（新增 `scripts/han-dict.mjs` 与
+  `src/lib/hanDict.ts`）：opencc-js 把词典以 JS 字符串字面量发布，简→繁那一份打出来是
+  1.1 MB 的 JS chunk（构建时触发 Vite「chunk 大于 500 kB」告警），WebView 每次都要下载并解析
+  这么大一坨模块。词典本质是纯数据，现改为构建期 gzip 成 `src/generated/han-dict-<方向>.bin`
+  （简→繁 450 KB、繁→简 28 KB），运行时按方向取回、解压（优先内核 `DecompressionStream`，
+  老内核回退 fflate）后再用 opencc-js 建树；未开启简繁转换的用户依旧完全不下载。
+  转换结果与 `opencc-js/cn2t`、`opencc-js/t2cn` **逐字一致**（已用约 900 万字语料双向比对）。
+  词典产物由 `vite.config.ts` 的 `hanDict` 插件在 dev / build 启动时自动生成、不入库，
+  词典未变不重复压缩；两个方向共用同一个 4 KB 小 chunk（opencc 核心 + 词典地址），
+  不再各自复制一份核心代码。词典相关产物共省下约 700 KB。
+- **首屏不再下载 EPUB 解压库**：`src/lib/books.ts` 对 `./epub` 改为按需 `import()`，fflate 与
+  EPUB 解析器移出首屏（入口 chunk 56.9 KB → 44.3 KB，gzip 21.9 KB → 16.4 KB），
+  两者都只在真正导入电子书时才加载。
+
 ## [0.1.4] - 2026-09-12
 
 ### Added

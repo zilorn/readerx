@@ -42,7 +42,6 @@ import {
   normalizeBookTags,
   samePlainFields,
 } from "./booksTypes";
-import { parseEpubFile } from "./epub";
 import { ensureShelfEntry } from "./store";
 import { clearAllBookmarks, removeBookmarksForBook } from "./bookmarks";
 import { invalidateBookLengths } from "./progress";
@@ -460,6 +459,8 @@ export async function parseEpubFileDraft(
   file: File,
   overrides?: { title?: string; author?: string },
 ): Promise<BookDraft> {
+  // EPUB 解析器（含解压库）只在真正导入电子书时才载入，不进首屏
+  const { parseEpubFile } = await import("./epub");
   const parsed = await parseEpubFile(file);
   return toDraft(
     file,
