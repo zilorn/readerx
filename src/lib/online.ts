@@ -5,7 +5,10 @@
  * - 阅读时按「当前章 ±5 章」窗口预取并落盘（逐批写回同一本 LocalBook）：
  *   正在读的那一章单独先取、取回即落盘，其余窗口章节后台补齐；
  *   预取只取正文，图片留到用户读到该章时按需下载（见 chapterImages.ts）；
- * - 显式批量下载剩余全部正文（并发可配、可取消）：正文下完后单独再过一遍图片。
+ * - 显式批量下载剩余全部正文（并发可配、可取消）：正文下完后单独再过一遍图片；
+ * - 以上三种拉取（窗口预取 / 批量下载 / 重新加载本章）可并存且互不阻塞，冲突时以用户
+ *   操作为准：批量下载开始时后台窗口预取让位，正文回写先到先得（只有「重新加载本章」
+ *   能覆盖已有正文），目录覆盖更新推进「目录世代」让按旧下标在飞的回写作废。
  */
 import { createSignal } from "solid-js";
 import {
@@ -20,9 +23,10 @@ import {
 import {
   addBookRecord,
   bookMetaById,
-  commitBookContentUpdate,
   localBookById,
+  updateBookChapterInPlace,
   updateBookChapters,
+  updateBookContent,
   updateBookInfo,
 } from "./books";
 import {
@@ -112,6 +116,12 @@ export function chapterHasContent(chapter: LocalBookChapter): boolean {
 
 // 正文文本规范化已迁至 sourceContent.ts（供“含图正文”解析共用）；这里再导出保持旧引用可用
 export { normalizeContentText } from "./sourceContent";
+
+/** 按下标判断某章是否已有正文（目录可能刚被覆盖更新：越界下标一律视为「没有」） */
+function chapterHasContentAt(book: Pick<LocalBook, "chapters">, index: number): boolean {
+  const chapter = book.chapters[index];
+  return !!chapter && chapterHasContent(chapter);
+}
 
 function toBookItem(
   book: Pick<LocalBook, "title" | "author" | "bookUrl" | "tags">,
@@ -242,7 +252,13 @@ export async function addOnlineBookToShelf(
 }
 
 // ---------------------------------------------------------------------------
-// 并发拉取执行器（每本书串行 one-flight；批内按并发请求）
+// 并发拉取执行器：同一本书上的三种拉取可以并存，冲突时一律以用户操作为准
+// - 后台窗口预取：阅读时按需补齐「当前章 ± LAZY_WINDOW」；
+// - 用户批量下载（下载面板）：开始时后台窗口预取立刻让位 —— 用户操作优先，且它本就
+//   覆盖窗口范围内的章节，并按「阅读焦点」优先取回正在读的那一章，无需两处重复请求；
+// - 用户单章重载（重新加载本章）：与其余拉取并存，期间其余拉取跳过这一章。
+// 书库回写侧的冲突规则：正文先到先得（只有「重新加载本章」能覆盖已有正文）；
+// 目录覆盖更新推进「目录世代」，此前发出、随后才回来的正文回写按旧下标丢弃。
 // ---------------------------------------------------------------------------
 
 export type OnlineRunPhase = "idle" | "window" | "download" | "images";
@@ -269,53 +285,261 @@ export interface OnlineRunState {
 
 const EMPTY_IMAGE_PROGRESS: OnlineImageProgress = { total: 0, done: 0, failed: 0 };
 
-const [runMap, setRunMap] = createSignal<Record<string, OnlineRunState>>({});
+const IDLE_RUN_STATE: OnlineRunState = {
+  phase: "idle",
+  busy: false,
+  total: 0,
+  done: 0,
+  failed: [],
+  pending: [],
+  cancelled: false,
+  images: EMPTY_IMAGE_PROGRESS,
+};
 
+/** 一次拉取的取消令牌（同一本书的不同拉取各持一枚，互不牵连） */
+interface CancelToken {
+  cancelled: boolean;
+}
+
+/** 一次正文拉取的进度（窗口预取 / 批量下载各占一个槽位，可并存） */
+interface RunSlot {
+  phase: Exclude<OnlineRunPhase, "idle">;
+  total: number;
+  done: number;
+  pending: number[];
+  cancelled: boolean;
+  images: OnlineImageProgress;
+  /** 是否仍在跑；结束后保留结果（下载面板据此显示「上次有 N 章失败」） */
+  active: boolean;
+  /** 启动序号：没有活动任务时取最近启动的一次作为显示来源 */
+  seq: number;
+  token: CancelToken;
+}
+
+interface BookRuns {
+  /** 后台窗口预取（阅读时按需补齐） */
+  window: RunSlot | null;
+  /** 用户批量下载（下载面板「下载剩余全部」） */
+  download: RunSlot | null;
+  /** 正在「重新加载本章」的章节（用户操作；其余拉取跳过它） */
+  reload: { index: number; token: CancelToken } | null;
+  /** 各章最近一次拉取失败原因（三种拉取共同记录，新一轮拉取开始时清空） */
+  failures: Map<number, string>;
+  /** 目录世代：目录被覆盖更新时 +1，早先发出的正文回写据此丢弃 */
+  epoch: number;
+  /** run 启动序号计数 */
+  seq: number;
+}
+
+function emptyRuns(): BookRuns {
+  return { window: null, download: null, reload: null, failures: new Map(), epoch: 0, seq: 0 };
+}
+
+const [runMap, setRunMap] = createSignal<Record<string, BookRuns>>({});
+
+/** 该书的拉取运行态（无记录时给空态；只读快照） */
+function runsOf(bookId: string): BookRuns {
+  return runMap()[bookId] ?? emptyRuns();
+}
+
+function patchRuns(bookId: string, patch: (runs: BookRuns) => BookRuns): void {
+  const all = runMap();
+  setRunMap({ ...all, [bookId]: patch(all[bookId] ?? emptyRuns()) });
+}
+
+function patchSlot(bookId: string, kind: "window" | "download", patch: Partial<RunSlot>): void {
+  patchRuns(bookId, (runs) => {
+    const slot = runs[kind];
+    if (!slot) return runs;
+    const next = { ...slot, ...patch };
+    return kind === "window" ? { ...runs, window: next } : { ...runs, download: next };
+  });
+}
+
+/** 最近启动的一次拉取（没有活动任务时的显示来源） */
+function latestSlot(runs: BookRuns): RunSlot | null {
+  const slots: RunSlot[] = [];
+  if (runs.download) slots.push(runs.download);
+  if (runs.window) slots.push(runs.window);
+  if (slots.length === 0) return null;
+  return slots.reduce((a, b) => (b.seq > a.seq ? b : a));
+}
+
+/**
+ * 该书的拉取状态（UI 只读这一份）：
+ * - 有活动任务时按「用户批量下载 > 后台窗口预取」取用进度；没有活动任务时沿用最近一次
+ *   的结果（失败 / 取消记录得以保留，供下载面板与正文 gate 显示，「重新加载本章」不占此口径）；
+ * - pending 是各活动任务的并集（目录「下载中」徽标用），failed 汇集三种拉取的失败章节。
+ */
 export function onlineRunState(bookId: string): OnlineRunState {
-  return (
-    runMap()[bookId] ?? {
-      phase: "idle",
-      busy: false,
-      total: 0,
-      done: 0,
-      failed: [],
-      pending: [],
-      cancelled: false,
-      images: EMPTY_IMAGE_PROGRESS,
-    }
+  const runs = runMap()[bookId];
+  if (!runs) return IDLE_RUN_STATE;
+  const active: RunSlot[] = [];
+  if (runs.download?.active) active.push(runs.download);
+  if (runs.window?.active) active.push(runs.window);
+  const pick = active[0] ?? latestSlot(runs);
+  const failed = [...runs.failures.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([index, error]) => ({ index, error }));
+  if (!pick) return { ...IDLE_RUN_STATE, failed };
+  const pendingSet = new Set<number>();
+  for (const slot of active) {
+    for (const index of slot.pending) pendingSet.add(index);
+  }
+  return {
+    phase: active.length > 0 ? pick.phase : "idle",
+    busy: active.length > 0,
+    total: pick.total,
+    done: pick.done,
+    failed,
+    pending: [...pendingSet].sort((a, b) => a - b),
+    cancelled: pick.cancelled,
+    images: pick.images,
+  };
+}
+
+/** 该书是否有正文拉取在跑（窗口预取 / 批量下载；不含「重新加载本章」） */
+export function onlineRunBusy(bookId: string): boolean {
+  const runs = runMap()[bookId];
+  return !!runs && ((runs.window?.active ?? false) || (runs.download?.active ?? false));
+}
+
+/** 该书的用户批量下载是否在跑（下载面板显示进度、按钮据此禁用） */
+export function onlineDownloadActive(bookId: string): boolean {
+  return runMap()[bookId]?.download?.active ?? false;
+}
+
+/** 该书是否正在「重新加载本章」（用户单章重取） */
+export function onlineReloadActive(bookId: string): boolean {
+  return (runMap()[bookId]?.reload ?? null) !== null;
+}
+
+/** 该章是否有已知的拉取失败原因（正文 gate 显示失败详情用） */
+export function onlineChapterFailure(bookId: string, index: number): string | null {
+  return runMap()[bookId]?.failures.get(index) ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// 取消入口（各拉取互不牵连：停止批量下载不会顺手打断窗口预取，反之亦然）
+// ---------------------------------------------------------------------------
+
+function cancelSlot(bookId: string, kind: "window" | "download"): void {
+  const slot = runMap()[bookId]?.[kind];
+  if (!slot?.active) return;
+  slot.token.cancelled = true;
+  patchSlot(bookId, kind, { cancelled: true, pending: [] });
+}
+
+/** 停止后台窗口预取（不再取新章节；在飞请求的结果按取消丢弃） */
+export function cancelBackgroundFetch(bookId: string): void {
+  cancelSlot(bookId, "window");
+}
+
+/** 停止用户批量下载（下载面板「停止下载」） */
+export function cancelChapterDownload(bookId: string): void {
+  cancelSlot(bookId, "download");
+}
+
+/** 取消正在进行的「重新加载本章」 */
+export function cancelChapterReload(bookId: string): void {
+  const reload = runMap()[bookId]?.reload;
+  if (!reload) return;
+  reload.token.cancelled = true;
+  patchRuns(bookId, (runs) =>
+    runs.reload?.token === reload.token ? { ...runs, reload: null } : runs,
   );
 }
 
-const cancellations = new Set<string>();
-
+/** 停止该书的全部章节拉取（返回书架 / 离开阅读页等场景） */
 export function cancelOnlineRun(bookId: string): void {
-  cancellations.add(bookId);
-  const current = runMap()[bookId];
-  if (current) {
-    setRunMap({
-      ...runMap(),
-      [bookId]: { ...current, cancelled: true, pending: [] },
-    });
-  }
+  cancelBackgroundFetch(bookId);
+  cancelChapterDownload(bookId);
+  cancelChapterReload(bookId);
 }
 
-function patchRun(bookId: string, patch: Partial<OnlineRunState>): void {
-  const current = runMap()[bookId] ?? {
-    phase: "idle" as const,
-    busy: false,
-    total: 0,
-    done: 0,
-    failed: [],
-    pending: [],
-    cancelled: false,
-    images: EMPTY_IMAGE_PROGRESS,
-  };
-  setRunMap({ ...runMap(), [bookId]: { ...current, ...patch } });
+// ---------------------------------------------------------------------------
+// 运行态维护
+// ---------------------------------------------------------------------------
+
+/** 启动一次拉取：返回该次拉取的取消令牌（进度经 patchSlot 更新） */
+function startRun(
+  bookId: string,
+  kind: "window" | "download",
+  phase: Exclude<OnlineRunPhase, "idle">,
+  total: number,
+  pending: number[],
+): CancelToken {
+  const token: CancelToken = { cancelled: false };
+  patchRuns(bookId, (runs) => {
+    const seq = runs.seq + 1;
+    const slot: RunSlot = {
+      phase,
+      total,
+      done: 0,
+      pending,
+      cancelled: false,
+      images: EMPTY_IMAGE_PROGRESS,
+      active: true,
+      seq,
+      token,
+    };
+    // 新一轮拉取从零计失败；目录世代沿用
+    return kind === "window"
+      ? { ...runs, seq, failures: new Map(), window: slot }
+      : { ...runs, seq, failures: new Map(), download: slot };
+  });
+  return token;
 }
 
-/** 某一本书内部是否正在拉正文 */
-export function onlineRunBusy(bookId: string): boolean {
-  return runMap()[bookId]?.busy ?? false;
+/** 收尾一次拉取：保留结果但标记为非活动 */
+function finishRun(
+  bookId: string,
+  kind: "window" | "download",
+  patch: Partial<RunSlot>,
+): void {
+  patchSlot(bookId, kind, { ...patch, active: false, pending: [] });
+}
+
+/** 记录某章拉取失败原因（三种拉取共用） */
+function markFailure(bookId: string, index: number, error: string): void {
+  patchRuns(bookId, (runs) => {
+    const failures = new Map(runs.failures);
+    failures.set(index, error);
+    return { ...runs, failures };
+  });
+}
+
+/** 清掉若干章节的失败记录（这些章已取回正文） */
+function clearFailures(bookId: string, indexes: readonly number[]): void {
+  patchRuns(bookId, (runs) => {
+    if (indexes.every((index) => !runs.failures.has(index))) return runs;
+    const failures = new Map(runs.failures);
+    for (const index of indexes) failures.delete(index);
+    return { ...runs, failures };
+  });
+}
+
+/** 当前目录世代（在飞的正文回写按它判断下标是否仍然有效） */
+function tocEpochOf(bookId: string): number {
+  return runsOf(bookId).epoch;
+}
+
+/** 目录覆盖更新：推进世代，让按旧下标在飞的正文回写失效（旧下标的失败记录一并清空） */
+function bumpTocEpoch(bookId: string): void {
+  patchRuns(bookId, (runs) => ({ ...runs, epoch: runs.epoch + 1, failures: new Map() }));
+}
+
+/** 目录整体重排前停掉在跑的正文拉取（用户操作优先；在飞结果由目录世代兜底丢弃） */
+function stopChapterFetches(bookId: string): void {
+  cancelBackgroundFetch(bookId);
+  cancelChapterDownload(bookId);
+  cancelChapterReload(bookId);
+}
+
+/** 其余拉取要跳过的章节：正在「重新加载本章」的那一章由用户独占 */
+function reloadSkipSet(bookId: string): ReadonlySet<number> | undefined {
+  const index = runMap()[bookId]?.reload?.index;
+  return index === undefined ? undefined : new Set([index]);
 }
 
 /** 单章拉取计划：引擎返回 + 结构化解析结果 */
@@ -349,18 +573,6 @@ function yieldToMain(): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, 0));
 }
 
-/** 把若干章节“原位替换”到一本书上：其余章节对象原样复用（不做整本深拷贝） */
-function patchChapters(
-  book: LocalBook,
-  patches: Array<{ index: number; chapter: LocalBookChapter }>,
-): LocalBook {
-  if (patches.length === 0) return book;
-  const byIndex = new Map<number, LocalBookChapter>();
-  for (const patch of patches) byIndex.set(patch.index, patch.chapter);
-  const chapters = book.chapters.map((ch, i) => byIndex.get(i) ?? ch);
-  return { ...book, chapters };
-}
-
 // ---------------------------------------------------------------------------
 // 拉取流程：窗口预取（阅读时按需补齐）与批量下载（离线全本）
 //
@@ -369,11 +581,9 @@ function patchChapters(
 //   （updateBookChapters），避免含 data URL 图片的大书反复整本拷贝（逐批下载卡顿 /
 //   内存暴涨闪退的根因）；
 // - 章节解析等 CPU 步骤之间让出主线程（yieldToMain），渲染与翻页不被阻塞；
-// - 写入前重新取「最新的书库对象」当基底原位替换，不长期攥着旧快照。
+// - 写入由 books.ts 按书排队串行，并在队列内以「最新缓存 + 最新目录」复核后套用补丁，
+//   因此多路拉取并发时不会互相覆盖、也不会按旧下标写错章节。
 // ---------------------------------------------------------------------------
-
-/** 一次拉取 run 内失败的章节（下标 + 可读原因） */
-type FailedChapter = { index: number; error: string };
 
 /** 离 center 一个预取窗口（LAZY_WINDOW）之内、还没有正文的章节下标；skip 中的跳过 */
 function windowMissing(
@@ -396,18 +606,18 @@ function windowMissing(
 /**
  * 拉取任务的「阅读焦点」：当前正在读的章节下标。用户切章时由 ensureReadingWindow 更新，
  * 在跑的窗口预取 / 批量下载于下一批之后读取它并改以新焦点为准 —— 读到哪一章就先取哪一章，
- * 不必等它把别的章节取完（一本书同一时刻只有一个 run，此处只换优先级，不并发写书）。
+ * 不必等它把别的章节取完（焦点只换优先级，不改变「谁在写书」）。
  */
 const windowFocus = new Map<string, number>();
 
-/** 取回并解析一批章节（引擎失败的章节计入 failed）；解析之间让出主线程。
+/** 取回并解析一批章节（引擎失败的章节记为失败）；解析之间让出主线程。
  *  章节地址缺失的章节直接计失败，保证返回结果与请求顺序严格对应。 */
 async function fetchChapterPlans(
   bookId: string,
   sourceId: string,
   book: LocalBook,
   slice: number[],
-  failed: FailedChapter[],
+  token: CancelToken,
 ): Promise<BatchPlan[]> {
   const jobs: Array<{ index: number; item: ChapterItem }> = [];
   for (const idx of slice) {
@@ -415,7 +625,7 @@ async function fetchChapterPlans(
     if (chapter?.url) {
       jobs.push({ index: idx, item: { chapterName: chapter.title, chapterUrl: chapter.url } });
     } else {
-      failed.push({ index: idx, error: "章节缺少地址" });
+      markFailure(bookId, idx, "章节缺少地址");
     }
   }
   if (jobs.length === 0) return [];
@@ -424,7 +634,7 @@ async function fetchChapterPlans(
     toBookItem(book),
     jobs.map((job) => job.item),
   );
-  if (cancellations.has(bookId)) return [];
+  if (token.cancelled) return [];
   const plans: BatchPlan[] = [];
   for (let offset = 0; offset < jobs.length; offset++) {
     const job = jobs[offset];
@@ -432,7 +642,7 @@ async function fetchChapterPlans(
     const res = results[offset];
     if (!chapter) continue;
     if (!res?.ok) {
-      failed.push({ index: job.index, error: res?.error || "未知错误" });
+      markFailure(bookId, job.index, res?.error || "未知错误");
       continue;
     }
     plans.push({
@@ -458,15 +668,28 @@ function fillChapterDraft(plan: BatchPlan): LocalBookChapter {
   return draft;
 }
 
-/** 把本次写好的章节落盘并原位替换书库（只把变动的章节交给后端，不整本深拷贝） */
+/**
+ * 把本次取回的章节落盘并原位替换书库（只把变动的章节交给后端，不整本深拷贝）。
+ * 并发拉取下的冲突规则：
+ * - 目录世代变了（目录被覆盖更新）→ 本批结果按旧下标已无意义，整批丢弃；
+ * - 正文先到先得：目标章已有正文（别的任务刚写回 / 用户刚重载过）就跳过；
+ *   overwrite 只由用户显式的「重新加载本章」置位。
+ * 校验在写入队列内执行（见 books.ts），因此与并发写入不会交错。
+ * 返回实际写入的章节数。
+ */
 async function persistChapters(
   bookId: string,
   patches: Array<{ index: number; chapter: LocalBookChapter }>,
-): Promise<void> {
-  if (patches.length === 0) return;
-  const base = localBookById(bookId);
-  if (!base) return;
-  await updateBookChapters(patchChapters(base, patches), patches);
+  options: { epoch: number; overwrite?: boolean },
+): Promise<number> {
+  if (patches.length === 0) return 0;
+  const overwrite = !!options.overwrite;
+  return await updateBookChapters(bookId, patches, (update, latest) => {
+    if (tocEpochOf(bookId) !== options.epoch) return false;
+    const current = latest.chapters[update.index];
+    if (!current) return false;
+    return overwrite || !chapterHasContent(current);
+  });
 }
 
 /**
@@ -476,55 +699,63 @@ async function persistChapters(
  * - 该章单独请求、取回即落盘 —— 阅读器拿到本章正文就能显示，不等其余窗口章节；
  * - 其余章节按小批（约 2×书源并发）后台补齐、逐章落盘，每批之后复查 windowFocus：
  *   用户跳到别的章节就立刻转向新章（新章同样单独先取），不必等旧窗口跑完。
+ *
+ * 用户操作优先：批量下载一开始就让位（见 runDownloadFetch），「重新加载本章」进行中的
+ * 那一章跳过不取，用户随时可以发起这两个操作。
  */
 async function runWindowFetch(bookId: string, center: number): Promise<void> {
   if (onlineRunBusy(bookId)) return;
   const initial = localBookById(bookId);
   if (!initial || !isOnlineBook(initial)) return;
   const sourceId = initial.bookSourceId!;
+  const epoch = tocEpochOf(bookId);
   const concurrency = Math.max(1, currentSourceParallel());
   // 非当前章一批取多少：吃满书源并发即可（批越小，跳章之后转向越快）
   const bulk = Math.max(1, Math.min(BATCH_SIZE, concurrency * 2));
-  cancellations.delete(bookId);
-  const failed: FailedChapter[] = [];
   // 本 run 已请求过的章节：失败 / 空正文的章节不在同一轮里反复重取（重试走 UI 入口）
   const attempted = new Set<number>();
+  const token = startRun(bookId, "window", "window", 0, []);
   let focus = Math.max(0, Math.min(center, initial.chapters.length - 1));
   windowFocus.set(bookId, focus);
   let done = 0;
-  let pending = windowMissing(initial, focus);
-  patchRun(bookId, {
-    phase: "window",
-    busy: true,
-    total: pending.length,
-    done: 0,
-    failed: [],
-    pending,
-    cancelled: false,
-    images: EMPTY_IMAGE_PROGRESS,
-  });
+  let pending = windowMissing(initial, focus, reloadSkipSet(bookId));
+  patchSlot(bookId, "window", { total: pending.length, pending });
   try {
     let focusFirst = true; // 本次焦点章还没单独取过
     for (;;) {
-      if (cancellations.has(bookId)) break;
-      const bookNow = localBookById(bookId) ?? initial;
-      const missing = windowMissing(bookNow, focus, attempted);
+      if (token.cancelled) break;
+      const bookNow = localBookById(bookId);
+      if (!bookNow) break; // 书已被删除：停止拉取
+      const skipped = reloadSkipSet(bookId);
+      const skip = skipped ? new Set([...attempted, ...skipped]) : attempted;
+      const missing = windowMissing(bookNow, focus, skip);
       if (missing.length === 0) break;
       const slice = missing.slice(0, focusFirst && missing[0] === focus ? 1 : bulk);
       focusFirst = false;
-      const plans = await fetchChapterPlans(bookId, sourceId, bookNow, slice, failed);
+      const plans = await fetchChapterPlans(bookId, sourceId, bookNow, slice, token);
       for (const idx of slice) attempted.add(idx);
       done += slice.length;
       // 逐章落盘：焦点章一落盘阅读器即可显示，其余章节随后陆续就位
       for (const plan of plans) {
-        if (cancellations.has(bookId)) break;
+        if (token.cancelled) break;
         const filled = fillChapterDraft(plan);
-        await persistChapters(bookId, [{ index: plan.chapterIndex, chapter: filled }]);
+        const written = await persistChapters(
+          bookId,
+          [{ index: plan.chapterIndex, chapter: filled }],
+          { epoch },
+        );
+        if (written > 0) clearFailures(bookId, [plan.chapterIndex]);
         if (plans.length > 1) await yieldToMain();
       }
-      const latest = localBookById(bookId) ?? bookNow;
-      pending = windowMissing(latest, focus, attempted);
-      patchRun(bookId, { total: done + pending.length, done, failed: [...failed], pending });
+      const latest = localBookById(bookId);
+      if (!latest) break; // 书已被删除：停止拉取
+      const skippedNow = reloadSkipSet(bookId);
+      pending = windowMissing(
+        latest,
+        focus,
+        skippedNow ? new Set([...attempted, ...skippedNow]) : attempted,
+      );
+      patchSlot(bookId, "window", { total: done + pending.length, done, pending });
       // 阅读章变了（用户跳章 / 听书跨章）：立刻改以新章为中心，新章同样单独先取
       const want = windowFocus.get(bookId);
       if (want !== undefined && want !== focus) {
@@ -533,117 +764,137 @@ async function runWindowFetch(bookId: string, center: number): Promise<void> {
       }
     }
   } catch (err) {
-    // 意外中断（磁盘 I/O 等）：清掉 busy 状态，避免该书永远卡在“获取中”
+    // 意外中断（磁盘 I/O 等）：收尾清掉活动状态，避免该书永远卡在“获取中”
     console.error("[online] 窗口预取意外中断", err);
   } finally {
-    windowFocus.delete(bookId);
-    const cancelled = cancellations.has(bookId);
-    cancellations.delete(bookId);
-    patchRun(bookId, { phase: "idle", busy: false, pending: [], cancelled });
+    // 焦点留给接手的批量下载继续用（它靠这个焦点优先取回正在读的章节）
+    if (!onlineDownloadActive(bookId)) windowFocus.delete(bookId);
+    finishRun(bookId, "window", { done, cancelled: token.cancelled });
   }
 }
 
+/** 一次批量下载的结果（调用方据此提示，不必去读可能已被下一轮拉取覆盖的全局状态） */
+export interface OnlineDownloadSummary {
+  /** 用户中途停止 */
+  cancelled: boolean;
+  /** 本次取回的章节数（含被其它任务抢先写回的章节） */
+  done: number;
+  /** 结束时仍失败的章节数 */
+  failedChapters: number;
+  /** 图片阶段进度 */
+  images: OnlineImageProgress;
+}
+
 /**
- * 批量下载剩余全部正文（下载按钮）：一次算好缺正文章节，按批取回、按批落盘（保持批量 I/O）。
- * 下载期间用户在阅读页读到未缓存的章节时，先把那一章单独取回，不按目录顺序排在后面。
- * 正文下完后再单独过一遍图片（runDownloadImages）：图片不与正文同时请求。
+ * 批量下载剩余全部正文（下载面板「下载剩余全部」）：一次算好缺正文章节，按批取回、按批落盘。
+ *
+ * 用户操作优先：开始时后台窗口预取立刻让位（它覆盖的窗口范围本就在本次目标里，且本次会按
+ * 「阅读焦点」优先取回正在读的那一章），因此两者不会重复请求同一批章节；下载期间用户读到
+ * 未缓存的章节时，那一章同样单独先取回，不按目录顺序排在后面。正文下完后再单独过一遍图片。
+ * 已有同种任务在跑时返回 null（不重复发起）。
  */
-async function runDownloadFetch(
-  bookId: string,
-  onProgress?: (state: OnlineRunState) => void,
-): Promise<void> {
-  if (onlineRunBusy(bookId)) return;
+async function runDownloadFetch(bookId: string): Promise<OnlineDownloadSummary | null> {
+  if (onlineDownloadActive(bookId)) return null;
   const initial = localBookById(bookId);
-  if (!initial || !isOnlineBook(initial)) return;
+  if (!initial || !isOnlineBook(initial)) return null;
   const sourceId = initial.bookSourceId!;
+  const epoch = tocEpochOf(bookId);
+  cancelBackgroundFetch(bookId); // 用户操作优先：后台窗口预取让位
+  const token = startRun(bookId, "download", "download", 0, []);
   const targets: number[] = [];
   for (let i = 0; i < initial.chapters.length; i++) {
     if (!chapterHasContent(initial.chapters[i])) targets.push(i);
   }
-  cancellations.delete(bookId);
-  const failed: FailedChapter[] = [];
+  const targetSet = new Set(targets);
   const handled = new Set<number>();
+  /** 目标里已有正文（本次取回 / 别的任务抢先写回 / 用户重载完成）的章节数 */
+  let settled = 0;
   const syncRun = (): void => {
-    patchRun(bookId, {
-      done: handled.size,
-      failed: [...failed],
-      pending: targets.filter((i) => !handled.has(i)),
-    });
+    const bookNow = localBookById(bookId) ?? initial;
+    const pending: number[] = [];
+    let done = 0;
+    for (const i of targets) {
+      if (!handled.has(i) && !chapterHasContentAt(bookNow, i)) pending.push(i);
+      else done++;
+    }
+    settled = done;
+    patchSlot(bookId, "download", { done, pending });
+  };
+
+  /** 这一章此刻是否还需要取（已由别的任务写回 / 正在被用户重载则跳过） */
+  const needsFetch = (book: LocalBook, index: number): boolean => {
+    if (handled.has(index) || !targetSet.has(index)) return false;
+    if (runMap()[bookId]?.reload?.index === index) return false;
+    return !chapterHasContentAt(book, index);
   };
 
   /** 阅读焦点章优先：正在阅读页上未缓存的那一章先单独取回并落盘 */
   const fetchFocused = async (): Promise<void> => {
     const idx = windowFocus.get(bookId);
-    if (idx === undefined || handled.has(idx) || !targets.includes(idx)) return;
+    if (idx === undefined) return;
+    const bookNow = localBookById(bookId);
+    if (!bookNow) return; // 书已被删除：停止拉取
+    if (!needsFetch(bookNow, idx)) return;
     handled.add(idx);
-    const plans = await fetchChapterPlans(
-      bookId,
-      sourceId,
-      localBookById(bookId) ?? initial,
-      [idx],
-      failed,
-    );
+    const plans = await fetchChapterPlans(bookId, sourceId, bookNow, [idx], token);
     const plan = plans[0];
     if (plan) {
-      await persistChapters(bookId, [{ index: idx, chapter: fillChapterDraft(plan) }]);
+      const written = await persistChapters(
+        bookId,
+        [{ index: idx, chapter: fillChapterDraft(plan) }],
+        { epoch },
+      );
+      if (written > 0) clearFailures(bookId, [idx]);
     }
     syncRun();
   };
   try {
     if (targets.length > 0) {
-      patchRun(bookId, {
-        phase: "download",
-        busy: true,
-        total: targets.length,
-        done: 0,
-        failed: [],
-        pending: [...targets],
-        cancelled: false,
-        images: EMPTY_IMAGE_PROGRESS,
-      });
+      patchSlot(bookId, "download", { total: targets.length, pending: [...targets] });
       for (let start = 0; start < targets.length; start += BATCH_SIZE) {
-        if (cancellations.has(bookId)) break;
+        if (token.cancelled) break;
         // 读到哪一章就先取哪一章：不必等下载按目录顺序排到它
         await fetchFocused();
-        if (cancellations.has(bookId)) break;
-        const slice = targets.slice(start, start + BATCH_SIZE).filter((i) => !handled.has(i));
+        if (token.cancelled) break;
+        const bookNow = localBookById(bookId);
+        if (!bookNow) break; // 书已被删除：停止拉取
+        const slice = targets
+          .slice(start, start + BATCH_SIZE)
+          .filter((i) => needsFetch(bookNow, i));
         if (slice.length === 0) continue;
-        const bookNow = localBookById(bookId) ?? initial;
-        const plans = await fetchChapterPlans(bookId, sourceId, bookNow, slice, failed);
+        const plans = await fetchChapterPlans(bookId, sourceId, bookNow, slice, token);
         // 这一批的网络请求期间用户可能又读到了未缓存的章节：立即单独取回，
         // 不等本批的解析 / 写盘走完
         await fetchFocused();
-        if (cancellations.has(bookId)) break;
+        if (token.cancelled) break;
         const patches: Array<{ index: number; chapter: LocalBookChapter }> = [];
         for (const plan of plans) {
           patches.push({ index: plan.chapterIndex, chapter: fillChapterDraft(plan) });
         }
         for (const idx of slice) handled.add(idx);
-        if (patches.length > 0) await persistChapters(bookId, patches);
+        const writtenIndexes = patches.map((patch) => patch.index);
+        if (patches.length > 0) await persistChapters(bookId, patches, { epoch });
+        clearFailures(bookId, writtenIndexes);
         syncRun();
-        onProgress?.(runMap()[bookId] ?? onlineRunState(bookId));
       }
     } else {
       // 正文都已缓存：只跑图片阶段，章节计数清零（下载面板按图片进度显示）
-      patchRun(bookId, {
-        total: 0,
-        done: 0,
-        failed: [],
-        pending: [],
-        cancelled: false,
-        images: EMPTY_IMAGE_PROGRESS,
-      });
+      patchSlot(bookId, "download", { total: 0, done: 0, pending: [] });
     }
-    if (!cancellations.has(bookId)) await runDownloadImages(bookId, sourceId, onProgress);
+    if (!token.cancelled) await runDownloadImages(bookId, sourceId, token);
   } catch (err) {
-    // 意外中断（磁盘 I/O 等）：清掉 busy 状态，避免该书永远卡在“下载中”
+    // 意外中断（磁盘 I/O 等）：收尾清掉活动状态，避免该书永远卡在“下载中”
     console.error("[online] 章节下载意外中断", err);
   } finally {
     windowFocus.delete(bookId);
-    const cancelled = cancellations.has(bookId);
-    cancellations.delete(bookId);
-    patchRun(bookId, { phase: "idle", busy: false, pending: [], cancelled });
+    finishRun(bookId, "download", { done: settled, cancelled: token.cancelled });
   }
+  return {
+    cancelled: token.cancelled,
+    done: settled,
+    failedChapters: runsOf(bookId).failures.size,
+    images: runsOf(bookId).download?.images ?? EMPTY_IMAGE_PROGRESS,
+  };
 }
 
 /**
@@ -654,7 +905,7 @@ async function runDownloadFetch(
 async function runDownloadImages(
   bookId: string,
   sourceId: string,
-  onProgress?: (state: OnlineRunState) => void,
+  token: CancelToken,
 ): Promise<void> {
   const book = localBookById(bookId);
   if (!book || !isOnlineBook(book)) return;
@@ -666,27 +917,30 @@ async function runDownloadImages(
   let done = 0;
   let failedImages = 0;
   const sync = (): void => {
-    patchRun(bookId, { phase: "images", images: { total, done, failed: failedImages } });
+    patchSlot(bookId, "download", {
+      phase: "images",
+      images: { total, done, failed: failedImages },
+    });
   };
-  // 注意：章节计数（total / done / failed / pending）此时保持正文阶段的结果，
-  // 图片进度单独放在 images 里 —— 下载面板按阶段显示，完成后汇总两者。
-  patchRun(bookId, {
+  // 注意：章节计数（total / done）此时保持正文阶段的结果，
+  // 图片进度单独放在 images 里 —— 下载面板按阶段显示，完成后汇总两者；
+  // 正文阶段已结束，目录徽标不再显示「下载中」（pending 清空）。
+  patchSlot(bookId, "download", {
     phase: "images",
-    busy: true,
     pending: [],
     images: { total, done: 0, failed: 0 },
   });
   for (const job of jobs) {
-    if (cancellations.has(bookId)) break;
+    if (token.cancelled) return;
     const results = await ensureChapterImages({
       sourceId,
       bookId,
       referer: job.chapter.url ?? null,
       urls: job.urls,
       force: true,
-      shouldStop: () => cancellations.has(bookId),
+      shouldStop: () => token.cancelled,
     });
-    if (cancellations.has(bookId)) break;
+    if (token.cancelled) return;
     const ready = new Map<string, ChapterImageFile>();
     for (const [url, file] of results) {
       if (file) ready.set(url, file);
@@ -695,7 +949,6 @@ async function runDownloadImages(
     done += job.urls.length;
     await persistReadyImages(bookId, job.index, ready);
     sync();
-    onProgress?.(runMap()[bookId] ?? onlineRunState(bookId));
   }
 }
 
@@ -708,23 +961,22 @@ export async function ensureReadingWindow(
 ): Promise<void> {
   const book = localBookById(bookId);
   if (!book || !isOnlineBook(book)) return;
-  const run = onlineRunState(bookId);
-  if (run.busy) {
-    if (run.phase !== "idle") windowFocus.set(bookId, chapterIndex);
+  if (onlineRunBusy(bookId)) {
+    windowFocus.set(bookId, chapterIndex);
     return;
   }
-  if (windowMissing(book, chapterIndex).length === 0) return;
+  if (windowMissing(book, chapterIndex, reloadSkipSet(bookId)).length === 0) return;
   await runWindowFetch(bookId, chapterIndex);
 }
 
-/** 批量下载剩余全部正文（下载按钮） */
+/** 批量下载剩余全部正文（下载面板「下载剩余全部」）。
+ *  已有一轮批量下载在跑时返回 null（不重复发起）；后台窗口预取会被让位，不阻塞本次下载。 */
 export async function downloadRemainingChapters(
   bookId: string,
-  onProgress?: (state: OnlineRunState) => void,
-): Promise<void> {
+): Promise<OnlineDownloadSummary | null> {
   const book = localBookById(bookId);
-  if (!book || !isOnlineBook(book)) return;
-  await runDownloadFetch(bookId, onProgress);
+  if (!book || !isOnlineBook(book)) return null;
+  return await runDownloadFetch(bookId);
 }
 
 // ---------------------------------------------------------------------------
@@ -756,7 +1008,8 @@ function pendingImageUrls(chapter: LocalBookChapter): string[] {
  * src 保持网络地址、remote 保持图片身份，因此：
  * - 书籍 JSON 体积与图片字节无关（Rust 侧文件才是图片本体）；
  * - 图片身份不变 → 阅读器的「当前章内容等价」判定不受影响，不会因下图触发整章重排。
- * 一次写盘（只提交本章）。
+ * 写入在写队列内按**最新章节内容**合并：与「重新加载本章」并发时，图片引用会合到新正文上，
+ * 而不是拿下载前的旧正文覆盖它。
  */
 async function persistReadyImages(
   bookId: string,
@@ -764,20 +1017,18 @@ async function persistReadyImages(
   ready: ReadonlyMap<string, ChapterImageFile>,
 ): Promise<void> {
   if (ready.size === 0) return;
-  const base = localBookById(bookId);
-  const chapter = base?.chapters[chapterIndex];
-  if (!base || !chapter?.blocks) return;
-  let changed = false;
-  const blocks = chapter.blocks.map((block): ChapterBlock => {
-    if (block.kind !== "img" || !block.remote) return block;
-    const file = ready.get(block.remote);
-    if (!file || block.local === file.local) return block;
-    changed = true;
-    return { ...block, local: file.local };
+  await updateBookChapterInPlace(bookId, chapterIndex, (chapter) => {
+    if (!chapter.blocks) return null;
+    let changed = false;
+    const blocks = chapter.blocks.map((block): ChapterBlock => {
+      if (block.kind !== "img" || !block.remote) return block;
+      const file = ready.get(block.remote);
+      if (!file || block.local === file.local) return block;
+      changed = true;
+      return { ...block, local: file.local };
+    });
+    return changed ? { ...chapter, blocks } : null;
   });
-  if (!changed) return;
-  const next: LocalBookChapter = { ...chapter, blocks };
-  await persistChapters(bookId, [{ index: chapterIndex, chapter: next }]);
 }
 
 /**
@@ -841,38 +1092,40 @@ export interface ReloadChapterOptions {
 }
 
 /**
- * 强制重新获取单个章节正文（阅读设置「重新加载本章」）：
+ * 强制重新获取单个章节正文（阅读页「重新加载本章」）：
  * - 先拉取最新正文并解析，期间不动书库（成功才覆盖，失败保留旧正文）；
  * - 新正文会替换本章书签锚定的文字：通过 options.confirmRisk 交调用方询问，
  *   用户选择放弃时既不覆盖正文也不改动书签；
- * - 有其它拉取任务正在进行时不动作（UI 端已据此禁用入口）。
+ * - 与其余拉取并存（用户操作不排队等待）：期间窗口预取 / 批量下载跳过这一章，
+ *   本方法写入时允许覆盖已有正文（正文回写的「先到先得」规则里唯一的例外）；
+ *   同一章已在重载时不重复发起。
  */
 export async function reloadChapterContent(
   bookId: string,
   chapterIndex: number,
   options?: ReloadChapterOptions,
 ): Promise<ReloadChapterOutcome> {
-  if (onlineRunBusy(bookId)) return { applied: false, cancelled: false };
   const book = localBookById(bookId);
   if (!book || !isOnlineBook(book)) return { applied: false, cancelled: false };
   const chapter = book.chapters[chapterIndex];
   if (!chapter?.url) return { applied: false, cancelled: false };
+  const inflight = runMap()[bookId]?.reload ?? null;
+  if (inflight) {
+    return {
+      applied: false,
+      cancelled: false,
+      error: inflight.index === chapterIndex ? "本章正在重新加载" : "已有章节正在重新加载",
+    };
+  }
   const sourceId = book.bookSourceId!;
-
-  // 占用 run 状态：与其余拉取互斥，“下载中”提示 / 相关入口禁用一并生效
-  cancellations.delete(bookId);
-  patchRun(bookId, {
-    phase: "window",
-    busy: true,
-    total: 1,
-    done: 0,
-    failed: [],
-    pending: [chapterIndex],
-    cancelled: false,
-    images: EMPTY_IMAGE_PROGRESS,
-  });
-  const settle = (patch: Partial<OnlineRunState>): void => {
-    patchRun(bookId, { phase: "idle", busy: false, pending: [], ...patch });
+  const epoch = tocEpochOf(bookId);
+  const token: CancelToken = { cancelled: false };
+  // 占位：其余拉取跳过这一章，避免重复请求与互相覆盖（不阻塞它们继续取别的章节）
+  patchRuns(bookId, (runs) => ({ ...runs, reload: { index: chapterIndex, token } }));
+  const settle = (): void => {
+    patchRuns(bookId, (runs) =>
+      runs.reload?.token === token ? { ...runs, reload: null } : runs,
+    );
   };
 
   try {
@@ -882,14 +1135,10 @@ export async function reloadChapterContent(
     const res = results[0];
     if (!res?.ok) {
       const error = res?.error || "获取正文失败";
-      settle({ failed: [{ index: chapterIndex, error }] });
+      markFailure(bookId, chapterIndex, error);
       return { applied: false, cancelled: false, error };
     }
-    if (cancellations.has(bookId)) {
-      cancellations.delete(bookId);
-      settle({ cancelled: true });
-      return { applied: false, cancelled: true };
-    }
+    if (token.cancelled) return { applied: false, cancelled: true };
     const build = buildSourceChapterContent(res.text, chapter.url);
 
     // 新正文会替换本章书签锚定的文字：先预演，部分书签无法精确定位时交调用方询问
@@ -906,18 +1155,21 @@ export async function reloadChapterContent(
       );
       if (preview.failedCount > 0) {
         const proceed = await options.confirmRisk(preview);
-        if (!proceed) {
-          settle({});
-          return { applied: false, cancelled: true };
-        }
+        if (!proceed) return { applied: false, cancelled: true };
       }
     }
+    if (token.cancelled) return { applied: false, cancelled: true };
 
-    // 拉取期间书库可能已更新（其它窗口预取落盘）：以最新书为基底只补当前章
-    const latest = localBookById(bookId) ?? book;
+    // 拉取期间目录可能被覆盖更新（下标含义已变）：本次结果作废，不写到别的章节上
+    if (tocEpochOf(bookId) !== epoch) {
+      return { applied: false, cancelled: false, error: "目录已更新，未写入本章" };
+    }
+    const latest = localBookById(bookId);
+    if (!latest) {
+      return { applied: false, cancelled: false, error: "书籍已不在书库，未重新加载" };
+    }
     const target = latest.chapters[chapterIndex];
     if (!target) {
-      settle({});
       return { applied: false, cancelled: false, error: "章节已变化，未重新加载" };
     }
     // 只构建/回写本章的新对象（不整本深拷贝），大书含图时不再反复整本过 IPC
@@ -929,19 +1181,22 @@ export async function reloadChapterContent(
       url: target.url,
     };
     applyChapterBuild(draft, build);
-    if (cancellations.has(bookId)) {
-      cancellations.delete(bookId);
-      settle({ cancelled: true });
-      return { applied: false, cancelled: true };
+    const written = await persistChapters(
+      bookId,
+      [{ index: chapterIndex, chapter: draft }],
+      { epoch, overwrite: true },
+    );
+    if (written === 0) {
+      return { applied: false, cancelled: false, error: "目录已更新，未写入本章" };
     }
-    const next = patchChapters(latest, [{ index: chapterIndex, chapter: draft }]);
-    await updateBookChapters(next, [{ index: chapterIndex, chapter: draft }]);
-    settle({ done: 1, failed: [] });
+    clearFailures(bookId, [chapterIndex]);
     return { applied: true, cancelled: false };
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
-    settle({ failed: [{ index: chapterIndex, error }] });
+    markFailure(bookId, chapterIndex, error);
     return { applied: false, cancelled: false, error };
+  } finally {
+    settle();
   }
 }
 
@@ -1012,53 +1267,62 @@ export function diffOnlineBookToc(
 }
 
 /** 执行追加更新：把末尾新增章节并入书架目录（正文留空，阅读时按窗口懒加载）。
- *  返回实际追加的章节数。 */
+ *  写入在本书写队列内基于最新缓存构建，不会丢掉并发拉取刚写回的正文；末尾追加不动既有
+ *  章节下标，因此不必打断正在跑的窗口预取 / 批量下载。返回实际追加的章节数。 */
 export async function applyOnlineTocAppend(
-  book: LocalBook,
+  bookId: string,
   added: ChapterItem[],
 ): Promise<number> {
   if (added.length === 0) return 0;
-  const next = structuredClone(book);
-  const start = next.chapters.length;
-  for (let i = 0; i < added.length; i++) {
-    const item = added[i];
-    next.chapters.push({
-      cid: chapterCid(start + i),
-      title: item.chapterName,
-      paragraphs: [],
-      url: item.chapterUrl,
-    });
-  }
-  await commitBookContentUpdate(next);
-  return added.length;
+  const next = await updateBookContent(bookId, (latest) => {
+    const start = latest.chapters.length;
+    const chapters = [...latest.chapters];
+    for (let i = 0; i < added.length; i++) {
+      const item = added[i];
+      chapters.push({
+        cid: chapterCid(start + i),
+        title: item.chapterName,
+        paragraphs: [],
+        url: item.chapterUrl,
+      });
+    }
+    return { ...latest, chapters };
+  });
+  return next ? added.length : 0;
 }
 
 /** 执行覆盖更新：以最新目录整本替换章节列表。
  *  章节地址未变的旧章节保留已缓存正文，其余章节正文留空（阅读时按需重新获取）。
- *  返回覆盖后的章节总数。 */
+ *  目录整体重排会让在跑的拉取「下标含义」失效：用户操作优先 —— 先停掉这些拉取，并推进
+ *  目录世代，让已经发出、随后才回来的正文回写被丢弃。返回覆盖后的章节总数。 */
 export async function applyOnlineTocOverwrite(
-  book: LocalBook,
+  bookId: string,
   fresh: ChapterItem[],
 ): Promise<number> {
-  const oldByUrl = new Map<string, LocalBookChapter>();
-  for (const ch of book.chapters) {
-    const url = (ch.url ?? "").trim();
-    if (url && !oldByUrl.has(url)) oldByUrl.set(url, ch);
-  }
-  const next = structuredClone(book);
-  next.chapters = fresh.map((item, index) => {
-    const carried = oldByUrl.get((item.chapterUrl ?? "").trim());
-    const chapter: LocalBookChapter = {
-      cid: chapterCid(index),
-      title: item.chapterName,
-      paragraphs: carried?.paragraphs ?? [],
-      url: item.chapterUrl,
+  stopChapterFetches(bookId);
+  bumpTocEpoch(bookId);
+  const next = await updateBookContent(bookId, (latest) => {
+    const oldByUrl = new Map<string, LocalBookChapter>();
+    for (const ch of latest.chapters) {
+      const url = (ch.url ?? "").trim();
+      if (url && !oldByUrl.has(url)) oldByUrl.set(url, ch);
+    }
+    return {
+      ...latest,
+      chapters: fresh.map((item, index) => {
+        const carried = oldByUrl.get((item.chapterUrl ?? "").trim());
+        const chapter: LocalBookChapter = {
+          cid: chapterCid(index),
+          title: item.chapterName,
+          paragraphs: carried?.paragraphs ?? [],
+          url: item.chapterUrl,
+        };
+        if (carried && carried.blocks !== undefined) chapter.blocks = carried.blocks;
+        return chapter;
+      }),
     };
-    if (carried && carried.blocks !== undefined) chapter.blocks = carried.blocks;
-    return chapter;
   });
-  await commitBookContentUpdate(next);
-  return next.chapters.length;
+  return next?.chapters.length ?? 0;
 }
 
 // ---------------------------------------------------------------------------

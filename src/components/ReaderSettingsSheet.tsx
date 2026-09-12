@@ -34,14 +34,14 @@ export interface ReaderSettingsSheetProps {
   onClose: () => void;
   /** 打开文本替换抽屉（列出本书可用替换并支持增删改） */
   onOpenReplace: () => void;
-  /** 在线书「重新加载本章」：提供即在设置中显示该入口（下载进行中时 disabled） */
+  /** 在线书「重新加载本章」：提供即在设置中显示该入口（本章正在重新加载时 disabled） */
   onlineReload?: {
     disabled: boolean;
     /** 正在重新获取本章正文（图标旋转、文案切换） */
     busy: boolean;
     onReload: () => void;
   };
-  /** 在线书「检查书籍更新」：提供即在设置中显示该入口（检查/下载进行中时 disabled） */
+  /** 在线书「检查书籍更新」：提供即在设置中显示该入口（正在检查时 disabled；章节下载不阻塞它） */
   onlineUpdate?: {
     disabled: boolean;
     /** 正在执行目录检查（图标旋转、文案切换） */
@@ -247,7 +247,7 @@ export function ReaderSettingsSheet(props: ReaderSettingsSheetProps) {
                     title="重新加载本章"
                     desc={
                       props.onlineReload?.disabled
-                        ? "有章节下载进行中，完成后可重新加载"
+                        ? "正在重新获取本章正文"
                         : "从书源重新获取当前章节正文"
                     }
                     disabled={props.onlineReload?.disabled}

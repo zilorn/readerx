@@ -25,6 +25,9 @@ import {
   LAZY_WINDOW,
   applyOnlineTocAppend,
   applyOnlineTocOverwrite,
+  cancelBackgroundFetch,
+  cancelChapterDownload,
+  cancelChapterReload,
   cancelOnlineRun,
   chapterHasContent,
   diffOnlineBookToc,
@@ -32,6 +35,10 @@ import {
   ensureReadingWindow,
   fetchOnlineBookToc,
   loadReadingChapterImages,
+  onlineChapterFailure,
+  onlineDownloadActive,
+  onlineReloadActive,
+  onlineRunBusy,
   onlineRunState,
   reloadChapterContent,
   retryReadingImage,
@@ -843,6 +850,10 @@ export default function ReaderPage() {
     return !!current && isOnlineBook(current);
   });
   const remoteRun = createMemo(() => onlineRunState(bookId()));
+  /** 用户批量下载进行中（与后台窗口预取区分：面板据此显示进度、主按钮据此禁用） */
+  const remoteDownloading = createMemo(() => onlineDownloadActive(bookId()));
+  /** 有正文拉取在跑（窗口预取 / 批量下载）—— 只用于显示，不再拿它禁用用户操作 */
+  const remoteFetching = createMemo(() => onlineRunBusy(bookId()));
   const [downloadOpen, setDownloadOpen] = createSignal(false);
 
   /** 在线书拉取中仍待获取的章节下标集合（目录“下载中”徽标用；空闲为 null） */
@@ -858,15 +869,11 @@ export default function ReaderPage() {
     return !!ch && !chapterHasContent(ch);
   });
   /** 当前章是否已有失败记录（不自动重试，给重试按钮） */
-  const remoteGateFailed = createMemo(() => {
-    const idx = chapterIdx();
-    return remoteRun().failed.some((f) => f.index === idx);
-  });
+  const remoteGateFailed = createMemo(() => onlineChapterFailure(bookId(), chapterIdx()) !== null);
   /** 覆盖层失败详情文本 */
-  const remoteGateFailedText = createMemo(() => {
-    const f = remoteRun().failed.find((x) => x.index === chapterIdx());
-    return f?.error ?? "未知错误";
-  });
+  const remoteGateFailedText = createMemo(
+    () => onlineChapterFailure(bookId(), chapterIdx()) ?? "未知错误",
+  );
 
   /**
    * 在线书当前章：已获取过但正文为空（拉取成功却未解析出任何内容）。
@@ -889,6 +896,8 @@ export default function ReaderPage() {
 
   /** 「重新加载本章」进行中（阅读区显示覆盖层，禁止翻页 / 呼出菜单） */
   const [reloadingChapter, setReloadingChapter] = createSignal(false);
+  /** 有重载在跑（本组件发起 / 离开阅读页后仍在跑的那次）：入口与覆盖层都据此判定 */
+  const remoteReloading = createMemo(() => reloadingChapter() || onlineReloadActive(bookId()));
 
   /** 弹出「书签可能失效」询问，等待用户选择（仍在拉取中的重载流程等待此结果） */
   function askReloadRisk(preview: BookmarkInheritPreview): Promise<boolean> {
@@ -909,7 +918,7 @@ export default function ReaderPage() {
   async function reloadCurrentChapter(): Promise<void> {
     const current = book();
     if (!current || !isOnlineBook(current)) return;
-    if (remoteRun().busy) return; // 其它拉取进行中（入口已禁用，双保险）
+    if (remoteReloading()) return; // 同一章正在重载（入口已按此禁用，双保险）
     const targetIndex = chapterIdx();
     setReaderSettingsOpen(false);
     setMenuOpen(false);
@@ -956,7 +965,8 @@ export default function ReaderPage() {
   // - 最新目录 = 现有目录前缀 + 末尾新增 → 直接追加并提示新增数；
   // - 结构冲突（中段增删/重排/地址变动，无法安全追加）→ 弹窗询问是否覆盖；
   // - 拉取失败 → 提示错误，不做任何改动。
-  // 注意：检查 / 应用都要求无其它章节拉取在进行（并发写书会互相覆盖目录）。
+  // 用户操作优先：有章节下载在跑也能检查 —— 末尾追加不动既有章节下标，照常执行；
+  // 覆盖更新会让在跑的拉取下标失效，由 online 层停掉它们并作废在飞的正文回写。
   // -------------------------------------------------------------------
   const [checkingUpdate, setCheckingUpdate] = createSignal(false);
   const [overwriteBusy, setOverwriteBusy] = createSignal(false);
@@ -972,23 +982,18 @@ export default function ReaderPage() {
     // 书库原书（含书源身份）；显示副本仅替换阅读文字，不能作为更新源
     const current = localBookById(bookId());
     if (!current || !isOnlineBook(current)) return;
-    if (remoteRun().busy) return; // 其它拉取进行中（入口已禁用，双保险）
     setCheckingUpdate(true);
     try {
       const fresh = await fetchOnlineBookToc(current);
-      if (remoteRun().busy) {
-        showToast("有章节下载进行中，请稍后再试", true);
-        return;
-      }
-      const diff = diffOnlineBookToc(current, fresh);
+      // 拉取目录期间下载可能已把正文写回书库：用最新记录比对 / 追加，避免丢刚缓存的内容
+      const latest = localBookById(current.id) ?? current;
+      const diff = diffOnlineBookToc(latest, fresh);
       if (diff.kind === "none") {
         showToast("目录已是最新，暂无更新");
         return;
       }
       if (diff.kind === "append") {
-        // 拉取目录期间后台窗口预取可能已把正文写回书库，用最新记录追加，避免丢刚缓存的内容
-        const latest = localBookById(current.id) ?? current;
-        const added = await applyOnlineTocAppend(latest, diff.added);
+        const added = await applyOnlineTocAppend(current.id, diff.added);
         // 收掉设置面板，让用户直接看到更新后的目录/正文
         setReaderSettingsOpen(false);
         setMenuOpen(false);
@@ -1009,7 +1014,7 @@ export default function ReaderPage() {
     }
   }
 
-  /** 冲突确认框「覆盖更新」：以最新目录整本替换 */
+  /** 冲突确认框「覆盖更新」：以最新目录整本替换（在跑的章节拉取由 online 层停掉） */
   async function confirmOverwriteToc(): Promise<void> {
     const pending = updateConflict();
     if (!pending || overwriteBusy()) return;
@@ -1017,18 +1022,9 @@ export default function ReaderPage() {
       setUpdateConflict(null);
       return;
     }
-    if (remoteRun().busy) {
-      showToast("有章节下载进行中，暂无法覆盖更新", true);
-      return;
-    }
-    const current = localBookById(pending.bookId);
-    if (!current) {
-      setUpdateConflict(null);
-      return;
-    }
     setOverwriteBusy(true);
     try {
-      const total = await applyOnlineTocOverwrite(current, pending.fresh);
+      const total = await applyOnlineTocOverwrite(pending.bookId, pending.fresh);
       setUpdateConflict(null);
       setReaderSettingsOpen(false);
       setMenuOpen(false);
@@ -1070,26 +1066,25 @@ export default function ReaderPage() {
   // 拉取进行中时：正在读的这一章还没有正文就把「阅读焦点」交给在跑的任务 —— 窗口预取会在
   // 下一批之后以本章为中心接着取，批量下载也会把本章提前取回，读到哪一章就先出哪一章，
   // 不用等它把其余章节取完。本章已有正文则不动在跑的任务（不打断它给别处补正文）。
+  // 注意：这里只决定「要不要新起一轮预取」，用户操作（下载 / 重载）从不因此被拦下。
   createEffect(() => {
     const current = renderBook();
     if (!current || !isOnlineBook(current)) return;
     const idx = chapterIdx();
     void current.chapters.length;
-    const run = onlineRunState(current.id);
-    void run.busy;
-    void run.phase;
+    const run = remoteRun();
+    const failed = run.failed;
     const ch = current.chapters[idx];
     const bodyMissing = !!ch && !chapterHasContent(ch);
-    if (run.busy) {
+    if (remoteFetching()) {
       if (bodyMissing) void ensureReadingWindow(current.id, idx);
       return;
     }
-    if (run.phase !== "idle") return;
     const needAny = current.chapters.some(
       (c, i) =>
         Math.abs(i - idx) <= LAZY_WINDOW &&
         !chapterHasContent(c) &&
-        !run.failed.some((f) => f.index === i),
+        !failed.some((f) => f.index === i),
     );
     if (!needAny) return;
     void ensureReadingWindow(current.id, idx);
@@ -1799,7 +1794,7 @@ export default function ReaderPage() {
   /** 提示可见条件：有未决原位置，且没有菜单/抽屉/搜索/加载等界面盖住阅读区 */
   const jumpBackHint = createMemo(() => {
     if (jumpOrigin() === null) return false;
-    if (reloadingChapter()) return false;
+    if (remoteReloading()) return false;
     if (
       menuOpen() ||
       tocOpen() ||
@@ -2964,7 +2959,7 @@ export default function ReaderPage() {
 
   function onSurfacePointerDown(e: PointerEvent) {
     if (e.pointerType === "mouse" && e.button !== 0) return;
-    if (isUiTarget(e) || reloadingChapter()) return;
+    if (isUiTarget(e) || remoteReloading()) return;
     // 自绘选区：记录按下候选（触屏等待长按；鼠标/笔等待拖拽起选）
     if (!selDrag && selEngineUsable()) {
       const pointerType = e.pointerType;
@@ -2998,7 +2993,7 @@ export default function ReaderPage() {
     if (e.pointerType === "mouse" && e.button !== 0) return;
     const start = gestureStart;
     gestureStart = null;
-    if (!start || isUiTarget(e) || reloadingChapter()) return;
+    if (!start || isUiTarget(e) || remoteReloading()) return;
     // 已有自绘选区时：这次轻点只收起选区（再点才翻页/呼菜单）
     if (selSpan() !== null) {
       setSelSpan(null);
@@ -3492,7 +3487,8 @@ export default function ReaderPage() {
                         <p class="text-[14px] font-semibold text-text-2">正在获取章节正文…</p>
                         <p class="text-[12px] leading-[1.6] text-text-3">
                           <Show when={remoteRun().total > 0}>
-                            窗口预取 {remoteRun().done} / {remoteRun().total}
+                            {remoteRun().phase === "download" ? "批量下载" : "窗口预取"}{" "}
+                            {remoteRun().done} / {remoteRun().total}
                             <br />
                           </Show>
                           已缓存的章节仍可正常阅读
@@ -3572,12 +3568,12 @@ export default function ReaderPage() {
                     </Show>
                     <button
                       class="rounded-xl bg-accent px-4 py-2.5 text-[13px] font-semibold text-on-accent active:scale-[0.97] disabled:pointer-events-none disabled:opacity-50"
-                      disabled={remoteRun().busy}
+                      disabled={remoteReloading()}
                       onClick={() => {
                         void reloadCurrentChapter();
                       }}
                     >
-                      {remoteRun().busy ? "下载中…" : "重新加载本章"}
+                      {remoteReloading() ? "重新加载中…" : "重新加载本章"}
                     </button>
                   </div>
                 </div>
@@ -3586,7 +3582,7 @@ export default function ReaderPage() {
 
             {/* 「重新加载本章」进行中：覆盖层盖住正文（旧正文已作废），禁止翻页 / 呼出菜单，
                 给出进度反馈与取消入口；失败时由 reloadCurrentChapter 回退原进度并提示 */}
-            <Show when={reloadingChapter()}>
+            <Show when={remoteReloading()}>
               <div
                 data-reader-ui
                 class="absolute inset-0 z-[30] flex flex-col items-center justify-center gap-4 px-8 text-center"
@@ -3606,7 +3602,7 @@ export default function ReaderPage() {
                 <button
                   type="button"
                   class="rounded-xl bg-surface-2 px-4 py-2.5 text-[13px] font-semibold text-text-2 active:scale-[0.97]"
-                  onClick={() => cancelOnlineRun(bookId())}
+                  onClick={() => cancelChapterReload(bookId())}
                 >
                   取消
                 </button>
@@ -4168,8 +4164,8 @@ export default function ReaderPage() {
               onlineReload={
                 isRemoteBook()
                   ? {
-                      disabled: remoteRun().busy,
-                      busy: reloadingChapter(),
+                      disabled: remoteReloading(),
+                      busy: remoteReloading(),
                       onReload: () => {
                         void reloadCurrentChapter();
                       },
@@ -4179,7 +4175,7 @@ export default function ReaderPage() {
               onlineUpdate={
                 isRemoteBook()
                   ? {
-                      disabled: checkingUpdate() || remoteRun().busy,
+                      disabled: checkingUpdate(),
                       busy: checkingUpdate(),
                       onCheck: () => {
                         void checkOnlineBookUpdate();
@@ -4264,7 +4260,7 @@ export default function ReaderPage() {
                     含图片的章节（漫画 / 图文）在正文下完后单独再过一遍图片（阅读时读到的章节也会随手缓存），
                     占用空间随图片数量明显增大。
                   </p>
-                  <Show when={remoteRun().busy}>
+                  <Show when={remoteFetching()}>
                     <div class="rounded-[12px] bg-surface-2 px-3.5 py-3">
                       <div class="flex items-center justify-between text-[12px]">
                         <span class="font-semibold text-text-2">
@@ -4313,7 +4309,7 @@ export default function ReaderPage() {
                   </Show>
                   <Show
                     when={
-                      !remoteRun().busy &&
+                      !remoteFetching() &&
                       (remoteRun().failed.length > 0 || remoteRun().images.failed > 0)
                     }
                   >
@@ -4330,34 +4326,37 @@ export default function ReaderPage() {
                     </p>
                   </Show>
                   <div class="flex gap-2.5 pt-0.5">
-                    <Show when={remoteRun().busy}>
+                    <Show when={remoteFetching()}>
                       <button
                         class="flex-1 rounded-xl bg-surface-2 px-4 py-2.5 text-[13.5px] font-semibold text-text-2 active:scale-[0.98]"
-                        onClick={() => cancelOnlineRun(bookId())}
+                        onClick={() => {
+                          // 停止当前这一轮：批量下载与后台窗口预取各自独立取消
+                          if (remoteDownloading()) cancelChapterDownload(bookId());
+                          else cancelBackgroundFetch(bookId());
+                        }}
                       >
                         停止下载
                       </button>
                     </Show>
                     <button
                       class="flex-1 rounded-xl bg-accent px-4 py-2.5 text-[13.5px] font-semibold text-on-accent shadow-lg shadow-accent/25 active:scale-[0.98]"
-                      disabled={remoteRun().busy}
-                      classList={{ "opacity-50": remoteRun().busy }}
+                      disabled={remoteDownloading()}
+                      classList={{ "opacity-50": remoteDownloading() }}
                       onClick={() => {
                         void (async () => {
-                          const bookIdNow = bookId();
-                          await downloadRemainingChapters(bookIdNow);
-                          const st = onlineRunState(bookIdNow);
-                          if (st.cancelled) return;
-                          const chapters = `${st.done} 章正文`;
+                          // 下载期间后台窗口预取会让位；这里拿到的是本轮结果（不受下一轮拉取影响）
+                          const summary = await downloadRemainingChapters(bookId());
+                          if (!summary || summary.cancelled) return;
+                          const chapters = `${summary.done} 章正文`;
                           const images =
-                            st.images.total > 0
-                              ? `、${st.images.done - st.images.failed} 张图片`
+                            summary.images.total > 0
+                              ? `、${summary.images.done - summary.images.failed} 张图片`
                               : "";
-                          if (st.done === 0 && st.images.total === 0) return;
-                          if (st.failed.length > 0 || st.images.failed > 0) {
+                          if (summary.done === 0 && summary.images.total === 0) return;
+                          if (summary.failedChapters > 0 || summary.images.failed > 0) {
                             const failed = [
-                              st.failed.length > 0 ? `${st.failed.length} 章` : "",
-                              st.images.failed > 0 ? `${st.images.failed} 张图片` : "",
+                              summary.failedChapters > 0 ? `${summary.failedChapters} 章` : "",
+                              summary.images.failed > 0 ? `${summary.images.failed} 张图片` : "",
                             ]
                               .filter(Boolean)
                               .join("、");
@@ -4368,7 +4367,7 @@ export default function ReaderPage() {
                         })();
                       }}
                     >
-                      {remoteRun().busy ? "下载中…" : "下载剩余全部"}
+                      {remoteDownloading() ? "下载中…" : "下载剩余全部"}
                     </button>
                   </div>
                   <p class="pb-1 text-center text-[11px] text-text-3">

@@ -20,7 +20,7 @@ import {
   type BookMeta,
 } from "../lib/booksTypes";
 import { withHanMeta } from "../lib/hanDisplay";
-import { refreshOnlineBookInfo, onlineRunBusy } from "../lib/online";
+import { refreshOnlineBookInfo } from "../lib/online";
 import { showToast } from "../lib/toast";
 import { groupName } from "../lib/groups";
 
@@ -138,10 +138,6 @@ export default function BookDetailPage() {
     if (refreshing()) return;
     const id = bookId();
     if (!refreshable()) return;
-    if (onlineRunBusy(id)) {
-      showToast("有章节下载进行中，请稍后再试", true);
-      return;
-    }
     setRefreshing(true);
     try {
       const result = await refreshOnlineBookInfo(id);
@@ -188,7 +184,7 @@ export default function BookDetailPage() {
                 <button
                   class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2 disabled:pointer-events-none disabled:opacity-60"
                   aria-label="重新拉取书籍信息（简介与封面）"
-                  disabled={refreshing() || onlineRunBusy(bookId())}
+                  disabled={refreshing()}
                   onClick={() => void refreshBookInfo()}
                 >
                   <Show when={refreshing()} fallback={<RefreshIcon size={20} />}>

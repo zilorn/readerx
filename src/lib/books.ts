@@ -511,32 +511,126 @@ export async function addBookRecord(book: LocalBook): Promise<void> {
   upsertFull(book);
 }
 
+// ---------------------------------------------------------------------------
+// 单本写入串行化：
+// 同一本书的正文回写在并发拉取下会同时发生（阅读窗口预取 / 批量下载 / 重新加载本章 /
+// 目录更新），而后端每条写命令都是「读文件 → 改 → 整本写回」。并发执行时读改写会交错，
+// 后写入的一方会把另一方刚写好的章节丢掉。这里按书 id 把写操作排队串行执行，并让每笔写
+// 在排队时基于**最新缓存**套用补丁，读改写不再互相覆盖。
+// ---------------------------------------------------------------------------
+
+const writeQueues = new Map<string, Promise<void>>();
+
+/** 把一次写操作排进该书的写队列（队内串行；前一笔失败不影响后一笔） */
+function enqueueBookWrite<T>(bookId: string, task: () => Promise<T>): Promise<T> {
+  const prev = writeQueues.get(bookId) ?? Promise.resolve();
+  const run = prev.then(task, task);
+  const tail = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  writeQueues.set(bookId, tail);
+  void tail.then(() => {
+    if (writeQueues.get(bookId) === tail) writeQueues.delete(bookId);
+  });
+  return run;
+}
+
+/** 按补丁原位替换若干章节（其余章节对象原样复用，不做整本深拷贝） */
+function withPatchedChapters(
+  book: LocalBook,
+  updates: Array<{ index: number; chapter: LocalBookChapter }>,
+): LocalBook {
+  const byIndex = new Map<number, LocalBookChapter>();
+  for (const update of updates) byIndex.set(update.index, update.chapter);
+  return { ...book, chapters: book.chapters.map((ch, i) => byIndex.get(i) ?? ch) };
+}
+
 /**
- * 保存单本的内容/元信息更新并响应式替换书架中的同一本。
- * 在线书逐批落盘章节正文时使用（整书 JSON 覆盖写）。
+ * 保存单本的内容/元信息更新并响应式替换书架中的同一本（整书 JSON 覆盖写）。
+ * 仍走本书的写队列，避免与逐章回写交错；新代码请优先用 updateBookContent。
  */
 export async function commitBookContentUpdate(book: LocalBook): Promise<void> {
-  await saveRemoteBook(book);
-  upsertMetaFromFull(book);
-  upsertFull(book);
+  await enqueueBookWrite(book.id, async () => {
+    await saveRemoteBook(book);
+    upsertMetaFromFull(book);
+    upsertFull(book);
+  });
 }
 
 /**
  * 在线书「只回写部分章节」的内容更新（逐批 / 逐章下载正文用）：
  * - 后端只接收本次变动的章节（saveRemoteBookChapters），不再整本 JSON 过 IPC；
- * - book 应为“只替换了这些章节、其余章节对象原样复用”的最新整书快照，
- *   存好后原位替换书架中的该本（reader 依据内容等价性决定是否重排当前章）；
- * - 元数据（书架 / 详情可见的章节头字符数）合并发布：逐章落盘不再逐章重建整本清单，
- *   阅读器需要的正文走 fulls 即时发布，不受影响。
+ * - 写入在本书写队列内执行：以排队时刻的**最新缓存**为基底套用补丁，不会用调用方
+ *   手里的旧快照覆盖并发任务刚写好的章节（元数据同样按该最新基底合并发布）；
+ * - filter 在队列内逐个补丁复核（目录世代已变 / 该章正文已被别的任务写回时丢弃），
+ *   并发拉取因此既不会互相覆盖，也不会按旧下标写错章节。
+ * 返回实际写入的章节数。
  */
 export async function updateBookChapters(
-  book: LocalBook,
+  bookId: string,
   updates: Array<{ index: number; chapter: LocalBookChapter }>,
+  filter?: (
+    update: { index: number; chapter: LocalBookChapter },
+    latest: LocalBook,
+  ) => boolean,
+): Promise<number> {
+  if (updates.length === 0) return 0;
+  return await enqueueBookWrite(bookId, async (): Promise<number> => {
+    const latest = localBookById(bookId);
+    if (!latest) return 0; // 书已被删除 / 未物化：不再写回
+    const usable = filter ? updates.filter((update) => filter(update, latest)) : updates;
+    if (usable.length === 0) return 0;
+    await saveRemoteBookChapters(bookId, usable);
+    const next = withPatchedChapters(latest, usable);
+    upsertFull(next);
+    deferMetaFromFull(next);
+    return usable.length;
+  });
+}
+
+/**
+ * 单章「读改写」：在本书写队列内按**最新章节内容**应用 updater（返回 null 表示不改动）。
+ * 供图片本地副本回写这类必须与并发正文更新合并的写入使用 —— 「重新加载本章」与图片
+ * 下载同时发生时，图片引用要合到新正文上，而不是拿旧正文覆盖它。
+ */
+export async function updateBookChapterInPlace(
+  bookId: string,
+  index: number,
+  updater: (chapter: LocalBookChapter) => LocalBookChapter | null,
 ): Promise<void> {
-  if (updates.length === 0) return;
-  await saveRemoteBookChapters(book.id, updates);
-  upsertFull(book);
-  deferMetaFromFull(book);
+  await enqueueBookWrite(bookId, async () => {
+    const latest = localBookById(bookId);
+    const chapter = latest?.chapters[index];
+    if (!latest || !chapter) return;
+    const next = updater(chapter);
+    if (!next || next === chapter) return;
+    const updates = [{ index, chapter: next }];
+    await saveRemoteBookChapters(bookId, updates);
+    const patched = withPatchedChapters(latest, updates);
+    upsertFull(patched);
+    deferMetaFromFull(patched);
+  });
+}
+
+/**
+ * 整本内容更新（目录追加 / 覆盖更新等）：在本书写队列内基于最新缓存构建新书再落盘。
+ * updater 返回 null / 原对象表示维持现状（不写盘）。
+ */
+export async function updateBookContent(
+  bookId: string,
+  updater: (latest: LocalBook) => LocalBook | null,
+): Promise<LocalBook | null> {
+  return await enqueueBookWrite(bookId, async () => {
+    const latest = localBookById(bookId);
+    if (!latest) return null;
+    const next = updater(latest);
+    if (!next || next === latest) return latest;
+    await saveRemoteBook(next);
+    upsertMetaFromFull(next);
+    upsertFull(next);
+    return next;
+  });
 }
 
 /**
@@ -570,11 +664,14 @@ export async function updateBookInfo(id: string, patch: BookInfoPatch): Promise<
     const tags = normalizeBookTags(patch.tags);
     remote.tags = tags.length > 0 ? tags : null;
   }
-  await patchRemoteBookMeta(id, remote);
-  // 本地两级状态同步（磁盘已经落定）
-  const apply = <T,>(obj: T): T => applyMetaPatchLocal(obj as never, remote) as never as T;
-  setMetasState((prev) => (prev ? prev.map((m) => (m.id === id ? apply(m) : m)) : prev));
-  setFullsState((prev) => prev.map((b) => (b.id === id ? apply(b) : b)));
+  // 元信息补丁同样是「读文件 → 打补丁 → 写回」：与逐章正文回写排队串行，避免互相覆盖
+  await enqueueBookWrite(id, async () => {
+    await patchRemoteBookMeta(id, remote);
+    // 本地两级状态同步（磁盘已经落定）
+    const apply = <T,>(obj: T): T => applyMetaPatchLocal(obj as never, remote) as never as T;
+    setMetasState((prev) => (prev ? prev.map((m) => (m.id === id ? apply(m) : m)) : prev));
+    setFullsState((prev) => prev.map((b) => (b.id === id ? apply(b) : b)));
+  });
 }
 
 /** 用一份新解析出的草稿**原位替换**某本已导入书（同一 id 与书架记录）。
@@ -604,9 +701,12 @@ export async function replaceBookContent(
     importedAt: Date.now(),
   };
   invalidateBookLengths(next.id);
-  await saveRemoteBook(next);
-  upsertMetaFromFull(next);
-  upsertFull(next);
+  // 整本替换同样排队：重新导入期间可能有章节回写在飞，避免互相覆盖
+  await enqueueBookWrite(next.id, async () => {
+    await saveRemoteBook(next);
+    upsertMetaFromFull(next);
+    upsertFull(next);
+  });
   return next;
 }
 
