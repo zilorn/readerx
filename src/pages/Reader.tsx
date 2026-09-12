@@ -1483,6 +1483,16 @@ export default function ReaderPage() {
     setJumpOrigin(null);
   }
 
+  /**
+   * 正文尚未就绪（在线书正在获取本章正文 / 分页排版中 / 滚动精确恢复等待）：
+   * 覆盖层盖住阅读区期间**只允许呼出菜单**，不翻页 —— 门闩语义由此保留。
+   */
+  const contentPendingGate = createMemo(() => {
+    if (remoteMissing() || remoteBodyEmpty()) return true;
+    if (isPaged()) return pagedBusy() && !paged();
+    return scrollResumePending();
+  });
+
   /** 提示可见条件：有未决原位置，且没有菜单/抽屉/搜索/加载等界面盖住阅读区 */
   const jumpBackHint = createMemo(() => {
     if (jumpOrigin() === null) return false;
@@ -2711,9 +2721,10 @@ export default function ReaderPage() {
     // 文本正处于选中状态：本次抬手只结束选取，不翻页、不呼出菜单
     if (hasActiveTextSelection()) return;
 
-    // 横向滑动翻页
+    const contentPending = contentPendingGate();
+    // 横向滑动翻页（正文尚未就绪时不翻页：当前章没内容，翻过去也只是空页）
     if (isPaged() && moved >= 56 && Math.abs(dx) > Math.abs(dy)) {
-      userFlip(dx < 0 ? 1 : -1);
+      if (!contentPending) userFlip(dx < 0 ? 1 : -1);
       return;
     }
     if (moved >= 12) return; // 纵向拖动等：不处理
@@ -2724,12 +2735,12 @@ export default function ReaderPage() {
       if (inMiddle) setMenuOpen(true);
       return;
     }
-    if (x < rect.width / 3) {
-      userFlip(-1);
-    } else if (x > (rect.width * 2) / 3) {
-      userFlip(1);
-    } else {
+    if (inMiddle) {
       setMenuOpen(true);
+    } else if (!contentPending) {
+      // 左右区域翻页。正文就绪（正在获取章节正文 / 分页排版中）前不翻页 ——
+      // 覆盖层不再吞手势后由这里守住原门闩语义，但仍允许点中间呼出菜单
+      userFlip(x < rect.width / 3 ? -1 : 1);
     }
   }
 
@@ -3136,31 +3147,26 @@ export default function ReaderPage() {
             </Show>
 
             {/* 大章节加载中：先给“正在加载”，避免长时间空白 / 页面无响应。
-                分页模式 = 分片排版未就绪；滚动模式 = 精确恢复目标分片尚未挂载 */}
+                分页模式 = 分片排版未就绪；滚动模式 = 精确恢复目标分片尚未挂载。
+                覆盖层只盖住未就绪的正文，不吞手势：正文没就绪时自绘选区引擎本就停用
+                （selEngineUsable），点按照常冒泡到阅读区，点中间即可呼出菜单 */}
             <Show
               when={
                 (isPaged() && pagedBusy() && !paged()) ||
                 (!isPaged() && scrollResumePending())
               }
             >
-              <div
-                class="absolute inset-0 z-[16] bg-bg"
-                onPointerDown={(e) => e.stopPropagation()}
-                onPointerUp={(e) => e.stopPropagation()}
-                onClick={(e) => e.stopPropagation()}
-              >
+              <div class="absolute inset-0 z-[16] bg-bg">
                 <LoadingScreen label="正在加载…" />
               </div>
             </Show>
 
-            {/* 在线书正文缺失：获取章节 gate（阻挡翻页直到正文就绪/失败可重试） */}
+            {/* 在线书正文缺失：获取章节 gate（正文就绪前不翻页，但**不挡呼出菜单**：
+                在线书抓正文往往要等几秒，等待期间仍需呼出菜单去看目录 / 下载 / 设置或返回） */}
             <Show when={remoteMissing()}>
               <div
                 class="absolute inset-0 z-[18] grid place-items-center px-8"
                 style={{ background: "var(--bg)" }}
-                onPointerDown={(e) => e.stopPropagation()}
-                onPointerUp={(e) => e.stopPropagation()}
-                onClick={(e) => e.stopPropagation()}
                 role="alert"
               >
                 <div class="flex w-full max-w-[300px] flex-col items-center gap-3 text-center">
@@ -3212,14 +3218,11 @@ export default function ReaderPage() {
               </div>
             </Show>
 
-            {/* 在线书正文为空：已获取但无正文，提示并提供重新加载 / 下一章 */}
+            {/* 在线书正文为空：已获取但无正文，提示并提供重新加载 / 下一章（同样不挡呼出菜单） */}
             <Show when={remoteBodyEmpty()}>
               <div
                 class="absolute inset-0 z-[18] grid place-items-center px-8"
                 style={{ background: "var(--bg)" }}
-                onPointerDown={(e) => e.stopPropagation()}
-                onPointerUp={(e) => e.stopPropagation()}
-                onClick={(e) => e.stopPropagation()}
                 role="alert"
               >
                 <div class="flex w-full max-w-[300px] flex-col items-center gap-3 text-center">
