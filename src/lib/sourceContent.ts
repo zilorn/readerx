@@ -7,8 +7,9 @@
  * - 新协议：bookContent 也可返回对象 `{ text?, images? }`（images 亦可写作 imgs），
  *   显式给出图片地址（相对地址按章节页 URL 解析）。
  *
- * 输出统一为「顺序 token」→ 章节 blocks（p / img）与段落文本；图片仍为网络地址时
- * 由调用方经书源会话下载成 data URL 再落盘（见 online.ts）。
+ * 输出统一为「顺序 token」→ 章节 blocks（p / img）与段落文本；图片只保留地址：
+ * 网络地址写入 img 块的 remote（图片身份），下载成 data URL 由阅读时的按需加载完成
+ * （见 chapterImages.ts）—— 拉正文本身不下载图片。
  */
 import type { ChapterBlock } from "./booksTypes";
 
@@ -17,16 +18,14 @@ export type ContentToken =
   | { kind: "text"; raw: string }
   | { kind: "img"; src: string; alt?: string };
 
-/** 解析结果：用于落盘与图片下载 */
+/** 解析结果：用于落盘 */
 export interface SourceContentBuild {
   /** 全部段落文本（p 块文本按序；字数/镜像文本口径，图片不占字符） */
   paragraphs: string[];
-  /** 章节顺序块；图片块的 src 可能仍是绝对网络地址（待下载）或 data: URL */
+  /** 章节顺序块；图片块 src 为绝对地址（data: 直给时即本地副本，网络地址待阅读时下载） */
   blocks: ChapterBlock[];
   /** 是否识别到可展示的图片 */
   hasImages: boolean;
-  /** 需要下载的图片（blocks 中对应 img 块下标 + 绝对地址） */
-  imageRefs: { index: number; url: string }[];
 }
 
 /** 正文空段落判定：未产出任何段落与图片 */
@@ -246,7 +245,7 @@ function resolveImageSrc(src: string, baseUrl: string | undefined): string | nul
 /**
  * 把引擎返回的正文解析为可直接落盘的章节内容。
  * - baseUrl：正文页面地址（章节页），用于解析相对图片地址；
- * - 图片的 src 在网络地址时写入 imageRefs，等待调用方下载并替换为 data URL。
+ * - 网络图片保留绝对地址（src + remote），正文拉取阶段不下载，阅读时再按需获取。
  */
 export function buildSourceChapterContent(
   raw: string,
@@ -254,7 +253,6 @@ export function buildSourceChapterContent(
 ): SourceContentBuild {
   const blocks: ChapterBlock[] = [];
   const paragraphs: string[] = [];
-  const imageRefs: { index: number; url: string }[] = [];
   let hasImages = false;
 
   const tokens = tokenizeSourceContent(raw);
@@ -268,17 +266,13 @@ export function buildSourceChapterContent(
     }
     const resolved = resolveImageSrc(token.src, baseUrl);
     if (!resolved) continue;
-    const block: ChapterBlock = {
-      kind: "img",
-      src: resolved,
-      ...(token.alt?.trim() ? { alt: token.alt.trim() } : {}),
-    };
-    const index = blocks.length;
+    const alt = token.alt?.trim();
+    const block: ChapterBlock =
+      resolved.startsWith("data:")
+        ? { kind: "img", src: resolved, ...(alt ? { alt } : {}) }
+        : { kind: "img", src: resolved, remote: resolved, ...(alt ? { alt } : {}) };
     blocks.push(block);
     hasImages = true;
-    if (resolved.startsWith("http://") || resolved.startsWith("https://")) {
-      imageRefs.push({ index, url: resolved });
-    }
   }
-  return { paragraphs, blocks, hasImages, imageRefs };
+  return { paragraphs, blocks, hasImages };
 }

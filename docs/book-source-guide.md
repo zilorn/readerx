@@ -86,7 +86,8 @@ async function bookContent(chapter, book) {
 ### 正文是图片（漫画 / 扫描 / 图文混排）
 
 `bookContent` 返回含 `<img>` 的 HTML（或对象 `{ text?, images? }`）即可让本章带图，
-阅读器会自动下载并本地化图片（走书源会话 / Cookie / 防盗链 Referer），详见
+阅读器会在用户读到这一章时逐张下载并本地化图片（走书源会话 / Cookie / 防盗链 Referer；
+下载失败的图片占位框上可点「重试」），详见
 [book-source-image.md](./book-source-image.md)。纯文字写法不受任何影响。
 
 ## 5. 详情与发现（可选）

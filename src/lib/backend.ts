@@ -255,30 +255,35 @@ export async function fetchRemoteChapterContents(
   }
 }
 
+/** 书源会话下载图片的结果：成功给 data URL，失败给可读原因（供占位框 / 重试提示） */
+export interface SourceImageResult {
+  /** 图片 data URL；失败为空串 */
+  data: string;
+  /** 失败原因；成功为空串 */
+  error: string;
+}
+
 /**
- * 用书源会话下载一张图片（正文插图 / 书源封面），返回 data URL；失败返回 null。
+ * 用书源会话下载一张图片（正文插图 / 书源封面），返回 data URL 或失败原因。
  * 图片请求自动携带该书源的默认头/Cookie/UA，Referer 可单独指定（正文页面 / 书页地址）。
  */
 export async function fetchRemoteSourceImage(
   sourceId: string,
   url: string,
   referer: string | null,
-): Promise<string | null> {
-  if (!tauri) return null;
+): Promise<SourceImageResult> {
+  if (!tauri) return { data: "", error: "书源图片仅应用内可用" };
   try {
     const r = await invoke<FetchedImage>("readerx_source_fetch_image", {
       sourceId,
       url,
       referer: referer || null,
     });
-    if (!r.ok || !r.data) {
-      if (r.error) console.warn(`[backend] 图片下载失败: ${r.error}`);
-      return null;
-    }
-    return `data:${r.mime || "image/jpeg"};base64,${r.data}`;
+    if (!r.ok || !r.data) return { data: "", error: r.error || "图片下载失败" };
+    return { data: `data:${r.mime || "image/jpeg"};base64,${r.data}`, error: "" };
   } catch (err) {
     console.error("[backend] 图片下载失败", err);
-    return null;
+    return { data: "", error: err instanceof Error ? err.message : String(err) };
   }
 }
 

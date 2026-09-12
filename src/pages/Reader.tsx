@@ -7,6 +7,7 @@ import {
   on,
   onCleanup,
   onMount,
+  untrack,
   type JSX,
 } from "solid-js";
 import { useNavigate, useParams } from "@solidjs/router";
@@ -30,9 +31,16 @@ import {
   downloadRemainingChapters,
   ensureReadingWindow,
   fetchOnlineBookToc,
+  loadReadingChapterImages,
   onlineRunState,
   reloadChapterContent,
+  retryReadingImage,
 } from "../lib/online";
+import {
+  chapterImageData,
+  chapterImageError,
+  chapterImagePhase,
+} from "../lib/chapterImages";
 import {
   BookSearchPanel,
   type BookSearchOpenTarget,
@@ -141,6 +149,19 @@ const PAD_BOTTOM_SCROLL = 28; // 滚动底部留白
 const PAGED_BUSY_DELAY_MS = 150; // 分页排版超过该时长才盖“正在加载”（普通章节不闪烁）
 const SCROLL_FIRST_BLOCKS = 160; // 滚动模式首片挂载的正文单元数（先出首屏，避免空首帧）
 const SCROLL_APPEND_BLOCKS = 240; // 滚动模式之后每帧追加的正文单元数
+// 在线书：排版前最多等本章图片多久（超时先按占位排版，图片到位后再排一次）
+const IMAGE_GATE_TIMEOUT_MS = 8_000;
+
+/** promise 是否在 timeoutMs 内落定（落定返回 true，超时返回 false；超时后原 promise 继续跑） */
+function settlesWithin(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const timer = window.setTimeout(() => resolve(false), timeoutMs);
+    void promise.then(() => {
+      window.clearTimeout(timer);
+      resolve(true);
+    });
+  });
+}
 
 // 安全区（刘海/系统手势条）探针：用 env(safe-area-inset-*) 解析成像素
 let safeInsetsCache: { top: number; bottom: number } | null = null;
@@ -177,6 +198,8 @@ function asCss(record: CssRecord): JSX.CSSProperties {
  * 两份“当前章内容单元”是否逐字一致（字符串克隆后为同一值，=== 即可判定）。
  * 在线书逐批下载会把整本对象替换掉：只要当前章内容没变就复用旧引用，
  * 避免无谓触发正文重排 / 分页 / 分片挂载。
+ * 在线图片按 remote（图片身份）比较：阅读时下载好的本地副本写回章节（src 变为 data URL）
+ * 不改变图片身份，因此不触发重排 —— 本地副本由渲染侧按身份实时取用。
  */
 function sameReaderUnits(a: ReaderBlock[], b: ReaderBlock[]): boolean {
   if (a.length !== b.length) return false;
@@ -186,7 +209,12 @@ function sameReaderUnits(a: ReaderBlock[], b: ReaderBlock[]): boolean {
     if (x.kind !== y.kind) return false;
     if (x.kind === "img") {
       const yi = y as Extract<ReaderBlock, { kind: "img" }>;
-      if (x.src !== yi.src || (x.alt ?? "") !== (yi.alt ?? "")) return false;
+      if ((x.alt ?? "") !== (yi.alt ?? "")) return false;
+      if (x.remote || yi.remote) {
+        if ((x.remote ?? "") !== (yi.remote ?? "")) return false;
+      } else if (x.src !== yi.src) {
+        return false;
+      }
     } else if (x.kind === "h") {
       const yi = y as Extract<ReaderBlock, { kind: "h" }>;
       if (x.text !== yi.text || x.level !== yi.level) return false;
@@ -195,6 +223,20 @@ function sameReaderUnits(a: ReaderBlock[], b: ReaderBlock[]): boolean {
     }
   }
   return true;
+}
+
+/** 在线图片的网络地址（图片身份）：优先块里的 remote，兼容旧数据直接以 src 为网络地址 */
+function readerImageRemote(src: string, remote?: string): string | null {
+  if (src.startsWith("data:")) return null;
+  if (remote) return remote;
+  return src.startsWith("http://") || src.startsWith("https://") ? src : null;
+}
+
+/** 图片当前可渲染的本地副本（data URL）：块内已本地化直接用，否则取本次运行下载结果 */
+function readerImageLocal(src: string, remote?: string): string | null {
+  if (src.startsWith("data:")) return src;
+  const key = readerImageRemote(src, remote) ?? src;
+  return chapterImageData(key);
 }
 
 /** 两本书的目录（cid 序列）是否一致：正文回写替换整书对象时目录不变 */
@@ -382,31 +424,75 @@ function TitleBlock(props: {
   );
 }
 
-/** 图片：分页按已计算尺寸渲染；滚动按自然比例自适配 */
+/**
+ * 图片：分页按已计算尺寸渲染；滚动按自然比例自适配。
+ * 在线书图片在阅读时下载：未就绪显示占位（转圈），失败显示占位与单张「重试」。
+ */
 function ImageBlock(props: {
   src: string;
+  remote?: string;
   alt?: string;
   /** 分页模式的展示尺寸（px）；0 表示未知/缺失 */
   w?: number;
   h?: number;
   /** 滚动模式：交给 CSS 自适应 */
   natural?: boolean;
+  /** 在线书单张图片重试（参数为图片网络地址） */
+  onRetry?: (url: string) => void;
 }) {
+  /** 图片网络地址（本地副本未下载时用于请求 / 重试） */
+  const remoteUrl = () => readerImageRemote(props.src, props.remote);
+  /** 当前可渲染的本地副本（data URL） */
+  const local = () => readerImageLocal(props.src, props.remote);
+  const phase = () => {
+    const url = remoteUrl();
+    return url ? chapterImagePhase(url) : "ready";
+  };
+  const showImage = () => !!local() && (props.natural || (props.w ?? 0) > 0);
+  /** 本地图彻底缺失：既没有本地副本，也没有可请求的网络地址（EPUB 缺图 / 旧数据失败图） */
+  const imageMissing = () => !local() && !remoteUrl();
+  const failed = () => !showImage() && (imageMissing() || phase() === "failed");
+  const canRetry = () => !!remoteUrl() && !!props.onRetry;
   return (
     <figure style={asCss(figureStyle())}>
       <Show
-        when={props.src && (props.natural || (props.w ?? 0) > 0)}
+        when={showImage()}
         fallback={
           <div
-            class="mx-auto flex max-w-full items-center justify-center rounded-md border border-dashed border-border bg-surface-2 px-4 text-[12px] text-text-3"
+            class="mx-auto flex max-w-full flex-col items-center justify-center gap-2 rounded-md border border-dashed border-border bg-surface-2 px-4 text-[12px] text-text-3"
             style={{ height: `${MISSING_IMAGE_HEIGHT}px` }}
           >
-            {props.alt || "图片缺失"}
+            <Show
+              when={failed()}
+              fallback={
+                <RefreshIcon
+                  size={18}
+                  class="animate-spin [animation-duration:1.2s]"
+                />
+              }
+            >
+              <span class="max-w-full truncate">{props.alt || "图片缺失"}</span>
+              <Show when={canRetry()}>
+                <button
+                  type="button"
+                  data-reader-ui
+                  class="inline-flex items-center gap-1 rounded-lg bg-surface px-2.5 py-1 text-[11.5px] font-semibold text-text-2 transition-[scale,opacity] duration-100 active:scale-[0.96]"
+                  aria-label="重新加载图片"
+                  onClick={() => {
+                    const url = remoteUrl();
+                    if (url) props.onRetry?.(url);
+                  }}
+                >
+                  <RefreshIcon size={13} />
+                  重试
+                </button>
+              </Show>
+            </Show>
           </div>
         }
       >
         <img
-          src={props.src}
+          src={local() ?? ""}
           alt={props.alt ?? ""}
           draggable={false}
           class="mx-auto max-w-full rounded-md object-contain"
@@ -427,6 +513,7 @@ function PagedFragment(props: {
   fragment: PageFragment;
   layout: PaginateLayout;
   marks: UnitMark[];
+  onImageRetry?: (url: string) => void;
 }) {
   const fragment = props.fragment;
   const layout = props.layout;
@@ -451,7 +538,16 @@ function PagedFragment(props: {
       </h3>
     );
   }
-  return <ImageBlock src={fragment.src} alt={fragment.alt} w={fragment.w} h={fragment.h} />;
+  return (
+    <ImageBlock
+      src={fragment.src}
+      remote={fragment.remote}
+      alt={fragment.alt}
+      w={fragment.w}
+      h={fragment.h}
+      onRetry={props.onImageRetry}
+    />
+  );
 }
 
 /** 滚动模式下的正文单元 */
@@ -460,6 +556,7 @@ function ScrollBlock(props: {
   block: ReaderBlock;
   unit: number;
   marks: UnitMark[];
+  onImageRetry?: (url: string) => void;
 }) {
   const block = props.block;
   const layout = props.layout;
@@ -477,7 +574,15 @@ function ScrollBlock(props: {
       </h3>
     );
   }
-  return <ImageBlock src={block.src} alt={block.alt} natural />;
+  return (
+    <ImageBlock
+      src={block.src}
+      remote={block.remote}
+      alt={block.alt}
+      natural
+      onRetry={props.onImageRetry}
+    />
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -927,6 +1032,61 @@ export default function ReaderPage() {
       },
     ),
   );
+
+  // -------------------------------------------------------------------
+  // 在线书正文图片：拉正文阶段只存图片地址，读到这一章时才下载（见 lib/chapterImages.ts）。
+  // 下载成功的图片由 online 层写回章节（离线可读），未就绪的图片在正文里显示占位，
+  // 失败的占位框带单张「重试」。
+  // -------------------------------------------------------------------
+
+  /** 用单张图片重试成功后的重排计数：尺寸从占位变成真实高度，需要重新排版本章 */
+  const [imageLayoutTick, setImageLayoutTick] = createSignal(0);
+
+  // 进入章节 / 本章正文变化（重新加载本章）：把本章缺的图片请求出去。
+  // 非分页模式同样走这里（滚动模式没有排版等待），分页模式由排版流程 await 同一批请求。
+  // 用户切走时放弃本章还没发出的请求（shouldStop）；untrack：本效果只该由「读到的这一章」
+  // 驱动，书库其它章节的正文回写不该惊动它。
+  createEffect(() => {
+    const current = renderBook();
+    const ch = chapter();
+    if (!current || !ch || !isOnlineBook(current)) return;
+    const cid = ch.cid;
+    void untrack(() =>
+      loadReadingChapterImages(current.id, chapterIdx(), () => chapterCid() !== cid),
+    );
+  });
+
+  /** 阅读页单张图片「重试」：忽略冷却立即重取，成功后重排本章让图片按真实尺寸就位 */
+  function retryReaderImage(url: string): void {
+    const current = localBookById(bookId());
+    if (!current || !isOnlineBook(current) || !url) return;
+    const index = chapterIdx();
+    void retryReadingImage(current.id, index, url).then((data) => {
+      if (data) {
+        setImageLayoutTick((tick) => tick + 1);
+        return;
+      }
+      showToast(`图片重新加载失败：${chapterImageError(url) || "未知错误"}`, true);
+    });
+  }
+
+  /** 当前章正文图片的下载进度（等待覆盖层显示；图片模块按地址报告状态） */
+  const imageWaitProgress = createMemo(() => {
+    const current = renderBook();
+    const ch = chapter();
+    if (!current || !ch || !isOnlineBook(current)) return null;
+    let total = 0;
+    let settled = 0;
+    for (const unit of chapterUnits(ch)) {
+      if (unit.kind !== "img") continue;
+      const remote = readerImageRemote(unit.src, unit.remote);
+      if (!remote) continue;
+      total++;
+      const phase = chapterImagePhase(remote);
+      if (phase === "ready" || phase === "failed") settled++;
+    }
+    return total > 0 && settled < total ? { total, settled } : null;
+  });
 
   // 阅读区几何（分页排版依赖真实尺寸；正文就绪且元素挂载后测量）。
   // 触发时机不能只看书对象身份：书已在全量缓存中（本次会话再次打开/从阅读页返回
@@ -1406,6 +1566,7 @@ export default function ReaderPage() {
     // 从而不会无谓地把当前章重新排版（旧实现每次提交都 setPaged(null) → 页面闪断）。
     const src = pageSource();
     const geo = layout();
+    void imageLayoutTick(); // 单张图片重试成功后按新的真实尺寸重排
     paginateTask?.cancel();
     paginateTask = null;
     disarmPagedBusy();
@@ -1426,12 +1587,32 @@ export default function ReaderPage() {
     void (async () => {
       const sizes = new Map<string, { w: number; h: number } | null>();
       const imageUnits = units().filter((u) => u.kind === "img");
+      // 在线书：图片在阅读时按需下载 —— 先把本章缺的图片取回来再排版，
+      // 避免先按占位高度排一遍、图片到位后又整章重排跳动。
+      // untrack：下载与落盘会替换书库对象，但那不影响本次排版输入（身份未变）。
+      if (imageUnits.length > 0) {
+        const cid = chapterCid();
+        const images = untrack(() =>
+          loadReadingChapterImages(bookId(), chapterIdx(), () => chapterCid() !== cid),
+        );
+        const ready = await settlesWithin(images, IMAGE_GATE_TIMEOUT_MS);
+        if (!ready) {
+          // 慢图不再干等（单张最长 60s）：先按占位排版把正文给用户，
+          // 图片随后到位时再排一次（分页会等它们就绪，这次一定带上真实尺寸）
+          void images.then(() => {
+            if (!dropped && chapterCid() === cid) {
+              setImageLayoutTick((tick) => tick + 1);
+            }
+          });
+        }
+      }
       await Promise.all(
-        imageUnits.map((unit) =>
-          decodeImageSize((unit as { src: string }).src).then((size) =>
-            sizes.set((unit as { src: string }).src, size),
-          ),
-        ),
+        imageUnits.map(async (unit) => {
+          const img = unit as Extract<ReaderBlock, { kind: "img" }>;
+          // 本地副本的读取不建立响应式依赖：图片到位后的重排由 imageLayoutTick 驱动
+          const local = untrack(() => readerImageLocal(img.src, img.remote));
+          sizes.set(img.src, local ? await decodeImageSize(local) : null);
+        }),
       );
       if (dropped || !isPaged() || pageSource() !== src) return;
       const task = startChapterPagination(src, author, geo, sizes);
@@ -3088,6 +3269,7 @@ export default function ReaderPage() {
                               fragment={fragment}
                               layout={layout()!}
                               marks={renderMarks()}
+                              onImageRetry={retryReaderImage}
                             />
                           )}
                         </For>
@@ -3143,6 +3325,7 @@ export default function ReaderPage() {
                           block={block}
                           unit={idx()}
                           marks={renderMarks()}
+                          onImageRetry={retryReaderImage}
                         />
                       )}
                     </For>
@@ -3162,7 +3345,13 @@ export default function ReaderPage() {
               }
             >
               <div class="absolute inset-0 z-[16] bg-bg">
-                <LoadingScreen label="正在加载…" />
+                <LoadingScreen
+                  label={
+                    imageWaitProgress()
+                      ? `正在获取图片 ${imageWaitProgress()!.settled} / ${imageWaitProgress()!.total}`
+                      : "正在加载…"
+                  }
+                />
               </div>
             </Show>
 
@@ -3924,16 +4113,23 @@ export default function ReaderPage() {
                     请求并行度跟随全局「书源并发」设置（设置 → 书源）。
                   </p>
                   <p class="text-[11.5px] leading-[1.6] text-text-3">
-                    含图片的章节（漫画 / 图文）会把图片一并下载到本地缓存，占用空间随图片数量明显增大。
+                    含图片的章节（漫画 / 图文）在正文下完后单独再过一遍图片（阅读时读到的章节也会随手缓存），
+                    占用空间随图片数量明显增大。
                   </p>
                   <Show when={remoteRun().busy}>
                     <div class="rounded-[12px] bg-surface-2 px-3.5 py-3">
                       <div class="flex items-center justify-between text-[12px]">
                         <span class="font-semibold text-text-2">
-                          {remoteRun().phase === "window" ? "窗口预取中…" : "批量下载中…"}
+                          {remoteRun().phase === "window"
+                            ? "窗口预取中…"
+                            : remoteRun().phase === "images"
+                              ? "图片下载中…"
+                              : "批量下载中…"}
                         </span>
                         <span class="tabular-nums text-text-3">
-                          {remoteRun().done} / {remoteRun().total}
+                          {remoteRun().phase === "images"
+                            ? `${remoteRun().images.done} / ${remoteRun().images.total}`
+                            : `${remoteRun().done} / ${remoteRun().total}`}
                         </span>
                       </div>
                       <div class="mt-2 h-1.5 overflow-hidden rounded-full bg-bg">
@@ -3941,23 +4137,48 @@ export default function ReaderPage() {
                           class="h-full rounded-full bg-accent transition-[width] duration-150"
                           style={{
                             width: `${
-                              remoteRun().total > 0
-                                ? Math.min(100, (remoteRun().done / remoteRun().total) * 100)
-                                : 0
+                              remoteRun().phase === "images"
+                                ? remoteRun().images.total > 0
+                                  ? Math.min(
+                                      100,
+                                      (remoteRun().images.done / remoteRun().images.total) * 100,
+                                    )
+                                  : 0
+                                : remoteRun().total > 0
+                                  ? Math.min(100, (remoteRun().done / remoteRun().total) * 100)
+                                  : 0
                             }%`,
                           }}
                         />
                       </div>
-                      {remoteRun().failed.length > 0 && (
+                      <Show when={remoteRun().failed.length > 0}>
                         <p class="mt-1.5 text-[11px] text-danger">
                           {remoteRun().failed.length} 章失败
                         </p>
-                      )}
+                      </Show>
+                      <Show when={remoteRun().images.failed > 0}>
+                        <p class="mt-1.5 text-[11px] text-danger">
+                          {remoteRun().images.failed} 张图片失败（阅读时可在图片上重试）
+                        </p>
+                      </Show>
                     </div>
                   </Show>
-                  <Show when={!remoteRun().busy && remoteRun().failed.length > 0}>
+                  <Show
+                    when={
+                      !remoteRun().busy &&
+                      (remoteRun().failed.length > 0 || remoteRun().images.failed > 0)
+                    }
+                  >
                     <p class="rounded-[10px] bg-danger-weak px-3 py-2 text-[11.5px] leading-[1.5] text-danger">
-                      上次有 {remoteRun().failed.length} 章未下载成功，可重试。
+                      <Show when={remoteRun().failed.length > 0}>
+                        上次有 {remoteRun().failed.length} 章未下载成功
+                      </Show>
+                      <Show when={remoteRun().failed.length > 0 && remoteRun().images.failed > 0}>
+                        、
+                      </Show>
+                      <Show when={remoteRun().images.failed > 0}>
+                        {remoteRun().images.failed} 张图片未下载成功（阅读时可在图片上重试）
+                      </Show>
                     </p>
                   </Show>
                   <div class="flex gap-2.5 pt-0.5">
@@ -3979,12 +4200,23 @@ export default function ReaderPage() {
                           await downloadRemainingChapters(bookIdNow);
                           const st = onlineRunState(bookIdNow);
                           if (st.cancelled) return;
-                          const count = st.done;
-                          if (st.failed.length === 0 && count > 0) {
-                            showToast(`下载完成：${count} 章正文已缓存`);
-                          } else if (st.failed.length > 0) {
-                            showToast(`下载完成 ${count} 章，${st.failed.length} 章失败`, true);
+                          const chapters = `${st.done} 章正文`;
+                          const images =
+                            st.images.total > 0
+                              ? `、${st.images.done - st.images.failed} 张图片`
+                              : "";
+                          if (st.done === 0 && st.images.total === 0) return;
+                          if (st.failed.length > 0 || st.images.failed > 0) {
+                            const failed = [
+                              st.failed.length > 0 ? `${st.failed.length} 章` : "",
+                              st.images.failed > 0 ? `${st.images.failed} 张图片` : "",
+                            ]
+                              .filter(Boolean)
+                              .join("、");
+                            showToast(`下载完成：${chapters}${images}；${failed}失败`, true);
+                            return;
                           }
+                          showToast(`下载完成：${chapters}${images} 已缓存`);
                         })();
                       }}
                     >

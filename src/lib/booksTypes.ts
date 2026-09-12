@@ -21,12 +21,14 @@ export function isOnlineBook(book: Pick<LocalBook, "source" | "bookSourceId">): 
  * 章节内的结构化正文块：
  * - p   ：自然段（缩进正文）
  * - h   ：副标题（章内小标题，不等同于章节名）
- * - img ：插图（src 为可在 WebView 直接渲染的 data URL）
+ * - img ：插图。src 是可直接渲染的地址（本地化后为 data URL；在线书尚未下载时是网络地址），
+ *   remote 是在线书的图片原始网络地址（图片身份）：阅读时按它下载、失败按它重试、
+ *   下载好的本地副本也按它对应（见 lib/chapterImages.ts）。本地 / EPUB 插图没有 remote。
  */
 export type ChapterBlock =
   | { kind: "p"; text: string }
   | { kind: "h"; level: number; text: string }
-  | { kind: "img"; src: string; alt?: string };
+  | { kind: "img"; src: string; alt?: string; remote?: string };
 
 export interface LocalBookChapter {
   /** 章节稳定 id，如 c0001、c0002 …（旧数据可能在载入时回填） */

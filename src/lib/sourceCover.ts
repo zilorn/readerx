@@ -118,12 +118,14 @@ export async function loadSourceCoverThumb(
   const promise = (async (): Promise<string | null> => {
     try {
       const ref = referer?.trim();
-      const dataUrl = target.startsWith("data:")
-        ? target
-        : await acquireSlot().then((release) =>
-            fetchRemoteSourceImage(sourceId, target, ref || null).finally(release),
-          );
-      if (!dataUrl) return null;
+      let dataUrl = target;
+      if (!target.startsWith("data:")) {
+        const downloaded = await acquireSlot().then((release) =>
+          fetchRemoteSourceImage(sourceId, target, ref || null).finally(release),
+        );
+        if (!downloaded.data) return null;
+        dataUrl = downloaded.data;
+      }
       if (dataUrl.length > MAX_RAW_DATA_URL_LENGTH) return null;
       const thumb = await makeCoverThumb(dataUrl).catch(() => null);
       if (!thumb || thumb.length > MAX_THUMB_DATA_URL_LENGTH) return null;

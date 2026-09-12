@@ -4,14 +4,18 @@
  * - 「加入书架」= 只落 toc 元数据的本地书（format: online），正文按需下载；
  * - 阅读时按「当前章 ±5 章」窗口预取并落盘（逐批写回同一本 LocalBook）：
  *   正在读的那一章单独先取、取回即落盘，其余窗口章节后台补齐；
- * - 显式批量下载剩余全部正文（并发可配、可取消）。
+ *   预取只取正文，图片留到用户读到该章时按需下载（见 chapterImages.ts）；
+ * - 显式批量下载剩余全部正文（并发可配、可取消）：正文下完后单独再过一遍图片。
  */
 import { createSignal } from "solid-js";
 import {
   callRemoteSource,
   fetchRemoteChapterContents,
-  fetchRemoteSourceImage,
 } from "./backend";
+import {
+  ensureChapterImages,
+  retryChapterImage,
+} from "./chapterImages";
 import {
   addBookRecord,
   bookMetaById,
@@ -32,6 +36,7 @@ import {
   chapterCid,
   isOnlineBook,
   normalizeBookTags,
+  type ChapterBlock,
   type LocalBook,
   type LocalBookChapter,
 } from "./booksTypes";
@@ -239,7 +244,14 @@ export async function addOnlineBookToShelf(
 // 并发拉取执行器（每本书串行 one-flight；批内按并发请求）
 // ---------------------------------------------------------------------------
 
-export type OnlineRunPhase = "idle" | "window" | "download";
+export type OnlineRunPhase = "idle" | "window" | "download" | "images";
+
+/** 批量下载的图片阶段进度（正文本就绪的章节单独过一遍图片；见 runDownloadFetch） */
+export interface OnlineImageProgress {
+  total: number;
+  done: number;
+  failed: number;
+}
 
 export interface OnlineRunState {
   phase: OnlineRunPhase;
@@ -250,7 +262,11 @@ export interface OnlineRunState {
   /** 本次拉取中仍待获取（含正在获取）的章节下标，取到正文后即移出 */
   pending: number[];
   cancelled: boolean;
+  /** 图片阶段进度（其余阶段为 0） */
+  images: OnlineImageProgress;
 }
+
+const EMPTY_IMAGE_PROGRESS: OnlineImageProgress = { total: 0, done: 0, failed: 0 };
 
 const [runMap, setRunMap] = createSignal<Record<string, OnlineRunState>>({});
 
@@ -264,6 +280,7 @@ export function onlineRunState(bookId: string): OnlineRunState {
       failed: [],
       pending: [],
       cancelled: false,
+      images: EMPTY_IMAGE_PROGRESS,
     }
   );
 }
@@ -290,6 +307,7 @@ function patchRun(bookId: string, patch: Partial<OnlineRunState>): void {
     failed: [],
     pending: [],
     cancelled: false,
+    images: EMPTY_IMAGE_PROGRESS,
   };
   setRunMap({ ...runMap(), [bookId]: { ...current, ...patch } });
 }
@@ -307,88 +325,22 @@ interface BatchPlan {
 }
 
 /**
- * 单章图片下载（章内限并发；取消/失败时该图留占位 src=""，阅读器显示占位框）。
- * 返回成功下载张数（data: 直给图片无需下载，不计入）。
+ * 把一个章节的解析结果写入 chapter 对象。
+ * 纯文本保持旧行为（无图片不写 blocks，避免旧读者差异；空正文标记已拉取）；
+ * 含图章节只落图片地址，图片本身留到阅读时按需下载（见 chapterImages.ts）。
  */
-async function fetchChapterImages(
-  bookId: string,
-  sourceId: string,
-  chapterUrl: string | null,
-  build: SourceContentBuild,
-  concurrency: number,
-): Promise<number> {
-  const refs = build.imageRefs;
-  if (refs.length === 0) return 0;
-  const cache = new Map<string, string | null>();
-  let cursor = 0;
-  let loaded = 0;
-  const cap = Math.max(1, Math.min(concurrency, refs.length));
-  const worker = async (): Promise<void> => {
-    for (;;) {
-      const ref = refs[cursor];
-      if (!ref) return;
-      cursor++;
-      const block = build.blocks[ref.index];
-      if (!block || block.kind !== "img") continue;
-      if (cancellations.has(bookId)) {
-        block.src = "";
-        continue;
-      }
-      let data = cache.get(ref.url);
-      if (data === undefined) {
-        data = await fetchRemoteSourceImage(sourceId, ref.url, chapterUrl);
-        cache.set(ref.url, data);
-      }
-      if (data) {
-        block.src = data;
-        loaded++;
-      } else {
-        block.src = "";
-      }
-    }
-  };
-  await Promise.all(Array.from({ length: cap }, () => worker()));
-  return loaded;
-}
-
-/**
- * 把一个章节的解析结果写入 chapter 对象（含图片下载）。
- * 纯图章一张图都没成功时返回 false（不落盘，供调用方标记失败/提示）。
- */
-async function applyChapterBuild(
-  bookId: string,
-  sourceId: string,
-  chapter: LocalBookChapter,
-  build: SourceContentBuild,
-  concurrency: number,
-): Promise<boolean> {
-  const imgCount = build.blocks.filter((b) => b.kind === "img").length;
-  // data: 直给图片无需下载，视为已就绪
-  const ready = imgCount - build.imageRefs.length;
-  const loaded =
-    build.imageRefs.length > 0
-      ? await fetchChapterImages(
-          bookId,
-          sourceId,
-          chapter.url || null,
-          build,
-          concurrency,
-        )
-      : 0;
+function applyChapterBuild(chapter: LocalBookChapter, build: SourceContentBuild): void {
   if (build.hasImages) {
-    if (build.paragraphs.length === 0 && ready + loaded === 0) return false;
     chapter.paragraphs = build.paragraphs;
     chapter.blocks = build.blocks;
-    return true;
+    return;
   }
-  // 纯文本：保持旧行为（无图片不写 blocks，避免旧读者差异；空正文标记已拉取）
   chapter.paragraphs = build.paragraphs;
   if (build.paragraphs.length > 0) {
     chapter.blocks = undefined;
   } else {
     chapter.blocks = [];
   }
-  return true;
 }
 
 /** 让出主线程一拍，保证分片解析/图片回写期间渲染与交互不被饿死 */
@@ -492,14 +444,8 @@ async function fetchChapterPlans(
   return plans;
 }
 
-/** 单章：在全新的章节对象上完成解析与图片下载；纯图章全失败视为失败 */
-async function fillChapterDraft(
-  bookId: string,
-  sourceId: string,
-  plan: BatchPlan,
-  concurrency: number,
-  failed: FailedChapter[],
-): Promise<LocalBookChapter | null> {
+/** 单章：在全新的章节对象上完成解析并落盘（图片留到阅读时下载） */
+function fillChapterDraft(plan: BatchPlan): LocalBookChapter {
   const draft: LocalBookChapter = {
     cid: plan.chapter.cid,
     title: plan.chapter.title,
@@ -507,14 +453,7 @@ async function fillChapterDraft(
     blocks: undefined,
     url: plan.chapter.url,
   };
-  const ok = await applyChapterBuild(bookId, sourceId, draft, plan.build, concurrency);
-  if (!ok) {
-    failed.push({
-      index: plan.chapterIndex,
-      error: `图片加载失败（0/${plan.build.imageRefs.length}）`,
-    });
-    return null;
-  }
+  applyChapterBuild(draft, plan.build);
   return draft;
 }
 
@@ -561,6 +500,7 @@ async function runWindowFetch(bookId: string, center: number): Promise<void> {
     failed: [],
     pending,
     cancelled: false,
+    images: EMPTY_IMAGE_PROGRESS,
   });
   try {
     let focusFirst = true; // 本次焦点章还没单独取过
@@ -574,13 +514,11 @@ async function runWindowFetch(bookId: string, center: number): Promise<void> {
       const plans = await fetchChapterPlans(bookId, sourceId, bookNow, slice, failed);
       for (const idx of slice) attempted.add(idx);
       done += slice.length;
-      // 逐章补齐图片并落盘：焦点章一落盘阅读器即可显示，其余章节随后陆续就位
+      // 逐章落盘：焦点章一落盘阅读器即可显示，其余章节随后陆续就位
       for (const plan of plans) {
         if (cancellations.has(bookId)) break;
-        const filled = await fillChapterDraft(bookId, sourceId, plan, concurrency, failed);
-        if (filled) {
-          await persistChapters(bookId, [{ index: plan.chapterIndex, chapter: filled }]);
-        }
+        const filled = fillChapterDraft(plan);
+        await persistChapters(bookId, [{ index: plan.chapterIndex, chapter: filled }]);
         if (plans.length > 1) await yieldToMain();
       }
       const latest = localBookById(bookId) ?? bookNow;
@@ -607,6 +545,7 @@ async function runWindowFetch(bookId: string, center: number): Promise<void> {
 /**
  * 批量下载剩余全部正文（下载按钮）：一次算好缺正文章节，按批取回、按批落盘（保持批量 I/O）。
  * 下载期间用户在阅读页读到未缓存的章节时，先把那一章单独取回，不按目录顺序排在后面。
+ * 正文下完后再单独过一遍图片（runDownloadImages）：图片不与正文同时请求。
  */
 async function runDownloadFetch(
   bookId: string,
@@ -620,11 +559,6 @@ async function runDownloadFetch(
   for (let i = 0; i < initial.chapters.length; i++) {
     if (!chapterHasContent(initial.chapters[i])) targets.push(i);
   }
-  if (targets.length === 0) {
-    patchRun(bookId, { phase: "idle", busy: false, total: 0, done: 0, pending: [] });
-    return;
-  }
-  const concurrency = Math.max(1, currentSourceParallel());
   cancellations.delete(bookId);
   const failed: FailedChapter[] = [];
   const handled = new Set<number>();
@@ -635,6 +569,7 @@ async function runDownloadFetch(
       pending: targets.filter((i) => !handled.has(i)),
     });
   };
+
   /** 阅读焦点章优先：正在阅读页上未缓存的那一章先单独取回并落盘 */
   const fetchFocused = async (): Promise<void> => {
     const idx = windowFocus.get(bookId);
@@ -649,44 +584,56 @@ async function runDownloadFetch(
     );
     const plan = plans[0];
     if (plan) {
-      const filled = await fillChapterDraft(bookId, sourceId, plan, concurrency, failed);
-      if (filled) await persistChapters(bookId, [{ index: idx, chapter: filled }]);
+      await persistChapters(bookId, [{ index: idx, chapter: fillChapterDraft(plan) }]);
     }
     syncRun();
   };
-  patchRun(bookId, {
-    phase: "download",
-    busy: true,
-    total: targets.length,
-    done: 0,
-    failed: [],
-    pending: [...targets],
-    cancelled: false,
-  });
   try {
-    for (let start = 0; start < targets.length; start += BATCH_SIZE) {
-      if (cancellations.has(bookId)) break;
-      // 读到哪一章就先取哪一章：不必等下载按目录顺序排到它
-      await fetchFocused();
-      if (cancellations.has(bookId)) break;
-      const slice = targets.slice(start, start + BATCH_SIZE).filter((i) => !handled.has(i));
-      if (slice.length === 0) continue;
-      const bookNow = localBookById(bookId) ?? initial;
-      const plans = await fetchChapterPlans(bookId, sourceId, bookNow, slice, failed);
-      // 这一批的网络请求期间用户可能又读到了未缓存的章节：立即单独取回，
-      // 不等本批的解析 / 图片下载 / 写盘走完
-      await fetchFocused();
-      if (cancellations.has(bookId)) break;
-      const patches: Array<{ index: number; chapter: LocalBookChapter }> = [];
-      for (const plan of plans) {
-        const filled = await fillChapterDraft(bookId, sourceId, plan, concurrency, failed);
-        if (filled) patches.push({ index: plan.chapterIndex, chapter: filled });
+    if (targets.length > 0) {
+      patchRun(bookId, {
+        phase: "download",
+        busy: true,
+        total: targets.length,
+        done: 0,
+        failed: [],
+        pending: [...targets],
+        cancelled: false,
+        images: EMPTY_IMAGE_PROGRESS,
+      });
+      for (let start = 0; start < targets.length; start += BATCH_SIZE) {
+        if (cancellations.has(bookId)) break;
+        // 读到哪一章就先取哪一章：不必等下载按目录顺序排到它
+        await fetchFocused();
+        if (cancellations.has(bookId)) break;
+        const slice = targets.slice(start, start + BATCH_SIZE).filter((i) => !handled.has(i));
+        if (slice.length === 0) continue;
+        const bookNow = localBookById(bookId) ?? initial;
+        const plans = await fetchChapterPlans(bookId, sourceId, bookNow, slice, failed);
+        // 这一批的网络请求期间用户可能又读到了未缓存的章节：立即单独取回，
+        // 不等本批的解析 / 写盘走完
+        await fetchFocused();
+        if (cancellations.has(bookId)) break;
+        const patches: Array<{ index: number; chapter: LocalBookChapter }> = [];
+        for (const plan of plans) {
+          patches.push({ index: plan.chapterIndex, chapter: fillChapterDraft(plan) });
+        }
+        for (const idx of slice) handled.add(idx);
+        if (patches.length > 0) await persistChapters(bookId, patches);
+        syncRun();
+        onProgress?.(runMap()[bookId] ?? onlineRunState(bookId));
       }
-      for (const idx of slice) handled.add(idx);
-      if (patches.length > 0) await persistChapters(bookId, patches);
-      syncRun();
-      onProgress?.(runMap()[bookId] ?? onlineRunState(bookId));
+    } else {
+      // 正文都已缓存：只跑图片阶段，章节计数清零（下载面板按图片进度显示）
+      patchRun(bookId, {
+        total: 0,
+        done: 0,
+        failed: [],
+        pending: [],
+        cancelled: false,
+        images: EMPTY_IMAGE_PROGRESS,
+      });
     }
+    if (!cancellations.has(bookId)) await runDownloadImages(bookId, sourceId, onProgress);
   } catch (err) {
     // 意外中断（磁盘 I/O 等）：清掉 busy 状态，避免该书永远卡在“下载中”
     console.error("[online] 章节下载意外中断", err);
@@ -695,6 +642,58 @@ async function runDownloadFetch(
     const cancelled = cancellations.has(bookId);
     cancellations.delete(bookId);
     patchRun(bookId, { phase: "idle", busy: false, pending: [], cancelled });
+  }
+}
+
+/**
+ * 批量下载的图片阶段：正文全部就绪后，单独把各章尚未本地化的图片过一遍。
+ * 与正文分两趟跑（不与获取章节同时取图片）：图片同样经书源会话下载并写回章节，
+ * 失败不计入章节失败，之后阅读该章时按占位框的「重试」再取。
+ */
+async function runDownloadImages(
+  bookId: string,
+  sourceId: string,
+  onProgress?: (state: OnlineRunState) => void,
+): Promise<void> {
+  const book = localBookById(bookId);
+  if (!book || !isOnlineBook(book)) return;
+  const jobs = book.chapters
+    .map((chapter, index) => ({ index, chapter, urls: pendingImageUrls(chapter) }))
+    .filter((job) => job.urls.length > 0);
+  if (jobs.length === 0) return;
+  const total = jobs.reduce((sum, job) => sum + job.urls.length, 0);
+  let done = 0;
+  let failedImages = 0;
+  const sync = (): void => {
+    patchRun(bookId, { phase: "images", images: { total, done, failed: failedImages } });
+  };
+  // 注意：章节计数（total / done / failed / pending）此时保持正文阶段的结果，
+  // 图片进度单独放在 images 里 —— 下载面板按阶段显示，完成后汇总两者。
+  patchRun(bookId, {
+    phase: "images",
+    busy: true,
+    pending: [],
+    images: { total, done: 0, failed: 0 },
+  });
+  for (const job of jobs) {
+    if (cancellations.has(bookId)) break;
+    const results = await ensureChapterImages({
+      sourceId,
+      referer: job.chapter.url ?? null,
+      urls: job.urls,
+      force: true,
+      shouldStop: () => cancellations.has(bookId),
+    });
+    if (cancellations.has(bookId)) break;
+    const ready = new Map<string, string>();
+    for (const [url, data] of results) {
+      if (data) ready.set(url, data);
+      else failedImages++;
+    }
+    done += job.urls.length;
+    await persistReadyImages(bookId, job.index, ready);
+    sync();
+    onProgress?.(runMap()[bookId] ?? onlineRunState(bookId));
   }
 }
 
@@ -724,6 +723,97 @@ export async function downloadRemainingChapters(
   const book = localBookById(bookId);
   if (!book || !isOnlineBook(book)) return;
   await runDownloadFetch(bookId, onProgress);
+}
+
+// ---------------------------------------------------------------------------
+// 阅读时按需下载正文图片（拉正文阶段只存地址，见 chapterImages.ts）
+// ---------------------------------------------------------------------------
+
+/**
+ * 章节里还没本地化的图片地址（去重、保序）。
+ * 只认 img 块的 remote（在线图片身份）：已下载成 data URL 的不再请求。
+ */
+function pendingImageUrls(chapter: LocalBookChapter): string[] {
+  const blocks = chapter.blocks;
+  if (!blocks || blocks.length === 0) return [];
+  const urls: string[] = [];
+  const seen = new Set<string>();
+  for (const block of blocks) {
+    if (block.kind !== "img") continue;
+    const remote = block.remote;
+    if (!remote || block.src.startsWith("data:")) continue;
+    if (seen.has(remote)) continue;
+    seen.add(remote);
+    urls.push(remote);
+  }
+  return urls;
+}
+
+/** 把本次下载好的图片写回章节（只替换仍是网络地址的图块，一次写盘） */
+async function persistReadyImages(
+  bookId: string,
+  chapterIndex: number,
+  ready: ReadonlyMap<string, string>,
+): Promise<void> {
+  if (ready.size === 0) return;
+  const base = localBookById(bookId);
+  const chapter = base?.chapters[chapterIndex];
+  if (!base || !chapter?.blocks) return;
+  let changed = false;
+  const blocks = chapter.blocks.map((block): ChapterBlock => {
+    if (block.kind !== "img" || !block.remote) return block;
+    const data = ready.get(block.remote);
+    if (!data || block.src === data) return block;
+    changed = true;
+    return { ...block, src: data };
+  });
+  if (!changed) return;
+  const next: LocalBookChapter = { ...chapter, blocks };
+  await persistChapters(bookId, [{ index: chapterIndex, chapter: next }]);
+}
+
+/**
+ * 阅读时备好一章的图片：经书源会话逐张下载，成功即写回本地书库（离线可读、不再重复请求）。
+ * 返回「地址 → data URL」（失败为 null），供分页按真实尺寸排版。
+ * shouldStop 用于「用户已离开这一章」时放弃还没发出的请求（已发出的等它结束，结果照常缓存）。
+ */
+export async function loadReadingChapterImages(
+  bookId: string,
+  chapterIndex: number,
+  shouldStop?: () => boolean,
+): Promise<Map<string, string | null>> {
+  const book = localBookById(bookId);
+  if (!book || !isOnlineBook(book)) return new Map();
+  const chapter = book.chapters[chapterIndex];
+  if (!chapter) return new Map();
+  const urls = pendingImageUrls(chapter);
+  if (urls.length === 0) return new Map();
+  const results = await ensureChapterImages({
+    sourceId: book.bookSourceId!,
+    referer: chapter.url ?? null,
+    urls,
+    ...(shouldStop ? { shouldStop } : {}),
+  });
+  const ready = new Map<string, string>();
+  for (const [url, data] of results) {
+    if (data) ready.set(url, data);
+  }
+  await persistReadyImages(bookId, chapterIndex, ready);
+  return results;
+}
+
+/** 阅读页「重试」单张图片：忽略自动重试冷却立即重取，成功即写回本地书库 */
+export async function retryReadingImage(
+  bookId: string,
+  chapterIndex: number,
+  url: string,
+): Promise<string | null> {
+  const book = localBookById(bookId);
+  if (!book || !isOnlineBook(book) || !url) return null;
+  const chapter = book.chapters[chapterIndex];
+  const data = await retryChapterImage(book.bookSourceId!, url, chapter?.url ?? null);
+  if (data) await persistReadyImages(bookId, chapterIndex, new Map([[url, data]]));
+  return data;
 }
 
 export interface ReloadChapterOutcome {
@@ -758,7 +848,6 @@ export async function reloadChapterContent(
   const chapter = book.chapters[chapterIndex];
   if (!chapter?.url) return { applied: false, cancelled: false };
   const sourceId = book.bookSourceId!;
-  const concurrency = Math.max(1, currentSourceParallel());
 
   // 占用 run 状态：与其余拉取互斥，“下载中”提示 / 相关入口禁用一并生效
   cancellations.delete(bookId);
@@ -770,6 +859,7 @@ export async function reloadChapterContent(
     failed: [],
     pending: [chapterIndex],
     cancelled: false,
+    images: EMPTY_IMAGE_PROGRESS,
   });
   const settle = (patch: Partial<OnlineRunState>): void => {
     patchRun(bookId, { phase: "idle", busy: false, pending: [], ...patch });
@@ -828,22 +918,11 @@ export async function reloadChapterContent(
       blocks: undefined,
       url: target.url,
     };
-    const okApply = await applyChapterBuild(
-      bookId,
-      sourceId,
-      draft,
-      build,
-      concurrency,
-    );
+    applyChapterBuild(draft, build);
     if (cancellations.has(bookId)) {
       cancellations.delete(bookId);
       settle({ cancelled: true });
       return { applied: false, cancelled: true };
-    }
-    if (!okApply) {
-      const error = `图片加载失败（0/${build.imageRefs.length}）`;
-      settle({ failed: [{ index: chapterIndex, error }] });
-      return { applied: false, cancelled: false, error };
     }
     const next = patchChapters(latest, [{ index: chapterIndex, chapter: draft }]);
     await updateBookChapters(next, [{ index: chapterIndex, chapter: draft }]);

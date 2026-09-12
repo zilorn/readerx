@@ -15,7 +15,7 @@ import type { LocalBookChapter } from "./booksTypes";
 export type ReaderBlock =
   | { kind: "p"; text: string }
   | { kind: "h"; level: number; text: string }
-  | { kind: "img"; src: string; alt?: string };
+  | { kind: "img"; src: string; alt?: string; remote?: string };
 
 export const READING_LINE_HEIGHT = 1.95;
 export const READING_LETTER_SPACING_EM = 0.01;
@@ -55,7 +55,15 @@ export type PageFragment =
       unit: number;
       cstart: number;
     }
-  | { kind: "img"; src: string; alt?: string; w: number; h: number };
+  | {
+      kind: "img";
+      src: string;
+      alt?: string;
+      /** 在线书图片的网络地址（图片身份）：本地副本未落盘时用它取会话内下载结果 */
+      remote?: string;
+      w: number;
+      h: number;
+    };
 
 export interface PaginatedChapter {
   /** 每页的片段序列（页 0 起始含章节标题） */
@@ -68,7 +76,12 @@ export function chapterUnits(chapter: LocalBookChapter): ReaderBlock[] {
   if (blocks && blocks.length > 0) {
     return blocks.map((block) => {
       if (block.kind === "img") {
-        return { kind: "img", src: block.src, alt: block.alt };
+        return {
+          kind: "img",
+          src: block.src,
+          alt: block.alt,
+          ...(block.remote ? { remote: block.remote } : {}),
+        };
       }
       if (block.kind === "h") {
         return { kind: "h", level: block.level ?? 3, text: block.text };
@@ -446,13 +459,13 @@ export function* paginateChapterSteps(
       const disp = imageDisplaySize(layout, natural);
       if (disp.missing) {
         pushAtomic(
-          { kind: "img", src: unit.src, alt: unit.alt, w: 0, h: 0 },
+          { kind: "img", src: unit.src, alt: unit.alt, remote: unit.remote, w: 0, h: 0 },
           MISSING_IMAGE_HEIGHT,
           em(layout.fontSize, 1),
         );
       } else {
         pushAtomic(
-          { kind: "img", src: unit.src, alt: unit.alt, w: disp.w, h: disp.h },
+          { kind: "img", src: unit.src, alt: unit.alt, remote: unit.remote, w: disp.w, h: disp.h },
           disp.h,
           em(layout.fontSize, 1),
         );
