@@ -133,6 +133,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     复核后再套用补丁；正文回写改为**先到先得**，只有用户显式「重新加载本章」才覆盖已有正文，
     图片本地副本的回写改为与最新正文合并（与重载并发时不会拿旧正文覆盖新正文）。
 
+- **书源 `cryptoUtil` 的二进制用法不再被静默改写**：`hexEncode` 此前把「1 字符 = 1 字节」的
+  字节保留字符串先过了一遍 `String::from_utf8_lossy`，凡 0x80–0xff 的字节都被替换成 `U+FFFD`
+  （efbfbd）——32 字节密钥会编成 60 个 hex 字符而不是 64 个，于是
+  `cryptoUtil.sha256(base64.decode(resp.data))` 这类文档推荐的二进制签名 / 加解密**结果全错**，
+  而自带测试只用了纯 ASCII 样本（`hello 书源`）所以一直是绿的。同族问题一并修复：
+  - `cryptoUtil.hexDecode` 的返回值同样被改写，`hexEncode(hexDecode(x)) !== x`；
+  - `base64.encode` 把字节保留字符串按 UTF-8 展开（0x81 → `c281`），
+    `base64.encode(base64.decode(x)) !== x`；
+  - `cryptoUtil.hmac` 的 `key`、`aesGcmEncrypt` 的 `data` / `key` / `aad` 都按 UTF-8 取字节，
+    二进制密钥 / 明文会被改写（`aesGcmDecrypt` 的返回值也是 lossy，解密出的二进制明文变成一堆 `U+FFFD`）；
+  - 桥接层 `arg_string` 用 `to_std_string_lossy` 取参数，U+0080–U+00FF 的码元在进 Rust 之前就已丢失。
+
+  现在从头到尾统一走「字节保留字符串」约定：U+0000–U+00FF 的字符各算一个字节，其余字符才按
+  UTF-8 展开，`hexEncode` / `hexDecode` / `base64.encode` / 摘要 / HMAC / AES-GCM 全部逐字节保真；
+  `aesGcmDecrypt` 明文是二进制时用新增的 `encoding: "bytes"` 取回字节保留字符串（默认仍是
+  `"text"`，文本明文的可读返回值不变）。回归测试的期望值改由 Node `crypto` / `Buffer` 独立算出，
+  并覆盖 0x00 / 0x7f / 0x80–0xff 与 `0xc3 0x28` 这类非法 UTF-8 序列
+  （说明同步更新到 docs/book-source-api.md）。
+
 - **修复「图片多的在线书加载时应用直接崩溃」**：此前正文图片下载后是以 **data URL（base64）写进书籍
   JSON** 的，同一张图会同时存在于磁盘 JSON、Rust 解析出的字符串、IPC 报文、WebView 的 JS 字符串，
   并在排版时被逐张解码 —— 一章几百张图时内存成倍膨胀（一本书的 JSON 甚至能到几百 MB），

@@ -127,16 +127,25 @@ where
     })
 }
 
-/// 原生函数通用参数转字符串
+/// 原生函数通用参数转字符串。
+///
+/// 优先用 `to_std_string`（Latin-1 码元按原样映射成 U+0000–U+00FF），**不能**直接用
+/// `to_std_string_lossy`：后者会把 U+0080–U+00FF 的码元显示成 U+FFFD，让
+/// `base64.decode` / `hexDecode` 出来的字节串在桥接层就被改写。
+/// 只有含孤立代理项的病态字符串才退回 lossy（JS 语义下本就无法表示）。
 fn arg_string(arg: &JsValue, context: &mut Context) -> String {
     arg.to_string(context)
-        .map(|s| s.to_std_string_lossy())
+        .map(|s| s.to_std_string().unwrap_or_else(|_| s.to_std_string_lossy()))
         .unwrap_or_default()
 }
 
 /// 二进制安全版 [`arg_string`]：把 U+0000–U+00FF 的每个字符还原成一个字节
 /// （host 侧 `base64_decode` / `hex_decode_to_string` / `aesGcmEncrypt().text` 的编码）。
 /// 超出该范围的字符（真正的中文 / emoji 文本）按 UTF-8 取字节，保证普通字符串不受影响。
+///
+/// 只有 `__hexEncode` / `__hexDecode` / `__base64Encode` 需要在桥接层显式取字节；
+/// 摘要 / HMAC / 加解密把字节保留字符串原样塞进 JSON，由 host 侧按同一约定还原
+/// （见 `host::text_to_bytes`）。
 fn arg_bytes(arg: &JsValue, context: &mut Context) -> Vec<u8> {
     let text = arg_string(arg, context);
     let mut out = Vec::with_capacity(text.len());
@@ -251,8 +260,10 @@ fn nv_sleep(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<Js
 }
 
 fn nv_base64_encode(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let text = args.first().map(|a| arg_string(a, context)).unwrap_or_default();
-    ret_string(host::base64_encode(&text))
+    // 入参是字节保留字符串（base64.decode / hexDecode 的产物）或普通文本；
+    // 先把每个字符还原成字节再编码，保证 base64.encode(base64.decode(x)) === x。
+    let raw = args.first().map(|a| arg_bytes(a, context)).unwrap_or_default();
+    ret_string(host::base64_encode(&host::bytes_to_js_string(&raw)))
 }
 
 fn nv_base64_decode(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -313,14 +324,16 @@ fn nv_crypto_hmac(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsRes
 }
 
 fn nv_hex_encode(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    // 输入按“一个字符 = 一个字节”还原，保证 base64.decode → hexEncode 的字节不被 UTF-8 改写
+    // 输入按「一个字符 = 一个字节」还原后**直接**编码成 hex。
+    // 这里绝不能走 String::from_utf8_lossy：0x80–0xFF 的字节会被替换成 U+FFFD（efbfbd），
+    // 32 字节密钥会被改写成 60 字节，摘要 / 签名随之全错。
     let raw = args.first().map(|a| arg_bytes(a, context)).unwrap_or_default();
-    let text = String::from_utf8_lossy(&raw).into_owned();
-    ret_string(host::hex_encode_utf8(&text))
+    ret_string(host::hex_encode_text(&host::bytes_to_js_string(&raw)))
 }
 
 fn nv_hex_decode(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    // 输入按“一个字符 = 一个字节”还原，保证 base64.decode → hexEncode 的字节不被 UTF-8 改写
+    // hex 文本本身必须是纯 ASCII；非 ASCII 字节在这里换成替换字符即可——
+    // host::hex_decode 会因「含非 0-9a-f 字符」报错，用户看到的原因比编码错误更直白。
     let raw = args.first().map(|a| arg_bytes(a, context)).unwrap_or_default();
     let text = String::from_utf8_lossy(&raw).into_owned();
     match host::hex_decode_to_string(&text) {
@@ -502,6 +515,8 @@ const PROLOGUE: &str = r#"
       }
       const args = { data: String(o.data), iv: String(o.iv), key: String(o.key) };
       if (o.aad != null) args.aad = String(o.aad);
+      // 明文是二进制时传 encoding: "bytes"，返回字节保留字符串（1 字符 = 1 字节）
+      if (o.encoding != null) args.encoding = String(o.encoding);
       return __rxText(__aesGcmDecrypt(JSON.stringify(args)));
     }
   };
@@ -950,6 +965,101 @@ mod tests {
         let value = result.value.unwrap_or(Value::Null);
         assert_eq!(value["md5"], json!("44a24962f6b0e616c0ed0fdf91b943cd"));
     }
+
+    /// 二进制字符串（1 字符 = 1 字节，含 0x80–0xff 与非法 UTF-8 序列）在**真实 JS 调用链**上
+    /// 必须逐字节保真：hexEncode / base64.encode / 摘要 / HMAC / AES-GCM 都不能把它当文本再编码，
+    /// 也不能替换成 U+FFFD。期望值由 Node crypto / Buffer 独立算出。
+    #[test]
+    fn crypto_util_keeps_binary_bytes_intact() {
+        let js = r#"
+        function searchBook() {
+          const out = {};
+          // 32 字节二进制密钥（base64.decode 的产物），0x00 / 0x7f / 0x80–0xff 都在里面
+          const key = base64.decode("gf+IAI9/lsOdKKSrsrnAx87V3OPq8fj+Bg0UGyIpMDc=");
+          out.keyLen = key.length;
+          out.keyHex = cryptoUtil.hexEncode(key);
+          // 32 字节密钥必须编出 64 个 hex 字符（曾因 from_utf8_lossy 变成 60/70 字符）
+          out.keyHexLen = out.keyHex.length;
+          out.keyB64 = base64.encode(key);
+          // base64.encode(base64.decode(x)) 必须回到 x
+          out.b64RoundTrip = base64.encode(base64.decode("gYiPkpSms7nAx87V3OPq8fj/Bg0UGyIpMDc+RUxTWg=="));
+          // hexDecode → hexEncode 必须回到原 hex
+          out.hexRoundTrip = cryptoUtil.hexEncode(cryptoUtil.hexDecode("80ff"));
+          // 摘要：二进制字节串参与运算，不是文本
+          out.sha256Key = cryptoUtil.sha256(key);
+          out.md5Key = cryptoUtil.md5(key);
+          out.sha256KeyB64 = cryptoUtil.sha256(key, "base64");
+          // HMAC：二进制密钥
+          out.hmac = cryptoUtil.hmac("sha256", key, "page=2");
+          // AES-256-GCM：二进制密钥 + 二进制明文（含 0xc3 0x28 这种非法 UTF-8 对）
+          const plain = String.fromCharCode(0x81, 0xc3, 0x28, 0x00, 0xff, 0x7f);
+          const cipher = cryptoUtil.aesGcmEncrypt({ data: plain, key: key, iv: "0".repeat(12), encoding: "hex" });
+          out.cipherHex = cipher.hex;
+          out.cipherB64 = cipher.base64;
+          out.cipherKeyHex = cipher.keyHex;
+          out.cipherTextLen = cipher.text.length;
+          // 明文是二进制：显式要求 bytes 形态才能逐字节还原
+          out.backBytes = cryptoUtil.hexEncode(
+            cryptoUtil.aesGcmDecrypt({ data: cipher.base64, iv: cipher.iv, key: key, encoding: "bytes" }));
+          out.backHexKey = cryptoUtil.hexEncode(
+            cryptoUtil.aesGcmDecrypt({ data: cipher.hex, iv: cipher.ivHex, key: cipher.keyHex, encoding: "bytes" }));
+          // 文本明文不受影响：默认按文本返回可读字符串
+          const tc = cryptoUtil.aesGcmEncrypt({ data: "hello 书源", key: key, iv: "0".repeat(12) });
+          out.textBack = cryptoUtil.aesGcmDecrypt({ data: tc.base64, iv: tc.iv, key: key });
+          return out;
+        }
+        "#;
+        let result = call_source_function("test-source", js, "searchBook", &json!([]), 5_000)
+            .expect("命令层不应返回 Err");
+        assert!(result.ok, "{:?}", result.error);
+        let value = result.value.unwrap_or(Value::Null);
+        let text = |key: &str| value[key].as_str().unwrap_or_default().to_string();
+
+        assert_eq!(value["keyLen"], json!(32));
+        // 32 字节密钥 → 64 个 hex 字符（回归：曾被 from_utf8_lossy 改写）
+        assert_eq!(value["keyHexLen"], json!(64));
+        assert_eq!(
+            text("keyHex"),
+            "81ff88008f7f96c39d28a4abb2b9c0c7ced5dce3eaf1f8fe060d141b22293037"
+        );
+        assert_eq!(
+            text("keyB64"),
+            "gf+IAI9/lsOdKKSrsrnAx87V3OPq8fj+Bg0UGyIpMDc="
+        );
+        assert_eq!(
+            text("b64RoundTrip"),
+            "gYiPkpSms7nAx87V3OPq8fj/Bg0UGyIpMDc+RUxTWg=="
+        );
+        assert_eq!(text("hexRoundTrip"), "80ff");
+        assert_eq!(
+            text("sha256Key"),
+            "5b363960de2f647c4c185ff95feb8a652e6e131ac2fbd5c9eda85859edd5d981"
+        );
+        assert_eq!(text("md5Key"), "9158d4811244cee87734527a861445c2");
+        assert_eq!(
+            text("sha256KeyB64"),
+            "WzY5YN4vZHxMGF/5X+uKZS5uExrC+9XJ7ahYWe3V2YE="
+        );
+        assert_eq!(
+            text("hmac"),
+            "a0df0c346e1f198965036a5f1f9d2fc5d4feb58440bac080260b4764b8ac8c1b"
+        );
+        assert_eq!(
+            text("cipherHex"),
+            "2bb3c6b7e121f7145f508107e79d099ed4c3a17ad78e"
+        );
+        assert_eq!(text("cipherB64"), "K7PGt+Eh9xRfUIEH550JntTDoXrXjg==");
+        assert_eq!(
+            text("cipherKeyHex"),
+            "81ff88008f7f96c39d28a4abb2b9c0c7ced5dce3eaf1f8fe060d141b22293037"
+        );
+        // 密文 6 字节 + 16 字节标签 = 22 字节
+        assert_eq!(value["cipherTextLen"], json!(22));
+        assert_eq!(text("backBytes"), "81c32800ff7f");
+        assert_eq!(text("backHexKey"), "81c32800ff7f");
+        assert_eq!(text("textBack"), "hello 书源");
+    }
+
     /// 死循环在**完整调用链**（glue → eval → 结算）上必须变成一条中文可读错误，
     /// 而不是一直转圈或只剩一句英文引擎报错。
     #[test]

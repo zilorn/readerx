@@ -163,11 +163,15 @@ const list = items.map((li) => ({
 里「1 个字符 = 1 个字节」（U+0000–U+00FF），可以直接当密钥 / 明文 / 密文再传回来，也可以拼进
 请求体。传进去的普通文本按 **UTF-8** 取字节（中文一个字 3 字节）。
 
+> 判断规则是**按字符**的：U+0000–U+00FF 的字符一律算作一个字节，其余字符按 UTF-8 展开。
+> 所以 `base64.decode("...")` 得到的 32 个字符永远是 32 字节，不会被当成 UTF-8 文本二次编码，
+> 也不会因为含 0x80–0xff 而被替换成 `U+FFFD`。
+
 ### `base64`
 
 | 成员 | 说明 |
 | --- | --- |
-| `base64.encode(s)` | → base64 文本 |
+| `base64.encode(s)` | → base64 文本；`s` 是字节保留字符串时按同一规则还原字节，`base64.encode(base64.decode(x)) === x` |
 | `base64.decode(s)` | → 字节保留字符串；容忍 URL-safe（`-_`）、省略的 `=` 与空白，非法输入抛错 |
 
 ### 摘要
@@ -181,24 +185,33 @@ const list = items.map((li) => ({
 `encoding` 取 `"hex"`（默认）/ `"base64"`。三个摘要都接受字节保留字符串，所以
 `cryptoUtil.sha256(base64.decode(resp.data))` 签的是**原始字节**，不会被再编码一次。
 
+```js
+// 响应里的二进制（data 是 base64 文本）直接签名
+const sign = cryptoUtil.sha256(base64.decode(resp.data) + "&appkey=xxx");
+```
+
 ### HMAC
 
 | 成员 | 说明 |
 | --- | --- |
 | `cryptoUtil.hmac(algorithm, key, data, encoding?)` | `algorithm` 取 `md5` / `sha1` / `sha256`（写法随意：`HMAC-SHA256`、`sha-256` 都认），返回小写 hex 或 base64 |
 
-`key` 按 UTF-8 文本取字节，长度不限（RFC 2104）。
+`key` 与 `data` 都按**字节保留字符串**取字节（与摘要同一套规则），长度不限（RFC 2104）；
+`base64.decode` / `hexDecode` 出来的字节串可以直接当密钥。
 
 ```js
 const sign = cryptoUtil.hmac("sha256", "secret", "page=2&q=" + keyword);
+const sign2 = cryptoUtil.hmac("sha256", base64.decode(secretKey), body);
 ```
 
 ### 十六进制
 
 | 成员 | 说明 |
 | --- | --- |
-| `cryptoUtil.hexEncode(s)` | 字节保留字符串 → 小写 hex（别名 `toHex`） |
+| `cryptoUtil.hexEncode(s)` | 字节保留字符串 → 小写 hex（别名 `toHex`）；32 字节密钥 → 64 个字符 |
 | `cryptoUtil.hexDecode(s)` | hex → 字节保留字符串（别名 `fromHex`）；容忍空白 / 冒号分隔 / 大写 / `0x` 前缀，非法输入抛错 |
+
+`hexEncode(hexDecode(x)) === x` 对任意字节成立。
 
 ### AES-256-GCM
 
@@ -211,7 +224,7 @@ const sign = cryptoUtil.hmac("sha256", "secret", "page=2&q=" + keyword);
 
 ```js
 {
-  data: "明文",            // 必填
+  data: "明文",            // 必填；字节保留字符串则按字节加密（见开头「字节保留字符串」）
   key:  "32 字节密钥",      // 必填；见下方「密钥与 IV 的写法」
   iv:   "12 字节 IV",      // 选填；不给则随机生成（12 字节，每次调用都不同）
   aad:  "附加认证数据",      // 选填；给了就必须在解密时给同一份
@@ -219,9 +232,17 @@ const sign = cryptoUtil.hmac("sha256", "secret", "page=2&q=" + keyword);
 }
 ```
 
+`aesGcmDecrypt` 的 `opts` 与 `aesGcmEncrypt` 对称，另有：
+
+```js
+{
+  encoding: "text"         // 选填：text（默认，明文按 UTF-8 解码）| bytes（字节保留字符串）
+}
+```
+
 返回的 `iv` / `key` 是 **base64**、`ivHex` / `keyHex` 是 **hex**，`hex` / `base64` 是同一份密文
-（密文尾部已按 WebCrypto 约定接上 16 字节认证标签）的两种写法，`text` 是字节保留字符串。
-解密时 `{ data, iv, key }` 三者任选一种写法混搭都行——最省事的做法是原样回传：
+（密文尾部已按 WebCrypto 约定接上 16 字节认证标签）的两种写法，`text` 是**密文**的字节保留字符串
+（可直接拼进请求体）。解密时 `{ data, iv, key }` 三者任选一种写法混搭都行——最省事的做法是原样回传：
 
 ```js
 const key = "0123456789abcdef0123456789abcdef"; // 32 字节
@@ -235,20 +256,34 @@ const plain = cryptoUtil.aesGcmDecrypt({ data: resp.data, iv: resp.iv, key: key 
 const payload = JSON.parse(plain);
 ```
 
+明文是**二进制**（base64.decode 出来的字节）时，要显式声明 `encoding: "bytes"`，
+否则非法 UTF-8 字节会按 `text` 语义被替换成 `U+FFFD`：
+
+```js
+const cipher = cryptoUtil.aesGcmEncrypt({ data: base64.decode(raw), key: key });
+const raw2 = cryptoUtil.aesGcmDecrypt({
+  data: cipher.base64, iv: cipher.iv, key: key, encoding: "bytes"
+});
+if (cryptoUtil.hexEncode(raw2) !== cryptoUtil.hexEncode(base64.decode(raw))) throw new Error("不一致");
+```
+
 ### 密钥与 IV 的写法
 
 `key` 必须是 **32 字节**、`iv` 必须是 **12 字节**（AES-256-GCM）。三种写法都认，
-按「base64 → hex → UTF-8 字面量」的顺序取第一个刚好对上字节数的解释：
+按「base64 → hex → 字节保留字符串」的顺序取第一个刚好对上字节数的解释：
 
 | 写法 | 例子 |
 | --- | --- |
 | base64 | `cipher.key` / `base64.encode(密钥字节)` |
 | hex | `"0".repeat(64)`、`cipher.keyHex`；`cryptoUtil.hexDecode(...)` 转换出的字节串同样可以 |
-| UTF-8 字面量 | `"0123456789abcdef0123456789abcdef"`（正好 32 字符） |
+| 字节保留字符串 | `"0123456789abcdef0123456789abcdef"`（正好 32 字符）；`base64.decode` / `hexDecode` 出来的二进制密钥也走这一档 |
 
 长度对不上会**直接抛错**并列出各解释解出的字节数，不做静默填充或截断——把口令当密钥用，
 或者想把 32 字符的 hex 串当密钥，都会是另一把密钥而不是「差不多能用」。真要按 hex 用，
 先 `cryptoUtil.hexDecode(...)` 转出来再把结果传进去（或直接用 64 字符的写法）。
+
+> 「字节保留字符串」这一档按**字符数**取字节（U+0000–U+00FF 一个字符 = 一个字节），
+> 所以 32 字节的二进制密钥直接 `aesGcmEncrypt({ key: binaryKey })` 就能用。
 
 ## `console`
 
