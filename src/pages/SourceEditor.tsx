@@ -213,11 +213,16 @@ export default function SourceEditorPage() {
     const r = await loginSourceWebview(draft().id, url);
     setLoginBusy(false);
     if (r.ok) {
-      showToast(
-        r.count > 0
-          ? `已捕获 ${r.count} 个 Cookie 并保存到该书源`
-          : "登录完成，但没有捕获到 Cookie",
-      );
+      // 登录成功但后端带了提示（如 Cookie 持久化失败）时按警告展示
+      if (r.message) {
+        showToast(r.message, true);
+      } else {
+        showToast(
+          r.count > 0
+            ? `已捕获 ${r.count} 个 Cookie 并保存到该书源`
+            : "登录完成，但没有捕获到 Cookie",
+        );
+      }
     } else if (r.message.includes("取消") || r.message.includes("超时") || r.message.includes("关闭")) {
       showToast(r.message || "已取消登录");
     } else {

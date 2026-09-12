@@ -10,6 +10,7 @@
 
 use crate::host;
 use crate::models::{BookItem, ChapterContentResult, ChapterItem, SourceCallResult};
+use crate::panic_guard;
 use boa_engine::{Context, JsResult, JsString, JsValue, NativeFunction, Source};
 use serde_json::{json, Value};
 use std::cell::RefCell;
@@ -22,6 +23,11 @@ use std::time::{Duration, Instant};
 pub(crate) const DEFAULT_CALL_BUDGET_MS: u64 = 45_000;
 /// 单章正文默认预算（毫秒）
 pub(crate) const DEFAULT_CHAPTER_BUDGET_MS: u64 = 30_000;
+/// 单个函数帧允许的最大循环次数（死循环兜底）：
+/// 书源 JS 里出现 `while (true) {}` 时 Boa 会一直跑，`context.eval` 永不返回——
+/// 超时预算形同虚设、引擎线程被永久占住、界面一直转圈。设上限后 Boa 抛出
+/// RuntimeLimitError，由 [`engine_error_message`] 转成用户可读的中文原因。
+const JS_LOOP_ITERATION_LIMIT: u64 = 100_000_000;
 
 /// JS 宿主能力可调用白名单（即书源入口函数集合）
 pub(crate) const ENTRY_FUNCTIONS: &[&str] = &[
@@ -52,9 +58,46 @@ impl CallCtx {
             logs: RefCell::new(Vec::new()),
         }
     }
+
+    /// 结算一次调用。这些槽位由书源 JS 反复触发，全部走 `try_borrow_mut`：
+    /// 极端重入下宁可丢弃一次写入，也不能因借用冲突 panic 打断整条调用链。
+    fn settle(&self, result: Result<String, String>) {
+        if let Ok(mut slot) = self.settled.try_borrow_mut() {
+            *slot = Some(result);
+        }
+    }
+
+    fn take_settled(&self) -> Option<Result<String, String>> {
+        self.settled
+            .try_borrow_mut()
+            .ok()
+            .and_then(|mut slot| slot.take())
+    }
+
+    fn push_log(&self, line: String) {
+        if let Ok(mut logs) = self.logs.try_borrow_mut() {
+            if logs.len() >= 200 {
+                let remove = logs.len() - 180;
+                logs.drain(0..remove);
+            }
+            logs.push(line);
+        }
+    }
+
+    fn logs_snapshot(&self) -> Vec<String> {
+        self.logs
+            .try_borrow()
+            .map(|logs| logs.clone())
+            .unwrap_or_default()
+    }
+
     fn reset(&self) {
-        *self.settled.borrow_mut() = None;
-        self.logs.borrow_mut().clear();
+        if let Ok(mut slot) = self.settled.try_borrow_mut() {
+            *slot = None;
+        }
+        if let Ok(mut logs) = self.logs.try_borrow_mut() {
+            logs.clear();
+        }
     }
 }
 
@@ -62,11 +105,26 @@ thread_local! {
     static CALL: RefCell<Option<Rc<CallCtx>>> = const { RefCell::new(None) };
 }
 
+/// 在当前线程安装调用上下文（引擎线程启动时调用一次）。
+fn install_call_ctx(source_id: &str) {
+    CALL.with(|cell| {
+        if let Ok(mut slot) = cell.try_borrow_mut() {
+            *slot = Some(Rc::new(CallCtx::new(source_id.to_string())));
+        }
+    });
+}
+
 fn with_call<F, T>(f: F) -> Option<T>
 where
     F: FnOnce(&CallCtx) -> T,
 {
-    CALL.with(|cell| cell.borrow().as_ref().map(|ctx| f(ctx)))
+    CALL.with(|cell| {
+        // 先取出 Rc 再释放线程局域借用，f 内部再取上下文也不会冲突
+        let guard = cell.try_borrow().ok()?;
+        let ctx = guard.as_ref()?.clone();
+        drop(guard);
+        Some(f(&ctx))
+    })
 }
 
 /// 原生函数通用参数转字符串
@@ -86,13 +144,13 @@ fn ret_string(s: String) -> JsResult<JsValue> {
 
 fn nv_settle(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let text = args.first().map(|a| arg_string(a, context)).unwrap_or_default();
-    with_call(|c| *c.settled.borrow_mut() = Some(Ok(text)));
+    with_call(|c| c.settle(Ok(text)));
     Ok(JsValue::undefined())
 }
 
 fn nv_settle_err(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let text = args.first().map(|a| arg_string(a, context)).unwrap_or_default();
-    with_call(|c| *c.settled.borrow_mut() = Some(Err(text)));
+    with_call(|c| c.settle(Err(text)));
     Ok(JsValue::undefined())
 }
 
@@ -102,14 +160,7 @@ fn nv_log(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsVa
         parts.push(arg_string(arg, context));
     }
     let line = parts.join(" ");
-    with_call(|c| {
-        let mut logs = c.logs.borrow_mut();
-        if logs.len() >= 200 {
-            let remove = logs.len() - 180;
-            logs.drain(0..remove);
-        }
-        logs.push(line);
-    });
+    with_call(|c| c.push_log(line));
     Ok(JsValue::undefined())
 }
 
@@ -313,6 +364,10 @@ const PROLOGUE: &str = r#"
 
 fn build_context(js: &str) -> Result<Context, String> {
     let mut context = Context::default();
+    // 死循环兜底（见 JS_LOOP_ITERATION_LIMIT 注释）
+    context
+        .runtime_limits_mut()
+        .set_loop_iteration_limit(JS_LOOP_ITERATION_LIMIT);
     for (name, length, func) in native_registry() {
         context
             .register_global_builtin_callable(JsString::from(name), length, func)
@@ -323,7 +378,7 @@ fn build_context(js: &str) -> Result<Context, String> {
         .map_err(|e| format!("宿主初始化失败: {e}"))?;
     context
         .eval(Source::from_bytes(js.as_bytes()))
-        .map_err(|e| format!("书源代码解析失败: {e}"))?;
+        .map_err(|e| engine_error_message("解析书源代码", &e))?;
     Ok(context)
 }
 
@@ -334,6 +389,23 @@ fn valid_identifier(name: &str) -> bool {
         _ => return false,
     }
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+}
+
+/// 识别 Boa 的「运行时限制」异常（死循环 / 无限递归 / 栈超限），换成用户看得懂的中文原因；
+/// 其它引擎异常原样保留（含调用栈），便于书源作者排查。
+fn engine_error_message(what: &str, error: &boa_engine::JsError) -> String {
+    let text = error.to_string();
+    if text.contains("RuntimeLimitError") {
+        let reason = if text.contains("iteration loops") {
+            "循环次数超出上限（书源代码可能存在死循环）"
+        } else if text.contains("recursive calls") {
+            "递归过深（书源代码可能存在无限递归）"
+        } else {
+            "执行栈超出上限"
+        };
+        return format!("{what}被中断：{reason}");
+    }
+    format!("{what}时引擎异常: {text}")
 }
 
 /// 在同一 Context 中执行一次入口调用。
@@ -359,14 +431,14 @@ fn try_call(
     );
     context
         .eval(Source::from_bytes(glue.as_bytes()))
-        .map_err(|e| format!("调用「{fn_name}」失败: {e}"))?;
+        .map_err(|e| engine_error_message(&format!("调用「{fn_name}」"), &e))?;
 
     let deadline = Instant::now() + budget;
     loop {
         context
             .run_jobs()
-            .map_err(|e| format!("执行「{fn_name}」时引擎异常: {e}"))?;
-        let taken = with_call(|c| c.settled.borrow_mut().take()).flatten();
+            .map_err(|e| engine_error_message(&format!("执行「{fn_name}」"), &e))?;
+        let taken = with_call(|c| c.take_settled()).flatten();
         if let Some(result) = taken {
             return result;
         }
@@ -438,24 +510,38 @@ pub(crate) fn call_source_function(
 
     let handle = std::thread::Builder::new()
         .name(format!("booksource-{fn_tag}"))
-        .spawn(move || -> Result<SourceCallResult, String> {
-            CALL.with(|cell| {
-                *cell.borrow_mut() = Some(Rc::new(CallCtx::new(source_id.clone())));
+        .spawn(move || -> SourceCallResult {
+            // 整段引擎执行（Boa + 书源 JS）都放在 panic 兜底里：任何意外的 panic
+            // 都退化成本次调用失败 + 可读原因，而不是把应用直接带走。
+            let run = panic_guard::catch("书源引擎", || -> SourceCallResult {
+                install_call_ctx(&source_id);
+                // 解析/初始化失败也作为“失败结果”返回，方便命令层展示可读错误
+                let outcome = (|| -> Result<Value, String> {
+                    let mut context = build_context(&js)?;
+                    let budget = Duration::from_millis(budget_ms.max(1_000));
+                    settle_value(&mut context, &fn_in_thread, &args_owned, budget)
+                })();
+                let logs = with_call(|c| c.logs_snapshot()).unwrap_or_default();
+                to_call_result(logs, started.elapsed(), outcome)
             });
-            // 解析/初始化失败也作为“失败结果”返回，方便命令层展示可读错误
-            let outcome = (|| -> Result<Value, String> {
-                let mut context = build_context(&js)?;
-                let budget = Duration::from_millis(budget_ms.max(1_000));
-                settle_value(&mut context, &fn_in_thread, &args_owned, budget)
-            })();
-            let logs = with_call(|c| c.logs.borrow().clone()).unwrap_or_default();
-            Ok(to_call_result(logs, started.elapsed(), outcome))
+            run.unwrap_or_else(|error| SourceCallResult {
+                ok: false,
+                value: None,
+                error: Some(error),
+                logs: Vec::new(),
+                elapsed_ms: started.elapsed().as_millis() as u64,
+            })
         })
         .map_err(|e| format!("无法创建书源引擎线程: {e}"))?;
 
-    handle
-        .join()
-        .map_err(|_| format!("书源函数「{fn_tag}」执行线程崩溃"))?
+    // 兜底：线程若在兜底之外异常结束，也返回结构化失败（不 panic、不丢错误原因）
+    Ok(handle.join().unwrap_or_else(|_| SourceCallResult {
+        ok: false,
+        value: None,
+        error: Some(format!("书源函数「{fn_tag}」执行线程异常退出")),
+        logs: Vec::new(),
+        elapsed_ms: started.elapsed().as_millis() as u64,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -480,6 +566,8 @@ pub(crate) fn fetch_chapter_contents(
     let next = Arc::new(AtomicUsize::new(0));
     let slots: Arc<Vec<Mutex<Option<ChapterContentResult>>>> =
         Arc::new((0..chapters.len()).map(|_| Mutex::new(None)).collect());
+    // worker 异常退出时记录原因：末尾给「没人领取 / 没写回」的章节一个可读解释
+    let panic_note: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
     let mut handles = Vec::new();
     for _ in 0..workers {
@@ -488,97 +576,212 @@ pub(crate) fn fetch_chapter_contents(
         let book = book.clone();
         let next = next.clone();
         let slots = slots.clone();
+        let panic_note = panic_note.clone();
         let chapters = chapters.to_vec();
         handles.push(
             std::thread::Builder::new()
                 .name("booksource-content".to_string())
-                .spawn(move || -> Result<(), String> {
-                    CALL.with(|cell| {
-                        *cell.borrow_mut() = Some(Rc::new(CallCtx::new(source_id.clone())));
-                    });
-                    let build = build_context(&js);
-                    if let Err(build_error) = build {
-                        // 解析失败：把本 worker 尚未领取的章节全部标记错误，避免静默缺失
+                .spawn(move || {
+                    // 每个 worker 的整段执行都做 panic 兜底：单个 worker 因意外异常
+                    // 退出时，未领取的章节仍会被其它 worker 处理，已取回的结果也不会丢。
+                    let outcome = panic_guard::catch_result("书源正文引擎", || -> Result<(), String> {
+                        install_call_ctx(&source_id);
+                        let mut context = match build_context(&js) {
+                            Ok(context) => context,
+                            Err(build_error) => {
+                                // 解析失败：把本 worker 尚未领取的章节全部标记错误，避免静默缺失
+                                loop {
+                                    let idx = next.fetch_add(1, Ordering::SeqCst);
+                                    if idx >= chapters.len() {
+                                        break;
+                                    }
+                                    if let Some(slot) = slots.get(idx) {
+                                        if let Ok(mut guard) = slot.lock() {
+                                            *guard = Some(ChapterContentResult {
+                                                ok: false,
+                                                chapter_name: chapters[idx].chapter_name.clone(),
+                                                text: String::new(),
+                                                error: build_error.clone(),
+                                            });
+                                        }
+                                    }
+                                }
+                                return Ok(());
+                            }
+                        };
+                        let budget = Duration::from_millis(budget_ms.max(1_000));
                         loop {
                             let idx = next.fetch_add(1, Ordering::SeqCst);
                             if idx >= chapters.len() {
                                 break;
                             }
+                            let chapter = &chapters[idx];
+                            // 用 to_value 而不是 json!：json! 对表达式内部会 unwrap，
+                            // 这里显式把编码失败变成该章的 error 文本
+                            let args = serde_json::to_value((chapter, &book))
+                                .map_err(|e| format!("参数编码失败: {e}"))?;
+                            let args_json =
+                                serde_json::to_string(&args).map_err(|e| format!("参数编码失败: {e}"))?;
+                            let outcome = try_call(&mut context, "bookContent", &args_json, budget);
+                            let result = match outcome {
+                                Ok(settled) => {
+                                    // 期望返回纯文本字符串
+                                    let value: Value =
+                                        serde_json::from_str(&settled).unwrap_or(Value::String(settled));
+                                    let text = match &value {
+                                        Value::String(s) => s.clone(),
+                                        Value::Null => String::new(),
+                                        _ => value.to_string(),
+                                    };
+                                    ChapterContentResult {
+                                        ok: true,
+                                        chapter_name: chapter.chapter_name.clone(),
+                                        text,
+                                        error: String::new(),
+                                    }
+                                }
+                                Err(error) => ChapterContentResult {
+                                    ok: false,
+                                    chapter_name: chapter.chapter_name.clone(),
+                                    text: String::new(),
+                                    error,
+                                },
+                            };
                             if let Some(slot) = slots.get(idx) {
                                 if let Ok(mut guard) = slot.lock() {
-                                    *guard = Some(ChapterContentResult {
-                                        ok: false,
-                                        chapter_name: chapters[idx].chapter_name.clone(),
-                                        text: String::new(),
-                                        error: build_error.clone(),
-                                    });
+                                    *guard = Some(result);
                                 }
                             }
                         }
-                        return Ok(());
-                    }
-                    let mut context = build.unwrap();
-                    let budget = Duration::from_millis(budget_ms.max(1_000));
-                    loop {
-                        let idx = next.fetch_add(1, Ordering::SeqCst);
-                        if idx >= chapters.len() {
-                            break;
-                        }
-                        let chapter = &chapters[idx];
-                        let args = json!([chapter, book]);
-                        let args_json = serde_json::to_string(&args).map_err(|e| format!("参数编码失败: {e}"))?;
-                        let outcome = try_call(&mut context, "bookContent", &args_json, budget);
-                        let result = match outcome {
-                            Ok(settled) => {
-                                // 期望返回纯文本字符串
-                                let value: Value =
-                                    serde_json::from_str(&settled).unwrap_or(Value::String(settled));
-                                let text = match &value {
-                                    Value::String(s) => s.clone(),
-                                    Value::Null => String::new(),
-                                    _ => value.to_string(),
-                                };
-                                ChapterContentResult {
-                                    ok: true,
-                                    chapter_name: chapter.chapter_name.clone(),
-                                    text,
-                                    error: String::new(),
-                                }
-                            }
-                            Err(error) => ChapterContentResult {
-                                ok: false,
-                                chapter_name: chapter.chapter_name.clone(),
-                                text: String::new(),
-                                error,
-                            },
-                        };
-                        if let Some(slot) = slots.get(idx) {
-                            if let Ok(mut guard) = slot.lock() {
-                                *guard = Some(result);
+                        Ok(())
+                    });
+                    if let Err(message) = outcome {
+                        if let Ok(mut note) = panic_note.lock() {
+                            if note.is_none() {
+                                *note = Some(message);
                             }
                         }
                     }
-                    Ok(())
                 })
                 .map_err(|e| format!("无法创建书源 worker 线程: {e}"))?,
         );
     }
 
     for handle in handles {
-        handle
-            .join()
-            .map_err(|_| "书源正文 worker 线程崩溃".to_string())??;
+        // worker 内部的异常已在各自入口收敛；这里 join 失败也不影响已取回的结果
+        let _ = handle.join();
     }
 
+    // 没有任何 worker 写回结果的章节：用实际原因（异常原因 / 通用兜底）说明
+    let fallback = panic_note
+        .lock()
+        .ok()
+        .and_then(|note| note.clone())
+        .unwrap_or_else(|| "该书源未返回本章内容".to_string());
     let mut results = Vec::with_capacity(chapters.len());
     for slot in slots.iter() {
         let guard = slot.lock().map_err(|_| "结果锁异常".to_string())?;
-        results.push(guard.clone().unwrap_or(ChapterContentResult {
+        results.push(guard.clone().unwrap_or_else(|| ChapterContentResult {
             ok: false,
             chapter_name: String::new(),
             text: String::new(),
-            error: "未知错误".to_string(),
+            error: fallback.clone(),
         }));
     }
     Ok(results)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 死循环兜底：Boa 的循环上限必须能把 `while (true) {}` 变成可捕获的错误，
+    /// 否则 `context.eval` 永不返回、引擎线程被永久占住（界面一直转圈）。
+    #[test]
+    fn loop_limit_stops_dead_loop() {
+        let mut context = Context::default();
+        context.runtime_limits_mut().set_loop_iteration_limit(10_000);
+        let result = context.eval(Source::from_bytes(b"while (true) {}"));
+        assert!(result.is_err(), "死循环必须被循环上限中断");
+    }
+
+    /// 无限递归兜底：Boa 默认递归上限把它变成错误（而非原生栈溢出）。
+    #[test]
+    fn recursion_limit_stops_runaway_recursion() {
+        let mut context = Context::default();
+        let result = context.eval(Source::from_bytes(b"function f() { return f(); } f();"));
+        assert!(result.is_err(), "无限递归必须被递归上限中断");
+    }
+
+    /// 书源 JS 抛出的异常要变成「本次调用失败 + 可读原因」，而不是进程级错误。
+    #[test]
+    fn source_exception_returns_failure_result() {
+        let js = "function searchBook() { throw new Error('站点改版了'); }";
+        let result = call_source_function("test-source", js, "searchBook", &json!([]), 5_000)
+            .expect("命令层不应返回 Err");
+        assert!(!result.ok);
+        assert!(result.error.unwrap_or_default().contains("站点改版了"));
+    }
+    /// 死循环在**完整调用链**（glue → eval → 结算）上必须变成一条中文可读错误，
+    /// 而不是一直转圈或只剩一句英文引擎报错。
+    #[test]
+    fn dead_loop_becomes_readable_error() {
+        let js = "function searchBook() { while (true) {} }";
+        let mut context = build_context(js).unwrap();
+        context.runtime_limits_mut().set_loop_iteration_limit(10_000);
+        let error = try_call(&mut context, "searchBook", "[]", Duration::from_secs(5))
+            .expect_err("死循环必须失败");
+        assert!(error.contains("循环次数超出上限"), "{error}");
+        assert!(error.contains("searchBook"), "{error}");
+    }
+
+    /// 无限递归同样要给中文原因（而不是英文 RuntimeLimitError 原文）。
+    #[test]
+    fn runaway_recursion_becomes_readable_error() {
+        let js = "function searchBook() { return searchBook(); }";
+        let error = call_source_function("test-source", js, "searchBook", &json!([]), 5_000)
+            .expect("命令层不应返回 Err")
+            .error
+            .unwrap_or_default();
+        assert!(error.contains("递归过深"), "{error}");
+    }
+
+    /// 批量拉正文：单章失败不拖垮整批，结果仍按章节下标一一对应。
+    #[test]
+    fn fetch_contents_keeps_per_chapter_results() {
+        let js = r#"
+        function bookContent(chapter, book) {
+          if (chapter.chapterName === "坏章") throw new Error("该章解析失败");
+          return "正文：" + chapter.chapterName + "@" + book.bookName;
+        }
+        "#;
+        let book: BookItem = serde_json::from_value(json!({
+            "bookName": "测试书",
+            "bookUrl": "https://example.com/book/1",
+        }))
+        .unwrap();
+        let chapters = vec![
+            ChapterItem {
+                chapter_name: "好章".to_string(),
+                chapter_url: "https://example.com/1".to_string(),
+            },
+            ChapterItem {
+                chapter_name: "坏章".to_string(),
+                chapter_url: "https://example.com/2".to_string(),
+            },
+            ChapterItem {
+                chapter_name: "好章2".to_string(),
+                chapter_url: "https://example.com/3".to_string(),
+            },
+        ];
+        let results = fetch_chapter_contents("test-source", js, &book, &chapters, 2, 5_000)
+            .expect("批量拉取本身不应返回 Err");
+        assert_eq!(results.len(), 3);
+        assert!(results[0].ok, "{:?}", results[0]);
+        assert_eq!(results[0].text, "正文：好章@测试书");
+        assert!(!results[1].ok);
+        assert!(results[1].error.contains("该章解析失败"));
+        assert!(results[2].ok);
+        assert_eq!(results[2].chapter_name, "好章2");
+    }
 }

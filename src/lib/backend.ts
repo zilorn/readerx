@@ -5,6 +5,7 @@
  */
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { bookToMeta, type BookMeta, type LocalBook, type LocalBookChapter } from "./booksTypes";
+import { reportFailure } from "./errorReport";
 import type {
   BookItem,
   BookSource,
@@ -31,12 +32,12 @@ export async function readState<T>(key: string): Promise<T | null> {
     const value = await invoke<T | null>("readerx_state_get", { key });
     return value ?? null;
   } catch (err) {
-    console.error(`[backend] 读取状态 ${key} 失败`, err);
+    reportFailure("读取本地设置失败", err);
     return null;
   }
 }
 
-/** 写入一条状态；Tauri 环境失败时降级为日志，不打断当前操作 */
+/** 写入一条状态；Tauri 环境失败时降级为内存值，但要让用户知道没存下来 */
 export async function writeState(key: string, value: unknown): Promise<void> {
   if (!tauri) {
     memoryState.set(key, value);
@@ -45,7 +46,7 @@ export async function writeState(key: string, value: unknown): Promise<void> {
   try {
     await invoke("readerx_state_set", { key, value });
   } catch (err) {
-    console.error(`[backend] 写入状态 ${key} 失败`, err);
+    reportFailure("保存本地设置失败", err);
   }
 }
 
@@ -57,7 +58,7 @@ export async function removeState(key: string): Promise<void> {
   try {
     await invoke("readerx_state_remove", { key });
   } catch (err) {
-    console.error(`[backend] 删除状态 ${key} 失败`, err);
+    reportFailure("清除本地设置失败", err);
   }
 }
 
@@ -77,7 +78,7 @@ export async function getRemoteBook(id: string): Promise<LocalBook | null> {
   try {
     return await invoke<LocalBook | null>("readerx_book_get", { id });
   } catch (err) {
-    console.error(`[backend] 读取书籍 ${id} 失败`, err);
+    reportFailure("读取书籍失败", err);
     return null;
   }
 }
@@ -184,7 +185,7 @@ export async function listRemoteSources(): Promise<BookSourceSummary[]> {
   try {
     return await invoke<BookSourceSummary[]>("readerx_sources_list");
   } catch (err) {
-    console.error("[backend] 读取书源列表失败", err);
+    reportFailure("读取书源列表失败", err);
     return [];
   }
 }
@@ -194,7 +195,7 @@ export async function getRemoteSource(id: string): Promise<BookSource | null> {
   try {
     return await invoke<BookSource | null>("readerx_source_get", { id });
   } catch (err) {
-    console.error(`[backend] 读取书源 ${id} 失败`, err);
+    reportFailure("读取书源失败", err);
     return null;
   }
 }
@@ -249,7 +250,7 @@ export async function fetchRemoteChapterContents(
       chapters,
     });
   } catch (err) {
-    console.error("[backend] 拉取正文失败", err);
+    reportFailure("拉取章节正文失败", err);
     return [];
   }
 }
@@ -344,7 +345,7 @@ export async function clearSourceLogin(sourceId: string): Promise<number> {
   try {
     return await invoke<number>("readerx_source_login_clear", { sourceId });
   } catch (err) {
-    console.error(`[backend] 清除书源 ${sourceId} 登录 Cookie 失败`, err);
+    reportFailure("清除登录状态失败", err);
     return 0;
   }
 }

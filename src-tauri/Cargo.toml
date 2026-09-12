@@ -46,7 +46,10 @@ sha1 = "0.10"
 codegen-units = 1
 lto = true
 opt-level = 3
-panic = "abort"
+# 用 unwind 而不是 abort：书源 JS（Boa 引擎）与第三方解析库内部的意外 panic 才能被
+# panic_guard 的 catch_unwind 收敛成一条可读错误返回前端；abort 会直接杀进程，
+# 用户只看到应用闪退、拿不到任何原因。（体积略增，换可诊断性）
+panic = "unwind"
 strip = true
 
 

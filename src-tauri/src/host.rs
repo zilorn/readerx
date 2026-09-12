@@ -253,8 +253,13 @@ fn append_query(url: &str, params: &Map<String, Value>) -> String {
 
 /// 按 Content-Type 里的 charset / 常见中文编码探测解码响应体
 fn decode_body(bytes: &[u8], content_type: &str) -> String {
-    if let Some(pos) = content_type.to_lowercase().find("charset=") {
-        let label = content_type[pos + 8..]
+    // 必须用 to_ascii_lowercase：它不改变字节长度，因此在小写串里找到的下标可以
+    // 安全地用于原串切片。若用 to_lowercase（会改变部分非 ASCII 字符的字节长度，
+    // 如 'İ' → "i̇"），按小写串下标切原串会越界 / 落在多字节字符中间而 panic ——
+    // Content-Type 完全由远端服务器控制，不能让响应头把应用打崩。
+    let lower = content_type.to_ascii_lowercase();
+    if let Some(pos) = lower.find("charset=") {
+        let label = lower[pos + 8..]
             .split(';')
             .next()
             .unwrap_or("")
@@ -267,14 +272,15 @@ fn decode_body(bytes: &[u8], content_type: &str) -> String {
             }
         }
     }
-    // BOM / 合法 UTF-8 优先，替代符过多时退回 GB18030（中文站点常见）
+    // 合法 UTF-8 优先，替代符过多时退回 GB18030（中文站点常见）
     let utf8 = String::from_utf8_lossy(bytes);
-    let replacement_ratio = utf8
-        .chars()
-        .filter(|c| *c == '\u{FFFD}')
-        .count()
-        .max(1) as f64
-        / utf8.chars().count().max(1) as f64;
+    let replacements = utf8.chars().filter(|c| *c == '\u{FFFD}').count();
+    if replacements == 0 {
+        // 整段就是合法 UTF-8（无缺省 charset 的 JSON / 小页面同样适用）：
+        // 旧实现分子固定 max(1)，短响应体会被误判成 GB18030 而整段乱码
+        return utf8.into_owned();
+    }
+    let replacement_ratio = replacements as f64 / utf8.chars().count().max(1) as f64;
     if replacement_ratio < 0.003 {
         return utf8.into_owned();
     }
@@ -303,11 +309,10 @@ fn do_http_request(source_id: &str, method: &str, raw_url: &str, opts: &str) -> 
     } else {
         &state.client
     };
-    let mut req = client.request(
-        reqwest::Method::from_bytes(method.as_bytes())
-            .map_err(|_| format!("不支持的请求方法: {method}"))?,
-        url,
-    );
+    // 方法只解析一次：解析失败返回可读错误（旧实现在组装 params 时二次解析并 unwrap）
+    let parsed_method = reqwest::Method::from_bytes(method.as_bytes())
+        .map_err(|_| format!("不支持的请求方法: {method}"))?;
+    let mut req = client.request(parsed_method.clone(), url);
 
     let mut header_lines = session_base_headers(&state);
 
@@ -324,7 +329,7 @@ fn do_http_request(source_id: &str, method: &str, raw_url: &str, opts: &str) -> 
     let mut body_bytes: Option<Vec<u8>> = None;
     if let Some(Value::Object(params)) = o.get("params") {
         let full = append_query(url, params);
-        req = client.request(reqwest::Method::from_bytes(method.as_bytes()).unwrap(), full);
+        req = client.request(parsed_method.clone(), full);
     }
     if let Some(Value::Object(form)) = o.get("form") {
         let mut parts = Vec::new();
@@ -869,24 +874,31 @@ fn entity_decode(input: &str) -> String {
     out
 }
 
-/// 把 HTML 片段清洗为纯文本（近似）：剔除 script/style/注释，块级与 <br> 换行，实体解码
+/// 把 HTML 片段清洗为纯文本（近似）：剔除 script/style/注释，块级与 <br> 换行，实体解码。
+/// 输入是远端页面内容（可能被任意构造），所有切片都走 `str::get`，越界只跳过不 panic。
 pub(crate) fn html_to_text(html: &str, sep: &str) -> String {
     let mut out = String::new();
     let bytes = html.as_bytes();
     let mut i = 0;
     let len = bytes.len();
     while i < len {
+        // 统一用 get 取剩余片段：任何下标异常都退化为「到此结束」，绝不 panic
+        let Some(rest) = html.get(i..) else {
+            break;
+        };
         match bytes[i] {
             b'<' => {
-                let close = html[i..].find('>').map(|p| i + p);
+                let close = rest.find('>').map(|p| i + p);
                 let Some(gt) = close else {
                     break;
                 };
-                let tag = &html[i + 1..gt];
+                let Some(tag) = html.get(i + 1..gt) else {
+                    break;
+                };
                 let lower = tag.trim_start().to_ascii_lowercase();
                 // 注释 / script / style 整体跳过
                 if lower.starts_with("!--") {
-                    let end = html[i..].find("-->").map(|p| i + p + 3);
+                    let end = rest.find("-->").map(|p| i + p + 3);
                     match end {
                         Some(e) => i = e,
                         None => break,
@@ -894,11 +906,12 @@ pub(crate) fn html_to_text(html: &str, sep: &str) -> String {
                     continue;
                 }
                 if lower.starts_with("script") || lower.starts_with("style") {
-                    let end = html[i..]
+                    let end = rest
                         .find(&format!("</{}", lower.split_whitespace().next().unwrap_or("")))
                         .map(|p| i + p)
                         .unwrap_or(len);
-                    i = end;
+                    // find 命中的位置恒 > i；这里再兜一层，保证循环一定前进
+                    i = if end > i { end } else { i + 1 };
                     continue;
                 }
                 let name = lower
@@ -920,9 +933,11 @@ pub(crate) fn html_to_text(html: &str, sep: &str) -> String {
             }
             _ => {
                 // 拷贝到下一个 '<' 或结尾
-                let next = html[i..].find('<').map(|p| i + p).unwrap_or(len);
-                out.push_str(&entity_decode(&html[i..next]));
-                i = next;
+                let next = rest.find('<').map(|p| i + p).unwrap_or(len);
+                if let Some(chunk) = html.get(i..next) {
+                    out.push_str(&entity_decode(chunk));
+                }
+                i = if next > i { next } else { i + 1 };
             }
         }
     }
@@ -1195,5 +1210,40 @@ mod tests {
         assert_eq!(origin_of("http://b.example.net:8080/x").unwrap(), "http://b.example.net:8080");
         assert_eq!(origin_of("https://c.example.org"), Some("https://c.example.org".into()));
         assert_eq!(origin_of("javascript:void(0)"), None);
+    }
+
+    #[test]
+    fn decode_body_reads_charset_and_never_panics() {
+        // 常规 charset 生效（GBK「中文」）
+        assert_eq!(decode_body(&[0xD6, 0xD0, 0xCE, 0xC4], "text/html; charset=gbk"), "中文");
+        // 旧实现用 to_lowercase 的下标切原串：'İ' 小写化后多一个字节，下标越界 panic
+        assert_eq!(decode_body("正文".as_bytes(), "İcharset="), "正文");
+        // 没有 charset / 空 header 也不能出错
+        assert_eq!(decode_body("正文".as_bytes(), ""), "正文");
+        assert_eq!(decode_body("正文".as_bytes(), "charset="), "正文");
+    }
+
+    #[test]
+    fn decode_body_prefers_valid_utf8_without_charset() {
+        // 短响应体（无 charset 的 JSON / 小页面）必须按 UTF-8 解，而不是退回 GB18030 变乱码
+        let json = r#"{"bookName":"斗破苍穹"}"#;
+        assert_eq!(decode_body(json.as_bytes(), "application/json"), json);
+        // 真正的 GBK 字节（非法 UTF-8）仍应走 GB18030 兜底
+        assert_eq!(decode_body(&[0xD6, 0xD0, 0xCE, 0xC4], "text/html"), "中文");
+    }
+
+    #[test]
+    fn html_to_text_survives_broken_markup() {
+        // 残缺 / 恶意构造的 HTML 只应退化输出，绝不 panic（旧实现的切片理论上可越界）
+        assert_eq!(html_to_text("<p>正文", "\n"), "正文");
+        assert_eq!(html_to_text("裸文本", "\n"), "裸文本");
+        assert_eq!(html_to_text("<div>中文<未闭合", "\n"), "中文");
+        assert_eq!(html_to_text("<!-- 未闭合注释", "\n"), "");
+        assert_eq!(html_to_text("<script>var a = 1;", "\n"), "");
+        assert_eq!(html_to_text("<", "\n"), "");
+        assert_eq!(html_to_text("<>", "\n"), "");
+        assert_eq!(html_to_text("", "\n"), "");
+        assert_eq!(html_to_text("a &amp; b", ""), "a & b");
+        assert_eq!(html_to_text("<p>中文</p><p>正文</p>", "\n").trim(), "中文\n正文");
     }
 }

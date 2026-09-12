@@ -40,7 +40,7 @@ const AppShell: Component<RouteSectionProps> = (props) => {
               "bg-text text-bg": !toast().error,
               "bg-danger text-white": toast().error,
             }}
-            role="status"
+            role={toast().error ? "alert" : "status"}
           >
             {toast().text}
           </div>

@@ -29,6 +29,7 @@ import {
   type HttpTtsMethod,
 } from "./ttsSettings";
 import { readTtsAudioCache, writeTtsAudioCache } from "./audioCache";
+import { describeError } from "./errorReport";
 
 const MARKER = /\{\$TEXT(?:\?\s*URLencoding=(\d+))?\}/g;
 const RATE_MARKER = /\{\$RATE(?:\?\s*URLencoding=(\d+))?\}/g;
@@ -69,11 +70,6 @@ function applyPlaceholders(template: string, text: string, rate: number): string
     return encodeText(String(rate), times);
   });
   return out;
-}
-
-function describeError(err: unknown): string {
-  if (err instanceof Error) return err.message || "未知错误";
-  return String(err);
 }
 
 /** POST body 的内容类型：JSON 模板与表单模板都能工作 */

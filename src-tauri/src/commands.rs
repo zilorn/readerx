@@ -1,5 +1,9 @@
 //! 供 WebView 调用的 Tauri command 处理器。
 //! 仅负责承接 invoke 参数、把同步 I/O 放到 blocking 线程池，不直接触碰磁盘。
+//!
+//! 所有命令统一走 [`blocking`]：既保证磁盘 / 网络 / 书源引擎跑在 blocking 线程池
+//! （不阻塞 IPC 事件循环），又把内部 panic 收敛成前端可读的错误字符串 —— 任何一处
+//! 意外异常只让这次调用失败，用户能看到原因，而不是应用直接闪退。
 
 use crate::engine;
 use crate::host;
@@ -7,6 +11,7 @@ use crate::models::{
     BookChapterPatch, BookItem, BookMeta, BookSource, BookSourceSummary, ChapterContentResult,
     ChapterItem, CachedAudio, FetchedImage, LocalBook, SourceCallResult, TtsCacheStat,
 };
+use crate::panic_guard;
 use crate::storage;
 use crate::webview_login;
 use base64::engine::general_purpose::STANDARD as B64;
@@ -17,32 +22,38 @@ use tauri::Manager;
 use tauri_plugin_fs::FsExt;
 use tauri_plugin_webview_login::LoginOutcome;
 
+/// 统一的 blocking 任务入口。
+///
+/// `what` 同时用于错误前缀（与历史文案保持一致）与 panic 兜底文案；
+/// 工作线程内的 panic 会被转成 `"{what}内部异常: …"` 由前端展示。
+async fn blocking<F, T>(what: &'static str, task: F) -> Result<T, String>
+where
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+    T: Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(move || panic_guard::catch_result(what, task))
+        .await
+        .map_err(|e| format!("{what}任务失败: {e}"))?
+}
+
 #[tauri::command]
 pub async fn readerx_state_get(app: AppHandle, key: String) -> Result<Option<Value>, String> {
-    tauri::async_runtime::spawn_blocking(move || storage::read_state(&app, &key))
-        .await
-        .map_err(|e| format!("状态读取任务失败: {e}"))?
+    blocking("状态读取", move || storage::read_state(&app, &key)).await
 }
 
 #[tauri::command]
 pub async fn readerx_state_set(app: AppHandle, key: String, value: Value) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || storage::write_state(&app, &key, &value))
-        .await
-        .map_err(|e| format!("状态写入任务失败: {e}"))?
+    blocking("状态写入", move || storage::write_state(&app, &key, &value)).await
 }
 
 #[tauri::command]
 pub async fn readerx_state_remove(app: AppHandle, key: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || storage::remove_state(&app, &key))
-        .await
-        .map_err(|e| format!("状态删除任务失败: {e}"))?
+    blocking("状态删除", move || storage::remove_state(&app, &key)).await
 }
 
 #[tauri::command]
 pub async fn readerx_book_put(app: AppHandle, book: LocalBook) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || storage::put_book(&app, &book))
-        .await
-        .map_err(|e| format!("书籍写入任务失败: {e}"))?
+    blocking("书籍写入", move || storage::put_book(&app, &book)).await
 }
 
 /// 只回写一本书的若干章节（在线书逐批下载正文用）：整本 JSON 仍在 Rust 侧读写，
@@ -53,26 +64,23 @@ pub async fn readerx_book_chapters_put(
     book_id: String,
     updates: Vec<BookChapterPatch>,
 ) -> Result<(), String> {
-    spawn_blocking(move || storage::put_book_chapters(&app, &book_id, &updates))
-        .await
-        .map_err(|e| format!("章节写入任务失败: {e}"))?
+    blocking("章节写入", move || {
+        storage::put_book_chapters(&app, &book_id, &updates)
+    })
+    .await
 }
 
 /// 书库元数据列表（章节仅留标题/字数，不含正文）。
 /// 应用启动 / 书架渲染只调用它——正文经 readerx_book_get 按需单本拉取。
 #[tauri::command]
 pub async fn readerx_book_list_meta(app: AppHandle) -> Result<Vec<BookMeta>, String> {
-    tauri::async_runtime::spawn_blocking(move || storage::list_book_meta(&app))
-        .await
-        .map_err(|e| format!("书库元数据读取任务失败: {e}"))?
+    blocking("书库元数据读取", move || storage::list_book_meta(&app)).await
 }
 
 /// 读取单本书全文（阅读页打开时按需调用）；文件不存在返回 null。
 #[tauri::command]
 pub async fn readerx_book_get(app: AppHandle, id: String) -> Result<Option<LocalBook>, String> {
-    tauri::async_runtime::spawn_blocking(move || storage::get_book(&app, &id))
-        .await
-        .map_err(|e| format!("书籍读取任务失败: {e}"))?
+    blocking("书籍读取", move || storage::get_book(&app, &id)).await
 }
 
 /// 单本元信息补丁（分组 / 书名 / 封面 / 标签…）：正文整体留在磁盘，不整本传回 WebView。
@@ -82,16 +90,15 @@ pub async fn readerx_book_patch_meta(
     id: String,
     patch: crate::models::BookMetaPatch,
 ) -> Result<(), String> {
-    spawn_blocking(move || storage::patch_book_meta(&app, &id, &patch))
-        .await
-        .map_err(|e| format!("书籍元信息写入任务失败: {e}"))?
+    blocking("书籍元信息写入", move || {
+        storage::patch_book_meta(&app, &id, &patch)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn readerx_book_delete(app: AppHandle, id: String) -> Result<(), String> {
-    spawn_blocking(move || storage::delete_book(&app, &id))
-        .await
-        .map_err(|e| format!("书籍删除任务失败: {e}"))?
+    blocking("书籍删除", move || storage::delete_book(&app, &id)).await
 }
 
 #[tauri::command]
@@ -107,9 +114,10 @@ pub async fn readerx_tts_cache_put(
     let bytes = B64
         .decode(data)
         .map_err(|e| format!("音频缓存数据不是合法 base64: {e}"))?;
-    spawn_blocking(move || storage::put_tts_audio(&app, &book_id, &key, &mime, &bytes))
-        .await
-        .map_err(|e| format!("音频缓存写入任务失败: {e}"))?
+    blocking("音频缓存写入", move || {
+        storage::put_tts_audio(&app, &book_id, &key, &mime, &bytes)
+    })
+    .await
 }
 
 /// 读取一句缓存音频；未命中返回 null
@@ -119,30 +127,19 @@ pub async fn readerx_tts_cache_get(
     book_id: String,
     key: String,
 ) -> Result<Option<CachedAudio>, String> {
-    spawn_blocking(move || -> Result<Option<CachedAudio>, String> {
+    blocking("音频缓存读取", move || -> Result<Option<CachedAudio>, String> {
         Ok(storage::get_tts_audio(&app, &book_id, &key)?.map(|(mime, bytes)| CachedAudio {
             data: B64.encode(bytes),
             mime,
         }))
     })
     .await
-    .map_err(|e| format!("音频缓存读取任务失败: {e}"))?
-}
-
-async fn spawn_blocking<F, T>(f: F) -> Result<T, tauri::Error>
-where
-    F: FnOnce() -> T + Send + 'static,
-    T: Send + 'static,
-{
-    tauri::async_runtime::spawn_blocking(f).await
 }
 
 /// 各书籍的听书缓存统计（用于设置页展示与清理）
 #[tauri::command]
 pub async fn readerx_tts_cache_stats(app: AppHandle) -> Result<Vec<TtsCacheStat>, String> {
-    spawn_blocking(move || storage::list_tts_cache(&app))
-        .await
-        .map_err(|e| format!("听书缓存统计任务失败: {e}"))?
+    blocking("听书缓存统计", move || storage::list_tts_cache(&app)).await
 }
 
 /// 清除听书缓存；book_id 为 null 时清空全部书籍
@@ -151,16 +148,17 @@ pub async fn readerx_tts_cache_clear(
     app: AppHandle,
     book_id: Option<String>,
 ) -> Result<(), String> {
-    spawn_blocking(move || storage::clear_tts_cache(&app, book_id.as_deref()))
-        .await
-        .map_err(|e| format!("听书缓存清理任务失败: {e}"))?
+    blocking("听书缓存清理", move || {
+        storage::clear_tts_cache(&app, book_id.as_deref())
+    })
+    .await
 }
 
 /// 读取随应用打包的 LICENSE（配置在 bundle.resources，运行期位于 resource 目录）。
 /// Android 的 resource 目录是 APK asset（asset:// 前缀），统一走 fs 插件读取。
 #[tauri::command]
 pub async fn readerx_license_text(app: AppHandle) -> Result<String, String> {
-    spawn_blocking(move || -> Result<String, String> {
+    blocking("开源许可读取", move || -> Result<String, String> {
         let resource_dir = app
             .path()
             .resource_dir()
@@ -171,7 +169,6 @@ pub async fn readerx_license_text(app: AppHandle) -> Result<String, String> {
             .map_err(|e| format!("读取开源许可失败: {e}"))
     })
     .await
-    .map_err(|e| format!("开源许可读取任务失败: {e}"))?
 }
 
 #[tauri::command]
@@ -186,20 +183,17 @@ pub fn greet(name: &str) -> String {
 /// 列出全部书源（摘要，不含 js 正文）
 #[tauri::command]
 pub async fn readerx_sources_list(app: AppHandle) -> Result<Vec<BookSourceSummary>, String> {
-    spawn_blocking(move || {
+    blocking("书源列表读取", move || {
         let sources = storage::list_book_sources(&app)?;
         Ok(sources.into_iter().map(|s| s.to_summary()).collect::<Vec<_>>())
     })
     .await
-    .map_err(|e| format!("书源列表读取任务失败: {e}"))?
 }
 
 /// 读取单个书源（含 js，供编辑）
 #[tauri::command]
 pub async fn readerx_source_get(app: AppHandle, id: String) -> Result<Option<BookSource>, String> {
-    spawn_blocking(move || storage::get_book_source(&app, &id))
-        .await
-        .map_err(|e| format!("书源读取任务失败: {e}"))?
+    blocking("书源读取", move || storage::get_book_source(&app, &id)).await
 }
 
 fn validate_source(source: &BookSource) -> Result<(), String> {
@@ -224,20 +218,17 @@ fn validate_source(source: &BookSource) -> Result<(), String> {
 /// 新建 / 覆盖保存一个书源
 #[tauri::command]
 pub async fn readerx_source_put(app: AppHandle, source: BookSource) -> Result<(), String> {
-    spawn_blocking(move || {
+    blocking("书源写入", move || {
         validate_source(&source)?;
         storage::put_book_source(&app, &source)
     })
     .await
-    .map_err(|e| format!("书源写入任务失败: {e}"))?
 }
 
 /// 删除一个书源
 #[tauri::command]
 pub async fn readerx_source_delete(app: AppHandle, id: String) -> Result<(), String> {
-    spawn_blocking(move || storage::delete_book_source(&app, &id))
-        .await
-        .map_err(|e| format!("书源删除任务失败: {e}"))?
+    blocking("书源删除", move || storage::delete_book_source(&app, &id)).await
 }
 
 /// 入口函数 → 能力开关 映射（调用前校验对应能力已启用）
@@ -268,7 +259,7 @@ pub async fn readerx_source_call(
     fn_name: String,
     args: serde_json::Value,
 ) -> Result<SourceCallResult, String> {
-    spawn_blocking(move || -> Result<SourceCallResult, String> {
+    blocking("书源调用", move || -> Result<SourceCallResult, String> {
         let source = storage::get_book_source(&app, &source_id)?
             .ok_or_else(|| "书源不存在".to_string())?;
         if !source.enabled {
@@ -286,7 +277,6 @@ pub async fn readerx_source_call(
         engine::call_source_function(&source.id, &source.js, &fn_name, &args, budget)
     })
     .await
-    .map_err(|e| format!("书源调用任务失败: {e}"))?
 }
 
 /// 批量拉取正文（按用户“书源并发”设置控制单源内部并行请求数）
@@ -297,7 +287,7 @@ pub async fn readerx_source_fetch_contents(
     book: BookItem,
     chapters: Vec<ChapterItem>,
 ) -> Result<Vec<ChapterContentResult>, String> {
-    spawn_blocking(move || -> Result<Vec<ChapterContentResult>, String> {
+    blocking("书源正文拉取", move || -> Result<Vec<ChapterContentResult>, String> {
         let source = storage::get_book_source(&app, &source_id)?
             .ok_or_else(|| "书源不存在".to_string())?;
         if !source.enabled {
@@ -326,7 +316,6 @@ pub async fn readerx_source_fetch_contents(
         )
     })
     .await
-    .map_err(|e| format!("书源正文拉取任务失败: {e}"))?
 }
 
 /// 用书源会话下载一张图片（正文插图 / 整章图片 / 书源封面），返回 base64 与 MIME。
@@ -340,7 +329,7 @@ pub async fn readerx_source_fetch_image(
     url: String,
     referer: Option<String>,
 ) -> Result<FetchedImage, String> {
-    spawn_blocking(move || -> Result<FetchedImage, String> {
+    blocking("图片下载", move || -> Result<FetchedImage, String> {
         let source = storage::get_book_source(&app, &source_id)?
             .ok_or_else(|| "书源不存在".to_string())?;
         if !source.enabled {
@@ -349,11 +338,7 @@ pub async fn readerx_source_fetch_image(
         host::prepare_source(&source)?;
         // 重启后把该书源已保存的登录 Cookie 注入会话（进程内幂等）
         let _ = webview_login::seed_source_session(&app, &source.id);
-        match host::fetch_image_bytes(
-            &source.id,
-            &url,
-            referer.as_deref().unwrap_or(""),
-        ) {
+        match host::fetch_image_bytes(&source.id, &url, referer.as_deref().unwrap_or("")) {
             Ok((mime, bytes)) => Ok(FetchedImage {
                 ok: true,
                 mime,
@@ -369,7 +354,6 @@ pub async fn readerx_source_fetch_image(
         }
     })
     .await
-    .map_err(|e| format!("图片下载任务失败: {e}"))?
 }
 
 // ---------------------------------------------------------------------------
@@ -389,24 +373,27 @@ pub async fn readerx_source_login_webview(
     source_id: String,
     url: String,
 ) -> Result<LoginOutcome, String> {
-    spawn_blocking(move || {
+    blocking("网页登录", move || {
         let url = url.trim().to_string();
         if !(url.starts_with("http://") || url.starts_with("https://")) {
             return Err("仅支持 http/https 的登录地址".to_string());
         }
-        if source_id.is_empty() || source_id.chars().any(|c| !c.is_ascii_alphanumeric() && c != '-' && c != '_' && c != '.') {
+        if source_id.is_empty()
+            || source_id
+                .chars()
+                .any(|c| !c.is_ascii_alphanumeric() && c != '-' && c != '_' && c != '.')
+        {
             return Err("非法的书源 id".to_string());
         }
         webview_login::perform(&source_id, &url)
     })
     .await
-    .map_err(|e| format!("网页登录任务失败: {e}"))?
 }
 
 /// 清空某个书源已保存的网页登录 Cookie（持久化文件 + 当前会话），返回移除的行数。
 #[tauri::command]
 pub async fn readerx_source_login_clear(app: AppHandle, source_id: String) -> Result<u64, String> {
-    spawn_blocking(move || -> Result<u64, String> {
+    blocking("清除登录 Cookie", move || -> Result<u64, String> {
         let saved = storage::read_source_login_cookie(&app, &source_id)?;
         storage::remove_source_login_cookie(&app, &source_id)?;
         webview_login::unseed(&source_id);
@@ -417,5 +404,4 @@ pub async fn readerx_source_login_clear(app: AppHandle, source_id: String) -> Re
         Ok(removed)
     })
     .await
-    .map_err(|e| format!("清除登录 Cookie 任务失败: {e}"))?
 }

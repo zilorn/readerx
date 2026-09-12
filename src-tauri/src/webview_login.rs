@@ -31,7 +31,7 @@ fn seeded_slot() -> &'static Mutex<HashSet<String>> {
 /// app setup 时调用。桌面/iOS 下插件不可用，调用会返回可读错误，不影响其它功能。
 pub fn install(app: AppHandle) {
     let runner: Arc<LoginRunner> = Arc::new(move |source_id: &str, url: &str| {
-        let outcome = tauri_plugin_webview_login::open_login(url).unwrap_or_else(|err| {
+        let mut outcome = tauri_plugin_webview_login::open_login(url).unwrap_or_else(|err| {
             LoginOutcome {
                 ok: false,
                 url: url.to_string(),
@@ -56,7 +56,10 @@ pub fn install(app: AppHandle) {
                 if let Err(err) =
                     storage::write_source_login_cookie(&app, source_id, &outcome.url, &cookies)
                 {
+                    // 本次会话已注入 Cookie，但重启后会丢失：这是用户必须知道的事，
+                    // 写进 message 由界面提示（否则登录看起来正常、下次启动却掉登录态）
                     eprintln!("[webview-login] 持久化登录 Cookie 失败: {err}");
+                    outcome.message = format!("登录已完成，但 Cookie 保存失败（重启后需重新登录）：{err}");
                 }
                 // 立即写入会话（相同文本会被 http_set_cookie 去重跳过）
                 host::http_set_cookie(source_id, &cookies);
