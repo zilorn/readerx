@@ -8,6 +8,7 @@ import {
   type TtsCacheStat,
 } from "../lib/audioCache";
 import { ensureLocalBooksLoaded, bookMetaById } from "../lib/books";
+import { hanText } from "../lib/hanDisplay";
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -68,7 +69,7 @@ export default function TtsCachePage() {
       .finally(() => setCacheBusy(false));
   }
 
-  const bookTitle = (id: string) => bookMetaById(id)?.title || id;
+  const bookTitle = (id: string) => hanText(bookMetaById(id)?.title || id);
 
   return (
     <div class="page">

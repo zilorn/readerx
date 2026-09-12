@@ -19,6 +19,7 @@ import {
   type BookFormat,
   type BookMeta,
 } from "../lib/booksTypes";
+import { withHanMeta } from "../lib/hanDisplay";
 import { refreshOnlineBookInfo, onlineRunBusy } from "../lib/online";
 import { showToast } from "../lib/toast";
 import { groupName } from "../lib/groups";
@@ -112,6 +113,8 @@ export default function BookDetailPage() {
 
   const bookId = () => params.id ?? "";
   const book = createMemo(() => bookMetaById(bookId()));
+  /** 展示用副本（简繁转换）；编辑抽屉与「重新拉取书籍信息」一律用原始记录，避免把转换结果写回书库 */
+  const displayBook = createMemo(() => withHanMeta(book()));
   const [editOpen, setEditOpen] = createSignal(false);
   /** 在线书：重新拉取简介 / 封面（书源 bookDetail）是否进行中 */
   const [refreshing, setRefreshing] = createSignal(false);
@@ -168,7 +171,10 @@ export default function BookDetailPage() {
     navigate(`/discover?q=${encodeURIComponent(tag)}`);
   }
 
-  const rows = createMemo(() => (book() ? bookMetaRows(book()!) : []));
+  const rows = createMemo(() => {
+    const current = displayBook();
+    return current ? bookMetaRows(current) : [];
+  });
 
   return (
     <div class="page">
@@ -228,10 +234,10 @@ export default function BookDetailPage() {
               </div>
               <div class="flex min-w-0 flex-1 flex-col justify-center gap-2">
                 <h2 class="break-words text-[18px] font-bold leading-snug">
-                  {book()!.title}
+                  {displayBook()!.title}
                 </h2>
                 <p class="break-words text-[13px] leading-snug text-text-3">
-                  {book()!.author || "佚名"}
+                  {displayBook()!.author || "佚名"}
                 </p>
                 <div class="mt-0.5 flex flex-wrap items-center gap-1.5">
                   <span class="rounded-full bg-accent-weak px-2 py-0.5 text-[11px] font-semibold text-accent">
@@ -250,7 +256,7 @@ export default function BookDetailPage() {
                 标签
               </h3>
               <Show
-                when={(book()!.tags?.length ?? 0) > 0}
+                when={(displayBook()!.tags?.length ?? 0) > 0}
                 fallback={
                   <div class="flex min-h-[44px] items-center justify-center rounded-[14px] border border-dashed border-border bg-surface px-4 text-center text-[12.5px] leading-[1.7] text-text-3">
                     暂无标签，点击右上角「编辑」添加
@@ -258,7 +264,10 @@ export default function BookDetailPage() {
                 }
               >
                 <div class="flex flex-wrap gap-1.5 pt-0.5">
-                  <TagChips tags={book()!.tags ?? []} onTagClick={onTagQuickSearch} />
+                  <TagChips
+                    tags={displayBook()!.tags ?? []}
+                    onTagClick={onTagQuickSearch}
+                  />
                 </div>
               </Show>
             </section>
@@ -269,7 +278,7 @@ export default function BookDetailPage() {
                 简介
               </h3>
               <Show
-                when={book()!.intro}
+                when={displayBook()!.intro}
                 fallback={
                   <div class="flex min-h-[72px] items-center justify-center rounded-[14px] border border-dashed border-border bg-surface px-4 text-center text-[12.5px] leading-[1.7] text-text-3">
                     暂无简介，点击右上角「编辑」补充
@@ -277,7 +286,7 @@ export default function BookDetailPage() {
                 }
               >
                 <p class="whitespace-pre-wrap break-words rounded-[14px] border border-border bg-surface px-3.5 py-3 text-[12.5px] leading-[1.75] text-text-2">
-                  {book()!.intro}
+                  {displayBook()!.intro}
                 </p>
               </Show>
             </section>

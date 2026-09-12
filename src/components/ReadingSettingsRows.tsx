@@ -1,8 +1,8 @@
 /**
- * 阅读设置行（正文字号 / 段落间距 / 翻页方式）：
+ * 阅读设置行（正文字号 / 段落间距 / 翻页方式 / 简繁转换）：
  * 由「设置」页的阅读区块与阅读器「阅读设置」面板共用，
  * 两处展示与改动只需维护这一份，避免重复操作。
- * 状态存于全局 store（src/lib/store.ts），改动实时联动阅读页排版。
+ * 状态存于全局 store（src/lib/store.ts）与 lib/hanConvert.ts，改动实时联动阅读页排版。
  */
 import {
   FONT_MAX,
@@ -18,10 +18,17 @@ import {
   setParaSpacing,
   type PageMode,
 } from "../lib/store";
+import { currentHanMode, setHanMode, type HanMode } from "../lib/hanConvert";
 
 const PAGE_MODE_OPTIONS: { value: PageMode; label: string }[] = [
   { value: "paged", label: "左右翻页" },
   { value: "scroll", label: "上下滚动" },
+];
+
+const HAN_MODE_OPTIONS: { value: HanMode; label: string }[] = [
+  { value: "off", label: "关闭" },
+  { value: "s2t", label: "简→繁" },
+  { value: "t2s", label: "繁→简" },
 ];
 
 /** 正文字号：A− / 数值 / A+ */
@@ -114,13 +121,46 @@ function PageModeRow() {
   );
 }
 
-/** 阅读设置三行（需放入带 divide-y 的卡片容器内使用） */
+/** 简繁转换：关闭 / 简→繁 / 繁→简（书名、简介、目录与正文一起转换） */
+function HanModeRow() {
+  return (
+    <div class="flex w-full cursor-default items-center gap-3 px-4 py-[13px] text-left">
+      <span class="flex min-w-0 flex-1 flex-col gap-0.5">
+        <span class="text-[14.5px] font-medium">简繁转换</span>
+        <span class="text-[11.5px] text-text-3">书名、简介、目录与正文</span>
+      </span>
+      <div
+        class="flex flex-none gap-0.5 rounded-[10px] bg-surface-2 p-[3px]"
+        role="radiogroup"
+        aria-label="简繁转换"
+      >
+        {HAN_MODE_OPTIONS.map((opt) => (
+          <button
+            role="radio"
+            aria-checked={currentHanMode() === opt.value}
+            class="inline-flex items-center whitespace-nowrap rounded-lg px-[9px] py-[7px] text-[12.5px] text-text-2 transition-all duration-150"
+            classList={{
+              "bg-surface font-semibold text-text shadow-sm shadow-black/15":
+                currentHanMode() === opt.value,
+            }}
+            onClick={() => setHanMode(opt.value)}
+          >
+            {opt.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** 阅读设置四行（需放入带 divide-y 的卡片容器内使用） */
 export function ReadingSettingsRows() {
   return (
     <>
       <FontSizeRow />
       <ParaSpacingRow />
       <PageModeRow />
+      <HanModeRow />
     </>
   );
 }

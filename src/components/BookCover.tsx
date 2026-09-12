@@ -1,5 +1,6 @@
 import { Show, createEffect, createMemo, createSignal } from "solid-js";
 import { bookMetaById } from "../lib/books";
+import { hanText } from "../lib/hanDisplay";
 
 type CoverVariant = "grid" | "thumb" | "row";
 
@@ -37,6 +38,9 @@ export function BookCover(props: BookCoverProps) {
   const hue = () => book()?.hue ?? 210;
   const background = () =>
     `linear-gradient(165deg, hsl(${hue()} 58% 52%), hsl(${(hue() + 24) % 360} 62% 34%))`;
+  // 兜底封面上的书名 / 作者走简繁转换显示副本（书库原文不变）
+  const title = () => hanText(book()?.title ?? "");
+  const author = () => hanText(book()?.author ?? "");
   const variantClass =
     variant === "grid"
       ? "w-full"
@@ -61,7 +65,7 @@ export function BookCover(props: BookCoverProps) {
       class={`${baseClass} ${variantClass} ${sheenClass()}`}
       style={{ background: background() }}
       role="img"
-      aria-label={props.label ?? `${book()?.title ?? "书籍"}封面`}
+      aria-label={props.label ?? `${title() || "书籍"}封面`}
     >
       <span class="absolute left-1.5 top-1.5 z-10 rounded-full bg-black/30 px-[5px] py-[2.5px] text-[9px] leading-none tracking-[0.08em]">
         {formatLabel()}
@@ -80,10 +84,10 @@ export function BookCover(props: BookCoverProps) {
           <span
             class="relative z-10 overflow-hidden text-center font-bold leading-none text-[12px] [text-shadow:0_2px_6px_rgb(0_0_0/0.2)] line-clamp-5"
           >
-            {book()?.title}
+            {title()}
           </span>
           <span class="relative z-10 max-w-[calc(100%-16px)] overflow-hidden text-ellipsis whitespace-nowrap text-[9.5px] leading-[1.2] text-white/85 tracking-[0.05em] line-clamp-1">
-            {book()?.author}
+            {author()}
           </span>
         </Show>
       </Show>

@@ -10,6 +10,7 @@ import { useNavigate } from "@solidjs/router";
 import { callRemoteSource } from "../lib/backend";
 import type { BookItem, ChapterItem } from "../lib/bookSourcesTypes";
 import { normalizeBookTags } from "../lib/booksTypes";
+import { hanText, hanTextList } from "../lib/hanDisplay";
 import { bookMetaList } from "../lib/books";
 import { addOnlineBookToShelf, fetchBookToc, mergeBookDetail, type PickedBook } from "../lib/online";
 import { showToast } from "../lib/toast";
@@ -164,6 +165,9 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
     return normalizeBookTags(info()?.tags);
   });
 
+  /** 展示用标签（简繁转换副本；书源 / 书架里的原始标签不变） */
+  const displayTags = createMemo(() => hanTextList(tags()) ?? []);
+
   /** 预览封面：已在书架的书直接用已落盘的封面缩略图；否则用书源搜索/详情返回的 cover */
   const coverSrc = createMemo(() => {
     const shelf = existingBook();
@@ -264,18 +268,18 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
                   sourceId={props.pick?.source.id ?? ""}
                   url={coverSrc()}
                   referer={info()?.bookUrl}
-                  title={info()?.bookName ?? ""}
+                  title={hanText(info()?.bookName ?? "")}
                 />
                 <div class="flex min-w-0 flex-1 flex-col justify-center gap-1">
                   <h2 class="text-[17px] font-bold leading-snug">
-                    {info()?.bookName ?? ""}
+                    {hanText(info()?.bookName ?? "")}
                   </h2>
                   <p class="truncate text-[12.5px] text-text-3">
-                    {info()?.author || "佚名"}
+                    {info()?.author ? hanText(info()!.author!) : "佚名"}
                   </p>
                   <Show when={info()?.latest}>
                     <p class="truncate text-[12px] text-accent">
-                      最新：{info()!.latest}
+                      最新：{hanText(info()!.latest!)}
                     </p>
                   </Show>
                   <Show when={info()?.updateTime}>
@@ -283,10 +287,10 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
                       更新：{info()!.updateTime}
                     </p>
                   </Show>
-                  <Show when={tags().length > 0}>
+                  <Show when={displayTags().length > 0}>
                     <div class="mt-0.5 flex flex-wrap gap-1.5">
                       <TagChips
-                        tags={tags()}
+                        tags={displayTags()}
                         onTagClick={
                           props.onTagSearch
                             ? (tag) => {
@@ -335,7 +339,7 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
                   }
                 >
                   <p class="whitespace-pre-wrap break-words rounded-[12px] border border-border bg-surface px-3.5 py-3 text-[12.5px] leading-[1.75] text-text-2">
-                    {info()!.intro}
+                    {hanText(info()!.intro!)}
                   </p>
                 </Show>
               </section>
@@ -396,7 +400,7 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
                             {index() + 1}
                           </span>
                           <span class="min-w-0 flex-1 truncate text-[12.5px] text-text">
-                            {ch.chapterName}
+                            {hanText(ch.chapterName)}
                           </span>
                         </div>
                       )}

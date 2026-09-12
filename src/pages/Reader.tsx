@@ -80,6 +80,7 @@ import {
   localBookById,
 } from "../lib/books";
 import { withDisplayReplacements } from "../lib/textReplacements";
+import { withHanBook } from "../lib/hanDisplay";
 import {
   BOOKMARK_MAX_LEN,
   addBookmark,
@@ -709,11 +710,13 @@ export default function ReaderPage() {
   /** 书架中的原书（对象身份只随书库内容更新变化） */
   const rawBook = createMemo(() => localBookById(bookId()));
   /**
-   * 实时显示用书：把「对本书生效」的文本替换规则应用到各章正文（仅影响阅读展示，
-   * 不改动书库原文；没有生效规则或文本无变化时与原书同一引用）。
-   * 目录、下载面板、全书搜索、听书引擎等需要整本书的地方读它。
+   * 实时显示用书：把「对本书生效」的文本替换规则应用到各章正文，再按用户的简繁转换
+   * 偏好产出显示副本（都只影响阅读展示，不改动书库原文；没有生效规则 / 未开启转换、
+   * 或文本无变化时与原书同一引用）。
+   * 目录、下载面板、全书搜索、听书引擎等需要整本书的地方读它；
+   * 章节正文是惰性转换的（读到哪一章才转哪一章），打开大书不会先卡一下。
    */
-  const book = createMemo(() => withDisplayReplacements(rawBook(), bookId()));
+  const book = createMemo(() => withHanBook(withDisplayReplacements(rawBook(), bookId())));
   const [chapterIdx, setChapterIdx] = createSignal(0);
   const [pageIdx, setPageIdx] = createSignal(0);
   const [menuOpen, setMenuOpen] = createSignal(false);
@@ -753,11 +756,11 @@ export default function ReaderPage() {
     return full;
   });
 
-  /** 渲染用书：文本替换只对窗口视图跑一遍 —— 窗口外的正文回写既不重算替换、也不惊动渲染 */
+  /** 渲染用书：文本替换与简繁转换只对窗口视图跑一遍 —— 窗口外的正文回写既不重算、也不惊动渲染 */
   const renderBook = createMemo<LocalBook | null>(() => {
     const windowed = windowBook();
     if (!windowed) return null;
-    return withDisplayReplacements(windowed, bookId()) ?? null;
+    return withHanBook(withDisplayReplacements(windowed, bookId())) ?? null;
   });
 
   // 精确恢复目标：打开书时按存档的“章节 cid + 文本偏移”置位，就绪后跳到该处一次

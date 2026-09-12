@@ -11,6 +11,7 @@ import {
 } from "../lib/books";
 import type { BookMeta } from "../lib/booksTypes";
 import { fuzzyScore } from "../lib/fuzzy";
+import { hanText } from "../lib/hanDisplay";
 import { groupName, isHiddenGroupId } from "../lib/groups";
 import { metaCardStatus } from "../lib/progress";
 import { shelfOrder, type ShelfEntry } from "../lib/store";
@@ -32,7 +33,11 @@ interface ScoredItem {
   quality: number;
 }
 
-/** 对一本在架书打分：取命中字段中优先级最高且质量最高的一条 */
+/**
+ * 对一本在架书打分：取命中字段中优先级最高且质量最高的一条。
+ * 书名 / 作者按「原文 + 简繁转换副本」两个形态各匹配一次：
+ * 开启转换后界面显示转换后的字形，用户无论按哪种字形输入都能搜到。
+ */
 function scoreItem(rawQuery: string, item: ShelfItem): ScoredItem | null {
   const book = item.book;
   const candidates: FieldCandidate[] = [
@@ -41,6 +46,10 @@ function scoreItem(rawQuery: string, item: ShelfItem): ScoredItem | null {
     { field: 2, text: book.fileName },
     { field: 3, text: groupName(book.groupId) },
   ];
+  const titleHan = hanText(book.title);
+  const authorHan = hanText(book.author);
+  if (titleHan !== book.title) candidates.push({ field: 0, text: titleHan });
+  if (authorHan !== book.author) candidates.push({ field: 1, text: authorHan });
   let best: ScoredItem | null = null;
   for (const c of candidates) {
     if (!c.text) continue;
@@ -169,12 +178,15 @@ export default function ShelfSearchPage() {
                   {(result) => {
                     const { entry, book } = result.item;
                     const summary = readSummary(entry, book);
+                    const title = hanText(book.title);
+                    // 展示与搜索都用同一套字形：书名/作者按用户偏好转换后显示
+                    const author = hanText(book.author);
                     return (
                       <div
                         role="button"
                         tabindex={0}
                         class="flex w-full items-center gap-3.5 px-3.5 py-3 text-left transition-colors active:bg-surface-2"
-                        aria-label={`打开《${book.title}》`}
+                        aria-label={`打开《${title}》`}
                         onClick={() => openBook(book.id)}
                         onKeyDown={(e) => {
                           if (e.key !== "Enter" && e.key !== " ") return;
@@ -185,10 +197,10 @@ export default function ShelfSearchPage() {
                         <BookCover bookId={book.id} variant="row" />
                         <span class="flex min-w-0 flex-1 flex-col gap-[3px]">
                           <span class="truncate text-[14.5px] font-semibold">
-                            {book.title}
+                            {title}
                           </span>
                           <span class="truncate text-[12px] text-text-3">
-                            {book.author}
+                            {author}
                             <Show when={groupName(book.groupId)}>
                               {(name) => (
                                 <span> · {name()}</span>

@@ -34,6 +34,7 @@ import {
   type BookMeta,
   type BookSource,
 } from "../lib/booksTypes";
+import { withHanMeta } from "../lib/hanDisplay";
 import {
   groupList,
   HIDDEN_GROUP_ID,
@@ -361,11 +362,12 @@ export default function BookshelfPage() {
     void ensureLocalBooksLoaded();
   });
 
+  // 书架卡片读显示副本：简繁转换只改书名 / 作者 / 简介 / 标签，其余字段（来源、分组、章节数）原样
   const items = createMemo<ShelfItem[]>(() =>
     shelfOrder()
       .map((entry) => {
         const book = bookMetaById(entry.bookId);
-        return book ? { entry, book } : null;
+        return book ? { entry, book: withHanMeta(book) ?? book } : null;
       })
       .filter((item): item is ShelfItem => item !== null),
   );

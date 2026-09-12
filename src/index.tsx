@@ -3,6 +3,7 @@ import { render } from "solid-js/web";
 import { initReaderState } from "./lib/store";
 import { initChapterRules } from "./lib/chapterRules";
 import { initTextReplacements } from "./lib/textReplacements";
+import { initHanConvert } from "./lib/hanConvert";
 import { ensureLocalBooksLoaded } from "./lib/books";
 import { initGroups } from "./lib/groups";
 import { installGlobalErrorReporting, listenBackendErrors, reportFailure } from "./lib/errorReport";
@@ -22,6 +23,7 @@ async function start() {
       initReaderState(),
       initChapterRules(),
       initTextReplacements(),
+      initHanConvert(),
       initGroups(),
     ]);
   } catch (error) {

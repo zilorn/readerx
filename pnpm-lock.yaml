@@ -23,6 +23,9 @@ importers:
       fflate:
         specifier: ^0.8.3
         version: 0.8.3
+      opencc-js:
+        specifier: ^1.4.2
+        version: 1.4.2
       solid-js:
         specifier: ^1.9.3
         version: 1.9.15
@@ -725,6 +728,9 @@ packages:
     resolution: {integrity: sha512-YHs7BmmcsdAI5Ozuf8JZo6PT0mv2GIWC9vMfvUC3dp65M8hn7Ux8CPL+2oBI7juNuj9d0ndhTcznq2ODBps9cQ==}
     engines: {node: '>=18'}
 
+  opencc-js@1.4.2:
+    resolution: {integrity: sha512-EdcspgdROiCCZDM+jZR6Pa670xW+EW2QhctPBQ8gRjg6lrx4IHEl+2s+kt5izk/TkxVRgdWuFgaGkaEdIUfdaw==}
+
   parse5@7.3.0:
     resolution: {integrity: sha512-IInvU7fabl34qmi9gY8XOVxhYyMyuH2xUNpb2q8/Y+7552KlejkRvqvD19nMoUW/uQGGbqNpA6Tufu5FL5BZgw==}
 
@@ -1379,6 +1385,8 @@ snapshots:
   nanoid@3.3.18: {}
 
   node-releases@2.0.54: {}
+
+  opencc-js@1.4.2: {}
 
   parse5@7.3.0:
     dependencies:

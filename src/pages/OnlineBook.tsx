@@ -3,6 +3,7 @@ import { useNavigate, useParams } from "@solidjs/router";
 import { PageHeader } from "../components/PageHeader";
 import { BookIcon, RefreshIcon, SourceIcon } from "../components/icons";
 import { SourceCover } from "../components/SourceCover";
+import { hanText } from "../lib/hanDisplay";
 import { bookMetaList } from "../lib/books";
 import {
   LAZY_WINDOW,
@@ -66,12 +67,13 @@ export default function OnlineBookPage() {
   }
 
   const item = () => pick()?.item;
+  /** 展示用书籍信息（简繁转换副本；书源原始数据与入架落盘内容不变） */
   const meta = () => ({
-    name: item()?.bookName ?? "",
-    author: item()?.author ?? "",
-    latest: item()?.latest ?? "",
+    name: hanText(item()?.bookName ?? ""),
+    author: hanText(item()?.author ?? ""),
+    latest: hanText(item()?.latest ?? ""),
     updateTime: item()?.updateTime ?? "",
-    intro: item()?.intro ?? "",
+    intro: hanText(item()?.intro ?? ""),
   });
 
   return (
@@ -102,7 +104,7 @@ export default function OnlineBookPage() {
               sourceId={pick()?.source.id ?? ""}
               url={coverSrc()}
               referer={pick()?.item.bookUrl}
-              title={pick()?.item.bookName ?? ""}
+              title={meta().name}
             />
             <div class="flex min-w-0 flex-1 flex-col justify-center gap-1">
               <h2 class="text-[17px] font-bold leading-snug">{meta().name}</h2>

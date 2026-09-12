@@ -16,6 +16,7 @@ import {
 import { callRemoteSource } from "../lib/backend";
 import type { BookItem, BookSourceSummary } from "../lib/bookSourcesTypes";
 import { normalizeBookTags } from "../lib/booksTypes";
+import { hanText } from "../lib/hanDisplay";
 import { rememberPicked, type PickedBook } from "../lib/online";
 import { currentSourceParallel } from "../lib/store";
 import { OnlineBookSheet } from "../components/OnlineBookSheet";
@@ -54,6 +55,11 @@ function toItem(raw: unknown): BookItem | null {
 /** 搜索结果/发现列表共用行 */
 function ResultRow(props: { entry: ResultEntry; onClick: () => void }) {
   const { source, item } = props.entry;
+  // 简繁转换只作用于展示副本：书源返回的原始数据（含入架落盘的内容）不变
+  const name = () => hanText(item.bookName);
+  const author = () => (item.author ? hanText(item.author) : "");
+  const latest = () => (item.latest ? hanText(item.latest) : "");
+  const intro = () => (item.intro ? hanText(item.intro) : "");
   return (
     <button
       class="flex w-full items-center gap-3 px-4 py-2.5 text-left active:bg-surface-2"
@@ -65,25 +71,25 @@ function ResultRow(props: { entry: ResultEntry; onClick: () => void }) {
         sourceId={source.id}
         url={item.cover}
         referer={item.bookUrl}
-        title={item.bookName}
+        title={name()}
       />
       <span class="flex min-w-0 flex-1 flex-col gap-0.5">
         <span class="flex items-center gap-1.5">
-          <span class="truncate text-[14.5px] font-medium">{item.bookName}</span>
+          <span class="truncate text-[14.5px] font-medium">{name()}</span>
         </span>
         <span class="flex items-center gap-1.5 text-[11px] text-text-3">
-          {item.author ? <span class="truncate">{item.author}</span> : null}
-          {item.latest ? (
+          {author() ? <span class="truncate">{author()}</span> : null}
+          {latest() ? (
             <>
               <span aria-hidden="true">·</span>
-              <span class="truncate text-accent">{item.latest}</span>
+              <span class="truncate text-accent">{latest()}</span>
             </>
           ) : null}
         </span>
-        {(item.intro || item.updateTime) && (
+        {(intro() || item.updateTime) && (
           <span class="truncate text-[11px] text-text-3/90">
             {item.updateTime ? `${item.updateTime} · ` : ""}
-            {item.intro}
+            {intro()}
           </span>
         )}
       </span>
@@ -426,7 +432,7 @@ export default function DiscoverPage() {
                           if (source) void loadDiscoverPage(source, c, 1, true);
                         }}
                       >
-                        {c.name}
+                        {hanText(c.name)}
                       </button>
                     ))}
                   </div>
