@@ -2,7 +2,7 @@
  * 在线书会话与内容缓存：
  * - 书源搜索/发现命中的“待预览书”暂存（会话级）；
  * - 「加入书架」= 只落 toc 元数据的本地书（format: online），正文按需下载；
- * - 阅读时按「当前章 ±5 章」窗口懒加载并落盘（逐批写回同一本 LocalBook）；
+ * - 阅读时按「当前章 ±5 章」窗口预取并落盘（逐批写回同一本 LocalBook）；
  * - 显式批量下载剩余全部正文（并发可配、可取消）。
  */
 import { createSignal } from "solid-js";
@@ -47,7 +47,10 @@ import {
   type SourceContentBuild,
 } from "./sourceContent";
 
-/** 阅读懒加载窗口半径（前后各 N 章） */
+/** 预取窗口半径（前后各 N 章，共 2N+1 章）：后台把这一圈章节的正文抓下来落盘，
+ *  顺序阅读 / 听书跨章时下一章永远已经就绪。
+ *  注意：这是「提前抓」的半径，与阅读视图实际读取的范围无关 ——
+ *  渲染只读当前章 ±1 章（见 Reader 的 RENDER_WINDOW），窗口外章节的落盘不会惊动前端。 */
 export const LAZY_WINDOW = 5;
 /** 单批拉取章节数 */
 const BATCH_SIZE = 20;

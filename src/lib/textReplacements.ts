@@ -196,6 +196,18 @@ export function applyReplacementsToChapter(
 }
 
 /**
+ * 章节 → 显示副本缓存。
+ * 在线书阅读 / 下载期间整本书对象会被反复替换（正文回写），但绝大多数章节对象原样复用；
+ * 没有缓存时每一次回写都要把全书章节重跑一遍替换规则（大书上是 O(全书正文)）。
+ * 规则列表每次改动都会整体换成新数组（本文件写路径都如此），
+ * 因此用「规则数组引用 + bookId」作为缓存版本即可判定是否仍然有效。
+ */
+const replacedChapterCache = new WeakMap<
+  LocalBookChapter,
+  { rules: TextReplaceRule[]; bookId: string; chapter: LocalBookChapter }
+>();
+
+/**
  * 返回“显示副本”书籍：正文单元文本应用了该书生效的替换规则。
  * 无规则 / 无实际改动时原样返回原书对象，避免多余重渲染。
  */
@@ -204,11 +216,18 @@ export function withDisplayReplacements(
   bookId: string,
 ): LocalBook | undefined {
   if (!book) return undefined;
+  const list = ruleListSignal();
+  if (list.length === 0) return book;
   const rules = effectiveReplaceRules(bookId);
-  if (rules.length === 0) return book;
   let changedAny = false;
   const chapters = book.chapters.map((chapter) => {
+    const cached = replacedChapterCache.get(chapter);
+    if (cached && cached.rules === list && cached.bookId === bookId) {
+      if (cached.chapter !== chapter) changedAny = true;
+      return cached.chapter;
+    }
     const next = applyReplacementsToChapter(chapter, rules);
+    replacedChapterCache.set(chapter, { rules: list, bookId, chapter: next });
     if (next !== chapter) changedAny = true;
     return next;
   });

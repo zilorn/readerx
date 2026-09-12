@@ -5,6 +5,7 @@ import { BookIcon, RefreshIcon, SourceIcon } from "../components/icons";
 import { SourceCover } from "../components/SourceCover";
 import { bookMetaList } from "../lib/books";
 import {
+  LAZY_WINDOW,
   addOnlineBookToShelf,
   fetchBookToc,
   getPicked,
@@ -147,7 +148,7 @@ export default function OnlineBookPage() {
               {adding() ? "正在获取目录…" : alreadyOnShelf() ? "去书架阅读" : "加入书架并阅读"}
             </button>
             <p class="text-center text-[11px] leading-[1.6] text-text-3">
-              加入书架只保存章节列表；正文在阅读时按需缓存「当前章前后 5 章」，阅读页也可批量下载全部用于离线
+              加入书架只保存章节列表；正文在阅读时按需缓存「当前章与前后各 {LAZY_WINDOW} 章」，阅读页也可批量下载全部用于离线
             </p>
           </div>
         </div>

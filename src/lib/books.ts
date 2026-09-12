@@ -30,6 +30,7 @@ import type {
   BookFormat,
   BookMeta,
   BookSource,
+  ChapterHead,
   LocalBook,
   LocalBookChapter,
 } from "./booksTypes";
@@ -39,6 +40,7 @@ import {
   assignChapterCids,
   chapterCid,
   normalizeBookTags,
+  samePlainFields,
 } from "./booksTypes";
 import { parseEpubFile } from "./epub";
 import { ensureShelfEntry } from "./store";
@@ -82,18 +84,103 @@ function sortByImportedAt<T extends { importedAt: number }>(arr: T[]): T[] {
   return arr.sort((a, b) => b.importedAt - a.importedAt);
 }
 
-/** 把一本全量书 upsert 进「已物化」缓存（同 id 替换） */
+/** 把一本全量书 upsert 进「已物化」缓存（同 id 原位替换；导入时间变了才重排） */
 function upsertFull(book: LocalBook): void {
-  setFullsState((prev) => sortByImportedAt([...prev.filter((b) => b.id !== book.id), book]));
+  setFullsState((prev) => {
+    const index = prev.findIndex((b) => b.id === book.id);
+    if (index < 0) return sortByImportedAt([...prev, book]);
+    if (prev[index] === book) return prev;
+    // 正文回写（在线书逐批下载）不动导入时间：原位替换，避免整表过滤 + 重排
+    if (prev[index].importedAt === book.importedAt) {
+      const next = prev.slice();
+      next[index] = book;
+      return next;
+    }
+    return sortByImportedAt([...prev.filter((b) => b.id !== book.id), book]);
+  });
 }
 
-/** 把一本全量书（或另一个元数据对象）同步进书库元数据列表 */
-function upsertMetaFromFull(book: LocalBook): void {
+/** 元数据里除章节头外的字段是否与书籍一致 */
+function sameMetaFields(meta: BookMeta, book: LocalBook): boolean {
+  return samePlainFields(meta, book, "chapters");
+}
+
+/** 两份章节头是否一致：未变章节由 chapterHeadOf 复用同一对象（指针比较即可命中），
+ *  对象被重新读盘 / 重建时退回逐字段比较 —— 值没变就不该算作一次变化。 */
+function sameChapterHeads(a: readonly ChapterHead[], b: readonly ChapterHead[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i];
+    const y = b[i];
+    if (x === y) continue;
+    if (x.cid !== y.cid || x.title !== y.title || x.chars !== y.chars) return false;
+    if ((x.url ?? "") !== (y.url ?? "")) return false;
+  }
+  return true;
+}
+
+/**
+ * 把一本全量书（或另一个元数据对象）同步进书库元数据列表。
+ * - insertIfMissing=false：只更新已存在的条目（合并发布期间书已被删除时不回填）；
+ * - 章节头与其余字段都没有变化时不发布 —— 正文回写改不动书架可见数据时，
+ *   前端（书架 / 详情 / 封面等消费方）不会收到一次无意义的更新。
+ */
+function commitMetaFromFull(book: LocalBook, insertIfMissing: boolean): void {
   const meta = bookToMeta(book);
   setMetasState((prev) => {
     if (prev === null) return null; // 元数据尚未载入时不提前建表
-    return sortByImportedAt([...prev.filter((m) => m.id !== book.id), meta]);
+    const index = prev.findIndex((m) => m.id === book.id);
+    if (index < 0) return insertIfMissing ? sortByImportedAt([...prev, meta]) : prev;
+    const existing = prev[index];
+    if (sameMetaFields(existing, book) && sameChapterHeads(existing.chapters, meta.chapters)) {
+      return prev;
+    }
+    // 导入时间变了（重新导入等）按导入顺序重排；正文回写则原位替换
+    if (existing.importedAt !== book.importedAt) {
+      return sortByImportedAt([...prev.filter((m) => m.id !== book.id), meta]);
+    }
+    const next = prev.slice();
+    next[index] = meta;
+    return next;
   });
+}
+
+/** 立即把一本全量书同步进元数据清单（导入 / 物化 / 元信息编辑等一次性路径） */
+function upsertMetaFromFull(book: LocalBook): void {
+  commitMetaFromFull(book, true);
+}
+
+// ---------------------------------------------------------------------------
+// 正文增量回写期间的元数据合并发布：
+// 在线书逐批 / 逐章下载时，真正需要立刻看到新正文的是阅读器，而它读的是全量缓存
+// （fulls，仍逐批即时发布）；消费元数据（章节头字符数）的书架 / 详情 / 搜索等页面
+// 此时并不在屏幕上。因此这些正文回写对元数据的发布按 ~250ms 合并一次，
+// 不再「落盘一章 → 重建并发布一次整本书架清单」。尾部定时保证最终一致。
+// ---------------------------------------------------------------------------
+
+const META_PUBLISH_DELAY_MS = 250;
+const pendingMetaBookIds = new Set<string>();
+let metaPublishTimer: number | undefined;
+
+function flushDeferredMetas(): void {
+  if (pendingMetaBookIds.size === 0) return;
+  const ids = [...pendingMetaBookIds];
+  pendingMetaBookIds.clear();
+  const books = fullsState();
+  for (const id of ids) {
+    // 以全量缓存里的最新对象为准：等待期间可能又被写入 / 编辑 / 删除过
+    const latest = books.find((b) => b.id === id);
+    if (latest) commitMetaFromFull(latest, false);
+  }
+}
+
+function deferMetaFromFull(book: LocalBook): void {
+  pendingMetaBookIds.add(book.id);
+  if (metaPublishTimer !== undefined) return;
+  metaPublishTimer = window.setTimeout(() => {
+    metaPublishTimer = undefined;
+    flushDeferredMetas();
+  }, META_PUBLISH_DELAY_MS);
 }
 
 function removeFromBoth(id: string): void {
@@ -435,10 +522,12 @@ export async function commitBookContentUpdate(book: LocalBook): Promise<void> {
 }
 
 /**
- * 在线书「只回写部分章节」的内容更新（逐批下载正文用）：
+ * 在线书「只回写部分章节」的内容更新（逐批 / 逐章下载正文用）：
  * - 后端只接收本次变动的章节（saveRemoteBookChapters），不再整本 JSON 过 IPC；
  * - book 应为“只替换了这些章节、其余章节对象原样复用”的最新整书快照，
- *   存好后原位替换书架中的该本（reader 依据内容等价性决定是否重排当前章）。
+ *   存好后原位替换书架中的该本（reader 依据内容等价性决定是否重排当前章）；
+ * - 元数据（书架 / 详情可见的章节头字符数）合并发布：逐章落盘不再逐章重建整本清单，
+ *   阅读器需要的正文走 fulls 即时发布，不受影响。
  */
 export async function updateBookChapters(
   book: LocalBook,
@@ -446,8 +535,8 @@ export async function updateBookChapters(
 ): Promise<void> {
   if (updates.length === 0) return;
   await saveRemoteBookChapters(book.id, updates);
-  upsertMetaFromFull(book);
   upsertFull(book);
+  deferMetaFromFull(book);
 }
 
 /**

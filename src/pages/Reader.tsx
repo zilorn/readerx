@@ -115,6 +115,7 @@ import {
   updateReadingLocation,
 } from "../lib/store";
 import { progressContextAt, readingPercent, resolveReadingTarget } from "../lib/progress";
+import { sameRenderWindow } from "../lib/renderWindow";
 import { showToast } from "../lib/toast";
 import {
   caretRangeAtGlobalOffset,
@@ -547,11 +548,12 @@ export default function ReaderPage() {
     }),
   );
 
-  /** 书架中的原书（对象身份只随书库内容更新变化，用作「打开书」类副作用触发源） */
+  /** 书架中的原书（对象身份只随书库内容更新变化） */
   const rawBook = createMemo(() => localBookById(bookId()));
   /**
-   * 显示用书：把「对本书生效」的文本替换规则应用到各章正文（仅影响阅读展示，
+   * 实时显示用书：把「对本书生效」的文本替换规则应用到各章正文（仅影响阅读展示，
    * 不改动书库原文；没有生效规则或文本无变化时与原书同一引用）。
+   * 目录、下载面板、全书搜索、听书引擎等需要整本书的地方读它。
    */
   const book = createMemo(() => withDisplayReplacements(rawBook(), bookId()));
   const [chapterIdx, setChapterIdx] = createSignal(0);
@@ -570,6 +572,35 @@ export default function ReaderPage() {
     createSignal<ReaderSearchSession | null>(null);
   // 当前阅读位置（章节正文镜像偏移：分页=页首行，滚动=视口顶部），状态栏百分比用
   const [viewOffset, setViewOffset] = createSignal(0);
+
+  /**
+   * 渲染窗口视图：**阅读视图只读取「当前章 ±1 章」**（判定见 lib/renderWindow.ts）。
+   *
+   * 后台预取（当前章 ±5 章 / LAZY_WINDOW）与批量下载会不断把窗口外章节的正文写回书库，
+   * 书库对象因此被反复整本替换。这些回写与屏幕上的这一页无关：只要窗口内三章与书籍
+   * 元信息都没变，渲染链路就沿用上一次的书对象引用 —— 依赖它的 memo / effect
+   * （章节内容、分页、进度百分比、面积测量…）全部因引用未变而跳过，
+   * 不会被书库里别处的改动惊动（那正是下载时高频闪烁的来源）。
+   */
+  let renderWindowBook: LocalBook | null = null;
+  const windowBook = createMemo<LocalBook | null>(() => {
+    const full = rawBook() ?? null;
+    if (!full) {
+      renderWindowBook = null;
+      return null;
+    }
+    const prev = renderWindowBook;
+    if (prev && prev !== full && sameRenderWindow(prev, full, chapterIdx())) return prev;
+    renderWindowBook = full;
+    return full;
+  });
+
+  /** 渲染用书：文本替换只对窗口视图跑一遍 —— 窗口外的正文回写既不重算替换、也不惊动渲染 */
+  const renderBook = createMemo<LocalBook | null>(() => {
+    const windowed = windowBook();
+    if (!windowed) return null;
+    return withDisplayReplacements(windowed, bookId()) ?? null;
+  });
 
   // 精确恢复目标：打开书时按存档的“章节 cid + 文本偏移”置位，就绪后跳到该处一次
   const [resumeTarget, setResumeTarget] = createSignal<{ cid: string; char: number } | null>(
@@ -590,11 +621,12 @@ export default function ReaderPage() {
   });
 
   // 书载入后：补建档案、按存档的精确文本位置（cid+偏移）恢复章节。
-  // 以原书身份为触发源：文本替换等显示副本变化不应重置阅读位置。
+  // 以渲染窗口（而非整本书对象）为触发源：窗口外章节的正文回写与阅读位置无关，
+  // 不必反复走一遍；目录变化（追加 / 覆盖 / 重新导入）会换掉窗口视图，照常触发。
   // 在线书逐批下载会整本替换书库对象：只要目录（cid 序列）没变就只是正文回写，
   // 不能按「重新打开书」处理（否则下载期间会不断重置页码/恢复位置导致卡顿跳动）。
   createEffect(
-    on(rawBook, (current, prev) => {
+    on(renderBook, (current, prev) => {
       if (!current) return;
       if (prev && prev.id === current.id && sameChapterToc(prev, current)) return;
       ensureShelfEntry(current.id);
@@ -628,7 +660,7 @@ export default function ReaderPage() {
   });
 
   const chapter = createMemo(() => {
-    const current = book();
+    const current = renderBook();
     const list = current?.chapters;
     if (!list || list.length === 0) return undefined;
     return list[Math.min(chapterIdx(), list.length - 1)];
@@ -636,16 +668,17 @@ export default function ReaderPage() {
 
   const isFirstChapter = () => chapterIdx() <= 0;
   const isLastChapter = () => {
-    const current = book();
+    const current = renderBook();
     return current ? chapterIdx() + 1 >= current.chapters.length : true;
   };
 
   // -------------------------------------------------------------------
-  // 在线书：按「当前章 ±5」窗口懒加载正文 + 缺失章节 gate 覆盖层 + 下载面板
+  // 在线书：正文由后台按「当前章 ±5」窗口预取，阅读视图只读「当前章 ±1」+
+  // 缺失章节 gate 覆盖层 + 下载面板
   // -------------------------------------------------------------------
 
   const isRemoteBook = createMemo(() => {
-    const current = book();
+    const current = renderBook();
     return !!current && isOnlineBook(current);
   });
   const remoteRun = createMemo(() => onlineRunState(bookId()));
@@ -847,9 +880,12 @@ export default function ReaderPage() {
     setReplaceSheetOpen(true);
   }
 
-  // 进入/切换章节时：若窗口内存在缺正文章节则后台预取（当前章失败过的不自动重试）
+  // 进入/切换章节时：若窗口内有缺正文章节则后台预取（当前章失败过的不自动重试）。
+  // 触发源用渲染窗口：只有当前章 ±1 变化（或本次拉取的状态变化）才需要重新检查；
+  // 真正判断缺哪些章节由 ensureReadingWindow 读实时的书库对象，这里拿到旧对象也只是
+  // 保守地多触发一次空检查，不会重复下载。
   createEffect(() => {
-    const current = book();
+    const current = renderBook();
     if (!current || !isOnlineBook(current)) return;
     const idx = chapterIdx();
     void current.chapters.length;
@@ -888,19 +924,25 @@ export default function ReaderPage() {
   );
 
   // 阅读区几何（分页排版依赖真实尺寸；正文就绪且元素挂载后测量）。
-  // 触发时机不能只看 rawBook 身份：书已在全量缓存中（本次会话再次打开/从阅读页返回
-  // 再进入）时，rawBook 初值即有，但此时正文字符内容还没进入「门闩后」的挂载阶段，
+  // 触发时机不能只看书对象身份：书已在全量缓存中（本次会话再次打开/从阅读页返回
+  // 再进入）时，书对象初值即有，但此时正文字符内容还没进入「门闩后」的挂载阶段，
   // areaRef 尚未赋值；必须等 contentLoad 转 ready（阅读区 DOM 挂载后）再量一次。
-  // 在线书逐批回写只换对象引用：届时重新量一次即可，不反复重建 ResizeObserver。
+  // 这里读的是渲染窗口：书库正文回写换了对象引用不再重跑（否则每次回写都会
+  // setArea 一个新对象 → layout 失效 → 当前章整章重新分页 = 下载时高频闪烁）。
   const [area, setArea] = createSignal({ w: 0, h: 0 });
   let areaRef: HTMLDivElement | undefined;
   let areaObserver: ResizeObserver | null = null;
   createEffect(() => {
-    const ready = contentLoad() === "ready" && !!rawBook();
+    const ready = contentLoad() === "ready" && !!renderBook();
     const el = areaRef;
     if (!ready || !el) return;
+    // 尺寸没变就不写信号：避免下游分页因一次无意义的面积更新而整章重排
+    const measure = () => {
+      const w = el.clientWidth;
+      const h = el.clientHeight;
+      setArea((prev) => (prev.w === w && prev.h === h ? prev : { w, h }));
+    };
     if (!areaObserver) {
-      const measure = () => setArea({ w: el.clientWidth, h: el.clientHeight });
       measure();
       areaObserver = new ResizeObserver(measure);
       areaObserver.observe(el);
@@ -909,7 +951,7 @@ export default function ReaderPage() {
         areaObserver = null;
       });
     } else {
-      setArea({ w: el.clientWidth, h: el.clientHeight });
+      measure();
     }
   });
 
@@ -995,7 +1037,7 @@ export default function ReaderPage() {
    * 只要当前章内容没变就复用同一引用 —— 分页 effect 只依赖本视图 / 版式 / 作者，
    * 不再随无关提交（下载其它章节）重排当前章、闪「正在加载」。
    */
-  const chapterAuthor = createMemo(() => book()?.author ?? null);
+  const chapterAuthor = createMemo(() => renderBook()?.author ?? null);
   let pageSourceCache: {
     cid: string;
     title: string;
@@ -1512,9 +1554,9 @@ export default function ReaderPage() {
       !jumpBackHint(),
   );
 
-  /** 整本书进度百分比（按章节正文累计字符） */
+  /** 整本书进度百分比（按章节正文累计字符；读渲染窗口，窗口外回写不惊动状态栏） */
   const bookPercent = createMemo<number | null>(() => {
-    const current = book();
+    const current = renderBook();
     if (!current || current.chapters.length === 0) return null;
     return readingPercent(current, chapterIdx(), viewOffset());
   });
@@ -3870,7 +3912,7 @@ export default function ReaderPage() {
                 </div>
                 <ScrollArea class="min-h-0 flex-1" contentClass="space-y-3 px-4 py-4">
                   <p class="text-[12px] leading-[1.7] text-text-3">
-                    平时阅读只按需缓存「当前章前后 5 章」；这里可把全书正文批量下载到本机，之后断网也能读。
+                    平时阅读只按需缓存当前章与前后各 {LAZY_WINDOW} 章（顺序阅读不断章）；这里可把全书正文批量下载到本机，之后断网也能读。
                     请求并行度跟随全局「书源并发」设置（设置 → 书源）。
                   </p>
                   <p class="text-[11.5px] leading-[1.6] text-text-3">

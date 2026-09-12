@@ -50,34 +50,76 @@ export type ChapterHead = Pick<LocalBookChapter, "cid" | "title" | "url"> & {
  *  应用启动只拉这份（readerx_book_list_meta），正文按需单本读取后再物化。 */
 export type BookMeta = Omit<LocalBook, "chapters"> & { chapters: ChapterHead[] };
 
+/**
+ * 章节对象一经发布即视为不可变（正文回写一律整章换成新对象），因此可以按对象缓存派生值：
+ * 在线书阅读 / 下载期间整本对象被反复替换，缓存命中让「整本字数、阅读进度累计、章节头」
+ * 这类派生计算只与真正变化的章节相关，而不是每次都重扫全书正文。
+ */
+const mirrorCharsCache = new WeakMap<LocalBookChapter, number>();
+
 /** 章节正文“镜像文本”字符数（UTF-16）：
  *  有结构化 blocks 时只数 p/h 文本；否则退回 paragraphs。 */
 export function chapterMirrorCharsOf(chapter: LocalBookChapter): number {
+  const cached = mirrorCharsCache.get(chapter);
+  if (cached !== undefined) return cached;
   const blocks = chapter.blocks;
+  let total = 0;
   if (blocks && blocks.length > 0) {
-    let total = 0;
     for (const block of blocks) {
       if (block.kind === "p" || block.kind === "h") total += block.text?.length ?? 0;
     }
-    return total;
+  } else {
+    for (const paragraph of chapter.paragraphs) total += paragraph.length;
   }
-  let total = 0;
-  for (const paragraph of chapter.paragraphs) total += paragraph.length;
+  mirrorCharsCache.set(chapter, total);
   return total;
+}
+
+/** 章节 → 轻量头（按章节对象缓存：未变章节复用同一个头对象）。
+ *  正文回写后重建整本元数据时，未变章节仍是同一引用 —— 下游既能省掉重算，
+ *  也能据此判定「这次写入是否真的改变了书架可见的数据」。 */
+const headCache = new WeakMap<LocalBookChapter, ChapterHead>();
+
+export function chapterHeadOf(chapter: LocalBookChapter): ChapterHead {
+  const cached = headCache.get(chapter);
+  if (cached) return cached;
+  const head: ChapterHead = {
+    cid: chapter.cid,
+    title: chapter.title,
+    ...(chapter.url ? { url: chapter.url } : {}),
+    chars: chapterMirrorCharsOf(chapter),
+  };
+  headCache.set(chapter, head);
+  return head;
 }
 
 /** 整书 → 书库元数据（章节裁剪为轻量头） */
 export function bookToMeta(book: LocalBook): BookMeta {
   const { chapters, ...meta } = book;
-  return {
-    ...meta,
-    chapters: chapters.map((chapter) => ({
-      cid: chapter.cid,
-      title: chapter.title,
-      ...(chapter.url ? { url: chapter.url } : {}),
-      chars: chapterMirrorCharsOf(chapter),
-    })),
-  };
+  return { ...meta, chapters: chapters.map(chapterHeadOf) };
+}
+
+/**
+ * 两个书籍 / 元数据对象除 skipKey（章节列表）外的字段是否一致：
+ * 逐字段浅比较，数组按内容比较。用于判断一次正文回写是否真的改变了
+ * 「书架可见数据」（books.ts）或「本次渲染用得到的数据」（阅读页渲染窗口）。
+ */
+export function samePlainFields(a: object, b: object, skipKey: string): boolean {
+  const x = a as Record<string, unknown>;
+  const y = b as Record<string, unknown>;
+  for (const key of Object.keys(x)) {
+    if (key === skipKey) continue;
+    const av = x[key];
+    const bv = y[key];
+    if (av === bv) continue;
+    if (Array.isArray(av) && Array.isArray(bv)) {
+      if (av.length !== bv.length || av.some((item, i) => item !== bv[i])) return false;
+      continue;
+    }
+    return false;
+  }
+  // b 上出现了 a 没有的字段（新增字段）→ 视为不一致
+  return Object.keys(y).every((key) => key === skipKey || key in x);
 }
 
 /** 生成章节 cid：下标 0 → c0001 */
