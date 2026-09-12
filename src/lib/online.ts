@@ -4,7 +4,8 @@
  * - 「加入书架」= 只落 toc 元数据的本地书（format: online），正文按需下载；
  * - 阅读时按「当前章 ±5 章」窗口预取并落盘（逐批写回同一本 LocalBook）：
  *   正在读的那一章单独先取、取回即落盘，其余窗口章节后台补齐；
- *   预取只取正文，图片留到用户读到该章时按需下载（见 chapterImages.ts）；
+ *   正文预取完毕后再单独过一遍窗口内**已下载章节**的图片（失败即放弃，读到该章时再取，
+ *   见 prefetchWindowImages）；
  * - 显式批量下载剩余全部正文（并发可配、可取消）：正文下完后单独再过一遍图片；
  * - 以上三种拉取（窗口预取 / 批量下载 / 重新加载本章）可并存且互不阻塞，冲突时以用户
  *   操作为准：批量下载开始时后台窗口预取让位，正文回写先到先得（只有「重新加载本章」
@@ -16,6 +17,8 @@ import {
   fetchRemoteChapterContents,
 } from "./backend";
 import {
+  chapterImagePhase,
+  chapterImagePrefetchable,
   ensureChapterImages,
   retryChapterImage,
   type ChapterImageFile,
@@ -461,14 +464,18 @@ export function cancelOnlineRun(bookId: string): void {
 // 运行态维护
 // ---------------------------------------------------------------------------
 
-/** 启动一次拉取：返回该次拉取的取消令牌（进度经 patchSlot 更新） */
+/** 启动一次拉取：返回该次拉取的取消令牌（进度经 patchSlot 更新）。
+ *  options.resetFailures=false 用于「只补图片、不取正文」的一轮：不动已有的章节失败记录
+ *  （否则别处失败章节的「N 章失败」会凭空消失）。 */
 function startRun(
   bookId: string,
   kind: "window" | "download",
   phase: Exclude<OnlineRunPhase, "idle">,
   total: number,
   pending: number[],
+  options?: { resetFailures?: boolean },
 ): CancelToken {
+  const resetFailures = options?.resetFailures ?? true;
   const token: CancelToken = { cancelled: false };
   patchRuns(bookId, (runs) => {
     const seq = runs.seq + 1;
@@ -483,10 +490,11 @@ function startRun(
       seq,
       token,
     };
-    // 新一轮拉取从零计失败；目录世代沿用
+    // 新一轮正文拉取从零计失败；只补图片的一轮沿用已有失败记录；目录世代沿用
+    const failures = resetFailures ? new Map<number, string>() : runs.failures;
     return kind === "window"
-      ? { ...runs, seq, failures: new Map(), window: slot }
-      : { ...runs, seq, failures: new Map(), download: slot };
+      ? { ...runs, seq, failures, window: slot }
+      : { ...runs, seq, failures, download: slot };
   });
   return token;
 }
@@ -693,7 +701,8 @@ async function persistChapters(
 }
 
 /**
- * 阅读窗口预取：把 [center ± LAZY_WINDOW] 内缺正文的章节取回来。
+ * 阅读窗口预取：把 [center ± LAZY_WINDOW] 内缺正文的章节取回来；正文齐了之后接着
+ * 预取窗口内**已下载章节**的图片（见 prefetchWindowImages）。
  *
  * 两条规则保证「正在读的那一章」不必陪跑其余预取：
  * - 该章单独请求、取回即落盘 —— 阅读器拿到本章正文就能显示，不等其余窗口章节；
@@ -714,11 +723,21 @@ async function runWindowFetch(bookId: string, center: number): Promise<void> {
   const bulk = Math.max(1, Math.min(BATCH_SIZE, concurrency * 2));
   // 本 run 已请求过的章节：失败 / 空正文的章节不在同一轮里反复重取（重试走 UI 入口）
   const attempted = new Set<number>();
-  const token = startRun(bookId, "window", "window", 0, []);
   let focus = Math.max(0, Math.min(center, initial.chapters.length - 1));
+  const targets = windowMissing(initial, focus, reloadSkipSet(bookId));
+  const textWork = targets.length > 0;
+  // 纯图片预取（正文早已就绪）不动已有的失败记录：那是「正文下载」的结论，不该被抹掉
+  const token = startRun(
+    bookId,
+    "window",
+    textWork ? "window" : "images",
+    targets.length,
+    targets,
+    { resetFailures: textWork },
+  );
   windowFocus.set(bookId, focus);
   let done = 0;
-  let pending = windowMissing(initial, focus, reloadSkipSet(bookId));
+  let pending = targets;
   patchSlot(bookId, "window", { total: pending.length, pending });
   try {
     let focusFirst = true; // 本次焦点章还没单独取过
@@ -729,23 +748,34 @@ async function runWindowFetch(bookId: string, center: number): Promise<void> {
       const skipped = reloadSkipSet(bookId);
       const skip = skipped ? new Set([...attempted, ...skipped]) : attempted;
       const missing = windowMissing(bookNow, focus, skip);
-      if (missing.length === 0) break;
-      const slice = missing.slice(0, focusFirst && missing[0] === focus ? 1 : bulk);
-      focusFirst = false;
-      const plans = await fetchChapterPlans(bookId, sourceId, bookNow, slice, token);
-      for (const idx of slice) attempted.add(idx);
-      done += slice.length;
-      // 逐章落盘：焦点章一落盘阅读器即可显示，其余章节随后陆续就位
-      for (const plan of plans) {
-        if (token.cancelled) break;
-        const filled = fillChapterDraft(plan);
-        const written = await persistChapters(
-          bookId,
-          [{ index: plan.chapterIndex, chapter: filled }],
-          { epoch },
-        );
-        if (written > 0) clearFailures(bookId, [plan.chapterIndex]);
-        if (plans.length > 1) await yieldToMain();
+      if (missing.length === 0) {
+        // 正文预取完毕 → 接着预取窗口内已下载章节的图片。
+        // 图片预取期间用户可能跳到缺正文的章节：焦点一变就回来取正文（见下）
+        const moved = await prefetchWindowImages(bookId, sourceId, token, focus);
+        if (moved) {
+          // 回到正文预取：阶段复位（图片进度下一轮重新统计）
+          patchSlot(bookId, "window", { phase: "window", images: EMPTY_IMAGE_PROGRESS });
+        } else {
+          break;
+        }
+      } else {
+        const slice = missing.slice(0, focusFirst && missing[0] === focus ? 1 : bulk);
+        focusFirst = false;
+        const plans = await fetchChapterPlans(bookId, sourceId, bookNow, slice, token);
+        for (const idx of slice) attempted.add(idx);
+        done += slice.length;
+        // 逐章落盘：焦点章一落盘阅读器即可显示，其余章节随后陆续就位
+        for (const plan of plans) {
+          if (token.cancelled) break;
+          const filled = fillChapterDraft(plan);
+          const written = await persistChapters(
+            bookId,
+            [{ index: plan.chapterIndex, chapter: filled }],
+            { epoch },
+          );
+          if (written > 0) clearFailures(bookId, [plan.chapterIndex]);
+          if (plans.length > 1) await yieldToMain();
+        }
       }
       const latest = localBookById(bookId);
       if (!latest) break; // 书已被删除：停止拉取
@@ -937,6 +967,7 @@ async function runDownloadImages(
       bookId,
       referer: job.chapter.url ?? null,
       urls: job.urls,
+      purpose: "prefetch",
       force: true,
       shouldStop: () => token.cancelled,
     });
@@ -952,7 +983,8 @@ async function runDownloadImages(
   }
 }
 
-/** 阅读窗口预取：确保 [idx ± LAZY_WINDOW] 内章节有正文（当前章优先）。
+/** 阅读窗口预取：确保 [idx ± LAZY_WINDOW] 内章节有正文（当前章优先）；
+ *  正文都已就绪时改为确保窗口内已下载章节的图片（见 prefetchWindowImages）。
  *  已有拉取任务在跑时不新起一轮，只把焦点换成新的阅读章：窗口预取会在下一批之后以本章
  *  为中心继续，批量下载也会把本章提前取回 —— 读到哪一章就先出哪一章，不必等别的章节。 */
 export async function ensureReadingWindow(
@@ -965,7 +997,13 @@ export async function ensureReadingWindow(
     windowFocus.set(bookId, chapterIndex);
     return;
   }
-  if (windowMissing(book, chapterIndex, reloadSkipSet(bookId)).length === 0) return;
+  // 正文已就绪时不再只是为了「没正文」而跑：窗口内还有没试过的图片也要跑一轮
+  if (
+    windowMissing(book, chapterIndex, reloadSkipSet(bookId)).length === 0 &&
+    windowImageIndexes(book, chapterIndex, reloadSkipSet(bookId)).length === 0
+  ) {
+    return;
+  }
   await runWindowFetch(bookId, chapterIndex);
 }
 
@@ -1053,6 +1091,7 @@ export async function loadReadingChapterImages(
     bookId,
     referer: chapter.url ?? null,
     urls,
+    purpose: "read",
     ...(shouldStop ? { shouldStop } : {}),
   });
   const ready = new Map<string, ChapterImageFile>();
@@ -1061,6 +1100,126 @@ export async function loadReadingChapterImages(
   }
   await persistReadyImages(bookId, chapterIndex, ready);
   return results;
+}
+
+// ---------------------------------------------------------------------------
+// 后台图片预取：正文预取结束后，把阅读窗口（当前章 ± LAZY_WINDOW）内**已下载章节**
+// 尚未取过的图片顺手取回来（用户读到这一章时就已经在本地了）。
+// 与「阅读时取图」共用同一个下载闸与同址去重（见 chapterImages.ts），因此不会重复请求。
+// ---------------------------------------------------------------------------
+
+/** 章节里「本会话还没试过」的图片地址：预取只取这些（失败过的等读到这一章再取，见 chapterImages） */
+function prefetchableImageUrls(chapter: LocalBookChapter): string[] {
+  return pendingImageUrls(chapter).filter((url) => chapterImagePrefetchable(url));
+}
+
+/**
+ * 离 center 一个预取窗口之内、正文已就绪且还有「没试过的图片」的章节下标；近的先取。
+ * 没有正文的章节连图片地址都还没有（等正文取回后自然会轮到它），因此不进这个列表；
+ * skip 中的章节跳过（正在「重新加载本章」的那一章由用户独占，等它写完再取图）。
+ */
+function windowImageIndexes(
+  book: Pick<LocalBook, "chapters">,
+  center: number,
+  skip?: ReadonlySet<number>,
+): number[] {
+  const lo = Math.max(0, center - LAZY_WINDOW);
+  const hi = Math.min(book.chapters.length - 1, center + LAZY_WINDOW);
+  const indexes: number[] = [];
+  for (let i = lo; i <= hi; i++) {
+    if (skip?.has(i)) continue;
+    const chapter = book.chapters[i];
+    if (!chapter || !chapterHasContent(chapter)) continue;
+    if (prefetchableImageUrls(chapter).length === 0) continue;
+    indexes.push(i);
+  }
+  indexes.sort((a, b) => Math.abs(a - center) - Math.abs(b - center) || a - b);
+  return indexes;
+}
+
+/** 阅读窗口内是否还有值得预取的图片（正文已就绪的章节里本会话还没试过的图） */
+export function windowImagesPending(bookId: string, chapterIndex: number): boolean {
+  const book = localBookById(bookId);
+  if (!book || !isOnlineBook(book)) return false;
+  return windowImageIndexes(book, chapterIndex, reloadSkipSet(bookId)).length > 0;
+}
+
+/**
+ * 窗口图片预取：正文预取结束后，把窗口内**已下载章节**还没试过的图片逐章取回来
+ * （当前章 ±LAZY_WINDOW；读到哪一章就先取哪一章）。
+ *
+ * - 只取正文已就绪的章节：连正文都没取回的章节谈不上图片地址（等正文到了再取）；
+ * - 失败即放弃：单张失败只计一张失败，不在本轮重试、也不计作章节失败 ——
+ *   用户读到该章时阅读路径会再取一次（预取失败不挡阅读时的重取，见 chapterImages.ts），
+ *   页面上还有占位框的「重试」；
+ * - 期间阅读焦点变了（用户跳章 / 听书跨章）：立刻放弃剩余图片（还没发出的请求不再发），
+ *   交回正文预取按新焦点走 —— 新焦点章若缺正文就先取正文；
+ * - 取消（下载面板「停止下载」/ 开始批量下载 / 失败页退回书架）→ 立即停下。
+ *
+ * 返回 true 表示焦点已变、外层应按新焦点继续；false 表示这一轮没有别的可做了（或已取消）。
+ */
+async function prefetchWindowImages(
+  bookId: string,
+  sourceId: string,
+  token: CancelToken,
+  center: number,
+): Promise<boolean> {
+  const book = localBookById(bookId);
+  if (!book) return false;
+  const jobs: Array<{ index: number; urls: string[]; referer: string | null }> = [];
+  let total = 0;
+  for (const index of windowImageIndexes(book, center, reloadSkipSet(bookId))) {
+    const chapter = book.chapters[index];
+    if (!chapter) continue;
+    const urls = prefetchableImageUrls(chapter);
+    if (urls.length === 0) continue;
+    jobs.push({ index, urls, referer: chapter.url ?? null });
+    total += urls.length;
+  }
+  if (jobs.length === 0) return false;
+  /** 阅读焦点是否已经移开：移开就放弃剩余图片，交回正文预取（新焦点章优先） */
+  const focusMoved = (): boolean => {
+    const want = windowFocus.get(bookId);
+    return want !== undefined && want !== center;
+  };
+  let done = 0;
+  let failed = 0;
+  patchSlot(bookId, "window", {
+    phase: "images",
+    pending: [],
+    images: { total, done: 0, failed: 0 },
+  });
+  for (const job of jobs) {
+    if (token.cancelled || focusMoved()) break;
+    const results = await ensureChapterImages({
+      sourceId,
+      bookId,
+      referer: job.referer,
+      urls: job.urls,
+      purpose: "prefetch",
+      shouldStop: () => token.cancelled || focusMoved(),
+    });
+    const ready = new Map<string, ChapterImageFile>();
+    let settled = 0;
+    for (const [url, file] of results) {
+      if (file) {
+        ready.set(url, file);
+        settled++;
+        continue;
+      }
+      // 被放弃（还没发出请求）的图会回到 idle，不算失败、也不算完成；
+      // 只有真的试过并失败的才计数（下一轮 / 阅读时还会再试）
+      if (chapterImagePhase(url) === "failed") {
+        failed++;
+        settled++;
+      }
+    }
+    done += settled;
+    // 成功的那部分照常写回书库（即使随后要放弃这一轮：字节已经下下来了，不该白下）
+    await persistReadyImages(bookId, job.index, ready);
+    patchSlot(bookId, "window", { images: { total, done, failed } });
+  }
+  return focusMoved();
 }
 
 /** 阅读页「重试」单张图片：忽略自动重试冷却立即重取，成功即写回本地书库 */

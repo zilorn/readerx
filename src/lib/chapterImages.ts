@@ -1,15 +1,18 @@
 /**
- * 在线书正文图片的「阅读时按需下载」。
+ * 在线书正文图片的「阅读时按需下载 + 后台预取」。
  *
- * 拉取章节正文时只保存图片地址（不下载），图片在用户读到这一章时才经**该书源会话**
+ * 拉取章节正文时只保存图片地址（不下载），图片经**该书源会话**
  * （默认请求头 / UA / Cookie，Referer 取正文页地址）逐张取回：
  *
  * - 图片字节由 Rust 写成本地文件（`images/<bookId>_<sha1(地址)>.<ext>`），这里只保留
  *   「本地文件名 + 原始尺寸」。**不再把图片变成 data URL**：base64 副本既会写进书籍 JSON，
  *   又要在 IPC 与 JS 字符串里各存一份，一章几百张图足以把应用撑崩（见 book_images.rs）；
  * - 下载结果存本会话内存缓存：同一张图一次运行内只取一次，翻回 / 重排不再请求；
- * - 失败（无网 / 防盗链 / 非图片响应）自动重试：同一地址两次自动尝试之间有冷却，
+ * - 取图分两种来源（`ChapterImagePurpose`）：**阅读时取图**（用户正读到这一章，或点了占位框
+ *   的「重试」）与**后台预取**（窗口预取 / 批量下载顺手把图片也下一遍，见 online.ts）；
+ * - 失败（无网 / 防盗链 / 非图片响应）自动重试：同一来源的两次自动尝试之间有冷却，
  *   因此「再次读到这一章」或重新排版时会再试一次，不会连环打服务器；
+ *   预取失败不占用阅读时取图的冷却额度 —— 用户读到这一章就该真的再试一次；
  * - 仍失败时由占位框提供手动重试（忽略冷却，立即重试）；
  * - 章节内容的落盘（把本地文件名写回章节块）由 online.ts 负责，本模块只管取图。
  */
@@ -20,10 +23,14 @@ import { currentSourceParallel } from "./store";
 
 /** 图片下载并发上限（受全局「书源并发」设置约束，且不高于此值：正文图片数量多，避免占满会话） */
 const NETWORK_CONCURRENCY_CAP = 4;
-/** 同一地址两次自动重试之间的最小间隔（毫秒）：冷却内的失败直接按失败返回，等下次阅读再试 */
+/** 同一地址两次自动重试之间的最小间隔（毫秒）：冷却内的失败直接按失败返回，等下次阅读再试
+ *  （只约束同一来源：后台预取失败后，用户读到这一章时的重取不受它限制） */
 const AUTO_RETRY_COOLDOWN_MS = 4_000;
 
 export type ChapterImagePhase = "loading" | "ready" | "failed";
+
+/** 取图来源：阅读时取图（用户在读这一章）/ 后台预取（窗口预取、批量下载） */
+export type ChapterImagePurpose = "read" | "prefetch";
 
 /** 一张图下载成功后的结果：本地文件名 + 原始尺寸 */
 export interface ChapterImageFile {
@@ -38,6 +45,8 @@ interface ImageEntry {
   local: string;
   /** 失败原因（可读）；非 failed 时为空 */
   error: string;
+  /** 最近一次失败来自哪种取图（阅读时取图 / 后台预取）；从没失败过为空 */
+  failedBy: ChapterImagePurpose | "";
   /** 进行中的请求；无请求时为空 */
   inflight: Promise<ChapterImageFile | null> | null;
   /** 最近一次尝试失败的时间戳；从没失败过为 0 */
@@ -72,6 +81,16 @@ export function chapterImagePhase(url: string): ChapterImagePhase | "idle" {
 export function chapterImageError(url: string): string {
   imageRevision();
   return entries.get(url)?.error ?? "";
+}
+
+/**
+ * 一张图是否「还没试过」（本会话从没请求过）—— 后台图片预取只取这些。
+ * 失败过的图不再自动预取（避免后台反复打同一个失败地址）：等用户读到这一章时由
+ * 阅读路径再取一次（预取失败不挡阅读时的重取），或点占位框上的「重试」。
+ * 注意：这是给逻辑判断用的快照，不建立响应式依赖（渲染侧用 chapterImagePhase）。
+ */
+export function chapterImagePrefetchable(url: string): boolean {
+  return (entries.get(url)?.phase ?? "idle") === "idle";
 }
 
 // ---------------------------------------------------------------------------
@@ -110,35 +129,54 @@ function acquireSlot(): Promise<() => void> {
 function entryOf(url: string): ImageEntry {
   let entry = entries.get(url);
   if (!entry) {
-    entry = { phase: "loading", local: "", error: "", inflight: null, failedAt: 0 };
+    entry = {
+      phase: "loading",
+      local: "",
+      error: "",
+      failedBy: "",
+      inflight: null,
+      failedAt: 0,
+    };
     entries.set(url, entry);
   }
   return entry;
+}
+
+interface LoadImageOptions {
+  sourceId: string;
+  bookId: string;
+  url: string;
+  referer: string | null;
+  /** 取图来源（默认阅读时取图）：只影响失败冷却的归属，见 loadChapterImage */
+  purpose?: ChapterImagePurpose;
+  /** 忽略自动重试冷却（批量下载 / 手动重试：要的是本次真的再试一次） */
+  force?: boolean;
+  /** 手动重试：文件名不变但内容变了，让渲染地址带版本参数重新请求 */
+  refresh?: boolean;
+  /** 中止判定：返回 true 时不再发起新请求（已发出的等它结束） */
+  shouldStop?: () => boolean;
 }
 
 /**
  * 取一张正文图片的本地副本（文件名 + 尺寸）。
  * - 已下载 → 直接返回；进行中 → 复用同一个请求；
  * - 之前失败且仍在冷却内且非强制 → 返回 null（等下次阅读 / 手动重试）；
+ *   冷却按来源归属：**后台预取**的失败不挡**阅读时**的取图（用户读到这一章就该再试一次），
+ *   反之阅读时的失败也会让预取先等一会儿，不会连环打同一个地址；
  * - 排队期间 shouldStop 变真（用户离开了这一章 / 批量下载被停止）→ 不发请求、不记为失败；
  * - 其余情况发起一次下载。
  */
-function loadChapterImage(
-  sourceId: string,
-  bookId: string,
-  url: string,
-  referer: string | null,
-  force: boolean,
-  shouldStop?: () => boolean,
-  refresh?: boolean,
-): Promise<ChapterImageFile | null> {
+function loadChapterImage(options: LoadImageOptions): Promise<ChapterImageFile | null> {
+  const { sourceId, bookId, url, referer, force = false, refresh = false, shouldStop } = options;
+  const purpose = options.purpose ?? "read";
   const entry = entryOf(url);
   // 同一张图的并发请求合并（重试时也复用正在跑的那次）
   if (entry.inflight) return entry.inflight;
   if (!force) {
     if (entry.local) return Promise.resolve({ local: entry.local, ...sizeOf(entry.local) });
     if (entry.phase === "failed" && Date.now() - entry.failedAt < AUTO_RETRY_COOLDOWN_MS) {
-      return Promise.resolve(null);
+      const prefetchFailure = entry.failedBy === "prefetch";
+      if (!(purpose === "read" && prefetchFailure)) return Promise.resolve(null);
     }
   }
   entry.phase = "loading";
@@ -157,6 +195,7 @@ function loadChapterImage(
         entry.local = result.local;
         entry.phase = "ready";
         entry.error = "";
+        entry.failedBy = "";
         rememberImageSize(result.local, result.width, result.height);
         // 手动重试：文件名由地址哈希决定、重下不会改名，必须让渲染地址带版本参数
         // 重新请求一次，否则 WebView 仍按已失败的旧地址处理
@@ -165,11 +204,13 @@ function loadChapterImage(
       }
       entry.phase = "failed";
       entry.error = result.error || "图片下载失败";
+      entry.failedBy = purpose;
       entry.failedAt = Date.now();
       return null;
     } catch (err) {
       entry.phase = "failed";
       entry.error = err instanceof Error ? err.message : String(err);
+      entry.failedBy = purpose;
       entry.failedAt = Date.now();
       return null;
     } finally {
@@ -196,6 +237,8 @@ export interface ChapterImagesRequest {
   referer: string | null;
   /** 需要就绪的图片地址（网络地址） */
   urls: readonly string[];
+  /** 取图来源（默认阅读时取图）：只影响失败冷却的归属（预取失败不挡阅读时的重取） */
+  purpose?: ChapterImagePurpose;
   /** 忽略自动重试冷却（批量下载「把图片也下一遍」用：要的是本次真的再试一次） */
   force?: boolean;
   /** 中止判定（批量下载「停止」用）：返回 true 时不再发起新的请求，已发出的等它结束 */
@@ -204,7 +247,7 @@ export interface ChapterImagesRequest {
 
 /**
  * 确保一批图片已就绪（返回地址 → 本地副本，失败为 null）。
- * 已在会话内下载过的直接命中；失败过的按冷却自动再试。
+ * 已在会话内下载过的直接命中；失败过的按来源冷却自动再试。
  */
 export async function ensureChapterImages(
   request: ChapterImagesRequest,
@@ -215,14 +258,15 @@ export async function ensureChapterImages(
     if (!url) continue;
     if (request.shouldStop?.()) break;
     tasks.push(
-      loadChapterImage(
-        request.sourceId,
-        request.bookId,
+      loadChapterImage({
+        sourceId: request.sourceId,
+        bookId: request.bookId,
         url,
-        request.referer,
-        !!request.force,
-        request.shouldStop,
-      ).then((file) => {
+        referer: request.referer,
+        ...(request.purpose ? { purpose: request.purpose } : {}),
+        ...(request.force ? { force: true } : {}),
+        ...(request.shouldStop ? { shouldStop: request.shouldStop } : {}),
+      }).then((file) => {
         result.set(url, file);
       }),
     );
@@ -238,5 +282,5 @@ export async function retryChapterImage(
   url: string,
   referer: string | null,
 ): Promise<ChapterImageFile | null> {
-  return loadChapterImage(sourceId, bookId, url, referer, true, undefined, true);
+  return loadChapterImage({ sourceId, bookId, url, referer, force: true, refresh: true });
 }

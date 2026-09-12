@@ -42,6 +42,7 @@ import {
   onlineRunState,
   reloadChapterContent,
   retryReadingImage,
+  windowImagesPending,
 } from "../lib/online";
 import {
   chapterImageError,
@@ -501,18 +502,21 @@ function ImageBlock(props: {
     const url = remoteUrl();
     return url ? chapterImagePhase(url) : "ready";
   };
-  const showImage = () => !!source() && (props.natural || (props.w ?? 0) > 0);
+  const showImage = () =>
+    !!source() && (props.natural || (props.w ?? 0) > 0) && !broken();
   /** 本地图彻底缺失：既没有可渲染地址，也没有可请求的网络地址（EPUB 缺图 / 旧数据失败图） */
   const imageMissing = () => !source() && !remoteUrl();
-  const failed = () => !showImage() && (imageMissing() || phase() === "failed") && !broken();
+  /** 按「失败」占位（文字 + 重试）：图片缺失 / 下载失败 / 本地副本损坏读不出来 */
+  const failed = () => !showImage() && (imageMissing() || phase() === "failed" || broken());
   const canRetry = () => !!remoteUrl() && !!props.onRetry;
   return (
     <figure style={asCss(figureStyle())}>
       <Show
-        when={showImage() && !broken()}
+        when={showImage()}
         fallback={
           <div
-            class="mx-auto flex max-w-full flex-col items-center justify-center gap-2 rounded-md border border-dashed border-border bg-surface-2 px-4 text-[12px] text-text-3"
+            class="mx-auto flex max-w-full items-center justify-center gap-2 rounded-md border border-dashed border-border bg-surface-2 px-4 text-[12px] text-text-3"
+            classList={{ "flex-col": !failed(), "flex-row": failed() }}
             style={{ height: `${MISSING_IMAGE_HEIGHT}px` }}
           >
             <Show
@@ -524,12 +528,12 @@ function ImageBlock(props: {
                 />
               }
             >
-              <span class="max-w-full truncate">{props.alt || "图片缺失"}</span>
+              <span class="min-w-0 max-w-full truncate">{props.alt || "图片缺失"}</span>
               <Show when={canRetry()}>
                 <button
                   type="button"
                   data-reader-ui
-                  class="inline-flex items-center gap-1 rounded-lg bg-surface px-2.5 py-1 text-[11.5px] font-semibold text-text-2 transition-[scale,opacity] duration-100 active:scale-[0.96]"
+                  class="inline-flex shrink-0 items-center gap-1 rounded-lg bg-surface px-2.5 py-1 text-[11.5px] font-semibold text-text-2 transition-[scale,opacity] duration-100 active:scale-[0.96]"
                   aria-label="重新加载图片"
                   onClick={() => {
                     const url = remoteUrl();
@@ -1059,13 +1063,35 @@ export default function ReaderPage() {
     setReplaceSheetOpen(true);
   }
 
-  // 进入/切换章节时：若窗口内有缺正文章节则后台预取（当前章失败过的不自动重试）。
+  /** 用户在上一步停过后台预取的章节：同一章不自动重启（换章 / 手动重试后恢复），
+   *  否则「停止下载」刚按下，预取就会因窗口里还有缺正文 / 缺图而立刻重新开跑 */
+  let stoppedPrefetchChapter = -1;
+  /** 已经把「阅读焦点」交给后台预取的章节（图片预取改中心用）：同一章只交一次 */
+  let imagesFocusHandedFor = -1;
+
+  /** 下载面板「停止下载」：用户批量下载与后台窗口预取各自独立取消 */
+  function stopRemoteFetch(): void {
+    // 停批量下载时窗口预取早已让位（runDownloadFetch 开头就让位），同样按「这一章不自动重启」处理
+    stoppedPrefetchChapter = chapterIdx();
+    if (remoteDownloading()) {
+      cancelChapterDownload(bookId());
+      return;
+    }
+    cancelBackgroundFetch(bookId());
+  }
+
+  // 进入/切换章节时：若窗口内有缺正文章节则后台预取（当前章失败过的不自动重试）；
+  // 正文都已就绪但窗口内还有没取过的图片时，同样起一轮预取（正文预取完毕是前提，
+  // 由 online 层保证：窗口预取先取正文，取完才过图片）。
   // 触发源用渲染窗口：只有当前章 ±1 变化（或本次拉取的状态变化）才需要重新检查；
   // 真正判断缺哪些章节由 ensureReadingWindow 读实时的书库对象，这里拿到旧对象也只是
   // 保守地多触发一次空检查，不会重复下载。
   // 拉取进行中时：正在读的这一章还没有正文就把「阅读焦点」交给在跑的任务 —— 窗口预取会在
   // 下一批之后以本章为中心接着取，批量下载也会把本章提前取回，读到哪一章就先出哪一章，
-  // 不用等它把其余章节取完。本章已有正文则不动在跑的任务（不打断它给别处补正文）。
+  // 不用等它把其余章节取完。本章正文已就绪但窗口里还有没取过的图片时同样交一次焦点：
+  // 正在跑的图片预取会改以本章为中心，不让它留在用户已经跳走的旧窗口。
+  // 图片焦点**每章只交一次**：书库回写（图片落盘）会频繁重跑本效果，每次重申焦点会与
+  // 「跟读关闭时交给朗读章」的焦点来回争抢，图片预取就会反复中断重来。
   // 注意：这里只决定「要不要新起一轮预取」，用户操作（下载 / 重载）从不因此被拦下。
   createEffect(() => {
     const current = renderBook();
@@ -1077,16 +1103,26 @@ export default function ReaderPage() {
     const ch = current.chapters[idx];
     const bodyMissing = !!ch && !chapterHasContent(ch);
     if (remoteFetching()) {
-      if (bodyMissing) void ensureReadingWindow(current.id, idx);
+      if (bodyMissing) {
+        imagesFocusHandedFor = idx;
+        void ensureReadingWindow(current.id, idx);
+        return;
+      }
+      if (imagesFocusHandedFor !== idx && windowImagesPending(current.id, idx)) {
+        imagesFocusHandedFor = idx;
+        void ensureReadingWindow(current.id, idx);
+      }
       return;
     }
+    // 用户刚停止过这一章的后台预取：同一章不自动重启（换章 / 手动重试后恢复）
+    if (run.cancelled && idx === stoppedPrefetchChapter) return;
     const needAny = current.chapters.some(
       (c, i) =>
         Math.abs(i - idx) <= LAZY_WINDOW &&
         !chapterHasContent(c) &&
         !failed.some((f) => f.index === i),
     );
-    if (!needAny) return;
+    if (!needAny && !windowImagesPending(current.id, idx)) return;
     void ensureReadingWindow(current.id, idx);
   });
 
@@ -4331,8 +4367,7 @@ export default function ReaderPage() {
                         class="flex-1 rounded-xl bg-surface-2 px-4 py-2.5 text-[13.5px] font-semibold text-text-2 active:scale-[0.98]"
                         onClick={() => {
                           // 停止当前这一轮：批量下载与后台窗口预取各自独立取消
-                          if (remoteDownloading()) cancelChapterDownload(bookId());
-                          else cancelBackgroundFetch(bookId());
+                          stopRemoteFetch();
                         }}
                       >
                         停止下载
