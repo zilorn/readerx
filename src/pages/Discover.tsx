@@ -31,6 +31,7 @@ import { rememberPicked, type PickedBook } from "../lib/online";
 import { currentSourceParallel, lastSourceGroupFilter, rememberSourceGroupFilter } from "../lib/store";
 import { OnlineBookSheet } from "../components/OnlineBookSheet";
 import { SourceCover } from "../components/SourceCover";
+import { closeOnRouteChange } from "../lib/keptPage";
 
 type Mode = "search" | "discover";
 
@@ -131,6 +132,8 @@ export default function DiscoverPage() {
   const [errorText, setErrorText] = createSignal("");
   // 点击结果后弹出的在线书详情抽屉（不切路由，保留搜索/发现页状态）
   const [preview, setPreview] = createSignal<PickedBook | null>(null);
+  // 本页保活：离开时收起挂在 Portal 上的在线书详情抽屉
+  closeOnRouteChange(() => setPreview(null));
   // 外部入口（如详情页点击标签 / 带 ?q= 深链）请求的「快速搜索」词，等待书源就绪后自动执行
   const [pendingQuick, setPendingQuick] = createSignal<string | null>(null);
 

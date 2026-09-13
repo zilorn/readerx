@@ -225,7 +225,11 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
     } else {
       showToast("已在书架中");
     }
-    if (openReader && bookId) navigate(`/book/${bookId}`);
+    if (openReader && bookId) {
+      // 抽屉挂在 Portal 上，不随页面一起隐藏：跳转前必须自己收起
+      props.onClose();
+      navigate(`/book/${bookId}`);
+    }
   }
 
   const close = () => {

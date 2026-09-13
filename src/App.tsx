@@ -27,6 +27,20 @@ const BookDetailPage = lazy(() => import("./pages/BookDetail.tsx"));
 const NotFoundPage = lazy(() => import("./pages/NotFound"));
 
 /**
+ * 常驻（保活）页面：路径 → 组件。
+ * 这些页面由页面栈 RouteStage 直接挂载并常驻 DOM —— 切 Tab、进书再返回都不会重新挂载，
+ * 页内的搜索词 / 结果列表 / 勾选 / 滚动位置原样保留（首页、发现页、设置页，
+ * 以及「WebDAV 导入」：进书阅读返回后仍停在原目录与原位置）。
+ * 因此它们不再出现在下面的路由表里：路由只声明真正会 push / pop 的次级页面。
+ */
+const KEPT_PAGES: Record<string, Component> = {
+  "/": BookshelfPage,
+  "/discover": DiscoverPage,
+  "/settings": SettingsPage,
+  "/webdav-import": WebdavImportPage,
+};
+
+/**
  * 根布局：外层手机列 + 页面栈 RouteStage。
  * 滚动容器、底部 Tab 与页面切换动画统一由 RouteStage 以「页面层」维护，
  * 此处只保留外壳、全局 Toast，以及提示条「加入分组」拉起的移入分组抽屉
@@ -38,7 +52,7 @@ const AppShell: Component<RouteSectionProps> = (props) => {
       class="relative mx-auto flex h-screen w-full max-w-[480px] flex-col overflow-hidden bg-bg min-[521px]:border-x min-[521px]:border-border min-[521px]:shadow-[0_0_44px_rgb(0_0_0/0.16)]"
       style={{ height: "100dvh" }}
     >
-      <RouteStage>{props.children}</RouteStage>
+      <RouteStage kept={KEPT_PAGES}>{props.children}</RouteStage>
       <Show when={currentToast()}>
         {(toast) => (
           <div
@@ -108,18 +122,15 @@ function App() {
 
   return (
     <Router root={AppShell}>
-      <Route path="/" component={BookshelfPage} />
+      {/* 主 Tab（/ 、/discover 、/settings）与 /webdav-import 属常驻页面，见 KEPT_PAGES */}
       <Route path="/shelf-search" component={ShelfSearchPage} />
-      <Route path="/webdav-import" component={WebdavImportPage} />
-      <Route path="/discover" component={DiscoverPage} />
-      <Route path="/settings" component={SettingsPage} />
       <Route path="/chapter-rules" component={ChapterRulesPage} />
       <Route path="/tts-cache" component={TtsCachePage} />
       <Route path="/book/:id" component={ReaderPage} />
       <Route path="/sources" component={BookSourcesPage} />
       <Route path="/source-editor" component={SourceEditorPage} />
       <Route path="/online/:key" component={OnlineBookPage} />
-      <Route path="/detail/:id" component={BookDetailPage}/>
+      <Route path="/detail/:id" component={BookDetailPage} />
       <Route path="*404" component={NotFoundPage} />
     </Router>
   );

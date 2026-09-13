@@ -16,6 +16,7 @@ import {
 } from "../lib/bookmarks";
 import { showToast } from "../lib/toast";
 import { BookmarkRiskDialog } from "./BookmarkRiskDialog";
+import { closeOnRouteChange } from "../lib/keptPage";
 import { ChevronRightIcon, CloseIcon, FileTextIcon, ServerIcon } from "./icons";
 
 interface ImportButtonProps {
@@ -48,6 +49,12 @@ export function ImportButton(props: ImportButtonProps) {
   const [conflictBusy, setConflictBusy] = createSignal(false);
   const [risk, setRisk] = createSignal<PendingRisk | null>(null);
   const [riskBusy, setRiskBusy] = createSignal(false);
+  // 菜单 / 冲突弹窗挂在 Portal 上，不随页面隐藏：路由离开（如系统返回）时收起
+  closeOnRouteChange(() => {
+    setOpen(false);
+    setConflict(null);
+    setRisk(null);
+  });
   let input: HTMLInputElement | undefined;
 
   async function handleFile(file: File | undefined | null) {

@@ -48,50 +48,21 @@ import {
 } from "../lib/webdav";
 import { BookmarkRiskDialog } from "../components/BookmarkRiskDialog";
 import { showToast } from "../lib/toast";
-import { appScrollEl } from "../lib/appScroll";
+import { closeOnRouteChange } from "../lib/keptPage";
 
 let reloadSeq = 0;
 
 /**
- * WebDAV 目录浏览现场：打开书籍阅读前保存，返回本页时恢复。
- * - path / dirList：打开的目录与“已经解析好的”目录列表
- * - keyword / selected：当前目录的搜索与勾选状态
- * - scrollTop：目录列表的滚动位置（应用滚动容器内）
- * 页面在路由切换（webdav → 阅读页 → webdav）时会卸载再重挂，
- * 因此快照存在模块级，随模块存活跨挂载保留。
+ * “重新导入”已确认但书签继承失效：等待用户决定是否仍替换（draft 已拉取，避免二次下载）
  */
-interface DavBrowseSnapshot {
-  serverId: string;
-  path: string;
-  keyword: string;
-  selected: Record<string, boolean>;
-  dirList: DavEntry[] | null;
-  scrollTop: number;
-}
-
-let pendingBrowseSnapshot: DavBrowseSnapshot | null = null;
-
-/** “重新导入”已确认但书签继承失效：等待用户决定是否仍替换（draft 已拉取，避免二次下载） */
 interface PendingReimportRisk {
   existing: BookMeta;
   draft: BookDraft;
   preview: BookmarkInheritPreview;
 }
 
-/** 当前 dirList 快照对应的 (serverId, path)，用于避免返回后重复解析同一目录 */
+/** 当前 dirList 快照对应的 (serverId, path)，用于避免重复解析同一目录 */
 let listedDirKey: string | null = null;
-
-/**
- * 读取并消费“从阅读页返回”的浏览快照：
- * 只有快照存在且仍属于当前激活服务器时返回，否则丢弃（当作全新进入根目录）。
- */
-function consumeBrowseSnapshot(): DavBrowseSnapshot | null {
-  const snapshot = pendingBrowseSnapshot;
-  pendingBrowseSnapshot = null;
-  if (!snapshot) return null;
-  const srv = activeDavServer();
-  return srv && snapshot.serverId === srv.id ? snapshot : null;
-}
 
 /** 条目名是否包含搜索词（小写不区分大小写；空词放行全部） */
 function nameMatchesQuery(name: string, query: string): boolean {
@@ -217,20 +188,11 @@ function ImportedBookRow(props: {
 /** 目录条目按类型分开渲染：文件夹可进入，书籍文件可勾选导入；已导入的书可直接阅读/长按重新导入 */
 export default function WebdavImportPage() {
   const navigate = useNavigate();
-  // 若刚结束「阅读页」返回（模块级快照仍存在且服务器一致），恢复浏览现场
-  const snapshot = consumeBrowseSnapshot();
-  // 恢复的快照即当前目录的解析结果：登记目录键，避免挂载时的加载逻辑重复解析
-  if (snapshot?.dirList) {
-    listedDirKey = snapshot.serverId + "\u0000" + snapshot.path;
-  }
-  let scrollRestoredFor = false;
-  const [path, setPath] = createSignal(snapshot?.path ?? "");
-  const [dirList, setDirList] = createSignal<DavEntry[] | null>(snapshot?.dirList ?? null);
+  const [path, setPath] = createSignal("");
+  const [dirList, setDirList] = createSignal<DavEntry[] | null>(null);
   const [error, setError] = createSignal<string | null>(null);
   const [loading, setLoading] = createSignal(false);
-  const [selected, setSelected] = createSignal<Record<string, boolean>>(
-    snapshot?.selected ?? {},
-  );
+  const [selected, setSelected] = createSignal<Record<string, boolean>>({});
   const [configOpen, setConfigOpen] = createSignal(false);
   const [importing, setImporting] = createSignal(false);
   const [importProgress, setImportProgress] = createSignal(0);
@@ -239,7 +201,13 @@ export default function WebdavImportPage() {
   const [reimporting, setReimporting] = createSignal(false);
   const [bookmarkRisk, setBookmarkRisk] = createSignal<PendingReimportRisk | null>(null);
   const [riskImporting, setRiskImporting] = createSignal(false);
-  const [keyword, setKeyword] = createSignal(snapshot?.keyword ?? "");
+  const [keyword, setKeyword] = createSignal("");
+  // 本页保活：离开时收起挂在 Portal 上的配置抽屉 / 重新导入弹窗
+  closeOnRouteChange(() => {
+    setConfigOpen(false);
+    setReimportEntry(null);
+    setBookmarkRisk(null);
+  });
 
   createEffect(() => {
     void ensureWebDavLoaded();
@@ -253,7 +221,7 @@ export default function WebdavImportPage() {
   async function loadDir(opts?: { force?: boolean }) {
     const srv = server();
     const dir = path();
-    // 已持有该目录的解析结果（如从阅读页返回时恢复的快照）：不再重复解析/请求
+    // 已持有该目录的解析结果（例如刚从阅读页返回，本页常驻、不会重新挂载）：不重复请求
     if (!opts?.force && srv && dirList() !== null) {
       const listedFor = srv.id + "\u0000" + dir;
       if (listedDirKey === listedFor) {
@@ -287,20 +255,6 @@ export default function WebdavImportPage() {
       if (seq === reloadSeq) setLoading(false);
     }
   }
-
-  // 从阅读页返回：恢复目录列表的滚动位置。
-  // AppShell 在路由切换时会把滚动容器同步滚回顶部，这里用 rAF 延后到它之后执行，
-  // 并留出当前帧让恢复出的目录列表完成布局。
-  createEffect(() => {
-    if (!snapshot || dirList() === null || snapshot.scrollTop <= 0) return;
-    if (scrollRestoredFor) return;
-    scrollRestoredFor = true;
-    const top = snapshot.scrollTop;
-    requestAnimationFrame(() => {
-      const el = appScrollEl();
-      if (el) el.scrollTop = top;
-    });
-  });
 
   // 激活服务器 / 当前路径变化时重新加载
   createEffect(() => {
@@ -437,19 +391,8 @@ export default function WebdavImportPage() {
     else showToast(`导入 ${ok} 本，失败 ${failed} 本`, true);
   }
 
-  /** 点击已导入的行：直接打开本地副本阅读（先保存浏览现场，返回时恢复） */
+  /** 点击已导入的行：直接打开本地副本阅读（本页常驻，返回时目录、勾选与滚动位置原样还在） */
   function openLocalBook(bookId: string) {
-    const srv = server();
-    if (srv && dirList() !== null) {
-      pendingBrowseSnapshot = {
-        serverId: srv.id,
-        path: path(),
-        keyword: keyword(),
-        selected: { ...selected() },
-        dirList: dirList(),
-        scrollTop: appScrollEl()?.scrollTop ?? 0,
-      };
-    }
     navigate(`/book/${bookId}`);
   }
 
@@ -508,8 +451,6 @@ export default function WebdavImportPage() {
   }
 
   function goBack() {
-    // 返回书架属“主动离开”，丢弃未消费的浏览快照，下次进入从根目录开始
-    pendingBrowseSnapshot = null;
     if (window.history.length > 1) navigate(-1);
     else navigate("/");
   }

@@ -58,6 +58,12 @@
 - **每个页面文件必须 default export 一个 Solid 组件**，并在 App.tsx 里用 `lazy(() => import(...))` 引入 —— 新增页面照抄现有写法即可，构建时 Vite 会自动拆 chunk。
 - 根布局 `AppShell` 负责：`<Suspense>` 承接懒加载 fallback、根据路由显示/隐藏底部 Tab、路由切换回滚滚动位置。
 - 主 Tab 页面才有底部导航；阅读页 / 404 等次级页不显示 Tab。
+- **常驻（保活）页面**：主 Tab（`/`、`/discover`、`/settings`）与 `/webdav-import` 由页面栈
+  `RouteStage` 直接挂载并常驻 DOM（注册表 `KEPT_PAGES` 在 `src/App.tsx`），切走只是
+  `display:none`、再进入复用同一层，页内状态与滚动位置原样保留 —— 这些路径**不写 `<Route>`**，
+  路由表只声明真正会 push / pop 的次级页面。要保活一个新页面：加进 `KEPT_PAGES`，
+  并让该页面用 `closeOnRouteChange`（`src/lib/keptPage.ts`）收起挂在 `<Portal>` 上的弹层
+  （Portal 渲染到 document.body，不随页面层隐藏）。其余页面按推入 / 弹出卸载，正常写 `<Route>`。
 - 页面内跳转用 `useNavigate()` / `<A href>`（不要写原生 `<a href>`）。
 
 ## 状态约定（重要）
