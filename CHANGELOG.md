@@ -88,6 +88,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `readerx-source auth clear` 清不掉用 `auth cookie` / `auth webkit` / `auth cdp` 导入的登录态：
+  只删了整行的 `source_sessions/<id>.json`，漏了带作用域的 `profiles/<id>.json`，而
+  `call` / `run` / `auth show` 每次都会重新套用后者，表现为「提示已清空、Cookie 却还在」。
+  现在两处文件都删，报告改为「整行 N + 作用域 M」的文件条数口径（并列出实际删除的文件，
+  无登录态时明确提示），可重复执行。
+- `readerx-source` 的显示环境预检失效：`DISPLAY=`（空串，容器里常见）被 `is_some()` 当成
+  「有显示」，于是无头环境一路走到 GTK 初始化才报错。现在空串按「没有显示」处理，
+  在打开窗口前就给出「用 xvfb-run 或 --auth cdp」的可读提示。
+- `readerx-source auth show` 与 `sources` 的信息口径：
+  - `show` 现在套用与 `call` / `run` 完全相同的身份（含 `--profile` / `--ua`），打印的
+    头与 Cookie 就是这次请求真正会带上的（此前无视 `--profile` 的 UA）；
+  - `sources` 的「登录态 N 条」此前只统计整行文件，用带域名的 Cookie 文件导入后显示为 0，
+    现在整行与作用域一起统计。
+- 采集登录态时不再把**书源自带的 User-Agent** 复制进登录态文件：它是外部覆盖（`--ua` /
+  身份文件）时才记录。此前一律写入，会在之后盖住书源自身对 UA 的修改。
 - `util.urlJoin` 两处拼接缺陷：目录地址的末尾斜杠被规范化吃掉（`/book/562822/` 变成
   `/book/562822`，按路由区分的站点直接 404）；相对地址带 query 时被重复追加
   （`/x?q=1` → `/x?q=1?q=1`）；协议相对地址（`//cdn.example.com/a.js`）拼出

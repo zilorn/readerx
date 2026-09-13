@@ -18,6 +18,19 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 use webkit2gtk::{CookieManagerExt, SettingsExt, WebContext, WebContextExt, WebView, WebViewExt};
 
+/// 当前环境是否有可用的显示（X11 / Wayland）。
+///
+/// 注意 `DISPLAY=`（空串）在 shell 里很常见（例如 `DISPLAY= cmd` 或容器里预置的空变量），
+/// 它**不是**「有显示」——`var_os` 会返回 `Some("")`，只看 `is_some()` 会误判成可用，
+/// 结果一路走到 GTK 初始化才报错。这里统一按「非空」判断，供 CLI 提前给出可读提示。
+pub fn display_available() -> bool {
+    ["DISPLAY", "WAYLAND_DISPLAY"].iter().any(|key| {
+        std::env::var_os(key)
+            .map(|value| !value.is_empty())
+            .unwrap_or(false)
+    })
+}
+
 /// 用 WebKitGTK 打开 `url` 让用户完成认证，返回捕获到的 Cookie。
 ///
 /// - `wait_secs`：最长等待时间（到点自动取当前 Cookie 并关窗）；
@@ -32,7 +45,7 @@ pub fn authenticate(
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return Err("仅支持 http/https 的认证地址".to_string());
     }
-    if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+    if !display_available() {
         return Ok(LoginOutcome::failure(
             url,
             "没有可用的显示环境：无头机器请用 xvfb-run 运行，或改用 --auth cdp 连接已有 Chrome",

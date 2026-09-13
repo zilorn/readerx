@@ -24,11 +24,11 @@
 
 书源引擎（`src-tauri/crates/readerx-source`）可独立编译为命令行工具，与 App 共用同一份引擎代码：
 
-| 命令                                                          | 说明                                     |
-| ------------------------------------------------------------- | ---------------------------------------- |
-| `cargo build -p readerx-source --features cli`                 | 构建 `readerx-source`（含 CDP 认证后端） |
-| `cargo build -p readerx-source --features "cli webkit"`        | 追加 WebKitGTK 认证后端（需系统开发包）  |
-| `cargo test -p readerx-source`                                 | 引擎 / 宿主 / 存储的单元测试             |
+| 命令                                                    | 说明                                     |
+| ------------------------------------------------------- | ---------------------------------------- |
+| `cargo build -p readerx-source --features cli`          | 构建 `readerx-source`（含 CDP 认证后端） |
+| `cargo build -p readerx-source --features "cli webkit"` | 追加 WebKitGTK 认证后端（需系统开发包）  |
+| `cargo test -p readerx-source`                          | 引擎 / 宿主 / 存储的单元测试             |
 
 > 端口 1420 可能已被 `tauri android dev` 占用，勿再起第二个 dev server。
 
@@ -139,4 +139,4 @@
 
 - 不要随意修改软件版本。
 - 注意更新`CHANGELOG.md`。
-- `CHANGELOG.md` 如果是未发布版本的更新内容修复，请不要写在Fixed。
+- `CHANGELOG.md` 如果是未发布版本的更新内容的修复（在Added上内容的修复），请不要写在Fixed。

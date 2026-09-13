@@ -5,7 +5,10 @@
 
 use crate::cli::args::{Cli, ENTRY_FUNCTIONS};
 use crate::cli::render as out;
-use crate::cli::source::{call_and_print, compact, load_source, prepare_and_call};
+use crate::cli::source::{
+    call_and_print, compact, count_cookies, load_source, prepare_and_call, profile_path,
+    read_profile_cookies,
+};
 use crate::engine;
 use crate::models::{BookItem, ChapterItem};
 use crate::store;
@@ -45,11 +48,11 @@ pub fn cmd_sources(cli: &Cli) -> Result<(), String> {
         println!("（没有已安装书源：用 --source <文件.json> 直接跑单个书源文件）");
     }
     for source in &sources {
-        let cookies = store::read_login_cookie(&source.id)
-            .ok()
-            .flatten()
-            .map(|c| c.split(';').filter(|p| !p.trim().is_empty()).count())
-            .unwrap_or(0);
+        // 登录态分两处落盘：整行（source_sessions）+ 作用域（profiles），都要统计，
+        // 否则用 `auth cookie --cookie-file`（带域名）建立登录态后这里会显示「无登录态」
+        let legacy = store::read_login_cookie(&source.id).ok().flatten();
+        let cookies = count_cookies(legacy.as_deref().unwrap_or(""))
+            + read_profile_cookies(&profile_path(&source.id)).len();
         println!(
             "{} {} [{}]  JS {} 字{}{}",
             if source.enabled { "●" } else { "○" },

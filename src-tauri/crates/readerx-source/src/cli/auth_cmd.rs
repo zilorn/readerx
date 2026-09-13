@@ -12,7 +12,8 @@ use crate::auth::{self, AuthProvider};
 use crate::cli::args::Cli;
 use crate::cli::render as out;
 use crate::cli::source::{
-    apply_profile, apply_saved_profile, count_cookies, load_source, profile_path,
+    apply_profile, apply_saved_profile, clear_login_state, count_cookies, load_source, profile_path,
+    read_profile_cookies,
 };
 use crate::host::{self, ScopedCookie};
 use crate::models::BookSource;
@@ -54,7 +55,7 @@ pub fn cmd_auth(cli: &Cli, provider: Option<Arc<dyn AuthProvider>>) -> Result<()
                 .collect::<Vec<String>>()
                 .join("; ");
             let scoped = filter_cookies_for_source(cli, &source, &cli.profile.cookies);
-            save_login_state(&source, &cookie_text, &scoped, cli)?;
+            save_login_state(&source, &cookie_text, &scoped, cli, &session)?;
             Ok(())
         }
         "webkit" | "cdp" => {
@@ -118,16 +119,28 @@ pub fn cmd_auth(cli: &Cli, provider: Option<Arc<dyn AuthProvider>>) -> Result<()
         }
         "show" => {
             let saved = store::read_login_cookie(&source.id)?;
-            // 已保存的登录态 profile（带作用域 Cookie）也一并加载，展示才是「跑书源时真正带上的」
+            let profile_file = profile_path(&source.id);
+            let profile_cookies = read_profile_cookies(&profile_file);
+            // 与 `call` / `run` 完全同一套身份：先 CLI/身份文件，再已保存登录态。
+            // 这里必须都套上，否则「show 出来的」和「请求真正带的」不是一回事
+            apply_profile(cli, &source, &session);
             apply_saved_profile(cli, &source, &session);
+            let headers = session.header_snapshot();
+            let ua = effective_user_agent(&session);
             if cli.json {
                 out::print_json(&json!({
                     "source": source.id,
                     "dataDir": store::data_root().display().to_string(),
                     "savedLogin": saved,
+                    "savedProfile": if profile_file.is_file() {
+                        profile_file.display().to_string()
+                    } else {
+                        String::new()
+                    },
+                    "savedScopedCookies": profile_cookies.len(),
                     "rawCookieLines": session.legacy_cookie_lines(),
                     "scopedCookies": session.scoped_cookie_names(),
-                    "baseHeaders": session.header_snapshot()
+                    "baseHeaders": headers
                         .into_iter()
                         .map(|(k, v)| json!({"name": k, "value": v}))
                         .collect::<Vec<_>>(),
@@ -136,11 +149,25 @@ pub fn cmd_auth(cli: &Cli, provider: Option<Arc<dyn AuthProvider>>) -> Result<()
                 println!("书源：{} [{}]", source.name, source.id);
                 println!("数据目录：{}", store::data_root().display());
                 match &saved {
-                    Some(cookie) => println!("已保存登录态：{} 条", count_cookies(cookie)),
-                    None => println!("已保存登录态：无（用 auth cookie / auth webkit / auth cdp 建立）"),
+                    Some(cookie) => println!("已保存登录态：{} 条（整行）", count_cookies(cookie)),
+                    None => println!("已保存登录态：无整行 Cookie"),
                 }
-                for line in session.header_snapshot() {
-                    println!("  头 {}: {}", line.0, line.1);
+                if profile_file.is_file() {
+                    println!(
+                        "已保存登录态：{} 条（作用域，来自 {}）",
+                        profile_cookies.len(),
+                        profile_file.display()
+                    );
+                }
+                if saved.is_none() && !profile_file.is_file() {
+                    println!("（用 auth cookie / auth webkit / auth cdp 建立登录态）");
+                }
+                println!("请求将带上：");
+                for (name, value) in headers {
+                    println!("  {name}: {value}");
+                }
+                if ua != crate::profile::DEFAULT_UA && ua != source.user_agent.trim() {
+                    println!("  （UA 来自 --profile / 已保存登录态）");
                 }
                 for name in session.scoped_cookie_names() {
                     println!("  Cookie {name}");
@@ -149,20 +176,31 @@ pub fn cmd_auth(cli: &Cli, provider: Option<Arc<dyn AuthProvider>>) -> Result<()
             Ok(())
         }
         "clear" => {
-            let removed = store::read_login_cookie(&source.id)?;
-            store::remove_login_cookie(&source.id)?;
-            auth::unseed(&source.id);
-            let mut cleared = 0u64;
-            if let Some(cookie) = removed {
-                cleared += host::http_remove_cookie(&source.id, &cookie);
-            }
-            if cli.clear_cookies {
-                session.clear_cookies();
-            }
+            // 登录态分两处落盘（整行 + 作用域），两处都要删干净——只删一处的话，
+            // `call` / `run` / `auth show` 里的 apply_saved_profile 会把 profile 重新套回会话
+            let cleared = clear_login_state(&source.id)?;
+            // 「本次会话」也清干净：内存里的整行 / 作用域 Cookie 与会话 jar
+            session.clear_cookies();
             if cli.json {
-                out::print_json(&json!({"source": source.id, "removedLines": cleared}));
+                out::print_json(&json!({
+                    "source": source.id,
+                    "removedCookies": cleared.total(),
+                    "removedLegacyCookies": cleared.legacy_cookies,
+                    "removedScopedCookies": cleared.scoped_cookies,
+                    "removedFiles": cleared.removed_files,
+                }));
+            } else if cleared.is_empty() {
+                println!("该书源本来就没有登录态（source_sessions / profiles 均无文件）");
             } else {
-                println!("已清空该书源登录态（移除 {cleared} 行 Cookie）");
+                println!(
+                    "已清空该书源登录态：{} 条 Cookie（整行 {} + 作用域 {}），会话也已清空",
+                    cleared.total(),
+                    cleared.legacy_cookies,
+                    cleared.scoped_cookies
+                );
+                for file in &cleared.removed_files {
+                    println!("  已删除 {file}");
+                }
             }
             Ok(())
         }
@@ -243,6 +281,7 @@ fn save_login_state(
     raw_cookie_text: &str,
     scoped: &[ScopedCookie],
     cli: &Cli,
+    session: &host::SessionHandle,
 ) -> Result<(), String> {
     let mut saved: Vec<String> = Vec::new();
     if !raw_cookie_text.trim().is_empty() {
@@ -256,7 +295,9 @@ fn save_login_state(
         let path = profile_path(&source.id);
         let profile = Profile {
             name: format!("{} 登录态", source.name),
-            user_agent: cli.profile.user_agent.clone(),
+            // 只记「外部覆盖」的 UA（CLI --ua / 身份文件）：书源自带的 UA 留在书源里，
+            // 复制进登录态会在之后盖住书源自身的修改
+            user_agent: effective_user_agent_if_external(cli, session),
             headers: cli
                 .profile
                 .headers
@@ -285,4 +326,28 @@ fn save_login_state(
         println!("后续 call / run 会自动套用（同名 Cookie 以最新导入为准）");
     }
     Ok(())
+}
+
+/// 会话当前生效的 UA：外部覆盖 > 书源自带 > 内置默认（与 `host::session_base_headers` 一致）
+fn effective_user_agent(session: &host::SessionHandle) -> String {
+    let (ua, _) = session.user_agent_state();
+    if ua.trim().is_empty() {
+        crate::profile::DEFAULT_UA.to_string()
+    } else {
+        ua
+    }
+}
+
+/// 会话当前生效的 UA，**仅当它是外部覆盖**（CLI `--ua` / 身份文件）时返回；
+/// 书源自带或内置默认返回空串（登录态里不必重复记录）。
+fn effective_user_agent_if_external(cli: &Cli, session: &host::SessionHandle) -> String {
+    if !cli.profile.user_agent.trim().is_empty() {
+        return cli.profile.user_agent.trim().to_string();
+    }
+    let (ua, external) = session.user_agent_state();
+    if external {
+        ua
+    } else {
+        String::new()
+    }
 }

@@ -7,7 +7,7 @@ use crate::cli::args::{Cli, ENTRY_FUNCTIONS};
 use crate::cli::render as out;
 use crate::auth;
 use crate::engine;
-use crate::host;
+use crate::host::{self, ScopedCookie};
 use crate::models::{BookSource, SourceCallResult};
 use crate::profile::Profile;
 use crate::store;
@@ -262,5 +262,130 @@ pub fn apply_saved_profile(cli: &Cli, source: &BookSource, session: &host::Sessi
             }
         }
         Err(err) => eprintln!("readerx-source: 读取登录态 {} 失败：{err}", path.display()),
+    }
+}
+
+/// 读取登录态 profile 里的作用域 Cookie（文件不存在 / 解析失败都返回空，只用于展示与计数）
+pub fn read_profile_cookies(path: &Path) -> Vec<ScopedCookie> {
+    if !path.is_file() {
+        return Vec::new();
+    }
+    Profile::load(path)
+        .map(|profile| profile.cookies)
+        .unwrap_or_default()
+}
+
+/// 登录态清理结果（`auth clear` 的报告口径）
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ClearedLoginState {
+    /// 移除的整行 Cookie 条数（`source_sessions/<id>.json`）
+    pub legacy_cookies: usize,
+    /// 移除的作用域 Cookie 条数（`profiles/<id>.json`）
+    pub scoped_cookies: usize,
+    /// 实际删掉的文件（人类可读描述）
+    pub removed_files: Vec<String>,
+}
+
+impl ClearedLoginState {
+    pub fn total(&self) -> usize {
+        self.legacy_cookies + self.scoped_cookies
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.total() == 0 && self.removed_files.is_empty()
+    }
+}
+
+/// 清空某个书源**两处**落盘的登录态。
+///
+/// 登录态分两处，缺一处就会「清了还在」（`call` / `run` 每次都会重新套用 profile）：
+/// - `source_sessions/<id>.json`：整行 Cookie（App 网页登录 / `auth cookie` 的无域条目）；
+/// - `profiles/<id>.json`：带作用域的 Cookie（`auth cookie` / `auth webkit` / `auth cdp`）。
+///
+/// 只用文件计数，不碰内存会话（会话清理由调用方做，见 `auth clear`）。
+pub fn clear_login_state(source_id: &str) -> Result<ClearedLoginState, String> {
+    let legacy = store::read_login_cookie(source_id)?;
+    let profile_file = profile_path(source_id);
+    let scoped = read_profile_cookies(&profile_file).len();
+    let mut result = ClearedLoginState {
+        legacy_cookies: count_cookies(legacy.as_deref().unwrap_or("")),
+        scoped_cookies: scoped,
+        removed_files: Vec::new(),
+    };
+    if legacy.is_some() {
+        store::remove_login_cookie(source_id)?;
+        result
+            .removed_files
+            .push("source_sessions/<id>.json（整行 Cookie）".to_string());
+    }
+    if profile_file.is_file() {
+        match std::fs::remove_file(&profile_file) {
+            Ok(()) => result
+                .removed_files
+                .push(format!("{}（作用域 Cookie）", profile_file.display())),
+            // 并发下已被删掉：当作成功
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(format!("删除 {} 失败: {err}", profile_file.display()));
+            }
+        }
+    }
+    auth::unseed(source_id);
+    Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_profile(id: &str, count: usize) {
+        let path = profile_path(id);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let cookies: Vec<ScopedCookie> = (0..count)
+            .map(|i| ScopedCookie {
+                name: format!("c{i}"),
+                value: "v".to_string(),
+                domain: ".example.com".to_string(),
+                path: "/".to_string(),
+                secure: true,
+                expires: 0,
+            })
+            .collect();
+        let profile = Profile {
+            name: "测试登录态".to_string(),
+            user_agent: String::new(),
+            headers: Vec::new(),
+            cookies,
+            auth_url: "https://example.com".to_string(),
+        };
+        profile.save(&path).unwrap();
+    }
+
+    /// 回归：`auth clear` 必须连作用域登录态（profiles/<id>.json）一起删掉。
+    /// 曾经只删了整行文件，导致 `call` 每次又把 profile 套回会话（「清了还在」）。
+    #[test]
+    fn clear_removes_both_legacy_and_scoped_login_state() {
+        let dir = std::env::temp_dir().join(format!("readerx-clear-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        store::init_data_root(&dir);
+
+        store::write_login_cookie("demo", "https://example.com", "a=1; b=2").unwrap();
+        write_profile("demo", 3);
+        assert!(profile_path("demo").is_file());
+
+        let cleared = clear_login_state("demo").unwrap();
+        assert_eq!(cleared.legacy_cookies, 2);
+        assert_eq!(cleared.scoped_cookies, 3);
+        assert_eq!(cleared.total(), 5);
+        assert_eq!(cleared.removed_files.len(), 2);
+        // 两处文件都不在了（call/run 之后不会再有可套用的登录态）
+        assert!(store::read_login_cookie("demo").unwrap().is_none());
+        assert!(!profile_path("demo").is_file());
+        assert!(read_profile_cookies(&profile_path("demo")).is_empty());
+
+        // 幂等：再删一次不报错、报告为空
+        let again = clear_login_state("demo").unwrap();
+        assert!(again.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

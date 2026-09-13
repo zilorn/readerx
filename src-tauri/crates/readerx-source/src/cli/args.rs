@@ -60,8 +60,8 @@ pub const USAGE: &str = r#"readerx-source —— ReaderX 书源引擎独立运�
                                              （默认按书源站点过滤；--url '' 收整份）
   webkit   [--url <地址>] [--wait <秒>]      用系统 WebKit 内核打开页面，人工过一次挑战
   cdp      [--url <地址>] [--wait <秒>]      连已有 Chrome（需 --remote-debugging-port）取 Cookie
-  show                                        查看当前会话 / 已保存的登录态
-  clear                                       清空该源登录态（文件 + 本次会话）
+  show                                        查看当前会真正带上的头与 Cookie
+  clear                                       清空该源登录态（整行 + 作用域文件，并清空会话）
 
 示例：
   readerx-source sources

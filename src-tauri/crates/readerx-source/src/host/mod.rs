@@ -127,6 +127,10 @@ pub struct SourceState {
     pub(crate) client_no_redirect: reqwest::blocking::Client,
     pub(crate) default_headers: Mutex<Vec<(String, String)>>,
     pub(crate) user_agent: Mutex<String>,
+    /// 当前 UA 的来源：书源自带（false）还是外部覆盖（true，CLI `--ua` / 身份文件）。
+    /// 采集登录态时要把 UA 一起存下来（`cf_clearance` 与 UA 绑定），而「存哪一个」取决于
+    /// 它从哪来——书源自带的 UA 已经写在书源里，重复存进登录态反而会盖住书源后续的修改。
+    pub(crate) user_agent_external: Mutex<bool>,
     pub(crate) extra_cookies: Mutex<Vec<String>>,
     /// 带**作用域**的 Cookie（浏览器导入 / CDP 抓取）：只在匹配域名的请求上发送。
     /// 与 `extra_cookies`（整行、无条件发送，含应用内网页登录的 Cookie）区分：
@@ -278,6 +282,7 @@ pub fn prepare_source(source: &BookSource) -> Result<(), String> {
                 client_no_redirect,
                 default_headers: Mutex::new(Vec::new()),
                 user_agent: Mutex::new(String::new()),
+                user_agent_external: Mutex::new(false),
                 extra_cookies: Mutex::new(Vec::new()),
                 scoped_cookies: Mutex::new(Vec::new()),
                 auto_auth: Mutex::new(true),
@@ -296,6 +301,11 @@ pub fn prepare_source(source: &BookSource) -> Result<(), String> {
     *state.default_headers.lock().unwrap_or_else(|e| e.into_inner()) = headers;
     *state.user_agent.lock().unwrap_or_else(|e| e.into_inner()) =
         source.user_agent.trim().to_string();
+    // 书源自身配置（或空 = 内置默认）不算外部覆盖
+    *state
+        .user_agent_external
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = false;
     *state.auto_auth.lock().unwrap_or_else(|e| e.into_inner()) = source.auto_auth;
     Ok(())
 }
@@ -1154,6 +1164,29 @@ impl SessionHandle {
             .user_agent
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = ua.trim().to_string();
+        *self
+            .state
+            .user_agent_external
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = !ua.trim().is_empty();
+    }
+
+    /// 会话当前生效的 User-Agent 与来源：`(ua 文本, 是否为外部覆盖)`。
+    /// 空文本表示会回落内置默认 UA（见 `session_base_headers`）。
+    pub fn user_agent_state(&self) -> (String, bool) {
+        let ua = self
+            .state
+            .user_agent
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
+        let external = self
+            .state
+            .user_agent_external
+            .lock()
+            .map(|guard| *guard)
+            .unwrap_or(false);
+        (ua, external)
     }
 
     /// 合并一批默认请求头（同名覆盖；`user-agent` / `cookie` 交给专用入口处理）

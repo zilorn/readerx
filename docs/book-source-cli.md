@@ -124,12 +124,23 @@ readerx-source --source demo auth cdp --browser /usr/bin/google-chrome
 在浏览器里完成登录 / 人机验证后**按回车**即取回该站点 Cookie；非交互环境下等待约 8 秒后
 自动取当前 Cookie。
 
-### 清理
+### 查看与清理
 
 ```bash
-readerx-source --source demo auth clear             # 清空登录态文件
-readerx-source --source demo auth clear --clear-cookies  # 同时清空本次会话的 Cookie
+readerx-source --source demo auth show    # 打印这次请求真正会带上的头与 Cookie
+readerx-source --source demo auth clear   # 清空登录态（整行 + 作用域文件）并清空会话
 ```
+
+登录态落两处，`auth clear` **两处都会删**（缺一处就会出现「清了还在」，因为 `call` / `run` 每次
+都会重新套用已保存的登录态）：
+
+| 文件 | 内容 |
+| --- | --- |
+| `<data-dir>/source_sessions/<源id>.json` | 整行 Cookie（App 网页登录 / `--cookie` 的无域条目） |
+| `<data-dir>/profiles/<源id>.json` | 带作用域的 Cookie（`auth cookie` / `auth webkit` / `auth cdp`） |
+
+`auth clear` 会按「整行 N + 作用域 M」报告条数与实际删除的文件，可重复执行（无登录态时提示并正常退出）。
+`--clear-cookies` 保留为兼容参数：现在无论是否给出，内存会话与 cookie jar 都会一并清空。
 
 ## 身份文件（profile）
 

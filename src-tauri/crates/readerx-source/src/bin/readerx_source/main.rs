@@ -106,8 +106,9 @@ impl WebkitProvider {
         }
     }
 
+    /// 是否有可用显示（空串环境变量不算，判定逻辑与后端保持一致）
     fn display_available() -> bool {
-        std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some()
+        readerx_source::backend_webkit::display_available()
     }
 }
 
