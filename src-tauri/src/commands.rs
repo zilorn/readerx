@@ -22,7 +22,7 @@ use serde_json::Value;
 use tauri::AppHandle;
 use tauri::Manager;
 use tauri_plugin_fs::FsExt;
-use tauri_plugin_webview_login::LoginOutcome;
+use readerx_source::auth::LoginOutcome;
 
 /// 统一的 blocking 任务入口。
 ///
@@ -288,7 +288,7 @@ pub async fn readerx_source_call(
         capability_gate(&source, &fn_name)?;
         host::prepare_source(&source)?;
         // 重启后把该书源已保存的登录 Cookie 注入会话（进程内幂等）
-        let _ = webview_login::seed_source_session(&app, &source.id);
+        let _ = webview_login::seed_source_session(&source.id);
         let budget = if fn_name == "bookContent" {
             engine::DEFAULT_CHAPTER_BUDGET_MS
         } else {
@@ -318,7 +318,7 @@ pub async fn readerx_source_fetch_contents(
         }
         host::prepare_source(&source)?;
         // 重启后把该书源已保存的登录 Cookie 注入会话（进程内幂等）
-        let _ = webview_login::seed_source_session(&app, &source.id);
+        let _ = webview_login::seed_source_session(&source.id);
         // 全局用户设置：readerx.onlineConcurrency（一次运行多少书源/并行请求），1-8，默认 3
         let concurrency = storage::read_state(&app, "readerx.onlineConcurrency")
             .ok()
@@ -361,7 +361,7 @@ pub async fn readerx_book_image_fetch(
         }
         host::prepare_source(&source)?;
         // 重启后把该书源已保存的登录 Cookie 注入会话（进程内幂等）
-        let _ = webview_login::seed_source_session(&app, &source.id);
+        let _ = webview_login::seed_source_session(&source.id);
         let root = book_images::images_root(&app)?;
         match host::fetch_image_bytes(&source.id, &url, referer.as_deref().unwrap_or("")) {
             Ok((mime, bytes)) => Ok(book_images::fetch_result(
@@ -417,7 +417,7 @@ pub async fn readerx_source_fetch_image(
         }
         host::prepare_source(&source)?;
         // 重启后把该书源已保存的登录 Cookie 注入会话（进程内幂等）
-        let _ = webview_login::seed_source_session(&app, &source.id);
+        let _ = webview_login::seed_source_session(&source.id);
         match host::fetch_image_bytes(&source.id, &url, referer.as_deref().unwrap_or("")) {
             Ok((mime, bytes)) => Ok(FetchedImage {
                 ok: true,

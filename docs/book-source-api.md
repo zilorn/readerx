@@ -57,7 +57,9 @@
 书源默认开启「自动网页认证」（书源 JSON `autoAuth: true`，编辑页可单独关闭）。`http.*` 请求
 命中 Cloudflare 挑战时，引擎会**自动**拉起应用内 WebView 让用户完成验证，成功后把新 Cookie
 持久化并注入会话，然后**自动重试一次原请求**（`cf_clearance` 过期后同样会自动刷新），详见
-[cloudflare.md](./cloudflare.md)。
+[cloudflare.md](./cloudflare.md)。在独立二进制里，同一接口由 `--auth webkit` / `--auth cdp`
+注册的后端实现（见 [book-source-cli.md](./book-source-cli.md)）；未注册后端时返回
+`ok:false`，规则照常降级。
 
 - 刷新成功：规则拿到的就是重试后的正常响应，无额外字段；
 - 未弹窗/被取消/刷新后仍被拦截：原挑战响应返回，附 `cf` 字段说明原因（`disabled` 表示该书源

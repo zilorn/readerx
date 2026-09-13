@@ -1,6 +1,9 @@
-//! 持久化层。
+//! 持久化层（App 侧）。
+//!
 //! - 偏好 / 书架 / 分章规则等状态按 key 存为 JSON 文件；
-//! - 本地书籍按 id 存为独立 JSON 文件。
+//! - 本地书籍按 id 存为独立 JSON 文件；
+//! - **书源与书源登录态**由 `readerx-source` crate 实现（见文件末尾的转发段）。
+//!
 //! 全部为同步磁盘 I/O，仅对 `commands` 暴露；WebView 侧只通过 command 访问。
 
 use crate::models::{BookChapterPatch, BookMeta, BookSource, ChapterHead, LocalBook, TtsCacheStat};
@@ -550,69 +553,35 @@ pub(crate) fn clear_tts_cache(app: &AppHandle, book_id: Option<&str>) -> Result<
 }
 
 // ---------------------------------------------------------------------------
-// 书源：<appData>/book_sources/<id>.json（一个书源一个文件）
+// 书源 / 书源登录态：实现在书源引擎 crate（readerx-source::store）
 // ---------------------------------------------------------------------------
+//
+// 目录与文件格式由核心 crate 定义，App 与独立二进制（readerx-source CLI）共用同一份：
+//   <appData>/book_sources/<id>.json      书源定义（BookSource）
+//   <appData>/source_sessions/<id>.json   { url, cookie, updated_at }
+//
+// 这里只做一层薄转发：命令层签名不变，书源读写的唯一实现在核心 crate，
+// 避免 App 与 CLI 各写一套格式而互相读不懂。
 
-fn ensure_sources_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = data_root(app)?.join("book_sources");
-    ensure_dir(&dir)?;
-    Ok(dir)
-}
-
-pub(crate) fn put_book_source(app: &AppHandle, source: &BookSource) -> Result<(), String> {
-    if !valid_component(&source.id) {
-        return Err("非法的书源 id".to_string());
-    }
-    let dir = ensure_sources_dir(app)?;
-    let path = dir.join(format!("{}.json", source.id));
-    let text = serde_json::to_string_pretty(source).map_err(|e| format!("序列化书源失败: {e}"))?;
-    fs::write(&path, text).map_err(|e| format!("写入书源失败: {e}"))
+pub(crate) fn put_book_source(_app: &AppHandle, source: &BookSource) -> Result<(), String> {
+    readerx_source::store::put_source(source)
 }
 
 /// 读取单个书源；不存在返回 Ok(None)
-pub(crate) fn get_book_source(app: &AppHandle, id: &str) -> Result<Option<BookSource>, String> {
-    if !valid_component(id) {
-        return Err("非法的书源 id".to_string());
-    }
-    let dir = ensure_sources_dir(app)?;
-    let path = dir.join(format!("{id}.json"));
-    if !path.exists() {
-        return Ok(None);
-    }
-    let text = fs::read_to_string(&path).map_err(|e| format!("读取书源失败: {e}"))?;
-    let source = serde_json::from_str(&text).map_err(|e| format!("解析书源失败: {e}"))?;
-    Ok(Some(source))
+pub(crate) fn get_book_source(_app: &AppHandle, id: &str) -> Result<Option<BookSource>, String> {
+    readerx_source::store::get_source(id)
 }
 
 /// 列出全部书源（含 js，供引擎使用）；调用方需要摘要时再裁剪
-pub(crate) fn list_book_sources(app: &AppHandle) -> Result<Vec<BookSource>, String> {
-    let dir = ensure_sources_dir(app)?;
-    let mut sources = Vec::new();
-    let entries = fs::read_dir(&dir).map_err(|e| format!("读取书源目录失败: {e}"))?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("json") {
-            continue;
-        }
-        if let Ok(text) = fs::read_to_string(&path) {
-            if let Ok(source) = serde_json::from_str::<BookSource>(&text) {
-                sources.push(source);
-            }
-        }
-    }
-    sources.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
-    Ok(sources)
+pub(crate) fn list_book_sources(_app: &AppHandle) -> Result<Vec<BookSource>, String> {
+    readerx_source::store::list_sources()
 }
 
 pub(crate) fn delete_book_source(app: &AppHandle, id: &str) -> Result<(), String> {
     if !valid_component(id) {
         return Err("非法的书源 id".to_string());
     }
-    let dir = ensure_sources_dir(app)?;
-    let path = dir.join(format!("{id}.json"));
-    if path.exists() {
-        fs::remove_file(&path).map_err(|e| format!("删除书源失败: {e}"))?;
-    }
+    readerx_source::store::delete_source(id)?;
     // 顺带清掉该书源保存的网页登录 Cookie（独立文件，见 webview_login.rs）
     remove_source_login_cookie(app, id)?;
     Ok(())
@@ -621,222 +590,42 @@ pub(crate) fn delete_book_source(app: &AppHandle, id: &str) -> Result<(), String
 /// 清除全部书源上指向该分组的归属（书源分组被删除时调用），返回受影响的书源数量。
 /// 组清单存在前端偏好里，源文件里的 `groupId` 必须在删组时一并清掉，
 /// 否则会留下指向已删分组的悬空引用。整批改写都在 Rust 侧完成，不走 IPC 往返。
-pub(crate) fn clear_book_source_group(app: &AppHandle, group_id: &str) -> Result<u64, String> {
-    let dir = ensure_sources_dir(app)?;
-    let entries = fs::read_dir(&dir).map_err(|e| format!("读取书源目录失败: {e}"))?;
+pub(crate) fn clear_book_source_group(_app: &AppHandle, group_id: &str) -> Result<u64, String> {
     let mut cleared = 0u64;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("json") {
-            continue;
-        }
-        let Ok(text) = fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(mut source) = serde_json::from_str::<BookSource>(&text) else {
-            continue;
-        };
+    for mut source in readerx_source::store::list_sources()? {
         if source.group_id.as_deref() != Some(group_id) {
             continue;
         }
         source.group_id = None;
-        let text =
-            serde_json::to_string_pretty(&source).map_err(|e| format!("序列化书源失败: {e}"))?;
-        fs::write(&path, text).map_err(|e| format!("写入书源失败: {e}"))?;
+        readerx_source::store::put_source(&source)?;
         cleared += 1;
     }
     Ok(cleared)
 }
 
-// ---------------------------------------------------------------------------
-// 书源网页登录 Cookie：<appData>/source_sessions/<id>.json
-// 与书源 JSON 分开放，避免把用户私人 Cookie 带进书源导出/导入。
-// ---------------------------------------------------------------------------
-
-fn ensure_sessions_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = data_root(app)?.join("source_sessions");
-    ensure_dir(&dir)?;
-    Ok(dir)
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct SourceLoginCookie {
-    /// 捕获时的最终 URL（信息用途）
-    url: String,
-    /// Cookie 文本（`k=v; k2=v2`，含 httpOnly），注入书源会话时整行使用
-    cookie: String,
-    updated_at: u64,
-}
-
 /// 读取书源已保存的网页登录 Cookie；没有返回 Ok(None)。
 pub(crate) fn read_source_login_cookie(
-    app: &AppHandle,
+    _app: &AppHandle,
     id: &str,
 ) -> Result<Option<String>, String> {
-    if !valid_component(id) {
-        return Err("非法的书源 id".to_string());
-    }
-    let path = ensure_sessions_dir(app)?.join(format!("{id}.json"));
-    if !path.exists() {
-        return Ok(None);
-    }
-    let text = fs::read_to_string(&path).map_err(|e| format!("读取登录 Cookie 失败: {e}"))?;
-    let data: SourceLoginCookie = serde_json::from_str(&text)
-        .map_err(|e| format!("解析登录 Cookie 失败: {e}"))?;
-    let cookie = data.cookie.trim().to_string();
-    if cookie.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(cookie))
+    readerx_source::store::read_login_cookie(id)
 }
 
 /// 覆盖式保存书源最近一次网页登录捕获到的 Cookie。
+/// 覆盖式写入某书源的登录 Cookie（独立文件，与书源 JSON 分离）。
+/// 当前写入由 `readerx_source::auth::persist_login_outcome` 统一完成（App 与 CLI 共用），
+/// 这里保留同一入口供后续需要直接落盘的调用方使用，避免两处各写一套格式。
+#[allow(dead_code)]
 pub(crate) fn write_source_login_cookie(
-    app: &AppHandle,
+    _app: &AppHandle,
     id: &str,
     url: &str,
     cookie: &str,
 ) -> Result<(), String> {
-    if !valid_component(id) {
-        return Err("非法的书源 id".to_string());
-    }
-    let dir = ensure_sessions_dir(app)?;
-    let path = dir.join(format!("{id}.json"));
-    let data = SourceLoginCookie {
-        url: url.trim().to_string(),
-        cookie: cookie.trim().to_string(),
-        updated_at: SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0),
-    };
-    let text = serde_json::to_string(&data).map_err(|e| format!("序列化登录 Cookie 失败: {e}"))?;
-    fs::write(&path, text).map_err(|e| format!("写入登录 Cookie 失败: {e}"))
+    readerx_source::store::write_login_cookie(id, url, cookie)
 }
 
 /// 删除书源保存的登录 Cookie（存在与否均 Ok）。
-pub(crate) fn remove_source_login_cookie(app: &AppHandle, id: &str) -> Result<(), String> {
-    if !valid_component(id) {
-        return Err("非法的书源 id".to_string());
-    }
-    let dir = ensure_sessions_dir(app)?;
-    let path = dir.join(format!("{id}.json"));
-    if path.exists() {
-        fs::remove_file(&path).map_err(|e| format!("删除登录 Cookie 失败: {e}"))?;
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::models::{ChapterBlock, LocalBookChapter};
-
-    fn temp_dir(tag: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("readerx-storage-{tag}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).expect("create temp dir");
-        dir
-    }
-
-    fn sample_book() -> LocalBook {
-        LocalBook {
-            id: "book-1".to_string(),
-            title: "书".to_string(),
-            author: "作者".to_string(),
-            intro: None,
-            format: "online".to_string(),
-            file_name: "book".to_string(),
-            size: 0,
-            imported_at: 0,
-            hue: 0,
-            split_desc: "在线书".to_string(),
-            cover: None,
-            chapters: vec![LocalBookChapter {
-                cid: "c0001".to_string(),
-                title: "第一章".to_string(),
-                paragraphs: vec!["正文".to_string()],
-                blocks: Some(vec![
-                    ChapterBlock {
-                        kind: "p".to_string(),
-                        text: Some("正文".to_string()),
-                        level: None,
-                        src: None,
-                        alt: None,
-                        remote: None,
-                        local: None,
-                    },
-                    ChapterBlock {
-                        kind: "img".to_string(),
-                        text: None,
-                        level: None,
-                        src: Some("https://img/1.png".to_string()),
-                        alt: None,
-                        remote: Some("https://img/1.png".to_string()),
-                        local: Some("book-1_abc.png".to_string()),
-                    },
-                ]),
-                url: Some("https://example.com/1".to_string()),
-            }],
-            group_id: None,
-            source: Some("online".to_string()),
-            book_source_id: Some("src-1".to_string()),
-            book_url: None,
-            tags: None,
-        }
-    }
-
-    /// 整书写盘 / 读回必须保住图片引用字段（早期 Rust 模型缺 remote，回写会把它们丢掉）
-    #[test]
-    fn book_round_trip_keeps_image_refs() {
-        let dir = temp_dir("round-trip");
-        let book = sample_book();
-        write_book_file(&dir, &book.id, &book).expect("write");
-        let back = read_book_file(&dir.join("book-1.json")).expect("read");
-        let block = &back.chapters[0].blocks.as_ref().unwrap()[1];
-        assert_eq!(block.remote.as_deref(), Some("https://img/1.png"));
-        assert_eq!(block.local.as_deref(), Some("book-1_abc.png"));
-        assert_eq!(block.src.as_deref(), Some("https://img/1.png"));
-        // 原子写：不留下临时文件
-        assert!(!dir.join("book-1.json.tmp").exists());
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    /// 启动扫描：图片载荷（旧数据的 data URL）不参与解析，只按正文算字数
-    #[test]
-    fn meta_scan_skips_image_payloads() {
-        let json = r#"{
-            "id":"b1","title":"t","author":"a","format":"online","fileName":"f",
-            "size":0,"importedAt":1,"hue":0,"splitDesc":"在线书",
-            "bookSourceId":"src-1","source":"online",
-            "chapters":[{
-                "cid":"c0001","title":"第一章","url":"https://example.com/1",
-                "paragraphs":["旧段落"],
-                "blocks":[
-                    {"kind":"p","text":"正文"},
-                    {"kind":"img","src":"data:image/png;base64,AAAAAAAA","remote":"https://img/1.png"},
-                    {"kind":"h","level":3,"text":"小标题"}
-                ]
-            }]
-        }"#;
-        let scan: BookScan = serde_json::from_str(json).expect("parse");
-        let head = scan_chapter_head(scan.chapters.into_iter().next().expect("chapter"));
-        assert_eq!(head.cid, "c0001");
-        assert_eq!(head.url.as_deref(), Some("https://example.com/1"));
-        assert_eq!(head.chars, "正文小标题".encode_utf16().count() as u64);
-    }
-
-    /// 没有结构化 blocks 的旧章节：回退到段落字数（与前端 chapterMirrorCharsOf 同口径）
-    #[test]
-    fn meta_scan_falls_back_to_paragraphs() {
-        let json = r#"{
-            "id":"b1","title":"t","author":"a","format":"txt","fileName":"f",
-            "size":0,"importedAt":1,"hue":0,"splitDesc":"按字数分章",
-            "chapters":[{"cid":"c0001","title":"第一章","paragraphs":["中文","abcd"]}]
-        }"#;
-        let scan: BookScan = serde_json::from_str(json).expect("parse");
-        let head = scan_chapter_head(scan.chapters.into_iter().next().expect("chapter"));
-        assert_eq!(head.chars, 6);
-    }
+pub(crate) fn remove_source_login_cookie(_app: &AppHandle, id: &str) -> Result<(), String> {
+    readerx_source::store::remove_login_cookie(id)
 }

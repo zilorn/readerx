@@ -22,6 +22,14 @@
 | `pnpm tauri android dev` | Android 真机/模拟器开发                              |
 | `pnpm tauri build`       | 打包发布                                             |
 
+书源引擎（`src-tauri/crates/readerx-source`）可独立编译为命令行工具，与 App 共用同一份引擎代码：
+
+| 命令                                                          | 说明                                     |
+| ------------------------------------------------------------- | ---------------------------------------- |
+| `cargo build -p readerx-source --features cli`                 | 构建 `readerx-source`（含 CDP 认证后端） |
+| `cargo build -p readerx-source --features "cli webkit"`        | 追加 WebKitGTK 认证后端（需系统开发包）  |
+| `cargo test -p readerx-source`                                 | 引擎 / 宿主 / 存储的单元测试             |
+
 > 端口 1420 可能已被 `tauri android dev` 占用，勿再起第二个 dev server。
 
 ## 构建期产物
@@ -79,6 +87,19 @@
 
 - Tauri WebView 只认较新的 CSS：flex/grid/backdrop-filter 可用，但避免过度依赖实验特性（`color-mix` 已用，注意低版本 Android WebView 兼容性，必要时加 fallback）。
 - 新增 Rust command 需同步注册 `src-tauri/src/lib.rs` 的 `invoke_handler`，并在 `src-tauri/capabilities` 里按需授权。
+
+## 书源引擎边界（重要）
+
+- 书源引擎（Boa 沙箱、宿主 `http`/`html`/`cryptoUtil`、书源与登录态持久化）住在
+  `src-tauri/crates/readerx-source`，**不依赖 Tauri / GUI**；App 与独立二进制共用它，
+  不要在主 crate 里再写第二份引擎或书源存储逻辑。
+- 该 crate 需要「真实浏览器」时一律通过 `readerx_source::auth` 的 `AuthProvider` 注册后端：
+  App 注册 Android WebView 插件，CLI 注册 webkit2gtk / CDP（都是可选 feature）。
+  新增平台认证方式时实现该 trait，不要往核心里塞 `#[cfg(target_os)]` 分支。
+- 数据目录由宿主在启动时用 `readerx_source::store::init_data_root` 指定（App 用应用数据目录，
+  CLI 用 `--data-dir`），App 与 CLI 因此能交替读写同一份书源与登录态；改动文件格式要同时
+  考虑两边的兼容（见 `store.rs` 的文件布局注释）。
+- 独立二进制的用法与认证流程见 `docs/book-source-cli.md`；书源相关改动需同步更新 `docs/`。
 
 ## 沙箱问题
 

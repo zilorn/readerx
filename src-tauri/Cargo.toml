@@ -14,10 +14,10 @@ edition = "2021"
 name = "readerx_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
-# 单一 workspace：主 crate 与书源网页登录插件共享同一 target 目录，
-# 便于 tauri 移动端构建发现插件的 android 工程。
+# 单一 workspace：主 crate、书源网页登录插件、书源引擎核心 crate 共享同一 target 目录，
+# 便于 tauri 移动端构建发现插件的 android 工程，也让独立二进制复用同一份依赖。
 [workspace]
-members = [".", "plugins/tauri-plugin-webview-login"]
+members = [".", "plugins/tauri-plugin-webview-login", "crates/readerx-source"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -30,24 +30,13 @@ tauri-plugin-fs = "2"
 tauri-plugin-tts = "0.1"
 # 书源「网页登录」：Android 原生 WebView 登录浮层（仅移动端注册）
 tauri-plugin-webview-login = { path = "plugins/tauri-plugin-webview-login" }
+# 书源引擎（Boa 沙箱 + 宿主 HTTP/HTML/加密 API）：
+# 同一份代码也编译成独立二进制（cargo build -p readerx-source --features cli），
+# 供不启动 App 的离线调试与带登录态的站点验证使用。
+readerx-source = { path = "crates/readerx-source" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
-boa_engine = { version = "0.22", default-features = false }
-scraper = "0.27"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "cookies", "gzip", "json", "rustls-tls"] }
-encoding_rs = "0.8"
-# 书源 JS 的摘要 / 签名 / 对称加密（cryptoUtil，见 docs/book-source-api.md）
-md-5 = "0.10"
-sha1 = "0.10"
-sha2 = "0.10"
-hmac = "0.12"
-# 显式依赖 digest 只为在泛型 HMAC 辅助函数上写 Digest 约束、并统一取摘要 trait
-# （md-5 / sha1 / sha2 都 re-export 同一份 digest 0.10，不存在重复版本）
-digest = "0.10"
-aes-gcm = "0.10"
-# AES-GCM 未给 IV 时生成随机 12 字节（与 rand_core 0.6 / getrandom 0.2 同源，不新增体积）
-getrandom = "0.2"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

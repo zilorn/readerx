@@ -49,6 +49,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   字面量三种写法（按字节数精确匹配，长度不对直接报错，不做静默填充或截断）。
   规范见 `docs/book-source-api.md`。
 
+- **书源引擎可编译为独立二进制 `readerx-source`**：书源引擎（Boa 沙箱 + 宿主 API）与书源
+  持久化抽成独立 crate `src-tauri/crates/readerx-source`，App 与命令行共用同一份代码；
+  不启动应用即可跑规则——离线检查书源文件、调单个入口函数、端到端跑「搜索 → 目录 → 正文」。
+  子命令：`sources` / `call` / `run` / `test` / `auth` / `login`，支持 `--json` 机器输出与
+  `--verbose` 打印书源 `console` 日志；`--data-dir` 可指向 App 的数据目录，直接跑已安装的书源
+  与其登录态。用法见 [docs/book-source-cli.md](./docs/book-source-cli.md)。
+- **独立二进制的浏览器标志与登录态支持**：`--ua` / `--header` / `--cookie` / `--cookie-file`
+  （Netscape cookies.txt、EditThisCookie / Cookie-Editor JSON、Playwright storageState、
+  DevTools 请求头文本，按内容自动识别），以及带**域名作用域**的 Cookie 导入——浏览器里存着
+  几十个站点的 Cookie，只按请求域名 / 路径 / https 逐条筛选发送，不再整行无条件外发。
+- **独立二进制可在真实浏览器内核里过 Cloudflare 挑战 / 登录**：`auth webkit` 用系统
+  WebKitGTK 打开页面（与 App 同内核，无头可用 `xvfb-run`），`auth cdp` 连已有 Chrome 的
+  DevTools 端口取 Cookie（`--browser` 也可由本工具拉起浏览器）。抓到的 Cookie（含 httpOnly 的
+  `cf_clearance`）覆盖式保存为该源登录态并立即注入会话；`auth show` / `auth clear` 查看与清理。
+
 ### Changed
 
 - 「确认导入」弹层底部的「从剪贴板粘贴导入」改为「继续粘贴导入」按钮：点它退回粘贴抽屉换一份
@@ -70,6 +85,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **首屏不再下载 EPUB 解压库**：`src/lib/books.ts` 对 `./epub` 改为按需 `import()`，fflate 与
   EPUB 解析器移出首屏（入口 chunk 56.9 KB → 44.3 KB，gzip 21.9 KB → 16.4 KB），
   两者都只在真正导入电子书时才加载。
+
+### Fixed
+
+- `util.urlJoin` 两处拼接缺陷：目录地址的末尾斜杠被规范化吃掉（`/book/562822/` 变成
+  `/book/562822`，按路由区分的站点直接 404）；相对地址带 query 时被重复追加
+  （`/x?q=1` → `/x?q=1?q=1`）；协议相对地址（`//cdn.example.com/a.js`）拼出
+  `https:////cdn…` 这种非法地址。已补回归测试。
 
 ## [0.1.4] - 2026-09-12
 

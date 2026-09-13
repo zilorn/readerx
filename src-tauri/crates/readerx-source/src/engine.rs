@@ -20,9 +20,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// 单次函数调用默认预算（毫秒）
-pub(crate) const DEFAULT_CALL_BUDGET_MS: u64 = 45_000;
+pub const DEFAULT_CALL_BUDGET_MS: u64 = 45_000;
 /// 单章正文默认预算（毫秒）
-pub(crate) const DEFAULT_CHAPTER_BUDGET_MS: u64 = 30_000;
+pub const DEFAULT_CHAPTER_BUDGET_MS: u64 = 30_000;
 /// 单个函数帧允许的最大循环次数（死循环兜底）：
 /// 书源 JS 里出现 `while (true) {}` 时 Boa 会一直跑，`context.eval` 永不返回——
 /// 超时预算形同虚设、引擎线程被永久占住、界面一直转圈。设上限后 Boa 抛出
@@ -30,7 +30,7 @@ pub(crate) const DEFAULT_CHAPTER_BUDGET_MS: u64 = 30_000;
 const JS_LOOP_ITERATION_LIMIT: u64 = 100_000_000;
 
 /// JS 宿主能力可调用白名单（即书源入口函数集合）
-pub(crate) const ENTRY_FUNCTIONS: &[&str] = &[
+pub const ENTRY_FUNCTIONS: &[&str] = &[
     "searchBook",
     "discoverBooks",
     "discoverCategories",
@@ -670,7 +670,7 @@ fn to_call_result(
 // 对外入口一：单函数调用（搜索/详情/目录等）
 // ---------------------------------------------------------------------------
 
-pub(crate) fn call_source_function(
+pub fn call_source_function(
     source_id: &str,
     js: &str,
     fn_name: &str,
@@ -724,7 +724,7 @@ pub(crate) fn call_source_function(
 // 对外入口二：批量拉取正文（多 worker 线程，并发可配置）
 // ---------------------------------------------------------------------------
 
-pub(crate) fn fetch_chapter_contents(
+pub fn fetch_chapter_contents(
     source_id: &str,
     js: &str,
     book: &BookItem,
@@ -1121,5 +1121,85 @@ mod tests {
         assert!(results[1].error.contains("该章解析失败"));
         assert!(results[2].ok);
         assert_eq!(results[2].chapter_name, "好章2");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 离线检查（CLI `test` 命令 / App 保存前校验）
+// ---------------------------------------------------------------------------
+
+/// 书源代码的离线检查结果
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceInspection {
+    /// 是否编译通过
+    pub ok: bool,
+    /// 编译失败原因（ok=true 时为 None）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// 代码里出现的入口函数名（按 ENTRY_FUNCTIONS 顺序）
+    pub defined: Vec<String>,
+}
+
+/// 编译一次书源代码并列出已定义的入口函数——**不发起任何网络请求**。
+///
+/// 用途：CLI `test` 与编辑页保存前的快速检查（语法错误、忘了定义入口函数）。
+/// 注意：与真实调用一样会执行顶层语句（书源代码通常只有函数声明），
+/// 因此这里同样走 panic 兜底，避免坏代码把进程带走。
+pub fn inspect(js: &str) -> SourceInspection {
+    let js = js.to_string();
+    panic_guard::catch("书源检查", move || match build_context(&js) {
+        Ok(_) => SourceInspection {
+            ok: true,
+            error: None,
+            defined: detect_entry_functions(&js),
+        },
+        Err(error) => SourceInspection {
+            ok: false,
+            error: Some(error),
+            defined: detect_entry_functions(&js),
+        },
+    })
+    .unwrap_or_else(|error| SourceInspection {
+        ok: false,
+        error: Some(error),
+        defined: Vec::new(),
+    })
+}
+
+/// 从书源代码里挑出入口函数名（文本匹配即可：Boa 侧不暴露全局函数表遍历，
+/// 而这里只用于「有没有定义」的提示，命名冲突等由真实调用暴露）
+fn detect_entry_functions(js: &str) -> Vec<String> {
+    ENTRY_FUNCTIONS
+        .iter()
+        .filter(|name| {
+            [
+                format!("function {name}"),
+                format!("{name} ="),
+                format!("{name}="),
+                format!("async function {name}"),
+            ]
+            .iter()
+            .any(|pattern| js.contains(pattern.as_str()))
+        })
+        .map(|name| name.to_string())
+        .collect()
+}
+
+#[cfg(test)]
+mod inspect_tests {
+    use super::*;
+
+    #[test]
+    fn detects_entry_functions_and_syntax_errors() {
+        let good = "async function searchBook(k) { return []; }\nfunction bookToc(b) { return []; }";
+        let result = inspect(good);
+        assert!(result.ok, "{:?}", result.error);
+        assert_eq!(result.defined, vec!["searchBook", "bookToc"]);
+
+        let bad = "function searchBook( { return []; }";
+        let result = inspect(bad);
+        assert!(!result.ok);
+        assert!(result.error.is_some());
     }
 }

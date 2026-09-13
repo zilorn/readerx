@@ -31,7 +31,7 @@ where
 }
 
 /// `task` 本身返回 `Result` 时的便捷版本：panic 与业务错误统一为可读错误文本。
-pub(crate) fn catch_result<T, F>(what: &str, task: F) -> Result<T, String>
+pub fn catch_result<T, F>(what: &str, task: F) -> Result<T, String>
 where
     F: FnOnce() -> Result<T, String>,
 {

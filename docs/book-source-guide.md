@@ -163,6 +163,9 @@ async function bookContent(chapter, book) {
 ## 进阶：需要登录 / Cloudflare / 防盗链
 
 见 [cloudflare.md](./cloudflare.md) 与 [book-source-api.md](./book-source-api.md) 的 `webview` 段。
+调试阶段不必反复进应用：用独立二进制
+`readerx-source --source ./my-source.json call searchBook '["关键词"]' --verbose`
+即可在终端里跑规则并看书源自己的 `console` 日志（见 [book-source-cli.md](./book-source-cli.md)）。
 
 **Cloudflare 站点（Android，推荐）**：书源默认开启「自动网页认证」（编辑页「网页登录」卡片内可单独
 关闭）。只要站点返回 CF 人机挑战（含 `cf_clearance` 过期后的再次挑战），引擎会自动拉起应用内

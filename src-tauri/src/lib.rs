@@ -1,15 +1,17 @@
 mod book_images;
 mod commands;
-mod engine;
-mod host;
 mod models;
-mod panic_guard;
 mod storage;
 mod webview_login;
 
+// 书源引擎（Boa 沙箱 + 宿主 API）与书源持久化实现在 readerx-source crate：
+// 同一份代码也编译成独立二进制（见 crates/readerx-source 的 CLI），
+// App 只保留「本地书 / 书架 / 设置」这些与界面强相关的存储与命令。
+use readerx_source::{engine, host, panic_guard};
+
 use std::panic::AssertUnwindSafe;
 use std::sync::OnceLock;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 /// 章节插图的自定义协议名：前端用 `convertFileSrc(local, "readerx-img")` 得到
 /// 平台正确的完整 URL（Android/Windows 为 `http://readerx-img.localhost/…`，
@@ -71,7 +73,12 @@ pub fn run() {
         .setup(|app| {
             // panic hook 需要 AppHandle 才能把内部异常推给前端
             let _ = APP_HANDLE.set(app.handle().clone());
-            // 网页登录桥：把「插件(Android WebView)」接到书源会话/持久化
+            // 书源引擎的数据根 = 应用数据目录：书源定义与登录态与独立二进制（CLI）
+            // 用同一套路径规则，两边可以交替读写同一份数据（见 readerx-source::store）
+            if let Ok(dir) = app.path().app_data_dir() {
+                readerx_source::store::init_data_root(dir);
+            }
+            // 网页登录后端：把「插件(Android WebView)」注册为引擎的认证实现
             webview_login::install(app.handle().clone());
             Ok(())
         })

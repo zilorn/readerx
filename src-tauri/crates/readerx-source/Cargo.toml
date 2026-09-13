@@ -1,0 +1,50 @@
+[package]
+name = "readerx-source"
+version = "0.1.0"
+description = "ReaderX 书源引擎：Boa 沙箱 + 宿主 HTTP/HTML/加密 API，可脱离应用编译为独立二进制"
+edition = "2021"
+publish = false
+
+# 独立二进制（CLI）与 App 共用本 crate：
+# - App（src-tauri）以 rlib 依赖本 crate，不引入任何 GUI / Tauri 依赖；
+# - 平台认证后端（webkit2gtk / CDP）是可选 feature，App 与纯引擎构建都不受牵连。
+[features]
+default = []
+# 真实浏览器内核（webkit2gtk-4.1）过 Cloudflare 人机挑战，仅 Linux 桌面（需 X11/Wayland 或 Xvfb）
+webkit = ["dep:webkit2gtk", "dep:gtk", "dep:soup", "dep:libc"]
+# 连已有 Chrome / Chromium（DevTools Protocol over WebSocket）取 Cookie
+cdp = ["dep:tungstenite", "dep:libc"]
+# 独立二进制 readerx-source（默认带两条认证后端）
+cli = ["cdp", "dep:libc"]
+
+[[bin]]
+name = "readerx-source"
+path = "src/bin/readerx_source/main.rs"
+required-features = ["cli"]
+
+[dependencies]
+boa_engine = { version = "0.22", default-features = false }
+scraper = "0.27"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "cookies", "gzip", "json", "rustls-tls"] }
+# url：Cookie 作用域判定（RFC 6265 域 / 路径匹配）与认证后端拼地址；核心依赖，始终编译
+url = "2"
+encoding_rs = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+# 书源 JS 的摘要 / 签名 / 对称加密（cryptoUtil，见 docs/book-source-api.md）
+md-5 = "0.10"
+sha1 = "0.10"
+sha2 = "0.10"
+hmac = "0.12"
+digest = "0.10"
+aes-gcm = "0.10"
+getrandom = "0.2"
+
+# 可选：认证后端 / CLI 基础设施
+libc = { version = "0.2", optional = true }
+webkit2gtk = { version = "2.0", optional = true, features = ["v2_40"] }
+gtk = { version = "0.18", optional = true }
+tungstenite = { version = "0.24", optional = true, default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
+# soup3：WebKit 会话 Cookie 的读写句柄（与 webkit2gtk 用同一版本，不引入重复实现）
+soup = { version = "0.5", package = "soup3", optional = true }

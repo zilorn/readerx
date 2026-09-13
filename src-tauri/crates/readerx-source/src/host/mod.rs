@@ -6,7 +6,6 @@
 //! - HTML 选择器基于 `scraper`，正文清洗是轻量标签扫描实现（文档中注明为近似结果）。
 
 use crate::models::BookSource;
-use crate::webview_login;
 use aes_gcm::aead::{AeadInPlace, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
 use base64::engine::general_purpose::STANDARD as B64;
@@ -81,20 +80,177 @@ fn sources_registry() -> &'static Mutex<HashMap<String, Arc<SourceState>>> {
     SOURCES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// 可读写的 Cookie jar 句柄。
+///
+/// reqwest 自带的 `Jar` 交给 client 之后就拿不回来了（`Client` 不暴露 `CookieStore`），
+/// 而采集站点 Cookie（`cf_clearance` 之类）与排查登录态都需要能读、能清。
+/// 这里自己实现 `CookieStore`：一份 `Jar` 同时交给 client 与 `SourceState`，
+/// 两边看到的是同一个 jar。
+#[derive(Clone, Default)]
+pub struct JarHandle(Arc<std::sync::RwLock<reqwest::cookie::Jar>>);
+
+impl JarHandle {
+    /// 清空 jar（整体换成新的空 jar；client 与 SourceState 共用同一份，换掉即整体失效）
+    pub fn clear(&self) {
+        *self.0.write().unwrap_or_else(|e| e.into_inner()) = Default::default();
+    }
+}
+
+impl reqwest::cookie::CookieStore for JarHandle {
+    fn set_cookies(
+        &self,
+        cookie_headers: &mut dyn Iterator<Item = &reqwest::header::HeaderValue>,
+        url: &reqwest::Url,
+    ) {
+        self.0
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .set_cookies(cookie_headers, url)
+    }
+
+    fn cookies(&self, url: &reqwest::Url) -> Option<reqwest::header::HeaderValue> {
+        self.0
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .cookies(url)
+    }
+}
+
 /// 每源会话：reqwest client（自动 cookie jar）+ 默认头 + 手动 cookie 行
-pub(crate) struct SourceState {
+pub struct SourceState {
+    /// 书源 id（会话公开句柄回读用）
+    pub(crate) source_id: String,
+    /// 服务端 `Set-Cookie` 落地的 cookie jar（与 client 内部共享）
+    pub(crate) jar: JarHandle,
     pub(crate) client: reqwest::blocking::Client,
     /// redirect=false 时使用（跟随重定向会丢失原始 URL 语义）
     pub(crate) client_no_redirect: reqwest::blocking::Client,
     pub(crate) default_headers: Mutex<Vec<(String, String)>>,
     pub(crate) user_agent: Mutex<String>,
     pub(crate) extra_cookies: Mutex<Vec<String>>,
+    /// 带**作用域**的 Cookie（浏览器导入 / CDP 抓取）：只在匹配域名的请求上发送。
+    /// 与 `extra_cookies`（整行、无条件发送，含应用内网页登录的 Cookie）区分：
+    /// 浏览器里往往存着几十个站点的 Cookie，整个头部无条件发给每个站点既错又危险。
+    pub(crate) scoped_cookies: Mutex<Vec<ScopedCookie>>,
     /// 书源是否允许自动网页认证（CF 挑战自动拉起 WebView / 代码级 webview.login）
     pub(crate) auto_auth: Mutex<bool>,
 }
 
-fn build_client(no_redirect: bool) -> Result<reqwest::blocking::Client, String> {
-    let mut builder = reqwest::blocking::Client::builder().cookie_store(true);
+/// 一条带作用域的 Cookie（值来自真实浏览器，见 crate::profile / backend_*）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScopedCookie {
+    pub name: String,
+    pub value: String,
+    /// 域名（可带前导点表示包含子域；空 = 不限域名）
+    pub domain: String,
+    /// 路径前缀（空 = 不限路径）
+    pub path: String,
+    /// true = 只在 https 请求上发送
+    pub secure: bool,
+    /// 过期时间（Unix 秒；0 = 会话 Cookie，不过期）
+    pub expires: u64,
+}
+
+/// 当前时间（Unix 秒）；系统时钟异常（1970 之前）时返回 0
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// 取 URL 的 host 与是否 https（不引入 url crate：核心 crate 唯一的需求就是这两样）。
+fn split_host(url: &str) -> (String, bool) {
+    let (scheme, rest) = match url.split_once("://") {
+        Some((s, r)) => (s.to_ascii_lowercase(), r),
+        None => (String::new(), url),
+    };
+    let authority = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .rsplit('@') // 去掉 user:pass@
+        .next()
+        .unwrap_or("");
+    // 去掉端口（IPv6 字面量 [::1]:8080 也按最后一个冒号处理）
+    let host = authority
+        .rsplit_once(':')
+        .map(|(h, port)| if port.chars().all(|c| c.is_ascii_digit()) { h } else { authority })
+        .unwrap_or(authority)
+        .trim_matches(['[', ']'])
+        .to_ascii_lowercase();
+    (host, scheme == "https")
+}
+
+/// 域匹配：`domain` 为空匹配任意；带前导点或裸域都按「自身或子域」处理。
+fn domain_matches(cookie_domain: &str, host: &str, https: bool, secure: bool) -> bool {
+    if secure && !https {
+        return false;
+    }
+    let domain = cookie_domain.trim().trim_start_matches('.').to_ascii_lowercase();
+    if domain.is_empty() {
+        return true;
+    }
+    if host == domain {
+        return true;
+    }
+    // 拒绝 `evil-example.com` 命中 `example.com`：子域必须以 `.domain` 结尾
+    host.len() > domain.len() && host.ends_with(&domain) && host.as_bytes()[host.len() - domain.len() - 1] == b'.'
+}
+
+/// 路径匹配（RFC 6265 前缀规则）
+fn path_matches(cookie_path: &str, request_path: &str) -> bool {
+    if cookie_path.is_empty() || cookie_path == "/" {
+        return true;
+    }
+    if !request_path.starts_with(cookie_path) {
+        return false;
+    }
+    cookie_path.ends_with('/')
+        || request_path.len() == cookie_path.len()
+        || request_path.as_bytes()[cookie_path.len()] == b'/'
+}
+
+/// 取 URL 的路径部分（无路径按 "/"）
+fn url_path(url: &str) -> String {
+    let rest = match url.split_once("://") {
+        Some((_, r)) => r,
+        None => url,
+    };
+    match rest.find('/') {
+        Some(pos) => {
+            let path = &rest[pos..];
+            let path = path.split(['?', '#']).next().unwrap_or("/");
+            if path.is_empty() { "/".to_string() } else { path.to_string() }
+        }
+        None => "/".to_string(),
+    }
+}
+
+/// 按 URL 组装该请求应带的 Cookie 值（同名以先出现的为准，与浏览器一致）
+fn scoped_cookie_header(cookies: &[ScopedCookie], url: &str) -> String {
+    let (host, https) = split_host(url);
+    let path = url_path(url);
+    let now = unix_now();
+    let mut parts: Vec<String> = Vec::new();
+    for cookie in cookies {
+        if cookie.name.is_empty() || (cookie.expires != 0 && cookie.expires < now) {
+            continue;
+        }
+        if !domain_matches(&cookie.domain, &host, https, cookie.secure) {
+            continue;
+        }
+        if !path_matches(&cookie.path, &path) {
+            continue;
+        }
+        parts.push(format!("{}={}", cookie.name, cookie.value));
+    }
+    parts.join("; ")
+}
+
+fn build_client(jar: &JarHandle, no_redirect: bool) -> Result<reqwest::blocking::Client, String> {
+    let mut builder = reqwest::blocking::Client::builder().cookie_provider(Arc::new(jar.clone()));
     if no_redirect {
         builder = builder.redirect(reqwest::redirect::Policy::none());
     }
@@ -104,21 +260,26 @@ fn build_client(no_redirect: bool) -> Result<reqwest::blocking::Client, String> 
 }
 
 /// 注册/刷新一个书源的运行会话（幂等；client 与 cookie jar 全程复用）
-pub(crate) fn prepare_source(source: &BookSource) -> Result<(), String> {
+pub fn prepare_source(source: &BookSource) -> Result<(), String> {
     let mut guard = sources_registry()
         .lock()
         .map_err(|_| "书源会话锁异常".to_string())?;
     let state = match guard.get(&source.id) {
         Some(state) => state.clone(),
         None => {
-            let client = build_client(false)?;
-            let client_no_redirect = build_client(true)?;
+            // 两个 client 共用同一个 jar：跟随重定向与不跟随重定向的请求共享会话
+            let jar = JarHandle::default();
+            let client = build_client(&jar, false)?;
+            let client_no_redirect = build_client(&jar, true)?;
             let state = Arc::new(SourceState {
+                source_id: source.id.clone(),
+                jar,
                 client,
                 client_no_redirect,
                 default_headers: Mutex::new(Vec::new()),
                 user_agent: Mutex::new(String::new()),
                 extra_cookies: Mutex::new(Vec::new()),
+                scoped_cookies: Mutex::new(Vec::new()),
                 auto_auth: Mutex::new(true),
             });
             guard.insert(source.id.clone(), state.clone());
@@ -139,7 +300,8 @@ pub(crate) fn prepare_source(source: &BookSource) -> Result<(), String> {
     Ok(())
 }
 
-fn source_state(source_id: &str) -> Result<Arc<SourceState>, String> {
+/// 取一个书源的会话状态（未 prepare 时报错）
+pub fn source_state(source_id: &str) -> Result<Arc<SourceState>, String> {
     let guard = sources_registry()
         .lock()
         .map_err(|_| "书源会话锁异常".to_string())?;
@@ -149,9 +311,10 @@ fn source_state(source_id: &str) -> Result<Arc<SourceState>, String> {
         .ok_or_else(|| "书源会话尚未初始化".to_string())
 }
 
-/// 组装书源会话的基础请求头：默认头 + 手动 Cookie 行 + UA（空 UA 用内置默认）。
+/// 组装书源会话的基础请求头：默认头 + 手动 Cookie 行 + 作用域 Cookie + UA（空 UA 用内置默认）。
 /// 顺序与历史实现一致（默认头 → Cookie → UA），便于后续“末尾同名覆盖”。
-fn session_base_headers(state: &SourceState) -> Vec<(String, String)> {
+/// `url` 用于挑选作用域 Cookie（浏览器导入的 Cookie 只发给匹配的站点）。
+fn session_base_headers(state: &SourceState, url: &str) -> Vec<(String, String)> {
     let mut lines: Vec<(String, String)> = state
         .default_headers
         .lock()
@@ -162,8 +325,22 @@ fn session_base_headers(state: &SourceState) -> Vec<(String, String)> {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
+    let mut cookie_parts: Vec<String> = Vec::new();
     if !cookies.is_empty() {
-        lines.push(("cookie".to_string(), cookies.join("; ")));
+        cookie_parts.push(cookies.join("; "));
+    }
+    let scoped = scoped_cookie_header(
+        &state
+            .scoped_cookies
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()),
+        url,
+    );
+    if !scoped.is_empty() {
+        cookie_parts.push(scoped);
+    }
+    if !cookie_parts.is_empty() {
+        lines.push(("cookie".to_string(), cookie_parts.join("; ")));
     }
     let ua = state
         .user_agent
@@ -331,7 +508,7 @@ fn do_http_request(source_id: &str, method: &str, raw_url: &str, opts: &str) -> 
         .map_err(|_| format!("不支持的请求方法: {method}"))?;
     let mut req = client.request(parsed_method.clone(), url);
 
-    let mut header_lines = session_base_headers(&state);
+    let mut header_lines = session_base_headers(&state, url);
 
     // 单请求头覆盖（末尾同名覆盖默认头；Referer 等按需追加）
     if let Some(Value::Object(extra)) = o.get("headers") {
@@ -354,7 +531,7 @@ fn do_http_request(source_id: &str, method: &str, raw_url: &str, opts: &str) -> 
             parts.push(format!(
                 "{}={}",
                 percent_encode(k),
-                percent_encode(&v.as_str().unwrap_or("").to_string())
+                percent_encode(v.as_str().unwrap_or(""))
             ));
         }
         body_bytes = Some(parts.join("&").into_bytes());
@@ -540,7 +717,7 @@ fn origin_of(url: &str) -> Option<String> {
 /// 对外 HTTP 请求入口：命中 Cloudflare 挑战时，按书源「自动网页认证」开关决定
 /// 是否自动拉起应用内 WebView 认证并重试一次（cf_clearance 过期场景覆盖在此）。
 /// 始终返回 JSON 字符串（成功为响应对象，失败为 __rxError）。
-pub(crate) fn http_request(source_id: &str, method: &str, raw_url: &str, opts: &str) -> String {
+pub fn http_request(source_id: &str, method: &str, raw_url: &str, opts: &str) -> String {
     let one = || do_http_request(source_id, method, raw_url, opts);
     let first = match one() {
         Ok(value) => value,
@@ -559,9 +736,13 @@ pub(crate) fn http_request(source_id: &str, method: &str, raw_url: &str, opts: &
         mark_cf_challenge(&mut first, "disabled", Some("该书源已关闭自动网页认证"));
         return serialize_value(&first);
     }
-    // 平台能力：应用内 WebView 认证仅 Android
-    if !webview_login::is_supported() {
-        mark_cf_challenge(&mut first, "unsupported", Some("自动网页认证仅 Android 端可用"));
+    // 平台能力：App 为 Android WebView，独立二进制为 webkit / CDP 后端
+    if !crate::auth::is_supported() {
+        mark_cf_challenge(
+            &mut first,
+            "unsupported",
+            Some("当前环境没有可用的网页认证后端（独立二进制用 --auth webkit / --auth cdp）"),
+        );
         return serialize_value(&first);
     }
     // 全局冷却：避免批量下载 / 并发搜索时连续弹多个认证窗
@@ -579,7 +760,7 @@ pub(crate) fn http_request(source_id: &str, method: &str, raw_url: &str, opts: &
         origin_of(raw_url.trim()).unwrap_or_else(|| raw_url.trim().to_string())
     };
 
-    let outcome = match webview_login::perform(source_id, &target) {
+    let outcome = match crate::auth::perform(source_id, &target) {
         Ok(o) => o,
         Err(err) => {
             // 登录桥异常（极少见）：按取消处理，避免阻塞书源代码
@@ -698,7 +879,7 @@ fn junk_dimensions(width: u32, height: u32) -> Option<(u32, u32)> {
 /// 阅读器排版需要每张图的真实尺寸：旧实现在 WebView 里用 `new Image()` 逐张解码，
 /// 一章几百张图时会一次性申请巨量位图内存（应用直接闪退）；改读文件头后
 /// 尺寸获取与「解码」解耦，整章图片也不再需要全部解码。
-pub(crate) fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+pub fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     // PNG：IHDR 固定紧跟在 8 字节签名 + 4 字节长度 + 4 字节类型之后
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") && bytes.len() >= 24 {
         return junk_dimensions(u32_be(bytes, 16)?, u32_be(bytes, 20)?);
@@ -814,7 +995,7 @@ fn image_mime(url: &str, content_type: &str, bytes: &[u8]) -> String {
 
 /// 用书源会话请求一张图片的原始字节。referer 非空时作为 Referer 头（防盗链常见）。
 /// 返回 (MIME, 字节)；无法识别为图片时返回 Err。
-pub(crate) fn fetch_image_bytes(
+pub fn fetch_image_bytes(
     source_id: &str,
     url: &str,
     referer: &str,
@@ -824,7 +1005,7 @@ pub(crate) fn fetch_image_bytes(
         return Err("仅支持 http/https 图片地址".to_string());
     }
     let state = source_state(source_id)?;
-    let mut header_lines = session_base_headers(&state);
+    let mut header_lines = session_base_headers(&state, url);
     let referer = referer.trim();
     if !referer.is_empty() {
         header_lines.push(("referer".to_string(), referer.to_string()));
@@ -872,7 +1053,7 @@ pub(crate) fn fetch_image_bytes(
 
 /// http.setCookie：手动追加一行 Cookie 头内容（后续所有请求自动携带）。
 /// 与已有行完全相同的文本会被跳过，避免重复累积。
-pub(crate) fn http_set_cookie(source_id: &str, cookie_text: &str) {
+pub fn http_set_cookie(source_id: &str, cookie_text: &str) {
     let text = cookie_text.trim().to_string();
     if text.is_empty() {
         return;
@@ -895,7 +1076,7 @@ pub(crate) fn http_set_cookie(source_id: &str, cookie_text: &str) {
 
 /// 从会话手动 Cookie 行中移除与给定文本完全相同的行（用于「清空登录 Cookie」）。
 /// 返回移除的行数。
-pub(crate) fn http_remove_cookie(source_id: &str, cookie_text: &str) -> u64 {
+pub fn http_remove_cookie(source_id: &str, cookie_text: &str) -> u64 {
     let text = cookie_text.trim();
     if text.is_empty() {
         return 0;
@@ -912,7 +1093,7 @@ pub(crate) fn http_remove_cookie(source_id: &str, cookie_text: &str) -> u64 {
     (before - lines.len()) as u64
 }
 
-pub(crate) fn http_cookies(source_id: &str) -> String {
+pub fn http_cookies(source_id: &str) -> String {
     let list = source_state(source_id)
         .ok()
         .and_then(|state| {
@@ -926,11 +1107,184 @@ pub(crate) fn http_cookies(source_id: &str) -> String {
     serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string())
 }
 
-pub(crate) fn http_clear_cookies(source_id: &str) {
+pub fn http_clear_cookies(source_id: &str) {
     if let Ok(state) = source_state(source_id) {
         if let Ok(mut lines) = state.extra_cookies.lock() {
             lines.clear();
         }
+        if let Ok(mut scoped) = state.scoped_cookies.lock() {
+            scoped.clear();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 对外会话 API（CLI / App 的认证与测试入口共用）
+// ---------------------------------------------------------------------------
+
+/// 「每源会话」的公开句柄：CLI 侧写入 Cookie / 读取当前会话状态时使用。
+/// 内部结构与引擎共用同一份注册表，写入后立刻对下一次 `http.*` 生效。
+#[derive(Clone)]
+pub struct SessionHandle {
+    state: Arc<SourceState>,
+}
+
+impl SessionHandle {
+    /// 从已有会话状态构造句柄（认证后端抓完 Cookie 后直接注入用）
+    pub fn from_state(state: Arc<SourceState>) -> Self {
+        Self { state }
+    }
+
+    /// 按书源准备会话（幂等：重复调用只刷新默认头 / UA / autoAuth）。
+    pub fn open(source: &BookSource) -> Result<Self, String> {
+        prepare_source(source)?;
+        Ok(Self {
+            state: source_state(&source.id)?,
+        })
+    }
+
+    pub fn source_id(&self) -> &str {
+        &self.state.source_id
+    }
+
+    /// 设置会话 UA（空 = 回落内置默认 UA）
+    pub fn set_user_agent(&self, ua: &str) {
+        *self
+            .state
+            .user_agent
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = ua.trim().to_string();
+    }
+
+    /// 合并一批默认请求头（同名覆盖；`user-agent` / `cookie` 交给专用入口处理）
+    pub fn set_headers(&self, headers: &[(String, String)]) {
+        let mut guard = self
+            .state
+            .default_headers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for (k, v) in headers {
+            let key = k.trim().to_lowercase();
+            let value = v.trim().to_string();
+            if key.is_empty() || value.is_empty() || key == "cookie" || key == "user-agent" {
+                continue;
+            }
+            match guard.iter_mut().find(|(existing, _)| *existing == key) {
+                Some(slot) => slot.1 = value,
+                None => guard.push((key, value)),
+            }
+        }
+    }
+
+    /// 追加一批**带作用域**的 Cookie（浏览器导入 / CDP 抓取）。
+    /// 与 `set_cookie`（整行、无条件发送）不同：这里按域名 / 路径 / https 逐请求筛选。
+    ///
+    /// 返回 (新增, 覆盖) 条数——覆盖指同域同名被新值替换（浏览器里同名 Cookie 的常规语义）。
+    pub fn set_scoped_cookies(&self, cookies: &[ScopedCookie]) -> (usize, usize) {
+        let mut guard = self
+            .state
+            .scoped_cookies
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut added = 0;
+        let mut replaced = 0;
+        for cookie in cookies {
+            if cookie.name.trim().is_empty() {
+                continue;
+            }
+            let same = |existing: &ScopedCookie| {
+                existing.name == cookie.name
+                    && existing.domain.trim_start_matches('.').eq_ignore_ascii_case(
+                        cookie.domain.trim_start_matches('.'),
+                    )
+                    && existing.path == cookie.path
+            };
+            match guard.iter_mut().find(|existing| same(existing)) {
+                Some(slot) => {
+                    *slot = cookie.clone();
+                    replaced += 1;
+                }
+                None => {
+                    guard.push(cookie.clone());
+                    added += 1;
+                }
+            }
+        }
+        (added, replaced)
+    }
+
+    /// 当前作用域 Cookie 条数
+    pub fn scoped_cookie_count(&self) -> usize {
+        self.state
+            .scoped_cookies
+            .lock()
+            .map(|c| c.len())
+            .unwrap_or(0)
+    }
+
+    /// 当前作用域 Cookie（K 为「域 + 路径」去重后用于展示的名称；V 为原始条目）
+    pub fn scoped_cookie_names(&self) -> Vec<String> {
+        self.state
+            .scoped_cookies
+            .lock()
+            .map(|cookies| {
+                cookies
+                    .iter()
+                    .map(|c| {
+                        if c.domain.is_empty() {
+                            c.name.clone()
+                        } else {
+                            format!("{} @{}", c.name, c.domain)
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// 整行 Cookie（应用内网页登录 / 书源代码 `http.setCookie` 写入的那类）
+    pub fn legacy_cookie_lines(&self) -> Vec<String> {
+        self.state
+            .extra_cookies
+            .lock()
+            .map(|lines| lines.clone())
+            .unwrap_or_default()
+    }
+
+    /// 当前会话 cookie jar 里（服务器 `Set-Cookie` 自动保存的）Cookie 快照。
+    /// 服务端下发的 Cookie 只要会话还活着就一直有效，导出来便于排查与复用。
+    pub fn jar_cookie_lines(&self, url: &str) -> Vec<String> {
+        let Ok(url) = reqwest::Url::parse(url) else {
+            return Vec::new();
+        };
+        match reqwest::cookie::CookieStore::cookies(&self.state.jar, &url) {
+            Some(value) => value
+                .to_str()
+                .map(|text| {
+                    text.split(';')
+                        .map(|part| part.trim().to_string())
+                        .filter(|part| !part.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default(),
+            None => Vec::new(),
+        }
+    }
+
+    /// 清空会话中的全部 Cookie（整行 + 作用域 + cookie jar）
+    pub fn clear_cookies(&self) {
+        if let Ok(mut lines) = self.state.extra_cookies.lock() {
+            lines.clear();
+        }
+        if let Ok(mut scoped) = self.state.scoped_cookies.lock() {
+            scoped.clear();
+        }
+        self.state.jar.clear();
+    }
+
+    /// 会话默认头 / UA 快照（`--explain` 与排查展示用）
+    pub fn header_snapshot(&self) -> Vec<(String, String)> {
+        session_base_headers(&self.state, "")
     }
 }
 
@@ -952,7 +1306,7 @@ fn element_json(element: ElementRef<'_>) -> Value {
 }
 
 /// 解析 CSS 查询结果；返回元素数组 JSON 或 __rxError
-pub(crate) fn html_query_all(html: &str, selector: &str) -> String {
+pub fn html_query_all(html: &str, selector: &str) -> String {
     match Selector::parse(selector) {
         Err(e) => error_payload(format!("CSS 选择器「{selector}」非法: {e}")),
         Ok(sel) => {
@@ -1017,7 +1371,7 @@ fn entity_decode(input: &str) -> String {
 
 /// 把 HTML 片段清洗为纯文本（近似）：剔除 script/style/注释，块级与 <br> 换行，实体解码。
 /// 输入是远端页面内容（可能被任意构造），所有切片都走 `str::get`，越界只跳过不 panic。
-pub(crate) fn html_to_text(html: &str, sep: &str) -> String {
+pub fn html_to_text(html: &str, sep: &str) -> String {
     let mut out = String::new();
     let bytes = html.as_bytes();
     let mut i = 0;
@@ -1100,7 +1454,7 @@ pub(crate) fn html_to_text(html: &str, sep: &str) -> String {
 // URL 工具
 // ---------------------------------------------------------------------------
 
-pub(crate) fn url_join(base: &str, rel: &str) -> String {
+pub fn url_join(base: &str, rel: &str) -> String {
     let rel = rel.trim();
     if rel.is_empty() {
         return base.to_string();
@@ -1108,11 +1462,16 @@ pub(crate) fn url_join(base: &str, rel: &str) -> String {
     if rel.starts_with("http://") || rel.starts_with("https://") {
         return rel.to_string();
     }
-    if rel.starts_with("//") {
-        if let Some(pos) = base.find("://") {
-            return format!("{}{rel}", &base[..pos + 3]);
-        }
-        return rel.to_string();
+    if let Some(rest) = rel.strip_prefix("//") {
+
+        // 协议相对地址（//cdn.example.com/a.js）：沿用 base 的 scheme。
+        // 注意这里必须显式传参——`format!("{}{rel}", …)` 会把 `rel` 当成具名参数，
+        // 结果拼出 `https:////cdn…` 这种非法地址（历史缺陷）
+        return match base.find("://") {
+            // scheme 后只留一个 `//`：`{scheme}:` + `//` + host/path
+            Some(pos) => format!("{}://{rest}", &base[..pos]),
+            None => rel.to_string(),
+        };
     }
     // 取 scheme://authority
     let Some(scheme_end) = base.find("://") else {
@@ -1125,22 +1484,26 @@ pub(crate) fn url_join(base: &str, rel: &str) -> String {
         .unwrap_or(base.len());
     let origin = &base[..path_start];
     let base_path = &base[path_start..];
-    let mut out_path: String = if rel.starts_with('/') {
-        rel.to_string()
+    // 相对地址里的 query / fragment 单独处理：拼进路径再取会重复追加（历史缺陷）
+    let rel_path = rel.split(['?', '#']).next().unwrap_or("");
+    let rel_suffix = &rel[rel_path.len()..];
+    let out_path: String = if rel_path.starts_with('/') {
+        rel_path.to_string()
     } else {
         // 相对：基于 base 所在目录
         let dir = base_path
             .rsplit_once('/')
             .map(|(d, _)| if d.is_empty() { "/" } else { d })
             .unwrap_or("/");
-        let joined = format!("{}/{}", dir.trim_end_matches('/'), rel);
+        let joined = format!("{}/{}", dir.trim_end_matches('/'), rel_path);
         if !joined.starts_with('/') {
             format!("/{joined}")
         } else {
             joined
         }
     };
-    // 规范化 . 与 ..
+    // 规范化 . 与 ..；**保留末尾斜杠**——很多站点的目录地址 `/book/562822/` 与
+    // `/book/562822` 是两条不同路由，吃掉末尾斜杠会直接 404（历史上这里丢过）
     let mut stack: Vec<&str> = Vec::new();
     for seg in out_path.split('/') {
         match seg {
@@ -1151,14 +1514,14 @@ pub(crate) fn url_join(base: &str, rel: &str) -> String {
             s => stack.push(s),
         }
     }
-    out_path = format!("/{}", stack.join("/"));
-    if let Some(query) = rel.find('?') {
-        return format!("{origin}{}{}", &out_path, &rel[query..]);
+    let mut normalized = format!("/{}", stack.join("/"));
+    if out_path.ends_with('/') && !normalized.ends_with('/') {
+        normalized.push('/');
     }
-    format!("{origin}{out_path}")
+    format!("{origin}{normalized}{rel_suffix}")
 }
 
-pub(crate) fn query_string(obj: &Map<String, Value>) -> String {
+pub fn query_string(obj: &Map<String, Value>) -> String {
     let mut parts = Vec::new();
     for (k, v) in obj {
         let s = match v {
@@ -1175,7 +1538,7 @@ pub(crate) fn query_string(obj: &Map<String, Value>) -> String {
     parts.join("&")
 }
 
-pub(crate) fn query_parse(input: &str) -> String {
+pub fn query_parse(input: &str) -> String {
     let query = match input.find('?') {
         Some(pos) => &input[pos + 1..],
         None => input,
@@ -1201,7 +1564,7 @@ pub(crate) fn query_parse(input: &str) -> String {
 // 杂项原生能力
 // ---------------------------------------------------------------------------
 
-pub(crate) fn sleep_ms(ms: u64) {
+pub fn sleep_ms(ms: u64) {
     let ms = ms.clamp(0, 10_000);
     std::thread::sleep(Duration::from_millis(ms));
 }
@@ -1369,7 +1732,7 @@ const AES_OPTS_HINT: &str =
 /// 这是 base64 / hex 解码的输出形式：JS 里一个字符就是一个字节，文本可直接比较、
 /// 拼接、丢回 `cryptoUtil`（`hexEncode` / `aesGcmEncrypt` 再按同一规则还原字节），
 /// 不需要额外的类型；对纯 ASCII 而言与普通字符串完全一致。
-pub(crate) fn bytes_to_js_string(bytes: &[u8]) -> String {
+pub fn bytes_to_js_string(bytes: &[u8]) -> String {
     bytes.iter().map(|b| *b as char).collect()
 }
 
@@ -1394,35 +1757,35 @@ fn text_to_bytes(text: &str) -> Vec<u8> {
 }
 
 /// 字节保留字符串 → 小写 hex（`cryptoUtil.hexEncode` 的宿主实现）
-pub(crate) fn hex_encode_text(text: &str) -> String {
+pub fn hex_encode_text(text: &str) -> String {
     hex_encode(&text_to_bytes(text))
 }
 
 /// `base64.encode`：入参与 [`base64_decode`] 同一套字节保留约定
 /// （`base64.encode(base64.decode(x))` 必须回到 `x`），非字节保留的文本按 UTF-8 取字节。
-pub(crate) fn base64_encode(text: &str) -> String {
+pub fn base64_encode(text: &str) -> String {
     B64.encode(text_to_bytes(text))
 }
 
 /// `base64.decode` → **字节保留**字符串（1 字符 = 1 字节，见 [`bytes_to_js_string`]）
-pub(crate) fn base64_decode(text: &str) -> Result<String, String> {
+pub fn base64_decode(text: &str) -> Result<String, String> {
     Ok(bytes_to_js_string(&b64_decode(text, "输入")?))
 }
 
 /// `cryptoUtil.hexDecode` → **字节保留**字符串（与 [`base64_decode`] 同一套约定）
-pub(crate) fn hex_decode_to_string(text: &str) -> Result<String, String> {
+pub fn hex_decode_to_string(text: &str) -> Result<String, String> {
     Ok(bytes_to_js_string(&hex_decode(text)?))
 }
 
-pub(crate) fn md5_hex(text: &str) -> String {
+pub fn md5_hex(text: &str) -> String {
     hex_encode(&Md5::digest(text.as_bytes()))
 }
 
-pub(crate) fn sha1_hex(text: &str) -> String {
+pub fn sha1_hex(text: &str) -> String {
     hex_encode(&Sha1::digest(text.as_bytes()))
 }
 
-pub(crate) fn sha256_hex(text: &str) -> String {
+pub fn sha256_hex(text: &str) -> String {
     hex_encode(&Sha256::digest(text.as_bytes()))
 }
 
@@ -1430,7 +1793,7 @@ pub(crate) fn sha256_hex(text: &str) -> String {
 /// `dataEncoding: "hex"` 表示 `data` 是十六进制（JS 侧二进制安全路径），缺省按 UTF-8 文本；
 /// `encoding` 是**输出**编码（hex 默认 / base64）。
 /// 历史写法 `md5(data)` / `sha1(data)` 与 `cryptoUtil.md5(data)` 走缺省 UTF-8 分支，行为不变。
-pub(crate) fn digest_json(args: &str, kind: &str) -> Result<String, String> {
+pub fn digest_json(args: &str, kind: &str) -> Result<String, String> {
     let (data, encoding) = text_encoding_args(args, kind)?;
     let bytes = decode_data_arg(&data, args)?;
     match kind {
@@ -1460,7 +1823,7 @@ fn decode_data_arg(data: &str, args: &str) -> Result<Vec<u8>, String> {
 }
 
 /// `cryptoUtil.hmac(algorithm, key, data, encoding?)`
-pub(crate) fn hmac_json(args: &str) -> Result<String, String> {
+pub fn hmac_json(args: &str) -> Result<String, String> {
     let parsed: Value = serde_json::from_str(args)
         .map_err(|_| "参数需为对象：{ algorithm, key, data, encoding? }".to_string())?;
     let algorithm = parsed
@@ -1505,7 +1868,7 @@ where
 /// `cryptoUtil.aesGcmEncrypt({ data, key, iv?, aad?, encoding? })`
 /// → JSON 文本 `{ iv, ivHex, key, keyHex, encoding, hex, base64, text }`。
 /// `data` / `aad` 按字节保留字符串取字节（JS 侧决定是明文还是 base64.decode 出来的原始字节）。
-pub(crate) fn aes_gcm_encrypt_json(args: &str) -> Result<String, String> {
+pub fn aes_gcm_encrypt_json(args: &str) -> Result<String, String> {
     let parsed: Value = serde_json::from_str(args).map_err(|_| AES_OPTS_HINT.to_string())?;
     let data = parsed
         .get("data")
@@ -1552,7 +1915,7 @@ pub(crate) fn aes_gcm_encrypt_json(args: &str) -> Result<String, String> {
 /// 或 `"bytes"`（字节保留字符串，1 字符 = 1 字节，见 [`bytes_to_js_string`]）。
 /// 明文本身是二进制时必须显式传 `"bytes"`，否则非法 UTF-8 字节会被替换。
 /// `data` / `iv` 当作 key 一样按 base64 优先解析（`cipher.base64` / `cipher.iv` 可原样回传）。
-pub(crate) fn aes_gcm_decrypt_json(args: &str) -> Result<String, String> {
+pub fn aes_gcm_decrypt_json(args: &str) -> Result<String, String> {
     let parsed: Value = serde_json::from_str(args)
         .map_err(|_| "参数需为对象：{ data, iv, key, aad?, encoding? }".to_string())?;
     let payload = parsed
@@ -1628,14 +1991,14 @@ fn text_encoding_args(args: &str, what: &str) -> Result<(String, &'static str), 
 // ---------------------------------------------------------------------------
 
 /// 平台是否支持网页登录（当前仅 Android）。
-pub(crate) fn webview_login_supported() -> bool {
-    webview_login::is_supported()
+pub fn webview_login_supported() -> bool {
+    crate::auth::is_supported()
 }
 
 /// 打开登录浮层并**阻塞等待**用户完成/取消/超时。
 /// 成功后内部已完成：持久化 + 注入该书源会话（后续 http.* 自动携带 Cookie）。
 /// 返回 JSON 文本 `{ ok, url, cookies, count, message }`（不抛宿主错误）。
-pub(crate) fn webview_login(source_id: &str, url: &str, _opts: &str) -> String {
+pub fn webview_login(source_id: &str, url: &str, _opts: &str) -> String {
     // 书源「自动网页认证」开关关闭时，书源代码无法主动拉起登录窗（编辑页手动按钮不受影响）
     let auto_auth = source_state(source_id)
         .map(|s| s.auto_auth.lock().map(|g| *g).unwrap_or(true))
@@ -1650,7 +2013,7 @@ pub(crate) fn webview_login(source_id: &str, url: &str, _opts: &str) -> String {
         });
         return serde_json::to_string(&value).unwrap_or_else(|_| error_payload("登录结果序列化失败".into()));
     }
-    let value = match webview_login::perform(source_id, url) {
+    let value = match crate::auth::perform(source_id, url) {
         Ok(outcome) => serde_json::to_value(&outcome)
             .unwrap_or_else(|_| json!({ "ok": false, "message": "登录结果序列化失败" })),
         Err(err) => json!({ "ok": false, "message": err }),
@@ -1729,6 +2092,19 @@ mod tests {
             r#"{"code":403,"msg":"blocked"}"#,
         );
         assert!(!is_cf_challenge_response(&resp));
+    }
+
+    #[test]
+    fn url_join_keeps_trailing_slash_and_resolves_dots() {
+        // 目录地址的末尾斜杠必须保留（站点常按路由区分 /x/ 与 /x）
+        assert_eq!(url_join("https://a.com", "/book/1/"), "https://a.com/book/1/");
+        assert_eq!(url_join("https://a.com/root/", "book/1/"), "https://a.com/root/book/1/");
+        assert_eq!(url_join("https://a.com/root/page.html", "c/1.html"), "https://a.com/root/c/1.html");
+        // 无末尾斜杠的地址不被凭空加上
+        assert_eq!(url_join("https://a.com/x/", "../y"), "https://a.com/y");
+        assert_eq!(url_join("https://a.com/x/", "./y?q=1"), "https://a.com/x/y?q=1");
+        assert_eq!(url_join("https://a.com", "//cdn.b.com/a.js"), "https://cdn.b.com/a.js");
+        assert_eq!(url_join("https://a.com", "https://c.com/z"), "https://c.com/z");
     }
 
     #[test]

@@ -44,6 +44,32 @@
 - JS 内可用 `http.setCookie(text)` 向会话追加 Cookie、`http.cookies()`/`http.clearCookies()` 查看与清空；
 - 请求并行度是**用户级设置**（设置 → 书源 → 书源并发），不是书源字段；一次搜索按该值同时运行多个书源。
 
+## 独立二进制（readerx-source）
+
+书源引擎可以脱离应用编译成命令行工具，用来在**不启动 App** 的情况下复现这些站点问题
+（完整用法见 [book-source-cli.md](./book-source-cli.md)）：
+
+- `auth cookie --cookie-file <文件>`：导入浏览器导出的 Cookie（Netscape / JSON / DevTools 文本）。
+  带域名信息的 Cookie 按**请求域名 / 路径 / https 逐条筛选**后发送；
+- `auth webkit`：用系统 WebKitGTK（与 App 同内核）打开页面，人工过验证后点「完成」取回 Cookie；
+- `auth cdp --cdp http://127.0.0.1:9222`：连已有 Chrome 的 DevTools 端口取 Cookie
+  （`--browser` 也可由工具自己拉起浏览器）。
+
+抓到的 `cf_clearance` 等 Cookie 会覆盖式保存为该源登录态并立即注入会话，后续 `call` / `run`
+自动携带。CLI 里没有 Android 插件，因此引擎的自动认证走的就是 `--auth` 指定的后端：
+
+| 情况 | 响应里的 `cf.auto` |
+| --- | --- |
+| `--auth none`，或该书源关闭了自动网页认证 | `disabled` |
+| 无显示环境且 `--auth webkit` | `unsupported` |
+| 距上次自动认证不足 45 秒 | `cooldown` |
+| 用户取消 / 超时 | `cancelled` |
+| 认证后重试仍被拦截（令牌未生效 / 指纹不符） | `stale` |
+
+`stale` 在 CLI 里尤其常见：HTTP 客户端（reqwest/rustls）的 TLS 指纹与浏览器不同，而
+`cf_clearance` 与 **IP + UA + TLS 指纹**绑定。此时把书源 UA 调成与认证浏览器一致
+（`--ua` 或身份文件），或改用 `auth cdp` 让「认证」和「后续请求」出自同一浏览器环境。
+
 ## 应用内网页登录（Android）
 
 需要**账号登录**（或站点没被自动识别为 CF 挑战）时，仍可用原「网页登录」：
@@ -81,5 +107,7 @@
 
 - 请求被 403/429 时，先检查：UA/Referer 是否一致、Cookie 是否过期（CF 挑战是否再次出现）、
   网页登录的账号是否真的成功（看编辑页提示捕获条数）、全局「书源并发」是否调得过高（设置 → 书源）。
+- 命令行侧排查：`readerx-source --source <书源> auth show` 看当前实际带上的头与 Cookie，
+  `call … --verbose` 看书源自己的 `console` 日志（见 [book-source-cli.md](./book-source-cli.md)）。
 - 用编辑页「测试」跑一次：若响应带 `cf` 字段且 `auto` 为 `disabled / unsupported / cooldown`，
   说明自动认证没被触发，按对应原因处理（打开开关 / 换 Android 端 / 稍后再试）。

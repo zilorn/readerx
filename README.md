@@ -34,6 +34,8 @@ TXT 导入时依次尝试“分章规则”匹配章节标题，未命中自动�
   - [docs/book-source-api.md](./docs/book-source-api.md)（宿主 API 参考）
   - [docs/book-source-guide.md](./docs/book-source-guide.md)（从零编写教程）
   - [docs/cloudflare.md](./docs/cloudflare.md)（Cloudflare/登录/防盗链站点处理）
+  - [docs/book-source-cli.md](./docs/book-source-cli.md)（独立二进制 `readerx-source`：不启动应用跑书源，
+    带浏览器 Cookie / WebKit 内核过挑战 / 连 Chrome 取 Cookie）
 - **启停与能力开关**：每个书源可整体启用/禁用，也可分别开关搜索 / 发现 / 详情 / 目录 / 正文。
 - **分组**：书源可归入分组（管理页筛选条 / 行内文件夹按钮 / 编辑页「分组」），分组管理支持新建、
   重命名、删除与整组一键启停；删除分组时组内书源退回未分组。「发现」页的筛选条与管理页共用同一个

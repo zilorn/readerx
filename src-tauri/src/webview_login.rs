@@ -1,123 +1,79 @@
 //! 书源「网页登录」桥接层（主 crate 侧）。
 //!
-//! 把「插件（Android WebView 登录浮层）」与「书源会话 / 持久化」串起来：
-//! - [`install`]：在 app setup 时安装一次性桥——插件调用完成后把 Cookie
-//!   持久化到该书源独立的登录文件，并立即注入书源会话（后续 http.* 自动携带）；
-//! - [`perform`]：Boa 引擎（`host::webview_login`）与界面命令共用的阻塞入口；
-//! - [`seed_source_session`]：每次执行书源函数前调用，保证重启后已保存的登录态
-//!   也会被注入本次进程的书源会话（幂等，进程内只注入一次）。
+//! 把「插件（Android WebView 登录浮层）」接到书源引擎的认证接口上：
+//! - [`install`]：app setup 时注册一次认证后端——引擎命中 Cloudflare 挑战或书源 JS 调
+//!   `webview.login(url)` 时，都会走这里拉起源码侧的登录浮层；
+//! - [`perform`]：界面命令（编辑页「网页登录」按钮）用的阻塞入口；
+//! - [`seed_source_session`] / [`unseed`]：转发核心 crate 的登录态注入（幂等）。
+//!
+//! 独立二进制（readerx-source CLI）注册的是另一套后端（webkit2gtk / CDP），
+//! 编排、持久化与注入逻辑都在 `readerx_source::auth`，两侧完全一致。
 
-use crate::{host, storage};
-use std::collections::HashSet;
-use std::sync::{Arc, Mutex, OnceLock};
-use tauri::AppHandle;
-use tauri_plugin_webview_login::LoginOutcome;
+use readerx_source::auth::{self, AuthProvider, LoginOutcome};
+use std::sync::Arc;
+use tauri_plugin_webview_login::LoginOutcome as PluginOutcome;
 
-/// 执行器：`(source_id, url) -> outcome`；内部会做持久化 + 会话注入。
-type LoginRunner = dyn Fn(&str, &str) -> Result<LoginOutcome, String> + Send + Sync;
+/// Android 插件后端：把插件的登录结果转成引擎的 [`LoginOutcome`]
+struct AndroidProvider;
 
-static RUNNER: OnceLock<Mutex<Option<Arc<LoginRunner>>>> = OnceLock::new();
-/// 已把持久化 Cookie 注入过会话的书源 id（避免重复追加）
-static SEEDED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-
-fn runner_slot() -> &'static Mutex<Option<Arc<LoginRunner>>> {
-    RUNNER.get_or_init(Default::default)
+impl AndroidProvider {
+    /// 平台是否支持（插件在桌面/iOS 上会返回 false）
+    fn platform_supported() -> bool {
+        tauri_plugin_webview_login::is_supported()
+    }
 }
 
-fn seeded_slot() -> &'static Mutex<HashSet<String>> {
-    SEEDED.get_or_init(Default::default)
-}
+impl AuthProvider for AndroidProvider {
+    fn supported(&self) -> bool {
+        Self::platform_supported()
+    }
 
-/// app setup 时调用。桌面/iOS 下插件不可用，调用会返回可读错误，不影响其它功能。
-pub fn install(app: AppHandle) {
-    let runner: Arc<LoginRunner> = Arc::new(move |source_id: &str, url: &str| {
-        let mut outcome = tauri_plugin_webview_login::open_login(url).unwrap_or_else(|err| {
-            LoginOutcome {
+    fn authenticate(&self, _source_id: &str, url: &str) -> Result<LoginOutcome, String> {
+        let outcome: PluginOutcome =
+            tauri_plugin_webview_login::open_login(url).unwrap_or_else(|err| PluginOutcome {
                 ok: false,
                 url: url.to_string(),
                 cookies: String::new(),
                 count: 0,
                 message: err,
-            }
-        });
-        if outcome.ok {
-            let cookies = outcome.cookies.trim().to_string();
-            if !cookies.is_empty() {
-                // 旧的一次登录行按整行精确移除，避免同名 Cookie 新旧并存
-                if let Ok(Some(previous)) =
-                    storage::read_source_login_cookie(&app, source_id)
-                {
-                    let previous = previous.trim();
-                    if !previous.is_empty() && previous != cookies {
-                        host::http_remove_cookie(source_id, previous);
-                    }
-                }
-                // 覆盖式持久化为该源最近一次网页登录的 Cookie（重启自动注入）
-                if let Err(err) =
-                    storage::write_source_login_cookie(&app, source_id, &outcome.url, &cookies)
-                {
-                    // 本次会话已注入 Cookie，但重启后会丢失：这是用户必须知道的事，
-                    // 写进 message 由界面提示（否则登录看起来正常、下次启动却掉登录态）
-                    eprintln!("[webview-login] 持久化登录 Cookie 失败: {err}");
-                    outcome.message = format!("登录已完成，但 Cookie 保存失败（重启后需重新登录）：{err}");
-                }
-                // 立即写入会话（相同文本会被 http_set_cookie 去重跳过）
-                host::http_set_cookie(source_id, &cookies);
-                if let Ok(mut guard) = seeded_slot().lock() {
-                    guard.insert(source_id.to_string());
-                }
-            }
-        }
-        Ok(outcome)
-    });
-    *runner_slot()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner()) = Some(runner);
+            });
+        Ok(LoginOutcome {
+            ok: outcome.ok,
+            url: outcome.url,
+            cookies: outcome.cookies,
+            count: outcome.count as usize,
+            message: outcome.message,
+        })
+    }
+}
+
+/// app setup 时调用。桌面/iOS 下插件不可用，`supported()` 为 false，不影响其它功能。
+pub fn install(_app: tauri::AppHandle) {
+    auth::install_provider(Arc::new(AndroidProvider));
 }
 
 /// 当前平台是否支持网页登录（Android + 插件已初始化）。
 pub fn is_supported() -> bool {
-    tauri_plugin_webview_login::is_supported()
+    AndroidProvider::platform_supported()
 }
 
 /// 阻塞执行一次网页登录（引擎线程 / spawn_blocking 内使用）。
+///
+/// 结果由核心 crate 统一收尾：覆盖式持久化为该书源的登录 Cookie（旧行精确移除）
+/// 并立即注入会话；写盘失败会把原因写进 `message`，界面据此提示。
 pub fn perform(source_id: &str, url: &str) -> Result<LoginOutcome, String> {
-    let runner = runner_slot()
-        .lock()
-        .map_err(|_| "登录桥锁异常".to_string())?
-        .clone()
-        .ok_or_else(|| "登录桥尚未初始化".to_string())?;
-    runner(source_id, url)
+    let mut outcome = auth::perform(source_id, url)?;
+    auth::persist_login_outcome(source_id, &mut outcome)?;
+    Ok(outcome)
 }
 
 /// 把该书源已保存的登录 Cookie 注入会话（幂等；进程内只注入一次）。
 /// 返回是否本次真正注入了新 Cookie。
-pub fn seed_source_session(app: &AppHandle, source_id: &str) -> Result<bool, String> {
-    let id = source_id.to_string();
-    let already = seeded_slot()
-        .lock()
-        .map_err(|_| "登录桥锁异常".to_string())?
-        .contains(&id);
-    if already {
-        return Ok(false);
-    }
-    let cookie = storage::read_source_login_cookie(app, source_id)?;
-    // 无论有没有已存 Cookie 都标记，避免反复读盘
-    let mut guard = seeded_slot().lock().unwrap_or_else(|e| e.into_inner());
-    guard.insert(id.clone());
-    drop(guard);
-    if let Some(cookie) = cookie {
-        if !cookie.trim().is_empty() {
-            host::http_set_cookie(source_id, &cookie);
-            return Ok(true);
-        }
-    }
-    Ok(false)
+pub fn seed_source_session(source_id: &str) -> Result<bool, String> {
+    auth::seed_source_session(source_id)
 }
 
 /// 清空该书源登录 Cookie 后重置注入标记（下次调用再按文件内容决定）。
 pub fn unseed(source_id: &str) {
-    if let Ok(mut guard) = seeded_slot().lock() {
-        guard.remove(source_id);
-    }
+    auth::unseed(source_id)
 }
