@@ -631,6 +631,7 @@ mod tests {
             book_source_id: Some("src-1".to_string()),
             book_url: None,
             tags: None,
+            source_tags: None,
         }
     }
 

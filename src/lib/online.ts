@@ -241,7 +241,7 @@ export async function addOnlineBookToShelf(
     source: "online",
     bookSourceId: source.id,
     bookUrl: item.bookUrl,
-    ...(tags.length > 0 ? { tags } : {}),
+    ...(tags.length > 0 ? { tags, sourceTags: tags } : {}),
   };
   await addBookRecord(book);
   // 封面（可选）：书源返回 cover 时经书源会话下载缩略图并落盘，失败 / 无封面静默回退
@@ -1487,8 +1487,10 @@ export async function applyOnlineTocOverwrite(
 // ---------------------------------------------------------------------------
 // 在线书「重新拉取书籍信息」（书籍详情页）：
 // 以书架里保存的标题 / 作者 / 书源地址为入参，重调书源「详情」（bookDetail），
-// 把书源返回的非空简介与封面重新写回书架（简介 / 封面为缺失或与当前一致时不写）。
-// 封面 URL 与「加入书架」同一套规则：经该书源会话下载压缩为缩略图 data URL。
+// 把书源返回的非空简介 / 封面 / 标签重新写回书架（简介与当前一致时不写；
+// 封面 URL 与「加入书架」同一套规则：经该书源会话下载压缩为缩略图 data URL）。
+// 标签分「书源来源」与「手编」两部分维护（见 mergeSourceBookTags）：书源侧新增 / 删除的
+// 标签都会同步，用户手编的标签始终保留。
 // ---------------------------------------------------------------------------
 
 export interface RefreshOnlineBookInfoResult {
@@ -1496,9 +1498,44 @@ export interface RefreshOnlineBookInfoResult {
   introUpdated: boolean;
   /** 封面是否被书源返回的新封面覆盖 */
   coverUpdated: boolean;
+  /** 标签是否随书源返回的标签变化（新增 / 移除书源来源的标签） */
+  tagsUpdated: boolean;
 }
 
-/** 在线书重新拉取书籍信息（简介 / 封面）；非在线书或书源不可用时抛可读错误 */
+/** 从书源 `bookDetail` 原始返回值里取标签：没给 / 不是数组一律视为「这次没有标签信息」。 */
+function detailTagsOf(value: unknown): string[] {
+  if (!value || typeof value !== "object") return [];
+  return normalizeBookTags((value as Record<string, unknown>)["tags"]);
+}
+
+/** 两个标签数组是否逐位相同（合并只做增删、不改顺序，故逐位比较即可） */
+function sameTagList(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((tag, index) => tag === b[index]);
+}
+
+/** 刷新时把书源返回的标签并入现有标签：
+ * - prevSourceTags 已知（上次书源写回的标签）：手编标签 = 现有标签里不属于书源的那部分，
+ *   一律保留；书源侧新增的补上、已删除的去掉，现有标签的相对顺序不变；
+ * - prevSourceTags 未知（本功能上线前入库的书，无从区分手编与书源）：退化为并集，
+ *   只追加不删除，绝不丢已有标签。
+ * freshTags 为空表示「书源这次没给标签」，调用方应整体跳过（不做任何标签改动）。 */
+export function mergeSourceBookTags(
+  prevTags: string[],
+  prevSourceTags: string[] | undefined,
+  freshTags: string[],
+): string[] {
+  const freshSet = new Set(freshTags);
+  const prevSourceSet = prevSourceTags ? new Set(prevSourceTags) : null;
+  const kept =
+    prevSourceSet === null
+      ? prevTags
+      : prevTags.filter((tag) => !prevSourceSet.has(tag) || freshSet.has(tag));
+  const keptSet = new Set(kept);
+  const added = freshTags.filter((tag) => !keptSet.has(tag));
+  return normalizeBookTags([...kept, ...added]);
+}
+
+/** 在线书重新拉取书籍信息（简介 / 封面 / 标签）；非在线书或书源不可用时抛可读错误 */
 export async function refreshOnlineBookInfo(
   bookId: string,
 ): Promise<RefreshOnlineBookInfoResult> {
@@ -1511,7 +1548,7 @@ export async function refreshOnlineBookInfo(
   if (!source) throw new Error("该书源已删除，无法重新拉取");
   if (!source.enabled) throw new Error("该书源已停用，请先在「书源」中启用");
   if (!source.capabilities.detail) {
-    throw new Error("该书源未启用「详情」能力，无法重新拉取简介与封面");
+    throw new Error("该书源未启用「详情」能力，无法重新拉取书籍信息");
   }
   const tags = normalizeBookTags(meta.tags);
   const item: BookItem = {
@@ -1526,6 +1563,7 @@ export async function refreshOnlineBookInfo(
 
   let introUpdated = false;
   let coverUpdated = false;
+  let tagsUpdated = false;
   const intro = merged.intro?.trim();
   if (intro && intro !== (meta.intro ?? "").trim()) {
     introUpdated = true;
@@ -1540,5 +1578,21 @@ export async function refreshOnlineBookInfo(
       await updateBookInfo(bookId, { cover: thumb });
     }
   }
-  return { introUpdated, coverUpdated };
+  // 标签：只认书源这次真正返回的那份（合并后的 merged.tags 会把现有标签带回来，
+  // 用它会把「书源没给标签」误判成「书源给的标签就是这些」）
+  const freshTags = detailTagsOf(result.value);
+  if (freshTags.length > 0) {
+    // 拉取期间用户可能刚改过标签：按最新记录重算一次，别用请求前的快照盖掉手编结果
+    const latest = bookMetaById(bookId) ?? meta;
+    const prevTags = normalizeBookTags(latest.tags);
+    const prevSourceTags =
+      latest.sourceTags === undefined ? undefined : normalizeBookTags(latest.sourceTags);
+    const nextTags = mergeSourceBookTags(prevTags, prevSourceTags, freshTags);
+    tagsUpdated = !sameTagList(prevTags, nextTags);
+    // 标签没变也要更新书源标签标记（老数据首次刷新即由此建立），但能省则省
+    if (tagsUpdated || !sameTagList(prevSourceTags ?? [], freshTags)) {
+      await updateBookInfo(bookId, { tags: nextTags, sourceTags: freshTags });
+    }
+  }
+  return { introUpdated, coverUpdated, tagsUpdated };
 }

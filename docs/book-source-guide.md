@@ -101,6 +101,7 @@ async function bookContent(chapter, book) {
 ## 5. 详情与发现（可选）
 
 - `bookDetail(book)`：返回富化后的 `BookItem`（补 `cover/intro/latest/updateTime/tags`），失败可不实现。
+  返回的 `cover` / `intro` / `tags` 可在书架书籍详情页点右上角刷新按钮随时同步（标签只增删书源来源的那部分，用户手编的标签保留）。
 - `discoverBooks(category, page)` + 可选 `discoverCategories()`：分类发现。列表页会自动把
   `{name,url}` 当作分类参数传给 discoverBooks。
 

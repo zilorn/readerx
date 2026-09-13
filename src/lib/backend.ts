@@ -123,13 +123,14 @@ export async function deleteRemoteBook(id: string): Promise<void> {
   await invoke("readerx_book_delete", { id });
 }
 
-/** 单本元信息补丁入参：外层 undefined = 不改动；null = 清除（intro/cover/tags/groupId） */
+/** 单本元信息补丁入参：外层 undefined = 不改动；null = 清除（intro/cover/tags/sourceTags/groupId） */
 export interface BookMetaPatchInput {
   title?: string;
   author?: string;
   intro?: string | null;
   cover?: string | null;
   tags?: string[] | null;
+  sourceTags?: string[] | null;
   groupId?: string | null;
 }
 
@@ -151,6 +152,10 @@ export async function patchRemoteBookMeta(
     if (patch.tags !== undefined) {
       const tags = patch.tags ?? [];
       book.tags = tags.length > 0 ? tags : undefined;
+    }
+    if (patch.sourceTags !== undefined) {
+      const sourceTags = patch.sourceTags ?? [];
+      book.sourceTags = sourceTags.length > 0 ? sourceTags : undefined;
     }
     if (patch.groupId !== undefined) book.groupId = patch.groupId;
     return;

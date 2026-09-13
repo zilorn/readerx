@@ -191,6 +191,9 @@ export interface LocalBook {
   bookUrl?: string;
   /** 标签（书源搜索/详情返回，或用户在书籍详情页手编；本地导入与在线书通用） */
   tags?: string[];
+  /** 上次由书源写入的标签（`tags` 里属于书源的那部分）：在线书「重新拉取书籍信息」
+   *  据此只增删书源来源的标签，用户手编的标签始终保留；老数据缺失时退化为并集合并。 */
+  sourceTags?: string[];
 }
 
 export function totalChars(book: Pick<LocalBook, "chapters">): number {

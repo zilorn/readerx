@@ -116,14 +116,14 @@ export default function BookDetailPage() {
   /** 展示用副本（简繁转换）；编辑抽屉与「重新拉取书籍信息」一律用原始记录，避免把转换结果写回书库 */
   const displayBook = createMemo(() => withHanMeta(book()));
   const [editOpen, setEditOpen] = createSignal(false);
-  /** 在线书：重新拉取简介 / 封面（书源 bookDetail）是否进行中 */
+  /** 在线书：重新拉取简介 / 封面 / 标签（书源 bookDetail）是否进行中 */
   const [refreshing, setRefreshing] = createSignal(false);
 
   createEffect(() => {
     void ensureLocalBooksLoaded();
   });
 
-  /** 该书是仍在书架、可向书源重新拉取简介与封面的在线书 */
+  /** 该书是仍在书架、可向书源重新拉取简介 / 封面 / 标签的在线书 */
   const refreshable = createMemo(() => {
     const current = book();
     return (
@@ -141,15 +141,15 @@ export default function BookDetailPage() {
     setRefreshing(true);
     try {
       const result = await refreshOnlineBookInfo(id);
-      if (result.introUpdated && result.coverUpdated) {
-        showToast("简介与封面已更新");
-      } else if (result.introUpdated) {
-        showToast("简介已更新");
-      } else if (result.coverUpdated) {
-        showToast("封面已更新");
-      } else {
-        showToast("简介与封面已是最新");
-      }
+      const updated: string[] = [];
+      if (result.introUpdated) updated.push("简介");
+      if (result.coverUpdated) updated.push("封面");
+      if (result.tagsUpdated) updated.push("标签");
+      showToast(
+        updated.length > 0
+          ? `${updated.join("、")}已更新`
+          : "书籍信息已是最新",
+      );
     } catch (e) {
       showToast(`重新拉取失败：${e instanceof Error ? e.message : String(e)}`, true);
     } finally {
@@ -183,7 +183,7 @@ export default function BookDetailPage() {
               <Show when={refreshable()}>
                 <button
                   class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2 disabled:pointer-events-none disabled:opacity-60"
-                  aria-label="重新拉取书籍信息（简介与封面）"
+                  aria-label="重新拉取书籍信息（简介、封面与标签）"
                   disabled={refreshing()}
                   onClick={() => void refreshBookInfo()}
                 >

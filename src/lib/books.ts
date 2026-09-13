@@ -271,6 +271,7 @@ function applyMetaPatchLocal<T extends {
   intro?: string;
   cover?: string;
   tags?: string[];
+  sourceTags?: string[];
   groupId?: string | null;
 }>(obj: T, patch: BookMetaPatchInput): T {
   const next = { ...obj };
@@ -284,6 +285,10 @@ function applyMetaPatchLocal<T extends {
   if (patch.tags !== undefined) {
     const tags = patch.tags ?? [];
     next.tags = tags.length > 0 ? tags : undefined;
+  }
+  if (patch.sourceTags !== undefined) {
+    const sourceTags = patch.sourceTags ?? [];
+    next.sourceTags = sourceTags.length > 0 ? sourceTags : undefined;
   }
   if (patch.groupId !== undefined) next.groupId = patch.groupId;
   return next;
@@ -640,6 +645,8 @@ export async function updateBookContent(
  * - cover：undefined 不改动，null 清除自定义封面（回退程序化封面），
  *   data URL 则替换封面。书名 / 作者留空时回落默认值，保持全库一致；
  * - tags：undefined 不改动，空数组清除现有标签，非空数组替换标签。
+ * - sourceTags：undefined 不改动（手编标签走这条路，标记保持不变），空数组清除，
+ *   非空数组替换「书源来源标签」标记；见 online.ts 的标签合并规则。
  * 磁盘侧由 Rust 就地打补丁，正文不整本传回。
  */
 export interface BookInfoPatch {
@@ -648,6 +655,7 @@ export interface BookInfoPatch {
   intro?: string;
   cover?: string | null;
   tags?: string[];
+  sourceTags?: string[];
 }
 
 export async function updateBookInfo(id: string, patch: BookInfoPatch): Promise<void> {
@@ -664,6 +672,10 @@ export async function updateBookInfo(id: string, patch: BookInfoPatch): Promise<
   if (patch.tags !== undefined) {
     const tags = normalizeBookTags(patch.tags);
     remote.tags = tags.length > 0 ? tags : null;
+  }
+  if (patch.sourceTags !== undefined) {
+    const sourceTags = normalizeBookTags(patch.sourceTags);
+    remote.sourceTags = sourceTags.length > 0 ? sourceTags : null;
   }
   // 元信息补丁同样是「读文件 → 打补丁 → 写回」：与逐章正文回写排队串行，避免互相覆盖
   await enqueueBookWrite(id, async () => {

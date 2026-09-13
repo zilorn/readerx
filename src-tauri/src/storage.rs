@@ -244,6 +244,8 @@ struct BookScan {
     book_url: Option<String>,
     #[serde(default)]
     tags: Option<Vec<String>>,
+    #[serde(default)]
+    source_tags: Option<Vec<String>>,
 }
 
 /// 章节扫描结果 → 轻量头。字数口径：有结构化 blocks 时只统计 p/h 文本（UTF-16，
@@ -331,6 +333,7 @@ pub(crate) fn list_book_meta(app: &AppHandle) -> Result<Vec<BookMeta>, String> {
             book_source_id: scan.book_source_id,
             book_url: scan.book_url,
             tags: scan.tags,
+            source_tags: scan.source_tags,
         });
     }
     books.sort_by_key(|book| std::cmp::Reverse(book.imported_at));
