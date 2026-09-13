@@ -13,7 +13,7 @@ interface GroupPickerProps {
   onClose: () => void;
 }
 
-/** 底部抽屉：选择（或新建）一个书架分组 */
+/** 底部抽屉：把书移入（或新建）一个书架分组；书架多选与「入架提示」共用 */
 export function GroupPicker(props: GroupPickerProps) {
   const [newName, setNewName] = createSignal("");
 
@@ -30,14 +30,14 @@ export function GroupPicker(props: GroupPickerProps) {
   }
 
   return (
-    <div class="fixed inset-0 z-50" role="dialog" aria-label="选择分组">
+    <div class="fixed inset-0 z-[90]" role="dialog" aria-label="选择分组">
       <div
         class="absolute inset-0 animate-sheet-fade bg-black/45 backdrop-blur-[2px]"
         onClick={props.onClose}
       />
-      <div class="absolute inset-x-0 bottom-0 z-[51] flex max-h-[72%] animate-sheet-up flex-col overflow-hidden rounded-t-[16px] bg-surface shadow-[0_-10px_34px_rgb(0_0_0/0.22)]">
+      <div class="absolute inset-x-0 bottom-0 z-[91] flex max-h-[72%] animate-sheet-up flex-col overflow-hidden rounded-t-[16px] bg-surface shadow-[0_-10px_34px_rgb(0_0_0/0.22)]">
         <div class="flex flex-none items-center gap-2.5 border-b border-border px-4 py-3">
-          <span class="text-[15px] font-bold">归入分组</span>
+          <span class="text-[15px] font-bold">移入分组</span>
           <span class="flex-1 text-xs text-text-3">选择一个书架分组</span>
           <button
             class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"

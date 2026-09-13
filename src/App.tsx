@@ -2,8 +2,14 @@ import { lazy, onMount, onCleanup, Show, createEffect } from "solid-js";
 import type { Component } from "solid-js";
 import { Router, Route, type RouteSectionProps } from "@solidjs/router";
 import { RouteStage } from "./components/RouteStage";
-import { ensureLocalBooksLoaded } from "./lib/books";
-import { currentToast } from "./lib/toast";
+import { GroupPicker } from "./components/GroupPicker";
+import { bookMetaById, ensureLocalBooksLoaded } from "./lib/books";
+import {
+  assignBookGroup,
+  closeGroupAssign,
+  groupAssignBookId,
+} from "./lib/groups";
+import { currentToast, dismissToast } from "./lib/toast";
 
 // ---- 路由页面全部走代码分割 + 懒加载（配合页面栈内 Suspense） ----
 const BookshelfPage = lazy(() => import("./pages/Bookshelf"));
@@ -23,7 +29,8 @@ const NotFoundPage = lazy(() => import("./pages/NotFound"));
 /**
  * 根布局：外层手机列 + 页面栈 RouteStage。
  * 滚动容器、底部 Tab 与页面切换动画统一由 RouteStage 以「页面层」维护，
- * 此处只保留外壳与全局 Toast。
+ * 此处只保留外壳、全局 Toast，以及提示条「加入分组」拉起的移入分组抽屉
+ * （抽屉跨页面：入架后可能已跳到阅读页 / 书架，故不能挂在发起入架的组件里）。
  */
 const AppShell: Component<RouteSectionProps> = (props) => {
   return (
@@ -35,15 +42,45 @@ const AppShell: Component<RouteSectionProps> = (props) => {
       <Show when={currentToast()}>
         {(toast) => (
           <div
-            class="absolute bottom-[calc(84px+env(safe-area-inset-bottom))] left-1/2 z-[60] max-w-[calc(100%-48px)] animate-toast-in rounded-full px-4 py-[9px] text-center text-[13px] leading-[1.4] shadow-lg shadow-black/20 [transform:translateX(-50%)]"
+            class="absolute bottom-[calc(84px+env(safe-area-inset-bottom))] left-1/2 z-[95] max-w-[calc(100%-48px)] animate-toast-in text-[13px] leading-[1.4] shadow-lg shadow-black/20 [transform:translateX(-50%)]"
             classList={{
-              "bg-text text-bg": !toast().error,
-              "bg-danger text-white": toast().error,
+              "rounded-full px-4 py-[9px] text-center": !toast().action,
+              "bg-text text-bg": !toast().action && !toast().error,
+              "bg-danger text-white": !toast().action && toast().error,
+              "flex items-center gap-1.5 rounded-[14px] border border-border bg-surface py-1.5 pl-3.5 pr-1.5 text-text":
+                !!toast().action,
             }}
             role={toast().error ? "alert" : "status"}
           >
-            {toast().text}
+            <span class="min-w-0">{toast().text}</span>
+            <Show when={toast().action}>
+              {(action) => (
+                <button
+                  class="flex-none rounded-[10px] bg-accent-weak px-2.5 py-1 font-semibold text-accent transition-[scale,opacity] duration-100 active:scale-[0.96] active:opacity-80"
+                  onClick={() => {
+                    const run = action().onClick;
+                    dismissToast();
+                    run();
+                  }}
+                >
+                  {action().label}
+                </button>
+              )}
+            </Show>
           </div>
+        )}
+      </Show>
+
+      {/* 入架提示里的「加入分组」：移入分组抽屉 */}
+      <Show when={groupAssignBookId()}>
+        {(bookId) => (
+          <GroupPicker
+            value={bookMetaById(bookId())?.groupId ?? null}
+            onSelect={(groupId) => {
+              void assignBookGroup(bookId(), groupId);
+            }}
+            onClose={closeGroupAssign}
+          />
         )}
       </Show>
     </div>

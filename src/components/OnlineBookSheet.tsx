@@ -13,6 +13,7 @@ import { normalizeBookTags } from "../lib/booksTypes";
 import { hanText, hanTextList } from "../lib/hanDisplay";
 import { bookMetaList } from "../lib/books";
 import { addOnlineBookToShelf, fetchBookToc, mergeBookDetail, type PickedBook } from "../lib/online";
+import { notifyAddedToShelf } from "../lib/groups";
 import { showToast } from "../lib/toast";
 import { TagChips } from "./TagChips";
 import { BookIcon, CloseIcon, ListIcon, RefreshIcon } from "./icons";
@@ -211,7 +212,8 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
         // 用富化后的信息入架（简介等一并保存）
         const book = await addOnlineBookToShelf(p.source, info() ?? p.item, list);
         bookId = book.id;
-        showToast("已加入书架");
+        // 入架成功：提示条右侧的「加入分组」按钮直接拉起移入分组抽屉
+        notifyAddedToShelf(book.id);
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         setActionError(msg);

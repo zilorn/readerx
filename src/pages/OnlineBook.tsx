@@ -11,6 +11,7 @@ import {
   fetchBookToc,
   getPicked,
 } from "../lib/online";
+import { notifyAddedToShelf } from "../lib/groups";
 import { showToast } from "../lib/toast";
 
 /** 在线书预览：仅展示搜索结果已有信息；点「加入书架」时才获取一次目录 */
@@ -52,7 +53,8 @@ export default function OnlineBookPage() {
         const chapters = await fetchBookToc(p.source, p.item);
         const book = await addOnlineBookToShelf(p.source, p.item, chapters);
         bookId = book.id;
-        showToast("已加入书架");
+        // 入架成功：提示条右侧的「加入分组」按钮直接拉起移入分组抽屉
+        notifyAddedToShelf(book.id);
       } else {
         showToast("已在书架中");
       }

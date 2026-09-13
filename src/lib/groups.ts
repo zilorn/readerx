@@ -2,11 +2,13 @@
  * 书架分组（本地书 / 云端书共用）。
  * - 用户分组列表作为偏好由 Rust 后端持久化（readerx.groups）；
  * - 内置隐藏分组不落库（固定 id），书籍的归属通过各自 book 上的 groupId 字段记录；
- * - 归入隐藏分组的书不出现在书架常规视图与书架搜索，只在「隐藏」分组内可见。
+ * - 归入隐藏分组的书不出现在书架常规视图与书架搜索，只在「隐藏」分组内可见；
+ * - 另提供「入架后加入分组」的全局开关（见文件末尾）：提示条按钮 → 移入分组抽屉。
  */
 import { createSignal } from "solid-js";
 import { readState, writeState } from "./backend";
-import { clearLocalGroup } from "./books";
+import { clearLocalGroup, bookMetaById, setLocalBookGroup } from "./books";
+import { showActionToast, showToast } from "./toast";
 
 export interface Group {
   id: string;
@@ -95,4 +97,49 @@ export async function deleteGroup(id: string): Promise<void> {
   setGroupsSignal((prev) => prev.filter((group) => group.id !== id));
   persist();
   await clearLocalGroup(id);
+}
+
+// ---------------------------------------------------------------------------
+// 入架后的「加入分组」入口
+// 提示条上的按钮点亮「待移入分组」的书，抽屉由 AppShell 统一渲染：
+// 在线书入架后常常紧接着跳转（书架 / 阅读页），开关放模块级 signal 才能跨页面可用。
+// ---------------------------------------------------------------------------
+
+const [assignBookId, setAssignBookId] = createSignal<string | null>(null);
+
+/** 当前待移入分组的书 id（null = 抽屉关闭） */
+export function groupAssignBookId(): string | null {
+  return assignBookId();
+}
+
+export function openGroupAssign(bookId: string): void {
+  setAssignBookId(bookId);
+}
+
+export function closeGroupAssign(): void {
+  setAssignBookId(null);
+}
+
+/** 把书移入分组（groupId 为 null 表示移出分组）并提示结果 */
+export async function assignBookGroup(bookId: string, groupId: string | null): Promise<void> {
+  // 提示还在屏幕上时书可能已被删掉：别报「已移入」却什么都没发生
+  if (!bookMetaById(bookId)) {
+    showToast("这本书已不在书架", true);
+    return;
+  }
+  try {
+    await setLocalBookGroup(bookId, groupId);
+  } catch (e) {
+    showToast(e instanceof Error ? e.message : String(e), true);
+    return;
+  }
+  showToast(groupId ? `已移入「${groupName(groupId)}」` : "已移出分组");
+}
+
+/** 书籍入架成功的提示：右侧「加入分组」按钮打开移入分组抽屉 */
+export function notifyAddedToShelf(bookId: string): void {
+  showActionToast("已放入书架", {
+    label: "加入分组",
+    onClick: () => openGroupAssign(bookId),
+  });
 }
