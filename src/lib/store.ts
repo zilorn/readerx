@@ -7,7 +7,7 @@
  * 持久化统一交给 Rust 后端（readerx.* key），WebView 不落盘。
  */
 import { createSignal } from "solid-js";
-import { readState, writeState } from "./backend";
+import { readState, removeState, writeState } from "./backend";
 
 export type ThemeMode = "light" | "dark" | "sepia";
 export type PageMode = "paged" | "scroll";
@@ -22,7 +22,6 @@ const PAGE_MODE_KEY = "readerx.pageMode";
 const STATUS_BAR_KEY = "readerx.statusBar";
 const PROGRESS_SCOPE_KEY = "readerx.progressScope";
 const MENU_SLIDER_KEY = "readerx.menuSlider";
-const MENU_SLIDER_NODES_KEY = "readerx.menuSliderNodes";
 const SOURCE_PARALLEL_KEY = "readerx.onlineConcurrency";
 const SHELF_SOURCE_FILTER_KEY = "readerx.shelfSourceFilter";
 const SHELF_FILTER_KEY = "readerx.shelfFilter";
@@ -48,6 +47,15 @@ function clampParaSpacing(value: number): number {
   return Math.round(raw / PARA_SPACING_STEP) * PARA_SPACING_STEP;
 }
 
+/**
+ * 已移除功能的遗留偏好：启动时把后端里对应的状态文件删掉。
+ * 这些 key 不再有读写方，留着只会让应用数据目录里堆没人看的 JSON；
+ * 迁移幂等（文件不存在时后端直接返回），删失败也不影响启动。
+ */
+const LEGACY_STATE_KEYS = [
+  "readerx.menuSliderNodes", // 菜单进度条「逐页刻度」开关（功能已移除）
+] as const;
+
 let initialized = false;
 
 /**
@@ -57,7 +65,7 @@ let initialized = false;
 export async function initReaderState(): Promise<void> {
   if (initialized) return;
   initialized = true;
-  const [storedTheme, storedShelf, storedFont, storedSpacing, storedPageMode, storedStatusBar, storedScope, storedSourceParallel, storedShelfSourceFilter, storedMenuSlider, storedMenuSliderNodes, storedShelfFilter, storedSourceGroupFilter] =
+  const [storedTheme, storedShelf, storedFont, storedSpacing, storedPageMode, storedStatusBar, storedScope, storedSourceParallel, storedShelfSourceFilter, storedMenuSlider, storedShelfFilter, storedSourceGroupFilter] =
     await Promise.all([
       readState<string>(THEME_KEY),
       readState<Record<string, ShelfEntry>>(SHELF_KEY),
@@ -69,7 +77,6 @@ export async function initReaderState(): Promise<void> {
       readState<number>(SOURCE_PARALLEL_KEY),
       readState<boolean>(SHELF_SOURCE_FILTER_KEY),
       readState<boolean>(MENU_SLIDER_KEY),
-      readState<boolean>(MENU_SLIDER_NODES_KEY),
       readState<string>(SHELF_FILTER_KEY),
       readState<string>(SOURCE_GROUP_FILTER_KEY),
     ]);
@@ -106,15 +113,15 @@ export async function initReaderState(): Promise<void> {
   if (typeof storedMenuSlider === "boolean") {
     setMenuSliderEnabledSignal(storedMenuSlider);
   }
-  if (typeof storedMenuSliderNodes === "boolean") {
-    setMenuSliderNodesSignal(storedMenuSliderNodes);
-  }
   if (typeof storedShelfFilter === "string" && storedShelfFilter.trim()) {
     setShelfFilterKeySignal(storedShelfFilter.trim());
   }
   if (typeof storedSourceGroupFilter === "string" && storedSourceGroupFilter.trim()) {
     setSourceGroupFilterSignal(storedSourceGroupFilter.trim());
   }
+
+  // 清理已移除功能的遗留偏好：不阻塞启动（主题等已就位），删失败只记日志
+  void Promise.all(LEGACY_STATE_KEYS.map((key) => removeState(key)));
 }
 
 // ---------------------------------------------------------------------------
@@ -369,30 +376,6 @@ function persistMenuSliderEnabled(on: boolean): void {
 export function setMenuSliderEnabled(on: boolean): void {
   setMenuSliderEnabledSignal(on);
   persistMenuSliderEnabled(on);
-}
-
-// ---------------------------------------------------------------------------
-// 阅读菜单进度条上的逐页刻度（全局偏好：入口在「阅读设置」）
-// 左右翻页模式：进度条上按总页数等分显示灰色圆点，指示页数分布。开关控制其显示。
-
-const [menuSliderNodes, setMenuSliderNodesSignal] = createSignal<boolean>(true);
-let menuSliderNodesWriteQueue: Promise<void> = Promise.resolve();
-
-/** 响应式：菜单进度条上的逐页等分刻度是否开启 */
-export function currentMenuSliderNodes(): boolean {
-  return menuSliderNodes();
-}
-
-function persistMenuSliderNodes(on: boolean): void {
-  menuSliderNodesWriteQueue = menuSliderNodesWriteQueue.then(() =>
-    writeState(MENU_SLIDER_NODES_KEY, on),
-  );
-}
-
-/** 开启 / 关闭菜单进度条逐页刻度并持久化 */
-export function setMenuSliderNodes(on: boolean): void {
-  setMenuSliderNodesSignal(on);
-  persistMenuSliderNodes(on);
 }
 
 // ---------------------------------------------------------------------------

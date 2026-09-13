@@ -4,7 +4,7 @@
  * 点按 / 拖动框内任意位置跳转到本章任意一页，拖动中在进度条上方实时
  * 显示「x/y页」提示，松手后才真正翻页。
  */
-import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createSignal, onCleanup, onMount, Show } from "solid-js";
 
 export interface MenuPageSliderProps {
   /** 当前页（0 起） */
@@ -13,8 +13,6 @@ export interface MenuPageSliderProps {
   total: number;
   /** 拖动结束后跳转到目标页（0 起；调用方自行与当前页比较 / 去抖） */
   onCommit: (page: number) => void;
-  /** 是否显示逐页等分刻度（灰色圆点）；缺省为显示 */
-  nodes?: boolean;
 }
 
 /** 圆球直径 / 半径（px） */
@@ -43,18 +41,6 @@ export function MenuPageSlider(props: MenuPageSliderProps) {
   };
   /** 进度高亮前沿（px）：始终延伸到圆球右缘之外，球完全落在高亮里 */
   const frontPx = () => ballCenterPx() + HIGHLIGHT_TRAIL;
-
-  /** 每个“页节点”的 x 位置（px）：按总页数等分，与球心活动区间一致 */
-  const nodePx = () => {
-    const inner = Math.max(0, trackW() - END_MARGIN * 2);
-    const n = props.total;
-    if (n <= 1 || inner <= 0) return [];
-    const out = new Array<number>(n);
-    for (let i = 0; i < n; i++) {
-      out[i] = END_MARGIN + (i / (n - 1)) * inner;
-    }
-    return out;
-  };
 
   onMount(() => {
     const el = trackRef;
@@ -152,20 +138,6 @@ export function MenuPageSlider(props: MenuPageSliderProps) {
             style={{ width: `${frontPx()}px` }}
           />
         </div>
-
-        {/* 页节点：按总页数等分的一个个灰色圆点（当前页那颗被圆球盖住）；可在阅读设置里开关 */}
-        <Show when={props.nodes !== false}>
-          <div class="pointer-events-none absolute inset-x-0 top-1/2 h-0">
-            <For each={nodePx()}>
-              {(px) => (
-                <div
-                  class="absolute top-1/2 h-[3px] w-[3px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-text-3/75"
-                  style={{ left: `${px}px` }}
-                />
-              )}
-            </For>
-          </div>
-        </Show>
 
         {/* 圆球：整体住在进度高亮内（高亮在球右缘之外仍有延伸），随高亮前沿滑动 */}
         <div

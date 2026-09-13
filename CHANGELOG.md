@@ -86,6 +86,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   EPUB 解析器移出首屏（入口 chunk 56.9 KB → 44.3 KB，gzip 21.9 KB → 16.4 KB），
   两者都只在真正导入电子书时才加载。
 
+### Removed
+
+- **阅读菜单进度条上的「逐页刻度」**：进度条上按本章页数等分的灰色圆点与阅读设置里的对应
+  开关一并移除（进度条本身、拖动跳页与「x/y页」提示都不受影响）。旧版本存过的
+  `readerx.menuSliderNodes` 偏好会在启动时由后端删掉，不在应用数据目录里留下没人再读的
+  状态文件；迁移幂等，删不掉也只是留个文件，不影响其它偏好。
+
 ### Fixed
 
 - `readerx-source auth clear` 清不掉用 `auth cookie` / `auth webkit` / `auth cdp` 导入的登录态：

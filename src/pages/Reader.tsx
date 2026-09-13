@@ -128,7 +128,6 @@ import {
 import {
   currentFontSize,
   currentMenuSliderEnabled,
-  currentMenuSliderNodes,
   currentPageMode,
   currentParaSpacing,
   currentProgressScope,
@@ -3927,7 +3926,6 @@ export default function ReaderPage() {
                 <MenuPageSlider
                   page={pageIdx()}
                   total={totalPages()}
-                  nodes={currentMenuSliderNodes()}
                   onCommit={seekToPage}
                 />
               </Show>
