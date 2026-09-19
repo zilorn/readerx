@@ -22,6 +22,14 @@ members = [".", "plugins/tauri-plugin-webview-login", "crates/readerx-source"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[features]
+# 桌面端设置页的「开发者工具」入口：转发到 tauri 的 devtools feature，
+# release 包（AppImage / deb / NSIS）也要能打开检查器（debug 构建本来就带）。
+# `--no-default-features` 构建时 `readerx_open_devtools` 会如实报「未启用」，
+# 而不是让按钮点了没反应；Android 上该 API 是空实现，不受影响。
+default = ["devtools"]
+devtools = ["tauri/devtools"]
+
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"

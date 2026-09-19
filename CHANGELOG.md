@@ -22,6 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   桌面端另有三项系统集成：窗口默认 1180×820、最小 420×560 并居中（`tauri.conf.json`）、
   **原生文件选择器导入本地书**（Rust 侧 `readerx_pick_book_file` 读成字节后复用既有的
   TXT / EPUB / PDF 解析与「同名书重新导入」交互，手机端不受影响）、**Esc 返回上级页面**。
+- **桌面端设置页可以打开开发者工具**：设置页新增「调试 → 开发者工具」（**仅桌面端**显示，
+  手机端与浏览器里不出现），点一下打开当前 WebView 的检查器（Rust 侧 `readerx_open_devtools`，
+  打开的是发起调用的那个 WebView）。release 包同样可用 —— `src-tauri/Cargo.toml` 的 `devtools`
+  feature（默认开启）转发到 `tauri/devtools`，不启用时命令如实报错而不是让按钮点了没反应
+  （Android 的 WebView 不提供该 API，真机调试仍走 `chrome://inspect`）。
 - **桌面端网页登录窗口**：书源「网页登录」不再只限 Android —— Linux / Windows 上开一个独立登录窗口
   （`plugins/tauri-plugin-webview-login` 的桌面实现），登录完点窗口里的「完成」或直接关窗即收尾。
   抓取口径与 Android 一致：**Cookie 走内核 Cookie 库**（Linux 直接用 WebKitGTK 原生 `CookieManager`，

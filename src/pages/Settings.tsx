@@ -1,4 +1,4 @@
-import { createEffect, createSignal, onCleanup, type JSX } from "solid-js";
+import { createEffect, createSignal, onCleanup, Show, type JSX } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 import { openExternal } from "../lib/external";
 import {
@@ -11,12 +11,15 @@ import {
   PackageIcon,
   RegexIcon,
   SourceIcon,
+  TerminalIcon,
   TrashIcon,
 } from "../components/icons";
 import { PageHeader } from "../components/PageHeader";
 import { LicenseSheet } from "../components/LicenseSheet";
 import { ThirdPartyNoticesSheet } from "../components/ThirdPartyNoticesSheet";
 import { ToggleSwitch } from "../components/ToggleSwitch";
+import { openDevTools } from "../lib/backend";
+import { isDesktopPlatform } from "../lib/platform";
 import {
   SOURCE_PARALLEL_MAX,
   SOURCE_PARALLEL_MIN,
@@ -281,6 +284,25 @@ export default function SettingsPage() {
             />
           </div>
         </section>
+
+        {/* 调试（仅桌面端） */}
+        <Show when={isDesktopPlatform()}>
+          <section class="mb-6">
+            <h2 class="mx-1 mb-2 text-[12.5px] font-medium tracking-[0.04em] text-text-3">
+              调试
+            </h2>
+            <div class="overflow-hidden rounded-[14px] border border-border bg-surface">
+              <Row
+                icon={<TerminalIcon size={18} />}
+                label="开发者工具"
+                desc="打开 WebView 开发者工具"
+                onClick={() => void openDevTools()}
+              >
+                <ChevronRightIcon size={18} class="flex-none text-text-3" />
+              </Row>
+            </div>
+          </section>
+        </Show>
 
         {/* 关于 */}
         <section class="mb-6">

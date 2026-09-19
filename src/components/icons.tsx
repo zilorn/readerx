@@ -566,3 +566,14 @@ export function SidebarExpandIcon(p: SvgIconProps) {
     </Icon>
   );
 }
+
+/** 开发者工具（终端窗口） */
+export function TerminalIcon(p: SvgIconProps) {
+  return (
+    <Icon {...p}>
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <path d="m7.5 9.5 3 2.5-3 2.5" />
+      <path d="M13.5 15H17" />
+    </Icon>
+  );
+}

@@ -422,6 +422,26 @@ export async function pickBookFile(): Promise<PickedBookFile | null> {
 }
 
 // ---------------------------------------------------------------------------
+// 桌面端：开发者工具
+// ---------------------------------------------------------------------------
+
+/**
+ * 打开当前界面的开发者工具（Web Inspector）。
+ * 仅桌面端可用（Android 的 WebView 不提供该 API），失败原因经提示告知用户。
+ */
+export async function openDevTools(): Promise<void> {
+  if (!tauri) {
+    reportFailure("打开开发者工具失败", "仅在应用内可用");
+    return;
+  }
+  try {
+    await invoke("readerx_open_devtools");
+  } catch (err) {
+    reportFailure("打开开发者工具失败", err);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 网页登录（WebView；登录 Cookie 由 Rust 按书源持久化并注入会话）
 // ---------------------------------------------------------------------------
 

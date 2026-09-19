@@ -101,6 +101,7 @@ pub fn run() {
             commands::readerx_tts_cache_clear,
             commands::readerx_license_text,
             commands::readerx_pick_book_file,
+            commands::readerx_open_devtools,
             commands::readerx_third_party_notices,
             commands::readerx_sources_list,
             commands::readerx_source_get,

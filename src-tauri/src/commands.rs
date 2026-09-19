@@ -21,6 +21,7 @@ use base64::Engine as _;
 use serde_json::Value;
 use tauri::AppHandle;
 use tauri::Manager;
+use tauri::Webview;
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_fs::FsExt;
 use readerx_source::auth::LoginOutcome;
@@ -575,4 +576,28 @@ pub async fn readerx_source_login_clear(app: AppHandle, source_id: String) -> Re
         Ok(removed)
     })
     .await
+}
+
+// ---------------------------------------------------------------------------
+// 桌面端：开发者工具
+// ---------------------------------------------------------------------------
+
+/// 打开**发起调用的** WebView 的开发者工具（Web Inspector）。
+///
+/// 桌面端专有：Android 的 WebView 不支持 wry 的 devtools API（真机调试走
+/// `chrome://inspect`），设置页因此只在桌面平台显示入口。
+/// release 构建要靠 `tauri` 的 `devtools` feature（见 Cargo.toml）才有这个 API，
+/// 万一被去掉也要如实报错，而不是让按钮点了没反应。
+#[tauri::command]
+pub fn readerx_open_devtools(webview: Webview) -> Result<(), String> {
+    #[cfg(any(debug_assertions, feature = "devtools"))]
+    {
+        webview.open_devtools();
+        Ok(())
+    }
+    #[cfg(not(any(debug_assertions, feature = "devtools")))]
+    {
+        let _ = webview;
+        Err("当前构建未启用开发者工具".to_string())
+    }
 }

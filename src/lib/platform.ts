@@ -51,3 +51,12 @@ export function isMobilePlatform(): boolean {
   if (typeof navigator === "undefined") return false;
   return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 }
+
+/**
+ * 是否是桌面平台（Tauri 宿主且 UA 不是移动端，与窗口宽度无关）。
+ * 用于「只有桌面端才有」的系统能力：桌面窗口拉窄回退成手机外壳时这些能力依然在，
+ * 所以这里看平台而不是 [`isDesktopShell`]（例如开发者工具，Android 的 WebView 不提供）。
+ */
+export function isDesktopPlatform(): boolean {
+  return isTauriHost() && !isMobilePlatform();
+}
