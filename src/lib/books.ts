@@ -4,7 +4,7 @@
  *   但启动 / 书架只拉「章节头 + 字数」这份轻量数据（readerx_book_list_meta）；
  * - 单本书「全量（含正文）」只有在打开阅读页等真正需要内容时才按需取回
  *   （readerx_book_get）并进入本模块的响应式全量缓存；
- * - 提供 txt（正则/字数分章）与 epub（按目录结构）两种导入解析入口；
+ * - 提供 txt（正则/字数分章）、epub（按目录结构）与 pdf（按书签 / 页）三种导入解析入口；
  * - 分组 / 元信息编辑走 Rust 侧就地打补丁（readerx_book_patch_meta），
  *   正文不整本经 IPC 传回 WebView。
  */
@@ -40,6 +40,7 @@ import {
   assignChapterCids,
   chapterCid,
   chapterHasImages,
+  newBookId,
   normalizeBookTags,
   samePlainFields,
 } from "./booksTypes";
@@ -54,9 +55,14 @@ export type ImportSplitChoice =
 
 export interface BookDraft {
   format: BookFormat;
+  /**
+   * 预分配的书 id：PDF 导入时页面图按它命名落盘，因此解析前就要定下来，
+   * 落库时沿用同一个 id（见 `newBookId`）。其余格式缺省，落库时才生成。
+   */
+  bookId?: string;
   title: string;
   author: string;
-  /** 简介（EPUB 的 dc:description / 在线书源附带；TXT 缺省，导入后可在详情页补录） */
+  /** 简介（EPUB 的 dc:description / 在线书源附带；TXT、PDF 缺省，导入后可在详情页补录） */
   intro?: string;
   fileName: string;
   size: number;
@@ -64,7 +70,7 @@ export interface BookDraft {
   splitDesc: string;
   chapters: LocalBookChapter[];
   totalChars: number;
-  /** EPUB 封面缩略图（data URL）；TXT 或无封面时缺省 */
+  /** EPUB / PDF 封面缩略图（data URL）；TXT 或无封面时缺省 */
   cover?: string;
 }
 
@@ -312,10 +318,6 @@ async function setBookGroupLocal(id: string, groupId: string | null): Promise<vo
 // 书籍写入路径：磁盘操作成功后同步两级状态
 // ---------------------------------------------------------------------------
 
-function newBookId(): string {
-  return `local-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
-}
-
 function hueFromTitle(title: string): number {
   let hash = 0;
   for (let i = 0; i < title.length; i++) {
@@ -368,12 +370,13 @@ export function detectBookFormat(fileName: string): BookFormat | null {
   const lower = fileName.toLowerCase();
   if (lower.endsWith(".txt")) return "txt";
   if (lower.endsWith(".epub") || lower.endsWith(".equb")) return "epub";
+  if (lower.endsWith(".pdf")) return "pdf";
   return null;
 }
 
 function titleFromFileName(fileName: string): string {
   const name = fileName
-    .replace(/\.(txt|epub|equb)$/i, "")
+    .replace(/\.(txt|epub|equb|pdf)$/i, "")
     .trim();
   return name || "未命名书籍";
 }
@@ -387,6 +390,7 @@ function toDraft(
   chapters: LocalBookChapter[],
   cover?: string,
   intro?: string,
+  bookId?: string,
 ): BookDraft {
   const totalChars = chapters.reduce(
     (sum, chapter) =>
@@ -401,6 +405,7 @@ function toDraft(
   const trimmedIntro = intro?.trim();
   return {
     format,
+    ...(bookId ? { bookId } : {}),
     title: title.trim() || titleFromFileName(file.name),
     author: author.trim() || "佚名",
     ...(trimmedIntro ? { intro: trimmedIntro } : {}),
@@ -479,13 +484,52 @@ export async function parseEpubFileDraft(
   );
 }
 
+/**
+ * 解析 PDF：优先跟随 PDF 自带书签（大纲）分章，没有可用大纲时按页累计正文字数分章；
+ * 没有文字层的扫描页整页渲染成图片章节（图片在解析时就按书 id 落盘）。
+ * 解析器（pdf.js + worker，1 MB 以上）只在真正导入 PDF 时才载入，不进首屏。
+ */
+export async function parsePdfFileDraft(
+  file: File,
+  overrides?: { title?: string; author?: string },
+): Promise<BookDraft> {
+  const { parsePdfFile } = await import("./pdf");
+  // 书 id 必须在这里就定下来：页面图按它命名落盘，落库时沿用同一个 id
+  const bookId = newBookId();
+  const parsed = await parsePdfFile(file, { bookId });
+  const textChapters = parsed.chapters.filter((chapter) => chapter.paragraphs.length > 0).length;
+  const renderedPages = parsed.chapters.reduce(
+    (sum, chapter) =>
+      sum + (chapter.blocks ?? []).filter((block) => block.kind === "img").length,
+    0,
+  );
+  const splitDesc =
+    renderedPages === 0
+      ? `按 PDF 大纲 / 页分章（${parsed.chapters.length} 章）`
+      : textChapters === 0
+        ? `PDF 页面图片（${parsed.chapters.length} 章）`
+        : `按 PDF 大纲 / 页分章（${parsed.chapters.length} 章，${renderedPages} 页图片）`;
+  return toDraft(
+    file,
+    "pdf",
+    overrides?.title ?? parsed.title,
+    overrides?.author ?? parsed.author,
+    splitDesc,
+    parsed.chapters,
+    parsed.cover,
+    undefined,
+    bookId,
+  );
+}
+
 /** 将确认后的草稿交给 Rust 后端持久化并同步到两级响应式清单 */
 export async function persistBookDraft(
   draft: BookDraft,
   source: BookSource = "local",
 ): Promise<LocalBook> {
   const book: LocalBook = {
-    id: newBookId(),
+    // PDF 等格式在解析阶段已分配 id（页面图按它落盘），沿用同一个 id
+    id: draft.bookId ?? newBookId(),
     title: draft.title.trim() || titleFromFileName(draft.fileName),
     author: draft.author.trim() || "佚名",
     ...(draft.intro ? { intro: draft.intro } : {}),
@@ -729,10 +773,10 @@ export async function replaceBookContent(
  */
 export async function parseBookFile(file: File): Promise<BookDraft> {
   const format = detectBookFormat(file.name);
-  if (!format) throw new Error("仅支持导入 .txt / .epub 文件");
-  return format === "txt"
-    ? await parseTxtFile(file, { kind: "auto" })
-    : await parseEpubFileDraft(file);
+  if (!format) throw new Error("仅支持导入 .txt / .epub / .pdf 文件");
+  if (format === "txt") return await parseTxtFile(file, { kind: "auto" });
+  if (format === "pdf") return await parsePdfFileDraft(file);
+  return await parseEpubFileDraft(file);
 }
 
 /**
@@ -759,7 +803,7 @@ export async function importLocalDraftAsNew(draft: BookDraft): Promise<LocalBook
 }
 
 /**
- * 直接选择文件后一键导入：TXT 按当前规则自动分章，EPUB 保留全部正文。
+ * 直接选择文件后一键导入：TXT 按当前规则自动分章，EPUB / PDF 保留自有结构。
  * 不再打开确认页/抽屉，导入结果立即出现在书架。
  */
 export async function importLocalBookFile(file: File): Promise<LocalBook> {

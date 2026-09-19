@@ -153,7 +153,7 @@ export function ImportButton(props: ImportButtonProps) {
         ref={input}
         class="sr-only"
         type="file"
-        accept=".txt,.epub,.equb,text/plain,application/epub+zip"
+        accept=".txt,.epub,.equb,.pdf,text/plain,application/epub+zip,application/pdf"
         aria-hidden="true"
         tabindex={-1}
         onChange={(event) => {
@@ -194,7 +194,7 @@ export function ImportButton(props: ImportButtonProps) {
                 <MenuRow
                   icon={<FileTextIcon size={19} />}
                   label="导入本地书"
-                  desc="从设备选择 TXT / EPUB"
+                  desc="从设备选择 TXT / EPUB / PDF"
                   onClick={openLocalPicker}
                 />
                 <MenuRow

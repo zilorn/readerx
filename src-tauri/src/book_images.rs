@@ -613,6 +613,33 @@ pub(crate) fn fetch_result(
     }
 }
 
+/// 落盘一张**前端渲染好的 PDF 页面图**（扫描页 / 图片页没有文字层，只能整页当图读）。
+///
+/// 与在线图片的区别只有图片来源：字节由 WebView 的 canvas 渲染产出，经 IPC 送来一次
+/// （仅导入时），落盘后同样只留文件名 —— 书籍 JSON 与后续渲染都不会再碰这份字节。
+/// 图片身份取「书名 + 页号」，因此同一本书重复导入同一页只会覆盖旧文件。
+pub(crate) fn store_pdf_page(
+    root: &Path,
+    book_id: &str,
+    page_number: i64,
+    data_url: &str,
+) -> Result<BookImageFile, String> {
+    let (mime, bytes) =
+        decode_data_url(data_url).ok_or_else(|| "页面图片格式无法识别".to_string())?;
+    let result = fetch_result(
+        root,
+        book_id,
+        &format!("pdf-page:{page_number}"),
+        &mime,
+        &bytes,
+    );
+    if result.ok {
+        Ok(result)
+    } else {
+        Err(result.error)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -748,6 +775,29 @@ mod tests {
         assert_eq!(percent_decode("c0001%5Fabc.jpg"), "c0001_abc.jpg");
         assert_eq!(percent_decode("a%2Fb"), "a/b");
         assert_eq!(percent_decode("100%zz"), "100%zz");
+    }
+
+    /// PDF 页面图：同一本书的同一页始终是同一个文件（重新导入覆盖旧页），
+    /// 删除书籍时随书一起清理；非图片 data URL 一律拒绝。
+    #[test]
+    fn pdf_page_roundtrip_and_cleanup() {
+        let root = temp_root("pdf-page");
+        let bytes = png_bytes();
+        let url = data_url("image/png", &bytes);
+        let first = store_pdf_page(&root, "book-9", 3, &url).expect("store page");
+        assert!(first.ok && root.join(&first.local).is_file());
+        assert_eq!((first.width, first.height), (300, 200));
+        // 同一页再存一次：文件名不变（不留新旧两份）
+        let again = store_pdf_page(&root, "book-9", 3, &url).expect("store page again");
+        assert_eq!(first.local, again.local);
+        // 另一页是另一个文件
+        let other = store_pdf_page(&root, "book-9", 4, &url).expect("store other page");
+        assert_ne!(first.local, other.local);
+        assert!(store_pdf_page(&root, "book-9", 5, "data:text/plain;base64,aGk=").is_err());
+        // 删除书籍：该书的页面图一并清理
+        assert_eq!(remove_book(&root, "book-9"), 2);
+        assert!(!exists(&root, &first.local));
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

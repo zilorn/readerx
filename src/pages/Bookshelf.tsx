@@ -710,7 +710,7 @@ export default function BookshelfPage() {
                 </p>
                 <p class="mb-[18px] mt-0.5 text-[12.5px] leading-[1.6]">
                   {items().length === 0
-                    ? "导入 TXT / EPUB 到本地书架"
+                    ? "导入 TXT / EPUB / PDF 到本地书架"
                     : allHiddenOnly()
                       ? "点上方「隐藏」分组即可查看"
                       : activeFilter().kind === "group"

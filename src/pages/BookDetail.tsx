@@ -27,6 +27,7 @@ import { groupName } from "../lib/groups";
 function formatName(format: BookFormat): string {
   if (format === "online") return "在线书";
   if (format === "epub") return "EPUB";
+  if (format === "pdf") return "PDF";
   if (format === "txt") return "TXT";
   return format;
 }

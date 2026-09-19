@@ -380,6 +380,23 @@ pub async fn readerx_book_image_fetch(
     .await
 }
 
+/// 把前端渲染好的 **PDF 页面图**落盘（扫描版 PDF 没有文字层，只能整页当图读）。
+/// 图片字节只在导入时经一次 IPC 送来，落盘后书籍里只留文件名，渲染走 `readerx-img`。
+/// 只接受 JPEG / PNG 这类 data URL，并按 `bookId` 命名，删除书籍时随书一起清理。
+#[tauri::command]
+pub async fn readerx_book_pdf_page(
+    app: AppHandle,
+    book_id: String,
+    page_number: i64,
+    data_url: String,
+) -> Result<BookImageFile, String> {
+    blocking("PDF 页面保存", move || {
+        let root = book_images::images_root(&app)?;
+        book_images::store_pdf_page(&root, &book_id, page_number, &data_url)
+    })
+    .await
+}
+
 /// 取若干张已落盘章节插图的尺寸 / 体积（只读文件头，不解码）。
 /// 分页排版需要每张图的真实尺寸：由 Rust 读文件头给出，
 /// WebView 因此不必为了量尺寸把整章图片解码一遍。

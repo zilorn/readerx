@@ -354,6 +354,24 @@ export async function readChapterImageInfo(
   }
 }
 
+/**
+ * 把 WebView 渲染好的 **PDF 页面图**落盘（扫描版 PDF 没有文字层，整页当图读）。
+ * 只在这一刻经 IPC 传一次字节：落盘后书籍里只留文件名，渲染走 `readerx-img` 协议。
+ * 纯浏览器调试环境没有该 command，调用方据此退回内嵌 data URL。
+ */
+export async function putBookPdfPageImage(
+  bookId: string,
+  pageNumber: number,
+  dataUrl: string,
+): Promise<BookImageFile> {
+  if (!tauri) throw new Error("PDF 页面图仅应用内可落盘");
+  return invoke<BookImageFile>("readerx_book_pdf_page", {
+    bookId,
+    pageNumber,
+    dataUrl,
+  });
+}
+
 function toSummary(source: BookSource): BookSourceSummary {
   return {
     schemaVersion: source.schemaVersion,

@@ -1,6 +1,6 @@
 /** 本地书籍的共享类型定义 */
 
-export type BookFormat = "txt" | "epub" | "online";
+export type BookFormat = "txt" | "epub" | "pdf" | "online";
 
 /** 书籍导入来源：webdav 导入带 "webdav" 标记；在线书为 "online"，其余视为本地导入 */
 export type BookSource = "local" | "webdav" | "online";
@@ -196,6 +196,15 @@ export type ChapterHead = Pick<LocalBookChapter, "cid" | "title" | "url"> & {
   /** 章节正文镜像文本的字符数（UTF-16；仅 p/h 文本，图片不计）。书架进度/详情字数以它为口径 */
   chars: number;
 };
+
+/**
+ * 新书 id（本地导入与在线书共用）。
+ * PDF 导入要在解析阶段就把页面图按书 id 落盘，因此 id 由解析入口先分配、随草稿落库，
+ * 不能等到写盘那一刻才生成（否则图片文件名与最终书 id 对不上，删除书籍时清不掉）。
+ */
+export function newBookId(): string {
+  return `local-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
+}
 
 /** 书库元数据：LocalBook 去掉正文，章节仅保留轻量头。
  *  应用启动只拉这份（readerx_book_list_meta），正文按需单本读取后再物化。 */

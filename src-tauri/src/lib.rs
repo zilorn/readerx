@@ -108,6 +108,7 @@ pub fn run() {
             commands::readerx_source_fetch_image,
             commands::readerx_book_image_fetch,
             commands::readerx_book_image_info,
+            commands::readerx_book_pdf_page,
             commands::readerx_source_login_supported,
             commands::readerx_source_login_webview,
             commands::readerx_source_login_clear

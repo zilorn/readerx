@@ -2,7 +2,7 @@
  * WebDAV 书库：
  * - 服务器配置（可多台，其中一台激活）作为状态由 Rust 后端持久化（readerx.webdav.*）；
  * - 目录浏览走 PROPFIND，文件下载走 GET；Tauri 环境经 tauri-plugin-http，浏览器开发环境回退原生 fetch；
- * - 导入复用本地书解析链路（TXT 自动分章 / EPUB 目录结构），结果直接入书架。
+ * - 导入复用本地书解析链路（TXT 自动分章 / EPUB 目录结构 / PDF 书签或页），结果直接入书架。
  */
 import { createSignal } from "solid-js";
 import { readState, writeState } from "./backend";
@@ -10,11 +10,12 @@ import { httpFetch } from "./http";
 import {
   detectBookFormat,
   parseEpubFileDraft,
+  parsePdfFileDraft,
   parseTxtFile,
   persistBookDraft,
   type BookDraft,
 } from "./books";
-import type { BookMeta, LocalBook } from "./booksTypes";
+import type { BookFormat, BookMeta, LocalBook } from "./booksTypes";
 import { ensureShelfEntry } from "./store";
 
 export interface DavServer {
@@ -334,11 +335,14 @@ function decodePathname(pathname: string): string {
 // 下载与导入
 
 export function isBookFileName(name: string): boolean {
-  return /\.(txt|epub|equb)$/i.test(name);
+  return /\.(txt|epub|equb|pdf)$/i.test(name);
 }
 
 export function bookExtOf(name: string): string {
-  return name.toLowerCase().endsWith(".txt") ? "txt" : "epub";
+  const lower = name.toLowerCase();
+  if (lower.endsWith(".txt")) return "txt";
+  if (lower.endsWith(".pdf")) return "pdf";
+  return "epub";
 }
 
 export function formatBytes(bytes: number): string {
@@ -384,12 +388,16 @@ export async function fetchDavBookDraft(
   const { bytes, fileName } = await downloadDavFile(server, path);
   const format = detectBookFormat(fileName);
   if (!format) throw new Error(`不支持的书籍格式：${fileName}`);
-  const file = new File([bytes], fileName, {
-    type: format === "epub" ? "application/epub+zip" : "text/plain;charset=utf-8",
-  });
-  return format === "txt"
-    ? await parseTxtFile(file, { kind: "auto" })
-    : await parseEpubFileDraft(file);
+  const file = new File([bytes], fileName, { type: mimeOfFormat(format) });
+  if (format === "txt") return await parseTxtFile(file, { kind: "auto" });
+  return format === "pdf" ? await parsePdfFileDraft(file) : await parseEpubFileDraft(file);
+}
+
+/** 交给解析器的文件 MIME（TXT 需带编码提示，PDF / EPUB 用各自的正式类型） */
+function mimeOfFormat(format: BookFormat): string {
+  if (format === "pdf") return "application/pdf";
+  if (format === "epub") return "application/epub+zip";
+  return "text/plain;charset=utf-8";
 }
 
 /** 下载并解析一本远程书，作为一本新书直接进入书架 */
