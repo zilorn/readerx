@@ -11,7 +11,12 @@
  *   才转换该字段，因此打开一本书、翻目录都不会把整本正文先转一遍。
  */
 import { convertHanText, hanVersion } from "./hanConvert";
-import type { ChapterBlock, LocalBook, LocalBookChapter } from "./booksTypes";
+import {
+  normalizeInlineImages,
+  type ChapterBlock,
+  type LocalBook,
+  type LocalBookChapter,
+} from "./booksTypes";
 
 /** 短文本缓存上限：超过整表清空（书名/章节名这类字符串转换本身很便宜） */
 const TEXT_CACHE_MAX = 5000;
@@ -86,15 +91,21 @@ export function withHanMeta<T extends HanMetaFields>(meta: T | undefined): T | u
   };
 }
 
-/** 正文块显示副本（图片块无文字，原样复用） */
+/**
+ * 正文块显示副本（图片块无文字，原样复用）。
+ * 简繁转换逐字符等长，段内插图锚点不受影响；万一某条词典映射改变了长度，
+ * 这里按转换后的文本把越界锚点收敛回范围内（图片不会因为简繁切换而丢失）。
+ */
 function convertBlocks(blocks: ChapterBlock[]): ChapterBlock[] {
   let changed = false;
-  const out = blocks.map((block) => {
+  const out = blocks.map((block): ChapterBlock => {
     if (block.kind === "img") return block;
     const text = hanText(block.text);
     if (text === block.text) return block;
     changed = true;
-    return { ...block, text };
+    if (block.kind === "h") return { kind: "h", level: block.level, text };
+    const imgs = normalizeInlineImages(text, block.imgs);
+    return { kind: "p", text, ...(imgs ? { imgs } : {}) };
   });
   return changed ? out : blocks;
 }

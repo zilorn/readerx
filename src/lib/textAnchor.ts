@@ -147,8 +147,8 @@ export function flashUnitRange(
     if (toGlobal <= base || fromGlobal >= base + len) continue;
     const lo = Math.max(0, fromGlobal - base);
     const hi = Math.min(len, toGlobal - base);
-    const mark = wrapTextRange(el, lo, hi);
-    if (!mark) return false;
+    const marks = wrapTextRange(el, lo, hi);
+    if (marks.length === 0) return false;
     if (scroll) {
       try {
         el.scrollIntoView({ block: "center" });
@@ -157,36 +157,20 @@ export function flashUnitRange(
       }
     }
     window.setTimeout(() => {
-      mark.replaceWith(...Array.from(mark.childNodes));
+      for (const mark of marks) mark.replaceWith(...Array.from(mark.childNodes));
     }, ms);
     return true;
   }
   return false;
 }
 
-/** 把一个元素文本的 [from,to) 字符段包进高亮 span，返回该 span */
-function wrapTextRange(el: Element, from: number, to: number): HTMLSpanElement | null {
-  const range = textNodesRange(el, from, to);
-  if (!range) return null;
-  const mark = document.createElement("span");
-  mark.className = "readerx-bm-flash";
-  try {
-    const fragment = range.extractContents();
-    mark.appendChild(fragment);
-    range.insertNode(mark);
-    return mark;
-  } catch {
-    return null;
-  }
-}
-
-/** 取元素内文本覆盖 [from,to) 的 Range（支持跨多个文本节点/书签 span） */
-function textNodesRange(el: Element, from: number, to: number): Range | null {
+/** 把一个元素文本的 [from,to) 字符段包进高亮 span，返回这些 span（无覆盖返回空数组） */
+function wrapTextRange(el: Element, from: number, to: number): HTMLSpanElement[] {
+  const marks: HTMLSpanElement[] = [];
+  // 按文本节点分别包裹：区间跨到段内插图（或别的元素节点）时不搬动它们 ——
+  // 图片是渲染树的一部分（自带加载状态），整体 extract/insert 会把它连根挪走。
+  const targets: Array<{ node: Text; start: number; end: number }> = [];
   let acc = 0;
-  let startNode: Text | null = null;
-  let startOff = 0;
-  let endNode: Text | null = null;
-  let endOff = 0;
   const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
   let cur: Node | null;
   while ((cur = walker.nextNode())) {
@@ -194,22 +178,26 @@ function textNodesRange(el: Element, from: number, to: number): Range | null {
     const nodeLen = text.data.length;
     const a = Math.max(0, from - acc);
     const b = Math.min(nodeLen, to - acc);
-    if (b > a) {
-      if (!startNode) {
-        startNode = text;
-        startOff = a;
-      }
-      endNode = text;
-      endOff = b;
-    }
+    if (b > a) targets.push({ node: text, start: a, end: b });
     acc += nodeLen;
     if (acc >= to) break;
   }
-  if (!startNode || !endNode) return null;
-  const range = document.createRange();
-  range.setStart(startNode, startOff);
-  range.setEnd(endNode, endOff);
-  return range;
+  for (const target of targets) {
+    const range = document.createRange();
+    range.setStart(target.node, target.start);
+    range.setEnd(target.node, target.end);
+    const mark = document.createElement("span");
+    mark.className = "readerx-bm-flash";
+    try {
+      const fragment = range.extractContents();
+      mark.appendChild(fragment);
+      range.insertNode(mark);
+      marks.push(mark);
+    } catch {
+      /* 这一段包不上就跳过，其余照常高亮 */
+    }
+  }
+  return marks;
 }
 
 /**
@@ -337,8 +325,7 @@ export function flashSpan(
     if (!firstEl) firstEl = el;
     const lo = Math.max(0, fromGlobal - spanStart);
     const hi = Math.min(elementTextLength(el), toGlobal - spanStart);
-    const mark = wrapTextRange(el, lo, hi);
-    if (mark) marks.push(mark);
+    marks.push(...wrapTextRange(el, lo, hi));
   }
   if (marks.length === 0) return false;
   if (scroll && firstEl) {

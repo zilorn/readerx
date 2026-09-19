@@ -13,7 +13,12 @@
  */
 import { createSignal } from "solid-js";
 import { readState, writeState } from "./backend";
-import type { LocalBook, LocalBookChapter } from "./booksTypes";
+import {
+  remapInlineImages,
+  type ChapterBlock,
+  type LocalBook,
+  type LocalBookChapter,
+} from "./booksTypes";
 
 export type ReplaceScope = "global" | "book";
 
@@ -169,6 +174,7 @@ export function applyReplaceRulesToText(text: string, rules: TextReplaceRule[]):
 /**
  * 返回应用规则后的章节副本；无任何文本改动时返回原引用（便于下游跳过重排）。
  * 章节标题 / cid 等元信息不改动（替换只针对正文显示）。
+ * 段内插图锚点跟随替换后的文本重定位：图片不占字符，按「锚点之前的文本」长度映射。
  */
 export function applyReplacementsToChapter(
   chapter: LocalBookChapter,
@@ -183,9 +189,14 @@ export function applyReplacementsToChapter(
   };
   const hasBlocks = !!chapter.blocks && chapter.blocks.length > 0;
   const blocks = hasBlocks
-    ? chapter.blocks!.map((block) =>
-        block.kind === "img" ? block : { ...block, text: mapText(block.text) },
-      )
+    ? chapter.blocks!.map((block): ChapterBlock => {
+        if (block.kind === "img") return block;
+        const text = mapText(block.text);
+        if (text === block.text) return block;
+        if (block.kind === "h") return { kind: "h", level: block.level, text };
+        const imgs = remapInlineImages(block.imgs, mapText, block.text);
+        return { kind: "p", text, ...(imgs ? { imgs } : {}) };
+      })
     : undefined;
   const paragraphs = chapter.paragraphs.map(mapText);
   if (!changed) return chapter;

@@ -11,6 +11,29 @@ pub use readerx_source::models::{
 
 use serde::{Deserialize, Serialize};
 
+/// 图片引用：块级插图（`ChapterBlock` 上的 src/alt/remote/local）与段内插图
+/// （`ChapterBlock::imgs` 锚点）共用同一组字段，语义完全一致。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChapterInlineImage {
+    /// 图片插在段落文本的第 `at` 个字符之前。
+    /// UTF-16 偏移（与前端 JS string 下标、书签/进度口径一致）；
+    /// **图片本身不占字符**，因此段内图片不影响既有字符偏移。
+    pub at: u32,
+    /// 可直接渲染的地址：在线书未下载时为网络地址，下载后仍保留网络地址
+    /// （本地副本由 `local` 指向的文件提供，避免把图片字节写进书籍 JSON）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub src: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alt: Option<String>,
+    /// 在线书：图片原始网络地址（图片身份：下载去重 / 失败重试按它对应）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<String>,
+    /// 本地副本文件名（位于应用数据目录 images/ 下，见 book_images.rs）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChapterBlock {
@@ -32,6 +55,10 @@ pub struct ChapterBlock {
     /// 图片下载成功后只把引用写回章节，图片字节留在文件里
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local: Option<String>,
+    /// p 块的段内插图锚点（图文混排）：图片留在段落文字流里，不另起一段。
+    /// 只有 p 块会用；缺失 = 纯文字段落（旧数据与新解析的纯文字段落都不写该字段）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imgs: Option<Vec<ChapterInlineImage>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

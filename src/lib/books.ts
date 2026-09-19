@@ -39,6 +39,7 @@ import {
   bookToMeta,
   assignChapterCids,
   chapterCid,
+  chapterHasImages,
   normalizeBookTags,
   samePlainFields,
 } from "./booksTypes";
@@ -392,9 +393,8 @@ function toDraft(
       sum + chapter.paragraphs.reduce((paraSum, paragraph) => paraSum + paragraph.length, 0),
     0,
   );
-  const hasImage = chapters.some((chapter) =>
-    chapter.blocks?.some((block) => block.kind === "img"),
-  );
+  // 只有图片（无正文文字）的章节同样算「有内容」：段内图与整行图都认
+  const hasImage = chapters.some((chapter) => chapterHasImages(chapter));
   if (totalChars === 0 && !hasImage) {
     throw new Error("没有读取到可阅读的正文内容");
   }

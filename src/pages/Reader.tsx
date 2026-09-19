@@ -111,6 +111,7 @@ import {
   chapterUnits,
   decodeImageSize,
   figureStyle,
+  inlineImageStyle,
   readerImageKey,
   headingStyle,
   paragraphStyle,
@@ -119,11 +120,14 @@ import {
   titleAuthorStyle,
   titleTextStyle,
   titleWrapperStyle,
+  unitImages,
   type CssRecord,
   type PageFragment,
   type PaginateLayout,
   type PaginatedChapter,
   type ReaderBlock,
+  type ReaderInlineImage,
+  splitParagraphPieces,
 } from "../lib/pagination";
 import {
   currentFontSize,
@@ -242,19 +246,33 @@ function sameReaderUnits(a: ReaderBlock[], b: ReaderBlock[]): boolean {
     if (x.kind === "img") {
       const yi = y as Extract<ReaderBlock, { kind: "img" }>;
       if ((x.alt ?? "") !== (yi.alt ?? "")) return false;
-      if (x.remote || yi.remote) {
-        if ((x.remote ?? "") !== (yi.remote ?? "")) return false;
-      } else if (x.src !== yi.src) {
-        return false;
-      }
+      if (!sameImageRef(x, yi)) return false;
     } else if (x.kind === "h") {
       const yi = y as Extract<ReaderBlock, { kind: "h" }>;
       if (x.text !== yi.text || x.level !== yi.level) return false;
-    } else if (x.text !== (y as Extract<ReaderBlock, { kind: "p" }>).text) {
-      return false;
+    } else {
+      const yp = y as Extract<ReaderBlock, { kind: "p" }>;
+      if (x.text !== yp.text) return false;
+      const xi = x.imgs ?? [];
+      const yimgs = yp.imgs ?? [];
+      if (xi.length !== yimgs.length) return false;
+      for (let k = 0; k < xi.length; k++) {
+        // 段内图片的锚点与身份都要一致：换了位置同样要重排
+        if (xi[k].at !== yimgs[k].at) return false;
+        if (!sameImageRef(xi[k], yimgs[k])) return false;
+      }
     }
   }
   return true;
+}
+
+/** 两张图是否同一张：按图片身份（remote 优先，旧数据退回 src）比较；本地副本写回不算变化 */
+function sameImageRef(
+  a: { src?: string; remote?: string },
+  b: { src?: string; remote?: string },
+): boolean {
+  if (a.remote || b.remote) return (a.remote ?? "") === (b.remote ?? "");
+  return (a.src ?? "") === (b.src ?? "");
 }
 
 /** 在线图片的网络地址（图片身份）：优先块里的 remote，兼容旧数据直接以 src 为网络地址 */
@@ -570,6 +588,137 @@ function ImageBlock(props: {
   );
 }
 
+/**
+ * 段内插图：与文字**同排**（行内替换元素），文字在图片之后继续排、必要时在行内换行。
+ *
+ * 尺寸口径与 [`inlineImageStyle`] 完全一致（分页测量用的就是它）：分页模式用排版算好的
+ * 展示尺寸（在线图未就绪时是占位小方框的尺寸），滚动模式交给 CSS 按自然比例自适应。
+ * 未就绪显示转圈小占位、失败/缺失显示可点重试的小占位 —— 都不打断整行的排版节奏。
+ */
+function InlineImageBlock(props: {
+  /** 可直接渲染的地址（在线书为网络地址；老数据可能是 data URL） */
+  src?: string;
+  remote?: string;
+  /** 已下载副本的文件名 */
+  local?: string;
+  alt?: string;
+  /** 分页模式的展示尺寸 px（0 / 缺省表示未知：按占位小方框排版） */
+  w?: number;
+  h?: number;
+  /** 滚动模式：按自然比例自适应 */
+  natural?: boolean;
+  /** 在线书单张图片重试（参数为图片网络地址） */
+  onRetry?: (url: string) => void;
+}) {
+  const remoteUrl = () => readerImageRemote(props.src, props.remote);
+  const source = () => readerImageSource(props.src, props.local, props.remote);
+  const [brokenSrc, setBrokenSrc] = createSignal<string | null>(null);
+  const broken = () => brokenSrc() !== null && brokenSrc() === source();
+  const phase = () => {
+    const url = remoteUrl();
+    return url ? chapterImagePhase(url) : "ready";
+  };
+  /** 分页模式：排版已给出展示尺寸才画图（否则先占位，等图片到位后重排） */
+  const sized = () => props.natural || ((props.w ?? 0) > 0 && (props.h ?? 0) > 0);
+  const showImage = () => !!source() && sized() && !broken();
+  /** 本地图彻底缺失：既没有可渲染地址，也没有可请求的网络地址（EPUB 缺图 / 旧数据失败图） */
+  const imageMissing = () => !source() && !remoteUrl();
+  const failed = () => !showImage() && (imageMissing() || phase() === "failed" || broken());
+  const canRetry = () => !!remoteUrl() && !!props.onRetry;
+  /** 占位小方框的尺寸：分页模式用排版给的尺寸，滚动模式用 em 相对单位 */
+  const boxSize = (): JSX.CSSProperties =>
+    props.natural || !sized()
+      ? { "min-width": "3em", height: "1.8em" }
+      : { width: `${props.w}px`, height: `${props.h}px` };
+  return (
+    <Show
+      when={showImage()}
+      fallback={
+        <span
+          class="mx-[0.12em] inline-flex max-w-full items-center justify-center gap-1 overflow-hidden rounded border border-dashed border-border bg-surface-2 px-1 align-middle text-[10.5px] text-text-3"
+          style={boxSize()}
+        >
+          <Show
+            when={failed()}
+            fallback={<RefreshIcon size={12} class="animate-spin [animation-duration:1.2s]" />}
+          >
+            <Show when={canRetry()} fallback={<span class="truncate">{props.alt || "图"}</span>}>
+              <button
+                type="button"
+                data-reader-ui
+                class="inline-flex shrink-0 items-center gap-0.5 rounded bg-surface px-1 py-0.5 text-[10.5px] font-semibold text-text-2 transition-[scale,opacity] duration-100 active:scale-[0.96]"
+                aria-label="重新加载图片"
+                onClick={() => {
+                  const url = remoteUrl();
+                  if (!url) return;
+                  setBrokenSrc(null);
+                  props.onRetry?.(url);
+                }}
+              >
+                <RefreshIcon size={11} />
+                重试
+              </button>
+            </Show>
+          </Show>
+        </span>
+      }
+    >
+      <img
+        src={source() ?? ""}
+        alt={props.alt ?? ""}
+        draggable={false}
+        loading="lazy"
+        decoding="async"
+        // 本地副本文件缺失（被判为裂图）时立刻转为「可重试」占位
+        onError={() => setBrokenSrc(source())}
+        class="mx-[0.12em] max-w-full rounded-sm object-contain"
+        classList={{ "align-middle": true, "max-h-[62vh]": !!props.natural }}
+        style={props.natural || !sized() ? undefined : asCss(inlineImageStyle(props.w!, props.h!))}
+      />
+    </Show>
+  );
+}
+
+/** 段落里的段内插图：分页片段带排版算好的展示尺寸，滚动模式按自然比例（无尺寸） */
+type ParagraphImage = ReaderInlineImage & { w?: number; h?: number };
+
+/**
+ * 段落内容：文字与段内插图按锚点交错渲染。
+ * `cstart` 为片段文本在单元原文中的起始偏移（书签/朗读标记用单元内绝对偏移）。
+ * 片段序列按文本与图片引用缓存：朗读高亮、选区变化只重渲染文字片段，
+ * 图片节点保持不动（不会因为每句高亮而重新解码）。
+ */
+function ParagraphContent(props: {
+  text: string;
+  imgs?: readonly ParagraphImage[];
+  cstart: number;
+  unit: number;
+  marks: UnitMark[];
+  natural?: boolean;
+  onImageRetry?: (url: string) => void;
+}) {
+  const pieces = createMemo(() => splitParagraphPieces(props.text, props.imgs));
+  return (
+    <For each={pieces()}>
+      {(piece) =>
+        piece.kind === "text" ? (
+          renderMarkedText(piece.text, props.cstart + piece.at, props.unit, props.marks)
+        ) : (
+          <InlineImageBlock
+            src={piece.img.src}
+            remote={piece.img.remote}
+            local={piece.img.local}
+            alt={piece.img.alt}
+            w={piece.img.w}
+            h={piece.img.h}
+            natural={props.natural}
+            onRetry={props.onImageRetry}
+          />
+        )
+      }
+    </For>
+  );
+}
 /** 分页视图里的单个片段 */
 function PagedFragment(props: {
   fragment: PageFragment;
@@ -589,7 +738,14 @@ function PagedFragment(props: {
         data-c={fragment.cstart}
         style={asCss(paragraphStyle(layout, fragment.indent, fragment.end))}
       >
-        {renderMarkedText(fragment.text, fragment.cstart, fragment.unit, props.marks)}
+        <ParagraphContent
+          text={fragment.text}
+          imgs={fragment.imgs}
+          cstart={fragment.cstart}
+          unit={fragment.unit}
+          marks={props.marks}
+          onImageRetry={props.onImageRetry}
+        />
       </p>
     );
   }
@@ -626,7 +782,15 @@ function ScrollBlock(props: {
   if (block.kind === "p") {
     return (
       <p data-u={props.unit} data-c={0} style={asCss(paragraphStyle(layout, true, true))}>
-        {renderMarkedText(block.text, 0, props.unit, props.marks)}
+        <ParagraphContent
+          text={block.text}
+          imgs={block.imgs}
+          cstart={0}
+          unit={props.unit}
+          marks={props.marks}
+          natural
+          onImageRetry={props.onImageRetry}
+        />
       </p>
     );
   }
@@ -1186,14 +1350,16 @@ export default function ReaderPage() {
     let total = 0;
     let settled = 0;
     for (const unit of chapterUnits(ch)) {
-      if (unit.kind !== "img") continue;
-      const remote = readerImageRemote(unit.src, unit.remote);
-      if (!remote) continue;
-      // 已有本地副本（上次读过）或本会话已下载好的图片不算「在等」
-      if (unit.local || chapterImageLocal(remote)) continue;
-      total++;
-      const phase = chapterImagePhase(remote);
-      if (phase === "ready" || phase === "failed") settled++;
+      // 整行图与段内图都要计入：段内图同样在排版前等就绪
+      for (const img of unitImages(unit)) {
+        const remote = readerImageRemote(img.src, img.remote);
+        if (!remote) continue;
+        // 已有本地副本（上次读过）或本会话已下载好的图片不算「在等」
+        if (img.local || chapterImageLocal(remote)) continue;
+        total++;
+        const phase = chapterImagePhase(remote);
+        if (phase === "ready" || phase === "failed") settled++;
+      }
     }
     return total > 0 && settled < total ? { total, settled } : null;
   });
@@ -1339,7 +1505,12 @@ export default function ReaderPage() {
     const paragraphs: string[] = [];
     for (const block of u) {
       if (block.kind === "p") {
-        blocks.push({ kind: "p", text: block.text });
+        // 段内插图锚点必须带过来：分页测量与渲染都按它摆放
+        blocks.push({
+          kind: "p",
+          text: block.text,
+          ...(block.imgs?.length ? { imgs: block.imgs } : {}),
+        });
         paragraphs.push(block.text);
       } else if (block.kind === "h") {
         blocks.push({ kind: "h", level: block.level, text: block.text });
@@ -1354,7 +1525,10 @@ export default function ReaderPage() {
         });
       }
     }
-    const hasStructured = blocks.some((b) => b.kind !== "p");
+    // 需要结构化块的场合：标题块、整行图，以及**带段内插图的段落**（退回 paragraphs 会丢图）
+    const hasStructured = blocks.some(
+      (b) => b.kind !== "p" || (b.kind === "p" && !!b.imgs?.length),
+    );
     const chapterView: LocalBookChapter = {
       cid: ch.cid,
       title: ch.title,
@@ -1703,13 +1877,13 @@ export default function ReaderPage() {
     armPagedBusy();
     void (async () => {
       const sizes = new Map<string, { w: number; h: number } | null>();
-      const imageUnits = units().filter(
-        (unit): unit is Extract<ReaderBlock, { kind: "img" }> => unit.kind === "img",
-      );
+      // 本章全部图片：整行图（img 块）与段内图（p 块锚点）一视同仁 ——
+      // 段内图同样参与排版，缺尺寸就不排。
+      const imageRefs = units().flatMap((unit) => unitImages(unit));
       // 在线书：图片在阅读时按需下载 —— 先把本章缺的图片取回来再排版，
       // 避免先按占位高度排一遍、图片到位后又整章重排跳动。
       // untrack：下载与落盘会替换书库对象，但那不影响本次排版输入（身份未变）。
-      if (imageUnits.length > 0) {
+      if (imageRefs.length > 0) {
         const cid = chapterCid();
         const images = untrack(() =>
           loadReadingChapterImages(bookId(), chapterIdx(), () => chapterCid() !== cid),
@@ -1729,18 +1903,18 @@ export default function ReaderPage() {
       // 位图内存，直接闪退）。已下载的在线图由 Rust 读文件头给出尺寸（本次下载结果
       // 已带；老数据在这里按文件名批量补一次），只有「尺寸未知但地址可用」的图
       // （老 data URL / SVG 等）才退回解码，且限量并发。
-      const localOf = (unit: Extract<ReaderBlock, { kind: "img" }>): string =>
-        untrack(() => chapterImageLocal(readerImageRemote(unit.src, unit.remote) ?? "")) ||
-        unit.local ||
+      const localOf = (image: { src: string; remote?: string; local?: string }): string =>
+        untrack(() => chapterImageLocal(readerImageRemote(image.src, image.remote) ?? "")) ||
+        image.local ||
         "";
-      await ensureImageSizes(imageUnits.map(localOf).filter(Boolean));
+      await ensureImageSizes(imageRefs.map(localOf).filter(Boolean));
       const decodes: Array<() => Promise<void>> = [];
-      for (const unit of imageUnits) {
-        const local = localOf(unit);
+      for (const image of imageRefs) {
+        const local = localOf(image);
         // 键必须与分页侧（chapterUnits 出来的单元）算得一致：优先网络地址
         const key = readerImageKey({
-          src: unit.src,
-          ...(unit.remote ? { remote: unit.remote } : {}),
+          src: image.src,
+          ...(image.remote ? { remote: image.remote } : {}),
           ...(local ? { local } : {}),
         });
         const cached = cachedImageSize(local);
@@ -1748,7 +1922,8 @@ export default function ReaderPage() {
           sizes.set(key, { w: cached.w, h: cached.h });
           continue;
         }
-        const renderable = chapterImageUrl(local) ?? (unit.src.startsWith("data:") ? unit.src : null);
+        const renderable =
+          chapterImageUrl(local) ?? (image.src.startsWith("data:") ? image.src : null);
         if (!renderable) {
           // 还没下载成功 / 下载失败：按占位高度排版，图片到位后由 imageLayoutTick 重排
           sizes.set(key, null);

@@ -18,28 +18,166 @@ export function isOnlineBook(book: Pick<LocalBook, "source" | "bookSourceId">): 
 }
 
 /**
+ * 图片引用：块级插图（img 块）与段内插图（p 块的 imgs 锚点）共用同一组字段。
+ * - src   ：可直接渲染的地址（在线书未下载时为网络地址；EPUB 老数据可能是 data URL）
+ * - remote：在线书的图片原始网络地址（图片身份）：阅读时按它下载、失败按它重试、
+ *   下载好的本地副本也按它对应（见 lib/chapterImages.ts）
+ * - local ：已下载副本的文件名（位于应用数据目录 images/ 下，见 lib/imageAssets.ts）：
+ *   图片字节存文件、不进书籍 JSON，渲染经 readerx-img 自定义协议直读
+ */
+export interface ChapterImageRef {
+  src?: string;
+  alt?: string;
+  remote?: string;
+  local?: string;
+}
+
+/**
+ * 段内图片锚点：图片插在段落文本的第 `at` 个字符之前。
+ *
+ * `at` 是段落 `text` 的 UTF-16 偏移，与书签 / 选区 / 朗读的字符口径一致 ——
+ * **图片本身不占字符**，因此段内图片不影响既有进度、书签与搜索锚点。
+ */
+export interface ChapterInlineImage extends ChapterImageRef {
+  at: number;
+}
+
+/**
  * 章节内的结构化正文块：
- * - p   ：自然段（缩进正文）
+ * - p   ：自然段（缩进正文）；`imgs` 为段内插图锚点（图文混排）
  * - h   ：副标题（章内小标题，不等同于章节名）
- * - img ：插图。src 是可直接渲染的地址（在线书的网络地址；EPUB 老数据可能是 data URL），
- *   remote 是在线书的图片原始网络地址（图片身份）：阅读时按它下载、失败按它重试、
- *   下载好的本地副本也按它对应（见 lib/chapterImages.ts）；
- *   local 是已下载副本的文件名（位于应用数据目录 images/ 下，见 lib/imageAssets.ts）：
- *   图片字节存文件、不进书籍 JSON，渲染经 readerx-img 自定义协议直读。
+ * - img ：独占一段的插图（整行图 / 整章图）；一段里只有图没有文字时用它，
+ *   与 p 的段内锚点渲染口径一致，只是居中独占一行。
  */
 export type ChapterBlock =
-  | { kind: "p"; text: string }
+  | { kind: "p"; text: string; imgs?: ChapterInlineImage[] }
   | { kind: "h"; level: number; text: string }
-  | {
-      kind: "img";
-      /** 可直接渲染的地址；老数据可能是 data URL（载入时已迁移成文件） */
-      src?: string;
-      alt?: string;
-      /** 在线书：图片原始网络地址（图片身份） */
-      remote?: string;
-      /** 已下载副本的文件名（应用数据目录 images/ 下） */
-      local?: string;
-    };
+  | ({ kind: "img" } & ChapterImageRef);
+
+/** 一个正文块是否含图片 */
+export function blockHasImage(block: ChapterBlock): boolean {
+  return block.kind === "img" || (block.kind === "p" && !!block.imgs?.length);
+}
+
+/** 图片引用 → 独占一行的 img 块（丢弃段内锚点偏移） */
+export function imageRefToBlock(img: ChapterImageRef): ChapterBlock {
+  return {
+    kind: "img",
+    ...(img.src ? { src: img.src } : {}),
+    ...(img.alt ? { alt: img.alt } : {}),
+    ...(img.remote ? { remote: img.remote } : {}),
+    ...(img.local ? { local: img.local } : {}),
+  };
+}
+
+/** 章节是否含图片（任意形态：整行图或段内图） */
+export function chapterHasImages(chapter: LocalBookChapter): boolean {
+  return (chapter.blocks ?? []).some(blockHasImage);
+}
+
+/**
+ * 段落缓冲里的一项：文本片段或段内插图。
+ * EPUB 与书源正文解析都先把一段内容收集成这样的顺序列表，再交给
+ * [`paragraphFromParts`] 归一化 —— 两条解析路径的段内图片口径因此完全一致。
+ */
+export type ParagraphPart = { text: string } | { img: ChapterImageRef };
+
+/** 单个文本片段的空白折叠（保留首尾各一个空格，跨片段/跨图片的空白由 paragraphFromParts 统一处理） */
+function collapseSpaceRun(text: string): string {
+  return text.replace(/\u00a0/g, " ").replace(/[\t\r\n ]+/g, " ");
+}
+
+/**
+ * 段落缓冲 → 归一化文本 + 段内插图锚点：
+ * - 空白按整段口径折叠（段内连续空白合成一个空格，段首段尾去掉）；
+ * - 图片锚点记在「它前面已累积的字符数」上：**图片本身不占字符**，
+ *   因此书签 / 进度 / 搜索 / 朗读的字符偏移都不受段内图片影响。
+ */
+export function paragraphFromParts(parts: readonly ParagraphPart[]): {
+  text: string;
+  imgs: ChapterInlineImage[];
+} {
+  let raw = "";
+  const slots: Array<{ at: number; img: ChapterImageRef }> = [];
+  for (const part of parts) {
+    if ("img" in part) {
+      slots.push({ at: raw.length, img: part.img });
+      continue;
+    }
+    raw += collapseSpaceRun(part.text);
+  }
+  let text = "";
+  /** 折叠前偏移 → 折叠后偏移（把图片锚点搬到归一化文本上） */
+  const mapped = new Array<number>(raw.length + 1);
+  let prevSpace = false;
+  for (let i = 0; i < raw.length; i++) {
+    mapped[i] = text.length;
+    const ch = raw[i];
+    if (ch === " ") {
+      if (!prevSpace && text.length > 0) text += " ";
+      prevSpace = true;
+      continue;
+    }
+    text += ch;
+    prevSpace = false;
+  }
+  mapped[raw.length] = text.length;
+  if (text.endsWith(" ")) text = text.slice(0, -1);
+  const limit = text.length;
+  return {
+    text,
+    imgs: slots.map(({ at, img }) => ({ ...img, at: Math.min(mapped[at] ?? limit, limit) })),
+  };
+}
+
+/**
+ * 归一化段内图片锚点（幂等）：越界偏移收敛到文本长度、按偏移排序，去掉偏移非法项。
+ * 返回新数组；无改动时返回原数组（下游可直接按引用判断是否需要重建）。
+ */
+export function normalizeInlineImages(
+  text: string,
+  imgs: ChapterInlineImage[] | undefined,
+): ChapterInlineImage[] | undefined {
+  if (!imgs || imgs.length === 0) return imgs;
+  const limit = text.length;
+  let changed = false;
+  const out = imgs.map((img) => {
+    const at = Number.isFinite(img.at) ? Math.min(Math.max(0, Math.floor(img.at)), limit) : 0;
+    if (at === img.at) return img;
+    changed = true;
+    return { ...img, at };
+  });
+  for (let i = 1; i < out.length; i++) {
+    if (out[i - 1].at > out[i].at) {
+      changed = true;
+      out.sort((a, b) => a.at - b.at);
+      break;
+    }
+  }
+  return changed ? out : imgs;
+}
+
+/**
+ * 段内图片锚点跟随文本改动重定位：`remap(before, after)` 把「原文本前缀」映射成
+ * 「新文本前缀」，返回新的锚点数组（偏移不变时返回原数组）。
+ * 文本替换（替换规则）/ 简繁转换（逐字符等长）都以它保持图片原位。
+ */
+export function remapInlineImages(
+  imgs: ChapterInlineImage[] | undefined,
+  remap: (prefix: string) => string,
+  text: string,
+): ChapterInlineImage[] | undefined {
+  if (!imgs || imgs.length === 0) return imgs;
+  let changed = false;
+  const out = imgs.map((img) => {
+    const at = Math.max(0, Math.min(img.at, text.length));
+    const next = remap(text.slice(0, at)).length;
+    if (next === img.at) return img;
+    changed = true;
+    return { ...img, at: next };
+  });
+  return changed ? out : imgs;
+}
 
 export interface LocalBookChapter {
   /** 章节稳定 id，如 c0001、c0002 …（旧数据可能在载入时回填） */

@@ -1023,20 +1023,27 @@ export async function downloadRemainingChapters(
 
 /**
  * 章节里还没本地化的图片地址（去重、保序）。
- * 只认 img 块的 remote（在线图片身份）：已经写好本地副本（`local`）的不再请求。
+ * 整行图（img 块）与段内图（p 块的 imgs 锚点）都算：只认图片的 remote（在线图片身份），
+ * 已经写好本地副本（`local`）的不再请求。
  */
 function pendingImageUrls(chapter: LocalBookChapter): string[] {
   const blocks = chapter.blocks;
   if (!blocks || blocks.length === 0) return [];
   const urls: string[] = [];
   const seen = new Set<string>();
-  for (const block of blocks) {
-    if (block.kind !== "img") continue;
-    const remote = block.remote;
-    if (!remote || block.local) continue;
-    if (seen.has(remote)) continue;
+  const push = (remote: string | undefined, local: string | undefined): void => {
+    if (!remote || local || seen.has(remote)) return;
     seen.add(remote);
     urls.push(remote);
+  };
+  for (const block of blocks) {
+    if (block.kind === "img") {
+      push(block.remote, block.local);
+      continue;
+    }
+    if (block.kind === "p" && block.imgs) {
+      for (const img of block.imgs) push(img.remote, img.local);
+    }
   }
   return urls;
 }
@@ -1058,12 +1065,25 @@ async function persistReadyImages(
   await updateBookChapterInPlace(bookId, chapterIndex, (chapter) => {
     if (!chapter.blocks) return null;
     let changed = false;
-    const blocks = chapter.blocks.map((block): ChapterBlock => {
-      if (block.kind !== "img" || !block.remote) return block;
-      const file = ready.get(block.remote);
-      if (!file || block.local === file.local) return block;
+    /** 补上一张图的本地副本引用；无变化时返回原对象（段内图据此判断数组是否要重建） */
+    const fill = <T extends { remote?: string; local?: string }>(img: T): T => {
+      const file = img.remote ? ready.get(img.remote) : undefined;
+      if (!file || img.local === file.local) return img;
       changed = true;
-      return { ...block, local: file.local };
+      return { ...img, local: file.local };
+    };
+    const blocks = chapter.blocks.map((block): ChapterBlock => {
+      if (block.kind === "img") return fill(block);
+      if (block.kind === "p" && block.imgs) {
+        let imgsChanged = false;
+        const imgs = block.imgs.map((img) => {
+          const next = fill(img);
+          if (next !== img) imgsChanged = true;
+          return next;
+        });
+        return imgsChanged ? { ...block, imgs } : block;
+      }
+      return block;
     });
     return changed ? { ...chapter, blocks } : null;
   });

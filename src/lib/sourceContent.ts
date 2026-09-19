@@ -3,15 +3,19 @@
  *
  * 兼容协议（前后兼容，schemaVersion 不变）：
  * - 老协议：bookContent 返回字符串（纯文本 / HTML）。纯文本行为与旧版完全一致；
- *   若 HTML 里含 `<img>`，则按出现顺序抽取图片并保留周围文字（图文混排 / 整章图）。
+ *   若 HTML 里含 `<img>`，则按出现顺序抽取图片并保留周围文字（图文混排 / 整章图），
+ *   落在**段落中间**的图片保留为段内插图（`p` 块的 `imgs` 锚点），不再把段落切成
+ *   「文字段 + 图片块 + 文字段」；整段只有图片时仍落成独占一行的 img 块。
  * - 新协议：bookContent 也可返回对象 `{ text?, images? }`（images 亦可写作 imgs），
- *   显式给出图片地址（相对地址按章节页 URL 解析）。
+ *   显式给出图片地址（相对地址按章节页 URL 解析）；对象协议沿用旧行为：
+ *   text 作为正文段落，images 依次跟在其后（一组图 / 整章图）。
  *
  * 输出统一为「顺序 token」→ 章节 blocks（p / img）与段落文本；图片只保留地址：
- * 网络地址写入 img 块的 remote（图片身份），下载成 data URL 由阅读时的按需加载完成
+ * 网络地址写入图片的 remote（图片身份），下载由阅读时的按需加载完成
  * （见 chapterImages.ts）—— 拉正文本身不下载图片。
  */
-import type { ChapterBlock } from "./booksTypes";
+import type { ChapterBlock, ChapterImageRef, ParagraphPart } from "./booksTypes";
+import { imageRefToBlock, paragraphFromParts } from "./booksTypes";
 
 /** 正文顺序流中的一个内容片段 */
 export type ContentToken =
@@ -33,8 +37,11 @@ export function buildIsEmpty(build: SourceContentBuild): boolean {
   return build.paragraphs.length === 0 && build.blocks.length === 0;
 }
 
-/** 把引擎返回的原始正文清洗成段落数组（分段 = 空行；HTML 先行剥标签） */
-export function normalizeContentText(raw: string): string[] {
+/**
+ * 把引擎返回的原始正文清洗成保留换行的纯文本（分段 = 空行；HTML 先行剥标签）。
+ * 与旧版 `normalizeContentText` 的前半段完全同口径，供段落切片复用。
+ */
+function contentPlainText(raw: string): string {
   let t = raw ?? "";
   t = t
     .replace(/<script[\s\S]*?<\/script>/gi, "")
@@ -45,7 +52,7 @@ export function normalizeContentText(raw: string): string[] {
       .replace(/<\/(?:p|div|li|h[1-6]|tr|table|ul|ol|section|article|blockquote|td|dd|dt)>/gi, "\n")
       .replace(/<[^>]*>/g, "");
   }
-  t = t
+  return t
     .replace(/&nbsp;/gi, " ")
     .replace(/&lt;/gi, "<")
     .replace(/&gt;/gi, ">")
@@ -63,13 +70,61 @@ export function normalizeContentText(raw: string): string[] {
     .replace(/\r\n?/g, "\n")
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n[ \t]+/g, "\n");
-  const paragraphs = t
-    .split(/\n[ \t]*\n+/)
-    .map((p) => p.replace(/\s*\n\s*/g, "").replace(/[ \t]+/g, " ").trim())
-    .filter(Boolean);
-  if (paragraphs.length > 0) return paragraphs;
-  const single = t.replace(/\s+/g, " ").trim();
-  return single ? [single] : [];
+}
+
+/**
+ * 正文切片：一段文本 + 它紧邻的段落分隔与首尾空白信息。
+ * - `breakBefore` / `breakAfter`：该段之前 / 之后有空行（段落分隔）；
+ * - `leadingSpace` / `trailingSpace`：该段首 / 尾原本有空白（被 trim 掉的部分）——
+ *   紧邻图片的空白要补回来（`hello <img> world` 的镜像文本仍是「hello world」），
+ *   段首段尾的空白则由段落归一化统一去掉。
+ */
+interface ContentChunk {
+  text: string;
+  /** 未裁剪的原始切片（保留换行：图片前的块级收尾要靠它判断） */
+  raw: string;
+  leadingSpace: boolean;
+  trailingSpace: boolean;
+  breakBefore: boolean;
+  breakAfter: boolean;
+}
+
+/**
+ * 纯文本 → 段落切片。文本口径与旧版 `normalizeContentText` 逐字一致
+ * （切分为空行，分隔符本身不进入文本）。
+ */
+function splitContentChunks(plain: string): ContentChunk[] {
+  const pieces = plain.split(/(\n[ \t]*\n+)/);
+  const chunks: ContentChunk[] = [];
+  for (let i = 0; i < pieces.length; i += 2) {
+    const raw = pieces[i];
+    const text = raw.replace(/\s*\n\s*/g, "").replace(/[ \t]+/g, " ").trim();
+    if (!text) continue;
+    chunks.push({
+      text,
+      raw,
+      leadingSpace: /^\s/.test(raw),
+      trailingSpace: /\s$/.test(raw),
+      breakBefore: i > 0,
+      breakAfter: i + 1 < pieces.length,
+    });
+  }
+  return chunks;
+}
+
+/** 文本是否以「块级收尾」结束（闭合块标签换来的换行）：图片据此判定是否独占一行 */
+function endsWithBlockBreak(text: string): boolean {
+  return text.length > 0 && /\n[ \t]*$/.test(text);
+}
+
+/** 文本是否以「块级开头」开始（块标签换来的前导换行） */
+function startsWithBlockBreak(text: string): boolean {
+  return /^[ \t]*\n/.test(text);
+}
+
+/** 把引擎返回的原始正文清洗成段落数组（分段 = 空行；HTML 先行剥标签） */
+export function normalizeContentText(raw: string): string[] {
+  return splitContentChunks(contentPlainText(raw)).map((chunk) => chunk.text);
 }
 
 // ---------------------------------------------------------------------------
@@ -242,37 +297,122 @@ function resolveImageSrc(src: string, baseUrl: string | undefined): string | nul
   }
 }
 
+/** 图片绝对地址 → 图片引用（网络地址同时作为图片身份 remote；data: 直给时只留 src） */
+function contentImage(resolved: string, alt: string | undefined): ChapterImageRef {
+  return resolved.startsWith("data:")
+    ? { src: resolved, ...(alt ? { alt } : {}) }
+    : { src: resolved, remote: resolved, ...(alt ? { alt } : {}) };
+}
+
+/**
+ * 对象协议 `{ text?, images? }`：text 作为正文段落、images 依次跟在其后
+ * （「这一章是一组图」的显式表达，与旧版行为一致）。
+ */
+function buildStructuredContent(
+  structured: { text?: string; images: string[] },
+  baseUrl: string | undefined,
+): SourceContentBuild {
+  const blocks: ChapterBlock[] = [];
+  const paragraphs: string[] = [];
+  if (structured.text) {
+    for (const paragraph of normalizeContentText(structured.text)) {
+      blocks.push({ kind: "p", text: paragraph });
+      paragraphs.push(paragraph);
+    }
+  }
+  let hasImages = false;
+  for (const src of structured.images) {
+    const resolved = resolveImageSrc(src, baseUrl);
+    if (!resolved) continue;
+    blocks.push(imageRefToBlock(contentImage(resolved, undefined)));
+    hasImages = true;
+  }
+  return { paragraphs, blocks, hasImages };
+}
+
 /**
  * 把引擎返回的正文解析为可直接落盘的章节内容。
  * - baseUrl：正文页面地址（章节页），用于解析相对图片地址；
+ * - HTML 里的图片按出现顺序抽取，**落在段落中间的图片留在该段的文字流里**
+ *   （`p` 块的段内锚点），整段只有图时落成独占一行的 img 块；
  * - 网络图片保留绝对地址（src + remote），正文拉取阶段不下载，阅读时再按需获取。
  */
 export function buildSourceChapterContent(
   raw: string,
   baseUrl: string | undefined,
 ): SourceContentBuild {
+  const structured = structuredContent(raw);
+  if (structured) return buildStructuredContent(structured, baseUrl);
+
+  const tokens = tokenizeSourceContent(raw);
+  // 每个文字 token 的纯文本（判图片前后的块级边界；只算一次）
+  const plains = tokens.map((token) => (token.kind === "text" ? contentPlainText(token.raw) : ""));
+  /** 图片之后的下一个文字 token 的纯文本（跳过中间的图片 token） */
+  const nextPlainAfter = (index: number): string => {
+    for (let i = index + 1; i < tokens.length; i++) {
+      if (tokens[i].kind === "text") return plains[i];
+    }
+    return "";
+  };
+
   const blocks: ChapterBlock[] = [];
   const paragraphs: string[] = [];
   let hasImages = false;
 
-  const tokens = tokenizeSourceContent(raw);
-  for (const token of tokens) {
+  /** 正在累积的段落：文字片段与段内插图按出现顺序收集，落块时统一归一化 */
+  let parts: ParagraphPart[] = [];
+  /** 本段已有可见文字（图片据此判定留在段内还是独占一行） */
+  let hasText = false;
+  /** 本段已累积原始文本的尾部（含换行；判「图片前是不是块级收尾」） */
+  let rawTail = "";
+
+  const flushParagraph = (): void => {
+    const current = parts;
+    parts = [];
+    hasText = false;
+    rawTail = "";
+    if (current.length === 0) return;
+    const { text, imgs } = paragraphFromParts(current);
+    if (!text) {
+      // 没有文字：图片各自独占一行（漫画 / 整章图）
+      for (const img of imgs) blocks.push(imageRefToBlock(img));
+    } else {
+      paragraphs.push(text);
+      blocks.push(imgs.length > 0 ? { kind: "p", text, imgs } : { kind: "p", text });
+    }
+  };
+
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index];
     if (token.kind === "text") {
-      for (const paragraph of normalizeContentText(token.raw)) {
-        blocks.push({ kind: "p", text: paragraph });
-        paragraphs.push(paragraph);
+      for (const chunk of splitContentChunks(plains[index])) {
+        if (chunk.breakBefore) flushParagraph();
+        // 文本直接相接：与「没有图片时同一段文本」的口径一致。
+        // 首尾空白补回来（紧邻图片时它是有意义的间隔），由段落归一化统一收尾。
+        parts.push({
+          text: `${chunk.leadingSpace ? " " : ""}${chunk.text}${chunk.trailingSpace ? " " : ""}`,
+        });
+        hasText = true;
+        rawTail = `${rawTail}${chunk.raw}`.slice(-64);
+        if (chunk.breakAfter) flushParagraph();
       }
       continue;
     }
     const resolved = resolveImageSrc(token.src, baseUrl);
     if (!resolved) continue;
-    const alt = token.alt?.trim();
-    const block: ChapterBlock =
-      resolved.startsWith("data:")
-        ? { kind: "img", src: resolved, ...(alt ? { alt } : {}) }
-        : { kind: "img", src: resolved, remote: resolved, ...(alt ? { alt } : {}) };
-    blocks.push(block);
     hasImages = true;
+    // 图片独占一行的两种情形：
+    // 1) 它前面是块级收尾（图片在上一段之外，如 `</p><img>` / `</div><img>`）；
+    // 2) 本段还没有文字，且它后面紧跟块级开头或没有文字（整段只有图的漫画章）。
+    // 其余情况（文字中间、段首紧跟文字）都留在段落的文字流里。
+    const after = nextPlainAfter(index);
+    const blockPositioned =
+      endsWithBlockBreak(rawTail) ||
+      (!hasText && (after.trim() === "" || startsWithBlockBreak(after)));
+    if (blockPositioned) flushParagraph();
+    parts.push({ img: contentImage(resolved, token.alt?.trim() || undefined) });
+    if (blockPositioned) flushParagraph();
   }
+  flushParagraph();
   return { paragraphs, blocks, hasImages };
 }

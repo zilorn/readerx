@@ -5,11 +5,12 @@
  * 3. 逐 spine 读取 XHTML/HTML，用 DOM 遍历还原成“自然段 / 标题 / 插图”结构化块。
  *
  * 与旧版不同：不再用不可见字符标记 + 空行切分，避免正文丢字、标题重复、
- * 分段混乱；<img> 会被提取为 data URL 引用，保证图片正常显示。
+ * 分段混乱；`<img>` 会被提取为 data URL 引用并**留在所在段落里**（段内插图，
+ * 见 ChapterBlock.imgs），保证图文混排与图片正常显示。
  */
 import { unzipSync } from "fflate";
-import type { ChapterBlock, LocalBookChapter } from "./booksTypes";
-import { chapterCid } from "./booksTypes";
+import type { ChapterBlock, LocalBookChapter, ParagraphPart } from "./booksTypes";
+import { chapterCid, imageRefToBlock, paragraphFromParts } from "./booksTypes";
 import { makeCoverThumb } from "./coverImage";
 
 export interface ParsedEpub {
@@ -199,29 +200,40 @@ function stripLeadingTitle(text: string, title: string): { rest: string; strippe
 
 /**
  * 把容器内的 DOM 还原成顺序块。逐元素遍历，块级标签处换段，
- * 标题单独成块，<img> 生成图片块；h1-h2 之外的标题保留为章内副标题。
+ * 标题单独成块；`<img>` 落在段落里时保留为该段的段内插图（图文混排），
+ * 整段只有图片时仍生成独占一行的图片块；h1-h2 之外的标题保留为章内副标题。
  */
 function renderBlocks(
   root: Element,
   getImageSrc: (el: Element) => string | null,
 ): ChapterBlock[] {
   const blocks: ChapterBlock[] = [];
-  let buf = "";
+  let buf: ParagraphPart[] = [];
 
   const flush = () => {
-    const text = normalizeWhitespace(buf);
-    if (text) {
+    const parts = buf;
+    buf = [];
+    if (parts.length === 0) return;
+    const { text, imgs } = paragraphFromParts(parts);
+    if (!text) {
+      // 没有文字：图片各自独占一行（漫画 / 整页插图的既有渲染口径）
+      for (const img of imgs) blocks.push(imageRefToBlock(img));
+      return;
+    }
+    if (imgs.length === 0) {
+      // 长段落按句读切分成较短段落；含段内插图的段落不切（切分会让锚点错位）
       for (const part of splitParagraph(text)) {
         blocks.push({ kind: "p", text: part });
       }
+      return;
     }
-    buf = "";
+    blocks.push({ kind: "p", text, imgs });
   };
 
   const walk = (node: Node): void => {
     for (const child of Array.from(node.childNodes)) {
       if (child.nodeType === Node.TEXT_NODE) {
-        buf += child.nodeValue ?? "";
+        buf.push({ text: child.nodeValue ?? "" });
         continue;
       }
       if (child.nodeType !== Node.ELEMENT_NODE) continue;
@@ -233,19 +245,15 @@ function renderBlocks(
 
       // 软换行：当作一个空格，避免把诗歌/短行硬拆成多个段落
       if (tag === "BR") {
-        buf += " ";
+        buf.push({ text: " " });
         continue;
       }
 
-      if (tag === "IMG") {
-        flush();
+      // IMG 与 SVG 内联图（<image xlink:href>）：作为段内插图留在文字流里
+      if (tag === "IMG" || tag === "IMAGE") {
         const src = getImageSrc(el);
-        // 即使图片缺失也保留占位块，避免在段落中间静默丢图
-        blocks.push({
-          kind: "img",
-          src: src ?? "",
-          alt: el.getAttribute("alt") ?? "插图",
-        });
+        // 即使图片缺失也保留占位，避免在段落中间静默丢图
+        buf.push({ img: { src: src ?? "", alt: el.getAttribute("alt") ?? "插图" } });
         continue;
       }
 
@@ -260,7 +268,6 @@ function renderBlocks(
       if (BLOCK_TAGS.has(tag)) {
         // 块级元素：先收掉当前段，再递归收集其子内容（内部会自管分段）
         flush();
-        buf = "";
         walk(el);
         flush();
         continue;
@@ -322,6 +329,12 @@ function buildDocumentChapters(
     }
 
     if (block.kind === "p") {
+      // 段内插图的段落整体保留：剔标题句 / 再切分都会让图片锚点错位
+      if (block.imgs?.length) {
+        paragraphs.push(block.text);
+        body.push(block);
+        continue;
+      }
       const atStart = body.length === 0 && paragraphs.length === 0;
       const reference = title || docTitle || fallbackTitle;
       let text = block.text;
@@ -477,7 +490,13 @@ export async function parseEpubFile(file: File): Promise<ParsedEpub> {
 
     const itemDir = hrefKey.includes("/") ? hrefKey.slice(0, hrefKey.lastIndexOf("/") + 1) : "";
     const getImageSrc = (el: Element): string | null => {
-      const rawSrc = el.getAttribute("src")?.trim();
+      // 普通 <img src>；SVG 内联图写作 <image xlink:href>（也可省略命名空间前缀）
+      const rawSrc = (
+        el.getAttribute("src") ??
+        el.getAttribute("xlink:href") ??
+        el.getAttribute("href") ??
+        ""
+      ).trim();
       if (!rawSrc) return null;
       const key = resolvePath(itemDir, rawSrc);
       const imgBytes = entries[key];

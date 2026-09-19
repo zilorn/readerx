@@ -490,11 +490,13 @@ pub(crate) fn migrate_book_file(root: &Path, book_id: &str, path: &Path) -> Resu
     Ok(true)
 }
 
-/// 图片块的旧数据迁移与自愈（幂等）：
+/// 图片的旧数据迁移与自愈（幂等）：
 /// 1. `local` 指向的文件不在了 → 清掉引用（下次读到本章重新下载，而不是永远裂图）；
 /// 2. 网络地址存在但 `remote` 缺失（旧版 Rust 回写会把未知字段丢掉）→ 补回 `remote`；
 /// 3. `src` 还是 data URL（旧版把图片塞进章节）→ 写成文件，只留 `local` 引用。
 ///
+/// **整行图（img 块）与段内图（p 块的 `imgs` 锚点）同一套口径**：段内图同样可能带着
+/// 旧数据里的 base64，漏掉它等于让几十 MB 的图片字节继续留在书籍 JSON 里。
 /// 写盘失败时保留原 data URL（图片不丢，只是这次没瘦身）。返回是否有改动。
 pub(crate) fn migrate_book(root: &Path, book: &mut LocalBook) -> bool {
     let book_id = book.id.clone();
@@ -507,45 +509,76 @@ pub(crate) fn migrate_book(root: &Path, book: &mut LocalBook) -> bool {
             continue;
         };
         for block in blocks.iter_mut() {
-            if block.kind != "img" {
-                continue;
+            if block.kind == "img" {
+                changed |= migrate_image_fields(
+                    root,
+                    &book_id,
+                    &mut block.src,
+                    &mut block.remote,
+                    &mut block.local,
+                );
             }
-            if let Some(local) = block.local.clone() {
-                if !exists(root, &local) {
-                    block.local = None;
-                    changed = true;
-                }
-            }
-            if block.remote.is_none() {
-                if let Some(src) = block.src.clone() {
-                    if src.starts_with("http://") || src.starts_with("https://") {
-                        block.remote = Some(src);
-                        changed = true;
-                    }
-                }
-            }
-            let Some(src) = block.src.clone() else {
+            // 段内插图（p 块的 imgs 锚点）：字段口径与整行图完全一致，
+            // 锚点偏移 at 不参与迁移。旧数据里的 EPUB 段内插图同样要抽成文件。
+            let Some(imgs) = block.imgs.as_mut() else {
                 continue;
             };
-            if !src.starts_with("data:image/") {
-                continue;
-            }
-            let Some((mime, bytes)) = decode_data_url(&src) else {
-                continue;
-            };
-            let identity = block.remote.clone().unwrap_or_else(|| src.clone());
-            match store(root, &book_id, &identity, &mime, &bytes) {
-                Ok(local) => {
-                    block.local = Some(local);
-                    // 正文里不再保留图片字节：有网络地址就留网络地址，否则留空
-                    block.src = block.remote.clone();
-                    changed = true;
-                }
-                Err(_) => continue,
+            for img in imgs.iter_mut() {
+                changed |= migrate_image_fields(
+                    root,
+                    &book_id,
+                    &mut img.src,
+                    &mut img.remote,
+                    &mut img.local,
+                );
             }
         }
     }
     changed
+}
+
+/// 单张图片（整行图 / 段内图共用）的迁移与自愈，口径见 [`migrate_book`]
+fn migrate_image_fields(
+    root: &Path,
+    book_id: &str,
+    src: &mut Option<String>,
+    remote: &mut Option<String>,
+    local: &mut Option<String>,
+) -> bool {
+    let mut changed = false;
+    if let Some(name) = local.clone() {
+        if !exists(root, &name) {
+            *local = None;
+            changed = true;
+        }
+    }
+    if remote.is_none() {
+        if let Some(value) = src.clone() {
+            if value.starts_with("http://") || value.starts_with("https://") {
+                *remote = Some(value);
+                changed = true;
+            }
+        }
+    }
+    let Some(value) = src.clone() else {
+        return changed;
+    };
+    if !value.starts_with("data:image/") {
+        return changed;
+    }
+    let Some((mime, bytes)) = decode_data_url(&value) else {
+        return changed;
+    };
+    let identity = remote.clone().unwrap_or_else(|| value.clone());
+    match store(root, book_id, &identity, &mime, &bytes) {
+        Ok(name) => {
+            *local = Some(name);
+            // 正文里不再保留图片字节：有网络地址就留网络地址，否则留空
+            *src = remote.clone();
+            true
+        }
+        Err(_) => changed,
+    }
 }
 
 /// 下载结果 → 回给前端的 `BookImageFile`：落盘并读出尺寸（失败也以 ok:false 收场，
@@ -583,7 +616,7 @@ pub(crate) fn fetch_result(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{ChapterBlock, LocalBookChapter};
+    use crate::models::{ChapterBlock, ChapterInlineImage, LocalBookChapter};
 
     /// 临时目录（测试自己创建 / 清理；不依赖 tauri 的路径解析）
     fn temp_root(tag: &str) -> PathBuf {
@@ -603,6 +636,34 @@ mod tests {
             alt: None,
             remote: remote.map(|v| v.to_string()),
             local: local.map(|v| v.to_string()),
+            imgs: None,
+        }
+    }
+
+    /// p 块 + 段内插图锚点（图文混排）
+    fn paragraph_with_imgs(
+        text: &str,
+        imgs: Vec<(u32, &str, Option<&str>, Option<&str>)>,
+    ) -> ChapterBlock {
+        ChapterBlock {
+            kind: "p".to_string(),
+            text: Some(text.to_string()),
+            level: None,
+            src: None,
+            alt: None,
+            remote: None,
+            local: None,
+            imgs: Some(
+                imgs.into_iter()
+                    .map(|(at, src, remote, local)| ChapterInlineImage {
+                        at,
+                        src: Some(src.to_string()),
+                        alt: None,
+                        remote: remote.map(|v| v.to_string()),
+                        local: local.map(|v| v.to_string()),
+                    })
+                    .collect(),
+            ),
         }
     }
 
@@ -755,6 +816,67 @@ mod tests {
 
         // 幂等：再跑一次不应再有改动
         assert!(!migrate_book(&root, &mut book));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn migrate_handles_inline_paragraph_images() {
+        let root = temp_root("migrate-inline");
+        let bytes = png_bytes();
+        let legacy = data_url("image/png", &bytes);
+        let mut book = book_with(vec![paragraph_with_imgs(
+            "他指着说道",
+            vec![
+                // 旧数据：段内图以 data URL 内嵌，remote 被早期回写丢掉
+                (3, &legacy, None, None),
+                // 已有本地副本但文件不在了：清引用（保留锚点位置，下次重下）
+                (3, "https://img/2.png", Some("https://img/2.png"), Some("book-1_missing.png")),
+                // 正常网络地址：只补 remote，锚点与文本不动
+                (5, "https://img/3.png", None, None),
+            ],
+        )]);
+
+        assert!(migrate_book(&root, &mut book));
+        let block = &book.chapters[0].blocks.as_ref().unwrap()[0];
+        assert_eq!(block.kind, "p");
+        assert_eq!(block.text.as_deref(), Some("他指着说道"), "段内文本不受迁移影响");
+        let imgs = block.imgs.as_ref().unwrap();
+
+        // 1) data URL → 文件，锚点偏移不变（图片不占字符）
+        let local0 = imgs[0].local.clone().expect("迁移后应有本地副本");
+        assert!(exists(&root, &local0));
+        assert_eq!(imgs[0].src, None, "无网络地址时 src 置空，渲染走本地副本");
+        assert_eq!(imgs[0].at, 3);
+        assert_eq!(fs::read(root.join(&local0)).unwrap(), bytes);
+
+        // 2) 本地副本丢失 → 清引用；锚点仍是原位置
+        assert_eq!(imgs[1].local, None);
+        assert_eq!(imgs[1].remote.as_deref(), Some("https://img/2.png"));
+        assert_eq!(imgs[1].at, 3);
+
+        // 3) remote 补齐（旧版回写丢字段的自愈）
+        assert_eq!(imgs[2].remote.as_deref(), Some("https://img/3.png"));
+        assert_eq!(imgs[2].at, 5);
+
+        // 幂等：再跑一次不应再有改动
+        assert!(!migrate_book(&root, &mut book));
+
+        // 序列化仍保持 camelCase 与 skip_if_none 口径（纯文字段落不写 imgs 字段）
+        let plain = ChapterBlock {
+            kind: "p".to_string(),
+            text: Some("正文".to_string()),
+            level: None,
+            src: None,
+            alt: None,
+            remote: None,
+            local: None,
+            imgs: None,
+        };
+        let json = serde_json::to_string(&plain).unwrap();
+        assert_eq!(json, r#"{"kind":"p","text":"正文"}"#);
+        let parsed: ChapterBlock =
+            serde_json::from_str(r#"{"kind":"p","text":"旧数据"}"#).expect("旧数据可解析");
+        assert!(parsed.imgs.is_none());
         let _ = fs::remove_dir_all(&root);
     }
 
