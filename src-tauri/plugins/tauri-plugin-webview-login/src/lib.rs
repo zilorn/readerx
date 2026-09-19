@@ -17,8 +17,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::plugin::TauriPlugin;
-#[cfg(not(target_os = "android"))]
-use tauri::Wry;
+// 插件对运行时不作假设：宿主用什么 runtime 就传什么（桌面是 wry，Android 是移动端 runtime）。
+// 这里绝不能写死 `tauri::Wry` —— 它在 Android 上不存在，会直接把移动端编译拖死。
+use tauri::Runtime;
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub mod desktop;
@@ -134,7 +135,7 @@ pub fn open_login(url: &str, request: &PlatformLoginRequest) -> Result<LoginOutc
 }
 
 /// 插件入口：注册当前平台的登录 runner，并把插件挂到 app 上（Android 由 Kotlin 浮层实现）。
-pub fn init() -> TauriPlugin<Wry> {
+pub fn init<R: Runtime>() -> TauriPlugin<R> {
     prepare();
     tauri::plugin::Builder::new("webview-login")
         .setup(|_app, api| {
@@ -175,8 +176,8 @@ pub fn prepare() {
 
 /// Android：把 Kotlin 的 `WebviewLoginPlugin` 注册成 runner。
 #[cfg(target_os = "android")]
-fn register_android_runner(
-    api: &tauri::plugin::PluginApi<'_, Wry, ()>,
+fn register_android_runner<R: Runtime>(
+    api: &tauri::plugin::PluginApi<R, ()>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let handle =
         api.register_android_plugin("com.readerx.webviewlogin", "WebviewLoginPlugin")?;
