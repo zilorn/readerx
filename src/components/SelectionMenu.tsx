@@ -6,6 +6,9 @@
  * - 固定高度条，宽度自适应内容；内容超出可用宽度时内部横向滚动，杜绝纵向溢出/出屏；
  * - 跟随选区定位，但只在能完整放进安全区（上/下留白）的区间摆放，绝不压到选区两端手柄
  *   （自定义选区模式下页面会传手柄位置来避让）；滚动手势或选区消失即隐藏。
+ * - 点按自身期间（pointerdown → click）位置被冻结：条一旦在按下与抬起之间移位，click 的
+ *   目标会退化成按下点/抬起点的公共祖先（按钮收不到 click），表现为「按了没反应、条还跳到
+ *   别处，再按一次才生效」；同一个选区也不再重复重建状态，避免无谓的重算定位。
  *
  * 两种驱动方式：
  * 1. 原生选区（滚动模式等）：监听 selectionchange / pointerup，从 window.getSelection
@@ -61,24 +64,82 @@ export interface SelectionMenuProps {
 const BAR_H = 46;
 const GAP = 10;
 const SIDE = 8;
+/** 抬起后等待 click 派发的兜底时长（ms）：超时仍未派发（手势被系统接管等）就自行解冻对账 */
+const PRESS_FALLBACK_MS = 400;
 
 export function SelectionMenu(props: SelectionMenuProps) {
   const [menu, setMenu] = createSignal<{ range: Range; text: string } | null>(null);
   let barRef: HTMLDivElement | undefined;
   let rowRef: HTMLDivElement | undefined;
+  /**
+   * 指针正按在菜单条上（pointerdown → click）。
+   * 期间既不重算位置也不收起菜单条：条在按下与 click 之间移位，click 的目标就变成
+   * 按下点与抬起点的公共祖先，按钮的 onClick 不会执行（且看起来像是位置被重置）。
+   */
+  let pressing = false;
+  let pressFallbackTimer: number | undefined;
+  /** 按下期间正文滚动过：滚动照旧要收起菜单，但只能等 click 派发完再收 */
+  let pressScrolled = false;
+  /** 解冻计数器：按下期间跳过的定位重算，在解冻后补一次 */
+  const [pressTick, setPressTick] = createSignal(0);
 
   function hide(): void {
+    if (pressing) return;
     if (menu()) setMenu(null);
   }
 
+  /** 事件目标是否落在菜单条内部（目标可能不是 Node，如 window 上的滚动） */
+  function insideBar(target: EventTarget | null): boolean {
+    return target instanceof Node && !!barRef?.contains(target);
+  }
+
+  /** 两个 Range 是否指向同一段内容（浏览器每次 getRangeAt 都给新对象，只能比边界） */
+  function sameRange(a: Range, b: Range): boolean {
+    if (a === b) return true;
+    if (a.commonAncestorContainer !== b.commonAncestorContainer) return false;
+    try {
+      return (
+        a.compareBoundaryPoints(Range.START_TO_START, b) === 0 &&
+        a.compareBoundaryPoints(Range.END_TO_END, b) === 0
+      );
+    } catch {
+      // 节点已随重渲染脱离文档，无法比较：按「选区变了」处理
+      return false;
+    }
+  }
+
+  /** 更新菜单状态；选区与文本都没变时不重建，避免顺带重算一次位置 */
+  function show(range: Range, text: string): void {
+    const cur = menu();
+    if (cur && cur.text === text && sameRange(cur.range, range)) return;
+    setMenu({ range, text });
+  }
+
+  /** 一次点按结束（click 已派发 / 指针离开菜单条 / 兜底超时）：解冻并按当前选区对账 */
+  function endPress(): void {
+    if (!pressing) return;
+    pressing = false;
+    window.clearTimeout(pressFallbackTimer);
+    pressFallbackTimer = undefined;
+    if (pressScrolled) {
+      // 按下期间正文滚过（此刻收起会吞掉这次 click）：click 已派发完，按原语义收起
+      pressScrolled = false;
+      hide();
+      return;
+    }
+    setPressTick((n) => n + 1); // 补上按下期间跳过的定位重算
+    sync();
+  }
+
   function sync(): void {
+    if (pressing) return; // 按下期间冻结：此刻重算位置或收起都会让这次 click 落空
     const custom = props.custom?.() ?? null;
     if (custom) {
       if (!props.active()) {
         hide();
         return;
       }
-      setMenu({ range: custom.anchor, text: custom.text });
+      show(custom.anchor, custom.text);
       return;
     }
     const root = props.rootRef();
@@ -112,7 +173,7 @@ export function SelectionMenu(props: SelectionMenuProps) {
       hide();
       return;
     }
-    setMenu({ range, text });
+    show(range, text);
   }
 
   // active / custom 变化（工具栏、弹层收起或选区变更）后重查
@@ -124,15 +185,39 @@ export function SelectionMenu(props: SelectionMenuProps) {
 
   onMount(() => {
     const onSelection = () => sync();
-    const onPointerUp = () => queueMicrotask(sync);
-    // scroll 不冒泡，捕获阶段监听以覆盖内部滚动容器
-    const onScroll = () => hide();
+    const onPointerUp = (e: PointerEvent) => {
+      if (pressing) {
+        // 抬起仍在菜单条上：等这次 click 派发完再对账（click 派发前动条就会吞掉它），
+        // 正常路径由菜单条上的 click 调 endPress；这里只挂兜底，防 click 不来时一直冻着
+        if (insideBar(e.target)) {
+          window.clearTimeout(pressFallbackTimer);
+          pressFallbackTimer = window.setTimeout(endPress, PRESS_FALLBACK_MS);
+          return;
+        }
+        endPress();
+        return;
+      }
+      queueMicrotask(sync);
+    };
+    const onPointerCancel = () => endPress();
+    // scroll 不冒泡，捕获阶段监听以覆盖内部滚动容器；菜单条自身的横向滚动不收起自己
+    const onScroll = (e: Event) => {
+      if (insideBar(e.target)) return;
+      if (pressing) {
+        pressScrolled = true; // 按下期间先记账，等 click 派发完再收（见 endPress）
+        return;
+      }
+      hide();
+    };
     document.addEventListener("selectionchange", onSelection);
     window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("pointercancel", onPointerCancel);
     window.addEventListener("scroll", onScroll, true);
     onCleanup(() => {
+      window.clearTimeout(pressFallbackTimer);
       document.removeEventListener("selectionchange", onSelection);
       window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerCancel);
       window.removeEventListener("scroll", onScroll, true);
     });
   });
@@ -149,6 +234,9 @@ export function SelectionMenu(props: SelectionMenuProps) {
       if (bar) bar.style.visibility = "hidden";
       return;
     }
+    // 点按期间冻结位置：任何重算都会让 click 落空（见 pressing 注释）；解冻时重算一次
+    pressTick();
+    if (pressing) return;
     const area = root.getBoundingClientRect();
     if (area.width <= 0 || area.height <= 0) return;
     let r = current.range.getBoundingClientRect();
@@ -270,10 +358,13 @@ export function SelectionMenu(props: SelectionMenuProps) {
           class="absolute z-[45] overflow-hidden rounded-2xl border border-border bg-surface shadow-[0_10px_34px_rgb(0_0_0/0.22)] select-none"
           style={{ height: `${BAR_H}px`, visibility: "hidden" }}
           onPointerDown={(e) => {
-            // 保住文本选区/自定义选区，避免点按菜单导致选区折叠
+            // 保住文本选区/自定义选区，避免点按菜单导致选区折叠；
+            // 同时冻结菜单条位置，直到这次 click 派发完（见 pressing 注释）
             e.preventDefault();
             e.stopPropagation();
+            pressing = true;
           }}
+          onClick={() => endPress()}
         >
           <div class="scrollbar-none flex h-full w-full items-center overflow-x-auto">
             <div
