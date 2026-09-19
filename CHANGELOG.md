@@ -46,6 +46,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   共享的 composite action（`.github/actions/setup-build`）并加 Gradle 缓存与并发取消。
   质量门槛（类型检查 / 前端构建 / Rust 单测）只在本地按需跑，不新增 Actions 工作流。
 
+### Changed
+
+- **书架封面改为「固定宽度 + 每行本数自适应」**：原先写死一行三本，封面会被容器宽度拉伸
+  —— 桌面内容区里三本各占几百像素。现在封面固定 96px，用 `auto-fill` 按容器宽度决定一行放
+  几本，轨道整体居中、余量均分到两侧（不再贴边）；手机列与桌面内容区共用这一套规则，
+  封面尺寸不变，只是每行本数随宽度增减（360px 手机仍 3 列、480px 视口 4 列、桌面内容区更多）。
+
 ### Fixed
 
 - **书源「网页登录」等待期间不再占用主线程**：认证窗改由核心 crate 统一编排（会话先就绪、UA 对齐、

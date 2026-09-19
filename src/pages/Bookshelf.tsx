@@ -216,9 +216,15 @@ interface ShelfGridProps {
   onToggle: (id: string) => void;
 }
 
+/**
+ * 书架网格：封面固定宽度 96px（改宽度就改这里的 `auto-fill` 轨道值），
+ * **每行放几本由容器宽度决定**（`auto-fill` 按 96px 轨道尽量铺满一行），不再写死三列；
+ * 轨道整体居中（`justify-center`），余量均分到两侧，窄窗口到宽窗口都是同一套规则：
+ * 封面尺寸不变，只是每行本数增减。
+ */
 function ShelfGrid(props: ShelfGridProps) {
   return (
-    <div class="grid grid-cols-3 gap-x-3.5 gap-y-[22px] py-[2px] pb-1.5">
+    <div class="grid grid-cols-[repeat(auto-fill,96px)] justify-center gap-x-3.5 gap-y-[22px] py-[2px] pb-1.5">
       <For each={props.items}>
         {(item) => (
           <BookCard
