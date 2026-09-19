@@ -183,6 +183,17 @@ export async function readLicenseText(): Promise<string | null> {
   }
 }
 
+/** 读取随应用打包的第三方开源库使用声明全文；仅 Tauri 环境可用，浏览器开发环境返回 null */
+export async function readThirdPartyNotices(): Promise<string | null> {
+  if (!tauri) return null;
+  try {
+    return await invoke<string>("readerx_third_party_notices");
+  } catch (err) {
+    console.error("[backend] 读取开源库声明失败", err);
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // 书源（Book Source）
 // ---------------------------------------------------------------------------

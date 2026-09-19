@@ -98,6 +98,7 @@ pub fn run() {
             commands::readerx_tts_cache_stats,
             commands::readerx_tts_cache_clear,
             commands::readerx_license_text,
+            commands::readerx_third_party_notices,
             commands::readerx_sources_list,
             commands::readerx_source_get,
             commands::readerx_source_put,

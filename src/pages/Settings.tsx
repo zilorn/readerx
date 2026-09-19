@@ -8,12 +8,14 @@ import {
   GitHubIcon,
   HeadphonesIcon,
   LibraryIcon,
+  PackageIcon,
   RegexIcon,
   SourceIcon,
   TrashIcon,
 } from "../components/icons";
 import { PageHeader } from "../components/PageHeader";
 import { LicenseSheet } from "../components/LicenseSheet";
+import { ThirdPartyNoticesSheet } from "../components/ThirdPartyNoticesSheet";
 import { ToggleSwitch } from "../components/ToggleSwitch";
 import {
   SOURCE_PARALLEL_MAX,
@@ -82,6 +84,7 @@ export default function SettingsPage() {
   const navigate = useNavigate();
   const [resetConfirming, setResetConfirming] = createSignal(false);
   const [licenseOpen, setLicenseOpen] = createSignal(false);
+  const [noticesOpen, setNoticesOpen] = createSignal(false);
   let timer: number | undefined;
 
   onCleanup(() => {
@@ -311,10 +314,22 @@ export default function SettingsPage() {
             >
               <ChevronRightIcon size={18} class="flex-none text-text-3" />
             </Row>
+            <Row
+              icon={<PackageIcon size={18} />}
+              label="开源库声明"
+              desc="第三方开源库与其许可、用途"
+              onClick={() => setNoticesOpen(true)}
+            >
+              <ChevronRightIcon size={18} class="flex-none text-text-3" />
+            </Row>
           </div>
         </section>
 
         <LicenseSheet open={licenseOpen()} onClose={() => setLicenseOpen(false)} />
+        <ThirdPartyNoticesSheet
+          open={noticesOpen()}
+          onClose={() => setNoticesOpen(false)}
+        />
 
         <p class="-mt-2 mb-2.5 text-center text-[11px] text-text-3">
           ReaderX {appVersion()} · 基于 Tauri 2 构建

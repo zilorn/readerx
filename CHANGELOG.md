@@ -7,8 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-09-19
+
 ### Added
 
+- **设置 → 关于新增「开源库声明」**：随包使用的第三方开源库（前端 solid-js / pdf.js / opencc-js
+  等，后端 Rust 的 tauri / boa / reqwest / RustCrypto 等）连同各自许可与在 ReaderX 中的用途，
+  整理成独立的 `THIRD-PARTY-NOTICES.md`，与 `LICENSE` 一样作为 Tauri resource 打进安装包，
+  由 Rust 侧新命令 `readerx_third_party_notices` 读入（Android 走 asset 资源目录），
+  在设置页最后一栏点开即可查看全文；两份随包文本（许可 / 声明）共用同一个全屏文本弹层组件。
 - **支持导入 PDF**：本地导入（书架 `+`）与 WebDAV 导入都能选 `.pdf` 了，导入后与其他本地书一样
   进书架、可阅读 / 加书签 / 加入分组。解析走 pdf.js（只在真正导入 PDF 时才载入，不进首屏）：
   - **文字层优先**：按文字片段的坐标还原行与段落（中文不插空格、西文按间距补空格、行尾连字符

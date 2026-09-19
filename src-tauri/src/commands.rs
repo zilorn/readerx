@@ -156,19 +156,32 @@ pub async fn readerx_tts_cache_clear(
     .await
 }
 
-/// 读取随应用打包的 LICENSE（配置在 bundle.resources，运行期位于 resource 目录）。
+/// 读取随应用打包的文本资源（配置在 bundle.resources，运行期位于 resource 目录）。
 /// Android 的 resource 目录是 APK asset（asset:// 前缀），统一走 fs 插件读取。
+fn read_bundled_text(app: &AppHandle, file: &str, label: &str) -> Result<String, String> {
+    let resource_dir = app
+        .path()
+        .resource_dir()
+        .map_err(|e| format!("无法定位资源目录: {e}"))?;
+    app.fs()
+        .read_to_string(resource_dir.join(file))
+        .map_err(|e| format!("读取{label}失败: {e}"))
+}
+
+/// 读取随应用打包的 LICENSE 全文。
 #[tauri::command]
 pub async fn readerx_license_text(app: AppHandle) -> Result<String, String> {
-    blocking("开源许可读取", move || -> Result<String, String> {
-        let resource_dir = app
-            .path()
-            .resource_dir()
-            .map_err(|e| format!("无法定位资源目录: {e}"))?;
-        let license_path = resource_dir.join("LICENSE");
-        app.fs()
-            .read_to_string(license_path)
-            .map_err(|e| format!("读取开源许可失败: {e}"))
+    blocking("开源许可读取", move || {
+        read_bundled_text(&app, "LICENSE", "开源许可")
+    })
+    .await
+}
+
+/// 读取随应用打包的第三方开源库使用声明（THIRD-PARTY-NOTICES.md）全文。
+#[tauri::command]
+pub async fn readerx_third_party_notices(app: AppHandle) -> Result<String, String> {
+    blocking("开源库声明读取", move || {
+        read_bundled_text(&app, "THIRD-PARTY-NOTICES.md", "开源库声明")
     })
     .await
 }
