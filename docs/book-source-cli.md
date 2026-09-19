@@ -32,7 +32,7 @@ sources                          列出已安装书源
 call   <函数> [参数JSON]          调用一个书源入口函数
 run    <关键词>                   端到端：搜索 → 目录 → 正文
 test                             冒烟测试：结构 / JS 语法 / 入口函数 / 能力开关
-auth   cookie|webkit|cdp|show|clear
+auth   cookie|webkit|cdp|show|storage|clear
 login  <url>                     等价 auth webkit --url <url>
 ```
 
@@ -52,6 +52,7 @@ login  <url>                     等价 auth webkit --url <url>
 | `--browser <路径>` | 拉起浏览器可执行文件（未开调试端口时） |
 | `--timeout <秒>` / `--concurrency <n>` / `--chapters <n>` | 调用预算 / 正文并发 / run 拉几章 |
 | `--json` / `--verbose` | 机器可读输出 / 打印书源 `console` 日志 |
+| `--reveal` | （`auth storage`）打印存储快照的完整值，默认只显示前 8 个字符 |
 
 退出码：`0` 成功、`1` 书源调用失败或认证未完成、`2` 参数或环境错误。
 
@@ -127,8 +128,10 @@ readerx-source --source demo auth cdp --browser /usr/bin/google-chrome
 ### 查看与清理
 
 ```bash
-readerx-source --source demo auth show    # 打印这次请求真正会带上的头与 Cookie
-readerx-source --source demo auth clear   # 清空登录态（整行 + 作用域文件）并清空会话
+readerx-source --source demo auth show              # 打印这次请求真正会带上的头与 Cookie
+readerx-source --source demo auth storage           # 查看登录时采到的存储快照（值只显示前 8 字符）
+readerx-source --source demo auth storage --reveal  # 同上，但打印完整值（含 token，注意日志留存）
+readerx-source --source demo auth clear             # 清空登录态（Cookie + 存储快照）并清空会话
 ```
 
 登录态落两处，`auth clear` **两处都会删**（缺一处就会出现「清了还在」，因为 `call` / `run` 每次
@@ -136,11 +139,29 @@ readerx-source --source demo auth clear   # 清空登录态（整行 + 作用域
 
 | 文件 | 内容 |
 | --- | --- |
-| `<data-dir>/source_sessions/<源id>.json` | 整行 Cookie（App 网页登录 / `--cookie` 的无域条目） |
+| `<data-dir>/source_sessions/<源id>.json` | 整行 Cookie + localStorage / sessionStorage / IndexedDB 快照 |
 | `<data-dir>/profiles/<源id>.json` | 带作用域的 Cookie（`auth cookie` / `auth webkit` / `auth cdp`） |
 
 `auth clear` 会按「整行 N + 作用域 M」报告条数与实际删除的文件，可重复执行（无登录态时提示并正常退出）。
 `--clear-cookies` 保留为兼容参数：现在无论是否给出，内存会话与 cookie jar 都会一并清空。
+
+### 不用 Cookie 记登录信息的站点
+
+有些站点把凭证写在 **localStorage** 里，只抓 Cookie 等于没登录。`auth webkit` / `auth cdp`
+在抓 Cookie 的同时会采集 localStorage / sessionStorage（以及 IndexedDB 的库名与对象仓清单），
+一起存进 `<data-dir>/source_sessions/<源id>.json`；书源代码用 `webview.storage()` 读取
+（见 [book-source-api.md](./book-source-api.md)），把 token 显式放进请求头 / 参数即可：
+
+```bash
+readerx-source --source demo auth cdp --browser /usr/bin/google-chrome
+readerx-source --source demo auth storage --json | jq '.storage.origins[0].localStorage'
+```
+
+- 采集粒度：每个 origin 每类最多 500 条、单值最多 8192 字符；IndexedDB **只记结构**（库 / 版本 / 对象仓）。
+- 只能读**页面 origin**：跨域登录时只有最后停留的 origin 能读到键值。
+- 会话文件是**增量扩展**的：旧文件（只有 `url` / `cookie` / `updated_at`）照常读，新增 `storage` 字段
+  后 App 与 CLI 仍能交替读写同一份数据目录。
+- 只更新 Cookie 的操作（`auth cookie` 手工导入）不会抹掉已有的存储快照，反之亦然。
 
 ## 身份文件（profile）
 

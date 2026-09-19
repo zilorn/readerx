@@ -10,6 +10,7 @@
 //!   （见 [`crate::backend_webkit`] / [`crate::backend_cdp`]，由 CLI 装配）；
 //! - 都没注册时，认证请求返回 `unsupported`，规则代码照常拿到原响应。
 
+use crate::storage::{snapshot_view, StorageSnapshot};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -30,6 +31,13 @@ pub struct LoginOutcome {
     /// 失败 / 取消原因（成功时可为空）
     #[serde(default)]
     pub message: String,
+    /// **非 Cookie 登录信息**：localStorage / sessionStorage / IndexedDB 快照。
+    ///
+    /// 站点把凭证写在 localStorage 而不是 Cookie 里时，只有 Cookie 的登录态等于没登录；
+    /// 快照由各认证后端在用户点「完成」时用 `crate::storage::probe_script` 采集，
+    /// 书源代码通过 `webview.storage()` 读取。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<StorageSnapshot>,
 }
 
 impl LoginOutcome {
@@ -41,6 +49,7 @@ impl LoginOutcome {
             cookies: cookies.into(),
             count,
             message: String::new(),
+            storage: None,
         }
     }
 
@@ -52,7 +61,14 @@ impl LoginOutcome {
             cookies: String::new(),
             count: 0,
             message: message.into(),
+            storage: None,
         }
+    }
+
+    /// 附上采集到的存储快照（空快照视为没有）
+    pub fn with_storage(mut self, storage: Option<StorageSnapshot>) -> Self {
+        self.storage = storage.filter(|snapshot| !snapshot.is_empty());
+        self
     }
 }
 
@@ -104,24 +120,32 @@ pub fn perform(source_id: &str, url: &str) -> Result<LoginOutcome, String> {
     provider.authenticate(source_id, url)
 }
 
-/// 把该书源已保存的登录 Cookie 注入会话（幂等；进程内只注入一次）。
+/// 把该书源已保存的登录态注入会话（幂等；进程内只注入一次）。
 ///
 /// App 与 CLI 每次执行书源函数前调用：重启后已保存的登录态（`source_sessions/<id>.json`）
-/// 也会被注入本次进程的书源会话。返回是否本次真正注入了新 Cookie。
+/// 也会被注入本次进程的书源会话——Cookie 进请求头，存储快照进
+/// `webview.storage()` 的读取缓存。返回是否本次真正注入了新 Cookie。
 pub fn seed_source_session(source_id: &str) -> Result<bool, String> {
     if seeded(source_id) {
         return Ok(false);
     }
-    let cookie = crate::store::read_login_cookie(source_id)?;
-    // 无论有没有已存 Cookie 都标记，避免反复读盘
+    let session = crate::store::read_login_session(source_id)?;
+    // 无论有没有已存登录态都标记，避免反复读盘
     mark_seeded(source_id);
-    if let Some(cookie) = cookie {
-        if !cookie.trim().is_empty() {
-            crate::host::http_set_cookie(source_id, &cookie);
-            return Ok(true);
-        }
+    let Some(state) = session else {
+        return Ok(false);
+    };
+    if let Some(storage) = state.storage {
+        crate::host::set_storage_snapshot(source_id, storage, &state.url);
     }
-    Ok(false)
+    let Some(cookie) = state.cookie else {
+        return Ok(false);
+    };
+    if cookie.trim().is_empty() {
+        return Ok(false);
+    }
+    crate::host::http_set_cookie(source_id, &cookie);
+    Ok(true)
 }
 
 /// 清空该书源登录 Cookie 后重置注入标记（下次调用再按文件内容决定）。
@@ -158,9 +182,10 @@ fn mark_seeded(source_id: &str) {
 // 认证结果落盘 + 注入会话（App 与 CLI 共用同一套编排）
 // ---------------------------------------------------------------------------
 
-/// 认证成功后的收尾：**覆盖式**持久化该书源的登录 Cookie 并立即注入会话。
+/// 认证成功后的收尾：**覆盖式**持久化该书源的登录态（Cookie + 存储快照）并立即注入会话。
 ///
 /// - 旧的登录行按整行精确移除（避免同名 Cookie 新旧并存，见 docs/cloudflare.md）；
+/// - 存储快照交给 `store::write_login_session`，空快照不会抹掉上一次抓到的那一份；
 /// - 写盘失败时把原因追加进 `outcome.message`：本次会话可用但重启会掉登录态，
 ///   这是用户必须知道的事，不能静默。
 pub fn persist_login_outcome(source_id: &str, outcome: &mut LoginOutcome) -> Result<(), String> {
@@ -168,19 +193,35 @@ pub fn persist_login_outcome(source_id: &str, outcome: &mut LoginOutcome) -> Res
         return Ok(());
     }
     let cookies = outcome.cookies.trim().to_string();
-    if cookies.is_empty() {
+    let storage = outcome.storage.clone();
+    if cookies.is_empty() && storage.is_none() {
         return Ok(());
     }
     if let Ok(Some(previous)) = crate::store::read_login_cookie(source_id) {
         let previous = previous.trim();
-        if !previous.is_empty() && previous != cookies {
+        if !previous.is_empty() && !cookies.is_empty() && previous != cookies {
             crate::host::http_remove_cookie(source_id, previous);
         }
     }
-    if let Err(err) = crate::store::write_login_cookie(source_id, &outcome.url, &cookies) {
-        outcome.message = format!("登录已完成，但 Cookie 保存失败（重启后需重新登录）：{err}");
+    if let Err(err) =
+        crate::store::write_login_session(source_id, &outcome.url, &cookies, storage.clone())
+    {
+        outcome.message = format!("登录已完成，但登录态保存失败（重启后需重新登录）：{err}");
     }
-    crate::host::http_set_cookie(source_id, &cookies);
+    if !cookies.is_empty() {
+        crate::host::http_set_cookie(source_id, &cookies);
+    }
+    if let Some(storage) = storage {
+        crate::host::set_storage_snapshot(source_id, storage, &outcome.url);
+    }
     mark_seeded(source_id);
     Ok(())
+}
+
+/// `webview.storage()` 的返回值：该书源登录时采集到的存储快照（没有则空视图）。
+pub fn storage_view(source_id: &str) -> serde_json::Value {
+    match crate::host::storage_snapshot(source_id) {
+        Some((snapshot, url)) => snapshot_view(&snapshot, &url),
+        None => crate::storage::empty_view(),
+    }
 }

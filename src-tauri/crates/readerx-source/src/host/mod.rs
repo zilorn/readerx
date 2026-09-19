@@ -138,6 +138,12 @@ pub struct SourceState {
     pub(crate) scoped_cookies: Mutex<Vec<ScopedCookie>>,
     /// 书源是否允许自动网页认证（CF 挑战自动拉起 WebView / 代码级 webview.login）
     pub(crate) auto_auth: Mutex<bool>,
+    /// 登录态的**非 Cookie 部分**（localStorage / sessionStorage / IndexedDB 快照）。
+    ///
+    /// `reqwest` 读不到浏览器存储，因此快照只能在登录时由浏览器采集、在这里缓存并落盘，
+    /// 书源代码通过 `webview.storage()` 取（见 [`storage_snapshot`]）。第二项是登录地址，
+    /// 决定 `webview.storage()` 的「主 origin」。
+    pub(crate) storage: Mutex<Option<(crate::storage::StorageSnapshot, String)>>,
 }
 
 /// 一条带作用域的 Cookie（值来自真实浏览器，见 crate::profile / backend_*）。
@@ -286,6 +292,7 @@ pub fn prepare_source(source: &BookSource) -> Result<(), String> {
                 extra_cookies: Mutex::new(Vec::new()),
                 scoped_cookies: Mutex::new(Vec::new()),
                 auto_auth: Mutex::new(true),
+                storage: Mutex::new(None),
             });
             guard.insert(source.id.clone(), state.clone());
             state
@@ -778,6 +785,13 @@ pub fn http_request(source_id: &str, method: &str, raw_url: &str, opts: &str) ->
             return serialize_value(&first);
         }
     };
+    // 走了哪条后端都要把这次的登录态（Cookie + 存储快照）落盘：后端自己不必各写一份，
+    // 书源下次运行靠 `auth::seed_source_session` 注入。这里 clone 一份只是为了收下
+    // 「写盘失败」的提示（落盘失败不影响本次会话，但值得让调用方看到）。
+    if outcome.ok {
+        let mut persisted = outcome.clone();
+        let _ = crate::auth::persist_login_outcome(source_id, &mut persisted);
+    }
 
     // 用户取消 / 超时 / 失败：原样返回挑战响应（带说明字段），不打扰书源代码
     if !outcome.ok {
@@ -2029,8 +2043,9 @@ pub fn webview_login_supported() -> bool {
 }
 
 /// 打开登录浮层并**阻塞等待**用户完成/取消/超时。
-/// 成功后内部已完成：持久化 + 注入该书源会话（后续 http.* 自动携带 Cookie）。
-/// 返回 JSON 文本 `{ ok, url, cookies, count, message }`（不抛宿主错误）。
+/// 成功后内部已完成：持久化 + 注入该书源会话（后续 http.* 自动携带 Cookie，
+/// 采集到的 localStorage / sessionStorage / IndexedDB 快照同时写入会话供 `webview.storage()` 读）。
+/// 返回 JSON 文本 `{ ok, url, cookies, count, message, storage? }`（不抛宿主错误）。
 pub fn webview_login(source_id: &str, url: &str, _opts: &str) -> String {
     // 书源「自动网页认证」开关关闭时，书源代码无法主动拉起登录窗（编辑页手动按钮不受影响）
     let auto_auth = source_state(source_id)
@@ -2052,6 +2067,43 @@ pub fn webview_login(source_id: &str, url: &str, _opts: &str) -> String {
         Err(err) => json!({ "ok": false, "message": err }),
     };
     serde_json::to_string(&value).unwrap_or_else(|_| error_payload("登录结果序列化失败".into()))
+}
+
+// ---------------------------------------------------------------------------
+// 登录态的存储部分（localStorage / sessionStorage / IndexedDB）
+// ---------------------------------------------------------------------------
+
+/// 缓存一批登录时采集到的存储快照（`login_url` 决定 `webview.storage()` 的主 origin）。
+///
+/// 登录成功（应用内浮层 / CLI 认证）与进程启动注入（`auth::seed_source_session`）都走这里；
+/// 落盘由 `store::write_login_session` 负责，本函数只管会话内存。
+pub fn set_storage_snapshot(source_id: &str, snapshot: crate::storage::StorageSnapshot, login_url: &str) {
+    if snapshot.is_empty() {
+        return;
+    }
+    if let Ok(state) = source_state(source_id) {
+        *state.storage.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some((snapshot, login_url.trim().to_string()));
+    }
+}
+
+/// 当前会话缓存的存储快照：`(快照, 登录地址)`。
+pub fn storage_snapshot(source_id: &str) -> Option<(crate::storage::StorageSnapshot, String)> {
+    source_state(source_id)
+        .ok()
+        .and_then(|state| {
+            state
+                .storage
+                .lock()
+                .map(|guard| guard.clone())
+                .unwrap_or(None)
+        })
+}
+
+/// 书源 JS `webview.storage()` 的宿主实现：返回扁平视图 JSON 文本（不抛宿主错误）。
+pub fn webview_storage(source_id: &str) -> String {
+    let view = crate::auth::storage_view(source_id);
+    serde_json::to_string(&view).unwrap_or_else(|_| "{}".to_string())
 }
 
 #[cfg(test)]

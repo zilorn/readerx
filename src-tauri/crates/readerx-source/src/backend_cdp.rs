@@ -1,5 +1,6 @@
 //! Chrome DevTools Protocol 认证后端：在**真实 Chrome** 里过登录 / Cloudflare 挑战，
-//! 再把该站点的 Cookie（含 `cf_clearance`、httpOnly）抓回来交给书源会话。
+//! 再把该站点的 Cookie（含 `cf_clearance`、httpOnly）与**非 Cookie 登录信息**
+//! （localStorage / sessionStorage / IndexedDB）抓回来交给书源会话。
 //!
 //! 为什么是 CDP 而不是自己实现挑战求解：`cf_clearance` 与 **IP + UA + TLS 指纹**绑定，
 //! 只有真实浏览器内核能拿到有效令牌（见 docs/cloudflare.md 的「手动兜底」）。
@@ -11,10 +12,11 @@
 //!   会以独立用户数据目录启动并打开目标页。
 //!
 //! 流程：浏览器打开目标页 → 用户完成登录 / 人机验证 → 回车（或等待超时）→
-//! `Network.getAllCookies` 抓取 → 保存为该书源登录态并注入会话。
+//! `Network.getAllCookies` + `DOMStorage` / 页面探针抓取 → 保存为该书源登录态并注入会话。
 
 use crate::auth::LoginOutcome;
 use crate::host::ScopedCookie;
+use crate::storage::{self, StorageSnapshot};
 use serde_json::{json, Value};
 use std::io::{BufRead, IsTerminal};
 use std::net::TcpListener;
@@ -70,6 +72,8 @@ pub fn authenticate(source_id: &str, url: &str, options: &Options) -> Result<Log
         );
     }
     session.wait_for_user(options.wait_secs);
+    // 关浏览器之前先抓存储（localStorage / sessionStorage / IndexedDB 只能在页面里读）
+    let snapshot = session.collect_storage(url);
     let cookies = session.all_cookies()?;
     session.close_spawned();
 
@@ -98,7 +102,98 @@ pub fn authenticate(source_id: &str, url: &str, options: &Options) -> Result<Log
     }
     // 同时按整行注入：部分站点 Cookie 没有域信息时也能生效
     crate::host::http_set_cookie(source_id, &text);
-    Ok(LoginOutcome::success(url, text, matched.len()))
+    Ok(LoginOutcome::success(url, text, matched.len()).with_storage(snapshot))
+}
+
+/// 页面里的一个 frame（采集存储时逐 frame 处理：内嵌的登录框常在自己的 origin 里）
+struct Frame {
+    id: String,
+    origin: String,
+}
+
+/// 拍平 `Page.getFrameTree` 的结果（origin 缺失时退回用 URL 推）
+fn flatten_frames(tree: Option<&Value>, out: &mut Vec<Frame>, depth: usize) {
+    // 深度兜底：畸形 / 自引用结构不至于把栈打爆
+    if depth > 8 {
+        return;
+    }
+    let Some(node) = tree else {
+        return;
+    };
+    if let Some(frame) = node.get("frame") {
+        let id = frame
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let origin = frame
+            .get("securityOrigin")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .or_else(|| {
+                frame
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .and_then(storage::origin_of)
+            })
+            .unwrap_or_default();
+        // 只处理能当存储作用域用的 http(s) origin：`null`（沙箱 iframe）、`file://` 都没有
+        // 可读写的 Web Storage，留着只会往快照里塞垃圾条目
+        if !id.is_empty() && storage::origin_of(&origin).is_some() {
+            out.push(Frame { id, origin });
+        }
+    }
+    if let Some(children) = node.get("childFrames").and_then(|v| v.as_array()) {
+        for child in children {
+            flatten_frames(Some(child), out, depth + 1);
+        }
+    }
+}
+
+/// 探针表达式：在指定执行上下文里跑一遍存储探针，直接返回它产出的 JSON 文本
+fn probe_expr(origin: &str, login_url: &str) -> String {
+    let script = storage::probe_script(&[origin.to_string()]);
+    let json = serde_json::to_string(&script).unwrap_or_else(|_| "\"\"".to_string());
+    let fallback = serde_json::to_string(login_url).unwrap_or_else(|_| "\"\"".to_string());
+    format!(
+        "(async function () {{ \
+             const r = await (0, eval)({json}); \
+             if (typeof r === \"string\" && r) return r; \
+             for (let i = 0; i < 40; i++) {{ \
+                 await new Promise(function (done) {{ setTimeout(done, 100); }}); \
+                 if (window.__rxStorageProbeDone) {{ \
+                     const t = window.__rxStorageProbeResult || \"\"; \
+                     window.__rxStorageProbeDone = false; \
+                     window.__rxStorageProbeResult = \"\"; \
+                     return t; \
+                 }} \
+             }} \
+             return JSON.stringify({{ version: 1, updatedAt: Date.now(), origins: [{{ \
+                 origin: {origin_json}, url: {fallback}, localStorage: [], sessionStorage: [], indexedDb: [] \
+             }}] }}); \
+         }})()",
+        origin_json = serde_json::to_string(origin).unwrap_or_else(|_| "\"\"".to_string()),
+    )
+}
+
+/// CDP 读到的键值对 → 快照条目（超长值按与探针一致的规则截断）
+fn entries(pairs: Vec<(String, String)>) -> Vec<storage::StorageEntry> {
+    pairs
+        .into_iter()
+        .take(storage::MAX_ENTRIES_PER_ORIGIN)
+        .map(|(key, value)| {
+            let truncated = value.chars().count() > storage::MAX_VALUE_CHARS;
+            storage::StorageEntry {
+                key,
+                value: if truncated {
+                    value.chars().take(storage::MAX_VALUE_CHARS).collect()
+                } else {
+                    value
+                },
+                truncated,
+            }
+        })
+        .collect()
 }
 
 /// 域名匹配（`.example.com` 命中 `www.example.com`；`www.` 前缀视为同站）
@@ -121,7 +216,7 @@ fn url_host(url: &str) -> String {
         .unwrap_or_default()
 }
 
-/// 一个最短可用的 CDP 会话（只用到目标管理 + 网络 Cookie）
+/// 一个最短可用的 CDP 会话（只用到目标管理 + 网络 Cookie + 页面存储）
 struct CdpSession {
     socket: tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
     next_id: u64,
@@ -354,6 +449,135 @@ impl CdpSession {
             });
         }
         Ok(out)
+    }
+
+    /// 采集页面里的非 Cookie 登录信息（localStorage / sessionStorage / IndexedDB）。
+    ///
+    /// LocalStorage 由 CDP 原生接口读取（不依赖页面脚本，localStorage 被页面改写也照样读得到）；
+    /// IndexedDB 只能异步枚举，交给统一的 JS 探针（见 `crate::storage::probe_script`）在页面
+    /// 上下文里跑，带超时兜底。任何一步失败都只是「少一部分快照」，不影响 Cookie 与登录本身。
+    fn collect_storage(&mut self, login_url: &str) -> Option<StorageSnapshot> {
+        let contexts = self.frame_contexts();
+        if contexts.is_empty() {
+            return None;
+        }
+        let mut snapshot = StorageSnapshot::default();
+        for (frame_id, context_id, origin) in contexts {
+            let local = self.dom_storage_items(&origin, true).unwrap_or_default();
+            let session = self.dom_storage_items(&origin, false).unwrap_or_default();
+            // 探针只用来拿 IndexedDB 库清单（键值已由 CDP 直读）
+            let probe_page = match context_id {
+                Some(context_id) => self
+                    .eval_json(context_id, &probe_expr(&origin, login_url))
+                    .and_then(|value| {
+                        let text = value.as_str().map(String::from).or_else(|| {
+                            value
+                                .get("value")
+                                .and_then(|v| v.as_str())
+                                .map(String::from)
+                        })?;
+                        storage::parse_probe(&text).ok()
+                    })
+                    .and_then(|probe| probe.origin(&origin).cloned()),
+                // 拿不到执行上下文时，至少把 CDP 直接读到的键值留下来
+                None => None,
+            };
+            let _ = frame_id;
+            let page = probe_page.unwrap_or_default();
+            if local.is_empty() && session.is_empty() && page.indexed_db.is_empty() {
+                continue;
+            }
+            snapshot.origins.push(storage::StorageOrigin {
+                origin: origin.clone(),
+                url: if page.url.trim().is_empty() {
+                    login_url.to_string()
+                } else {
+                    page.url
+                },
+                local_storage: entries(local),
+                session_storage: entries(session),
+                indexed_db: page.indexed_db,
+            });
+        }
+        snapshot.normalize();
+        (!snapshot.is_empty()).then_some(snapshot)
+    }
+
+    /// 页面里的执行上下文：`(frameId, contextId?, origin)`。
+    /// 优先建一个隔离世界（探针不会污染页面自己的全局变量）；失败则退回主世界。
+    fn frame_contexts(&mut self) -> Vec<(String, Option<i64>, String)> {
+        let _ = self.send("Page.enable", json!({}));
+        let tree = match self.send("Page.getFrameTree", json!({})) {
+            Ok(tree) => tree,
+            Err(_) => return Vec::new(),
+        };
+        let mut frames = Vec::new();
+        flatten_frames(tree.get("frameTree"), &mut frames, 0);
+        let mut out = Vec::new();
+        for frame in frames {
+            let context_id = self
+                .send(
+                    "Page.createIsolatedWorld",
+                    json!({
+                        "frameId": frame.id,
+                        "worldName": format!("readerx_storage_{}", self.next_id),
+                        "grantUniveralAccess": true,
+                    }),
+                )
+                .ok()
+                .and_then(|value| value.get("executionContextId").and_then(|v| v.as_i64()));
+            out.push((frame.id, context_id, frame.origin));
+        }
+        out
+    }
+
+    /// 该 origin 的 localStorage / sessionStorage 键值（CDP 原生读取，不执行页面脚本）
+    fn dom_storage_items(&mut self, origin: &str, local: bool) -> Result<Vec<(String, String)>, String> {
+        // DOMStorage 需要先 enable 才认这个 storageId
+        let _ = self.send("DOMStorage.enable", json!({}));
+        let result = self.send(
+            "DOMStorage.getDOMStorageItems",
+            json!({
+                "storageId": {
+                    "securityOrigin": origin,
+                    "isLocalStorage": local,
+                }
+            }),
+        )?;
+        let entries = result
+            .get("entries")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        Ok(entries
+            .iter()
+            .filter_map(|pair| {
+                let list = pair.as_array()?;
+                let key = list.first()?.as_str()?.to_string();
+                let value = list.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                Some((key, value))
+            })
+            .collect())
+    }
+
+    /// 在指定执行上下文里求值，返回 JS 值（`awaitPromise`：探针的 IndexedDB 枚举是异步的）
+    fn eval_json(&mut self, context_id: i64, expression: &str) -> Option<Value> {
+        let result = self
+            .send(
+                "Runtime.evaluate",
+                json!({
+                    "expression": expression,
+                    "contextId": context_id,
+                    "returnByValue": true,
+                    "awaitPromise": true,
+                    "silent": true,
+                }),
+            )
+            .ok()?;
+        if result.get("exceptionDetails").is_some() {
+            return None;
+        }
+        result.get("result").cloned()
     }
 
     /// 关掉本次拉起的浏览器与新建标签页（连别人浏览器时不动它）

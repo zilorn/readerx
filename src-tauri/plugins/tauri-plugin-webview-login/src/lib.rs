@@ -2,7 +2,8 @@
 //!
 //! 目标平台：**仅 Android**（Tauri 多 WebView 窗口在移动端不受支持，
 //! 本插件通过 Android 侧 Kotlin 在 Activity 上叠加一个原生 `WebView`
-//! 浮层让用户完成登录，捕获含 httpOnly 的 Cookie 后原路返回）。
+//! 浮层让用户完成登录，捕获含 httpOnly 的 Cookie 与 localStorage / sessionStorage /
+//! IndexedDB 快照后原路返回）。
 //!
 //! 调用关系：
 //! - ReaderX 主 crate（Boa 引擎线程 / 界面按钮）调用 [`open_login`]；
@@ -12,6 +13,7 @@
 //!   完成/取消/超时，得到统一的 [`LoginOutcome`]。
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{plugin::TauriPlugin, Runtime};
 
@@ -24,7 +26,7 @@ pub struct LoginOutcome {
     /// 最终停留的页面 URL（失败/取消时可能为空）
     #[serde(default)]
     pub url: String,
-    /// 捕获到的 Cookie 文本（`k=v; k2=v2`），含 httpOnly
+    /// 捕获到的 Cookie 文本（`k=v; k=v2`），含 httpOnly
     #[serde(default)]
     pub cookies: String,
     /// Cookie 条数（仅统计非空）
@@ -33,6 +35,11 @@ pub struct LoginOutcome {
     /// 可读消息（取消/错误原因）
     #[serde(default)]
     pub message: String,
+    /// 非 Cookie 登录信息：localStorage / sessionStorage / IndexedDB 探针快照。
+    /// 这里只做**透传**（原样交给引擎侧的 `readerx_source::storage` 解析与持久化），
+    /// 因此保持 `Value` 而不在本插件里再定义一份结构。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<Value>,
 }
 
 /// 注册表里的调用器：输入起始 URL，阻塞直到用户完成/取消/超时。

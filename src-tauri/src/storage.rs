@@ -628,7 +628,7 @@ pub(crate) fn write_source_login_cookie(
     readerx_source::store::write_login_cookie(id, url, cookie)
 }
 
-/// 删除书源保存的登录 Cookie（存在与否均 Ok）。
+/// 删除书源保存的登录态（Cookie + 存储快照一并清掉；存在与否均 Ok）。
 pub(crate) fn remove_source_login_cookie(_app: &AppHandle, id: &str) -> Result<(), String> {
     readerx_source::store::remove_login_cookie(id)
 }

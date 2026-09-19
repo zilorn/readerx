@@ -6,8 +6,10 @@
 //! - [`host`]：宿主能力层（HTTP 会话、Cookie、HTML 选择器、文本清洗、base64 / 摘要 / HMAC / AES-GCM）；
 //! - [`auth`]：网页登录 / Cloudflare 认证的**可插拔后端**——App 侧接 Android WebView 插件，
 //!   独立二进制侧接 webkit2gtk 或 Chrome DevTools Protocol（见 `backend` 模块）；
-//! - [`store`]：书源 JSON、书源登录 Cookie、认证配置（profile）的磁盘读写，
+//! - [`store`]：书源 JSON、书源登录态（Cookie + 存储快照）、认证配置（profile）的磁盘读写，
 //!   格式与 App 完全一致（同一份数据目录可被 App 与 CLI 交替使用）；
+//! - [`storage`]：登录态的**非 Cookie 部分**（localStorage / sessionStorage / IndexedDB 快照），
+//!   采集探针与解析都在这里，三个认证后端共用；
 //! - [`profile`]：浏览器身份（User-Agent / 请求头 / Cookie 文件导入），用于带登录态离线测试。
 //!
 //! 编译产物：
@@ -19,6 +21,7 @@ pub mod engine;
 pub mod host;
 pub mod models;
 pub mod panic_guard;
+pub mod storage;
 pub mod store;
 
 #[cfg(all(feature = "cli", any(feature = "cdp", feature = "webkit")))]

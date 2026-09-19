@@ -299,24 +299,31 @@ impl ClearedLoginState {
 /// 清空某个书源**两处**落盘的登录态。
 ///
 /// 登录态分两处，缺一处就会「清了还在」（`call` / `run` 每次都会重新套用 profile）：
-/// - `source_sessions/<id>.json`：整行 Cookie（App 网页登录 / `auth cookie` 的无域条目）；
+/// - `source_sessions/<id>.json`：整行 Cookie（App 网页登录 / `auth cookie` 的无域条目）
+///   **与非 Cookie 存储快照**（localStorage / sessionStorage / IndexedDB）；
 /// - `profiles/<id>.json`：带作用域的 Cookie（`auth cookie` / `auth webkit` / `auth cdp`）。
 ///
 /// 只用文件计数，不碰内存会话（会话清理由调用方做，见 `auth clear`）。
 pub fn clear_login_state(source_id: &str) -> Result<ClearedLoginState, String> {
-    let legacy = store::read_login_cookie(source_id)?;
+    // 注意按**整个登录态**判断存在性：只有存储快照（没有 Cookie）时文件同样要删掉，
+    // 否则「清了还在」——书源下次运行仍能从 webview.storage() 读到旧快照。
+    let session = store::read_login_session(source_id)?;
     let profile_file = profile_path(source_id);
     let scoped = read_profile_cookies(&profile_file).len();
     let mut result = ClearedLoginState {
-        legacy_cookies: count_cookies(legacy.as_deref().unwrap_or("")),
+        legacy_cookies: session
+            .as_ref()
+            .and_then(|state| state.cookie.clone())
+            .map(|cookie| count_cookies(&cookie))
+            .unwrap_or(0),
         scoped_cookies: scoped,
         removed_files: Vec::new(),
     };
-    if legacy.is_some() {
+    if session.is_some() {
         store::remove_login_cookie(source_id)?;
         result
             .removed_files
-            .push("source_sessions/<id>.json（整行 Cookie）".to_string());
+            .push("source_sessions/<id>.json（整行 Cookie + 存储快照）".to_string());
     }
     if profile_file.is_file() {
         match std::fs::remove_file(&profile_file) {
@@ -337,6 +344,7 @@ pub fn clear_login_state(source_id: &str) -> Result<ClearedLoginState, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::OnceLock;
 
     fn write_profile(id: &str, count: usize) {
         let path = profile_path(id);
@@ -361,14 +369,27 @@ mod tests {
         profile.save(&path).unwrap();
     }
 
+    /// 测试用的数据根 + 串行锁：`init_data_root` 是进程内一次的 OnceLock，
+    /// 同 crate 的测试只能共用一个目录，而测试并行执行时「读整个目录」的操作会互相干扰。
+    fn test_root() -> (&'static std::path::Path, std::sync::MutexGuard<'static, ()>) {
+        static ROOT: OnceLock<PathBuf> = OnceLock::new();
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let dir = ROOT.get_or_init(|| {
+            let dir =
+                std::env::temp_dir().join(format!("readerx-cli-tests-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            store::init_data_root(&dir);
+            dir
+        });
+        let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        (dir.as_path(), guard)
+    }
+
     /// 回归：`auth clear` 必须连作用域登录态（profiles/<id>.json）一起删掉。
     /// 曾经只删了整行文件，导致 `call` 每次又把 profile 套回会话（「清了还在」）。
     #[test]
     fn clear_removes_both_legacy_and_scoped_login_state() {
-        let dir = std::env::temp_dir().join(format!("readerx-clear-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        store::init_data_root(&dir);
-
+        let (_dir, _serial) = test_root();
         store::write_login_cookie("demo", "https://example.com", "a=1; b=2").unwrap();
         write_profile("demo", 3);
         assert!(profile_path("demo").is_file());
@@ -386,6 +407,40 @@ mod tests {
         // 幂等：再删一次不报错、报告为空
         let again = clear_login_state("demo").unwrap();
         assert!(again.is_empty());
-        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 回归：只有**存储快照**（没有任何 Cookie）的登录态也必须被清掉。
+    /// 曾经的存在性判断只看整行 Cookie，于是这种文件被留下，书源下次运行照旧读得到旧快照。
+    #[test]
+    fn clear_removes_storage_only_login_state() {
+        use crate::storage::{StorageEntry, StorageOrigin, StorageSnapshot};
+        let (_dir, _serial) = test_root();
+        store::write_login_session(
+            "demo-storage",
+            "https://example.com/login",
+            "",
+            Some(StorageSnapshot {
+                version: 1,
+                updated_at: 0,
+                origins: vec![StorageOrigin {
+                    origin: "https://example.com".to_string(),
+                    url: String::new(),
+                    local_storage: vec![StorageEntry {
+                        key: "token".to_string(),
+                        value: "jwt".to_string(),
+                        truncated: false,
+                    }],
+                    session_storage: Vec::new(),
+                    indexed_db: Vec::new(),
+                }],
+            }),
+        )
+        .unwrap();
+        assert!(store::read_login_session("demo-storage").unwrap().is_some());
+
+        let cleared = clear_login_state("demo-storage").unwrap();
+        assert_eq!(cleared.legacy_cookies, 0);
+        assert_eq!(cleared.removed_files.len(), 1);
+        assert!(store::read_login_session("demo-storage").unwrap().is_none());
     }
 }

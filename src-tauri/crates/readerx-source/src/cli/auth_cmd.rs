@@ -119,6 +119,21 @@ pub fn cmd_auth(cli: &Cli, provider: Option<Arc<dyn AuthProvider>>) -> Result<()
         }
         "show" => {
             let saved = store::read_login_cookie(&source.id)?;
+            let storage = store::read_login_storage(&source.id)?;
+            let storage_entries = storage
+                .as_ref()
+                .map(|snapshot| {
+                    snapshot
+                        .origins
+                        .iter()
+                        .map(|origin| {
+                            origin.local_storage.len()
+                                + origin.session_storage.len()
+                                + origin.indexed_db.len()
+                        })
+                        .sum::<usize>()
+                })
+                .unwrap_or(0);
             let profile_file = profile_path(&source.id);
             let profile_cookies = read_profile_cookies(&profile_file);
             // 与 `call` / `run` 完全同一套身份：先 CLI/身份文件，再已保存登录态。
@@ -132,6 +147,7 @@ pub fn cmd_auth(cli: &Cli, provider: Option<Arc<dyn AuthProvider>>) -> Result<()
                     "source": source.id,
                     "dataDir": store::data_root().display().to_string(),
                     "savedLogin": saved,
+                    "savedStorageEntries": storage_entries,
                     "savedProfile": if profile_file.is_file() {
                         profile_file.display().to_string()
                     } else {
@@ -159,6 +175,9 @@ pub fn cmd_auth(cli: &Cli, provider: Option<Arc<dyn AuthProvider>>) -> Result<()
                         profile_file.display()
                     );
                 }
+                if storage_entries > 0 {
+                    println!("已保存存储快照：{storage_entries} 项（localStorage / sessionStorage / IndexedDB，auth storage 查看）");
+                }
                 if saved.is_none() && !profile_file.is_file() {
                     println!("（用 auth cookie / auth webkit / auth cdp 建立登录态）");
                 }
@@ -171,6 +190,60 @@ pub fn cmd_auth(cli: &Cli, provider: Option<Arc<dyn AuthProvider>>) -> Result<()
                 }
                 for name in session.scoped_cookie_names() {
                     println!("  Cookie {name}");
+                }
+            }
+            Ok(())
+        }
+        "storage" => {
+            let snapshot = store::read_login_storage(&source.id)?;
+            let login_url = store::read_login_session(&source.id)?
+                .map(|state| state.url)
+                .unwrap_or_default();
+            match snapshot {
+                Some(snapshot) => {
+                    if cli.json {
+                        out::print_json(&json!({
+                            "source": source.id,
+                            "loginUrl": login_url,
+                            "storage": snapshot,
+                        }));
+                    } else {
+                        println!("书源：{} [{}]", source.name, source.id);
+                        if !login_url.trim().is_empty() {
+                            println!("登录地址：{login_url}");
+                        }
+                        for origin in &snapshot.origins {
+                            println!("origin {}", origin.origin);
+                            print_entries("  localStorage", &origin.local_storage, cli.reveal_secrets);
+                            print_entries("  sessionStorage", &origin.session_storage, cli.reveal_secrets);
+                            if !origin.indexed_db.is_empty() {
+                                println!("  IndexedDB（只记结构，不含记录内容）：");
+                                for database in &origin.indexed_db {
+                                    println!(
+                                        "    {} (v{}){}",
+                                        database.name,
+                                        database.version,
+                                        if database.stores.is_empty() {
+                                            String::new()
+                                        } else {
+                                            format!(" 对象仓：{}", database.stores.join(", "))
+                                        }
+                                    );
+                                }
+                            }
+                        }
+                        println!("（书源 JS 用 webview.storage() 读同一份快照）");
+                        if !cli.reveal_secrets {
+                            println!("（值只显示前 8 个字符；要看全文加 --reveal）");
+                        }
+                    }
+                }
+                None => {
+                    if cli.json {
+                        out::print_json(&json!({ "source": source.id, "storage": null }));
+                    } else {
+                        println!("该书源没有存储快照（用 auth webkit / auth cdp 登录后会有）");
+                    }
                 }
             }
             Ok(())
@@ -205,8 +278,44 @@ pub fn cmd_auth(cli: &Cli, provider: Option<Arc<dyn AuthProvider>>) -> Result<()
             Ok(())
         }
         other => Err(format!(
-            "未知的 auth 方式 `{other}`（可选 cookie / webkit / cdp / show / clear）"
+            "未知的 auth 方式 `{other}`（可选 cookie / webkit / cdp / show / storage / clear）"
         )),
+    }
+}
+
+/// 打印一组存储键值：默认只给前 8 个字符（token 出现在终端 / CI 日志里是风险）
+fn print_entries(label: &str, entries: &[crate::storage::StorageEntry], reveal: bool) {
+    if entries.is_empty() {
+        return;
+    }
+    println!("{label}（{} 条）：", entries.len());
+    for entry in entries {
+        let value = if reveal {
+            entry.value.clone()
+        } else {
+            preview(&entry.value)
+        };
+        println!(
+            "    {} = {}{}",
+            entry.key,
+            value,
+            if entry.truncated { "…（已截断）" } else { "" }
+        );
+    }
+}
+
+/// 值预览：换行 / 制表符转义，便于一行一条看清
+fn preview(value: &str) -> String {
+    let head: String = value.chars().take(8).collect();
+    let escaped = head
+        .replace('\\', "\\\\")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t");
+    if value.chars().count() > 8 {
+        format!("{escaped}…")
+    } else {
+        escaped
     }
 }
 

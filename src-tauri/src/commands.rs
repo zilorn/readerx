@@ -447,7 +447,8 @@ pub fn readerx_source_login_supported() -> bool {
 }
 
 /// 为某个书源打开网页登录浮层（阻塞直到完成/取消/超时）。
-/// `url` 为登录起始页；成功后 Cookie 已持久化并注入该书源会话。
+/// `url` 为登录起始页；成功后 Cookie 与 localStorage / sessionStorage / IndexedDB 快照
+/// 都已持久化并注入该书源会话。
 #[tauri::command]
 pub async fn readerx_source_login_webview(
     source_id: String,
@@ -470,10 +471,10 @@ pub async fn readerx_source_login_webview(
     .await
 }
 
-/// 清空某个书源已保存的网页登录 Cookie（持久化文件 + 当前会话），返回移除的行数。
+/// 清空某个书源已保存的登录态（Cookie + 存储快照文件 + 当前会话），返回移除的 Cookie 行数。
 #[tauri::command]
 pub async fn readerx_source_login_clear(app: AppHandle, source_id: String) -> Result<u64, String> {
-    blocking("清除登录 Cookie", move || -> Result<u64, String> {
+    blocking("清除登录态", move || -> Result<u64, String> {
         let saved = storage::read_source_login_cookie(&app, &source_id)?;
         storage::remove_source_login_cookie(&app, &source_id)?;
         webview_login::unseed(&source_id);

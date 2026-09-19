@@ -125,6 +125,8 @@
 - `webview.login(url)`（Android 端网页登录，见 [book-source-api.md](./book-source-api.md)）
   会**阻塞等待**用户在登录浮层内完成/取消/超时；期间不占用函数预算计时，
   请只在确实需要登录时调用，避免把整个调用拖住。该书源关闭 `autoAuth` 时返回 `ok:false`。
+- `webview.storage()`：读取登录时采集的 localStorage / sessionStorage / IndexedDB 快照
+  （凭证不用 Cookie 记的站点靠它把 token 显式带进请求）；只读、不触发认证，没有快照时返回空对象。
 - `autoAuth`（默认 `true`，编辑页可单独关闭）：开启时 `http.*` 命中 Cloudflare 挑战会自动拉起
   应用内 WebView 认证并重试（含 `cf_clearance` 过期自动刷新，Android 端），详见
   [cloudflare.md](./cloudflare.md) 与 [book-source-api.md](./book-source-api.md)。

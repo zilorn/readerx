@@ -174,8 +174,8 @@ WebView 完成验证、刷新 Cookie 并重试原请求——搜索/目录/正�
 普通 `http.get` 写法即可。认证后仍 403 时把书源 UA 填成与网页一致的浏览器 UA（见 cloudflare.md）。
 
 **Android 端（推荐）**：在书源编辑页点「网页登录」，应用内弹出 WebView 浮层，
-登录完成后宿主自动捕获该站 Cookie（含 httpOnly）并**持久化到该书源**（重启自动注入），
-之后的搜索/目录/正文请求都会自动带上：
+登录完成后宿主自动捕获该站 Cookie（含 httpOnly）与 localStorage / sessionStorage 快照并
+**持久化到该书源**（重启自动注入），之后的搜索/目录/正文请求都会自动带上 Cookie；
 
 ```js
 async function searchBook(keyword) {
@@ -187,6 +187,16 @@ async function searchBook(keyword) {
   }
   // …
 }
+```
+
+凭证只写在 localStorage 里的站点，用 `webview.storage()` 取出 token 显式带上
+（详见 [book-source-api.md](./book-source-api.md)）：
+
+```js
+const token = webview.storage().localStorage.token;
+const resp = await http.get(BASE + "/api/search?q=" + encodeURIComponent(keyword), {
+  headers: token ? { Authorization: "Bearer " + token } : {},
+});
 ```
 
 没有 Android 环境时仍可退而求其次：

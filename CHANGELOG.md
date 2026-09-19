@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **书源登录支持「不用 Cookie 记登录信息」的站点（localStorage / sessionStorage / IndexedDB）**：
+  一部分站点把登录凭证（JWT、`uid` + `token`）写在 localStorage 里而不是 Cookie 里，此前只抓
+  Cookie 的登录浮层在这些站点上等于没登录。现在点「完成」时（以及自动网页认证刷新时）会**顺带
+  采集存储快照**：Android 应用内浮层用页面探针抓 localStorage / sessionStorage 与 IndexedDB 的
+  库名 / 对象仓清单，CLI 的 `--auth cdp` 走 CDP 原生 `DOMStorage` 逐 origin 读取（localStorage
+  被页面改写也读得到），`--auth webkit` 走同一份探针；快照与 Cookie 一起写进该书源的登录态文件
+  （**不随书源 JSON 导出/分享**，应用重启自动注入），书源代码用新接口 **`webview.storage()`**
+  读取（`{ url, origin, localStorage: {…}, sessionStorage: {…}, indexedDb: […], updatedAt }`，
+  只读、不触发认证，没有快照时返回空对象），把 token 显式放进请求头 / 参数即可。
+  IndexedDB **只记结构不记记录内容**（记录往往是整表业务数据，体积与隐私都不适合放进登录态），
+  每个 origin 每类最多 500 条、单值最多 8192 字符（超出截断）。新增 CLI
+  `auth storage [--reveal]` 查看快照（默认只显示值的前 8 个字符，避免 token 进了终端与 CI 日志），
+  `auth show` 也会提示已保存多少项；书源编辑页的登录提示同时报告 Cookie 与存储条数。
+  登录态文件是增量扩展的（旧文件只有 `url` / `cookie` / `updated_at` 也照常读写，App 与 CLI
+  仍能交替使用同一份数据目录），且「只导入 Cookie」的操作不会抹掉已抓到的存储快照（反之亦然）。
 - **主 Tab 与 WebDAV 导入页改为常驻（保活）页面，切页不再丢状态**：书架 / 发现 / 设置三个主 Tab
   与「WebDAV 导入」页现在由页面栈按 `KEPT_PAGES` 注册表（`src/App.tsx`）直接挂载并常驻 DOM，
   切走只是隐藏、再进入复用同一层 —— 搜索词、结果列表、分组筛选、勾选与滚动位置全部原样保留，

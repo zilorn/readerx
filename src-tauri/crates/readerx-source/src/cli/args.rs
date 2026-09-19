@@ -32,7 +32,7 @@ pub const USAGE: &str = r#"readerx-source —— ReaderX 书源引擎独立运�
   call   <函数> [参数JSON]          调用一个书源入口函数
   run    [关键词]                   端到端跑一遍：搜索 → 目录 → 正文
   test                             冒烟测试：JS 语法 / 入口函数 / 能力开关 / 参数构造
-  auth   <方式>                     浏览器标志与登录态（cookie / webkit / cdp / clear / show）
+  auth   <方式>                     浏览器标志与登录态（cookie / webkit / cdp / show / storage / clear）
   login  <url>                      打开网页登录（等价 auth webkit --url）
 
 全局参数：
@@ -61,7 +61,9 @@ pub const USAGE: &str = r#"readerx-source —— ReaderX 书源引擎独立运�
   webkit   [--url <地址>] [--wait <秒>]      用系统 WebKit 内核打开页面，人工过一次挑战
   cdp      [--url <地址>] [--wait <秒>]      连已有 Chrome（需 --remote-debugging-port）取 Cookie
   show                                        查看当前会真正带上的头与 Cookie
-  clear                                       清空该源登录态（整行 + 作用域文件，并清空会话）
+  storage   [--reveal]                        查看登录时采集的 localStorage / sessionStorage /
+                                             IndexedDB 快照（默认只显示值的前几个字符）
+  clear                                       清空该源登录态（Cookie + 存储快照，并清空会话）
 
 示例：
   readerx-source sources
@@ -116,6 +118,9 @@ pub struct Cli {
     pub wait_secs: u64,
     pub url: Option<String>,
     pub clear_cookies: bool,
+    /// `auth storage --reveal`：打印存储快照的完整值（默认只显示前几个字符，
+    /// 登录 token 出现在终端 / CI 日志里是要避免的）
+    pub reveal_secrets: bool,
     pub batch: Option<PathBuf>,
 }
 
@@ -140,6 +145,7 @@ impl Default for Cli {
             wait_secs: 300,
             url: None,
             clear_cookies: false,
+            reveal_secrets: false,
             batch: None,
         }
     }
@@ -235,6 +241,7 @@ impl Cli {
                 "--json" => cli.json = true,
                 "--verbose" | "-v" => cli.verbose = true,
                 "--clear-cookies" => cli.clear_cookies = true,
+                "--reveal" => cli.reveal_secrets = true,
                 // App 在「测试」面板调用本二进制时会带上自己的 API 地址；独立运行忽略
                 "--app" | "--endpoint" => {
                     let _ = take_value(flag);

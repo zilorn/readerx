@@ -28,7 +28,11 @@ import {
   isSourceLoginSupported,
   loginSourceWebview,
 } from "../lib/backend";
-import { type BookSource, type BookSourceCapabilities } from "../lib/bookSourcesTypes";
+import {
+  type BookSource,
+  type BookSourceCapabilities,
+  storageEntryCount,
+} from "../lib/bookSourcesTypes";
 import { showToast } from "../lib/toast";
 
 /** 编辑页内的三块内容（常驻 Tab；不是路由） */
@@ -234,14 +238,18 @@ export default function SourceEditorPage() {
     const r = await loginSourceWebview(draft().id, url);
     setLoginBusy(false);
     if (r.ok) {
-      // 登录成功但后端带了提示（如 Cookie 持久化失败）时按警告展示
+      // 登录成功但后端带了提示（如登录态持久化失败）时按警告展示
       if (r.message) {
         showToast(r.message, true);
       } else {
+        const stored = storageEntryCount(r.storage);
+        const parts: string[] = [];
+        if (r.count > 0) parts.push(`${r.count} 个 Cookie`);
+        if (stored > 0) parts.push(`${stored} 项存储`);
         showToast(
-          r.count > 0
-            ? `已捕获 ${r.count} 个 Cookie 并保存到该书源`
-            : "登录完成，但没有捕获到 Cookie",
+          parts.length > 0
+            ? `已捕获 ${parts.join(" 与 ")} 并保存到该书源`
+            : "登录完成，但没有捕获到登录信息",
         );
       }
     } else if (r.message.includes("取消") || r.message.includes("超时") || r.message.includes("关闭")) {
@@ -253,7 +261,7 @@ export default function SourceEditorPage() {
 
   async function onClearLogin() {
     const removed = await clearSourceLogin(draft().id);
-    showToast(removed > 0 ? "已清空登录 Cookie" : "没有保存的登录 Cookie");
+    showToast(removed > 0 ? "已清空登录态" : "没有保存的登录态");
   }
 
   return (

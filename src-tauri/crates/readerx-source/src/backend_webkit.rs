@@ -1,5 +1,6 @@
 //! WebKitGTK 认证后端：在**真实浏览器内核**里打开页面，人工完成登录 / Cloudflare 挑战，
-//! 然后把该站点的 Cookie（含 httpOnly 的 `cf_clearance`、`__cf_bm`）抓回书源会话。
+//! 然后把该站点的 Cookie（含 httpOnly 的 `cf_clearance`、`__cf_bm`）与**非 Cookie 登录
+//! 信息**（localStorage / sessionStorage / IndexedDB）抓回书源会话。
 //!
 //! 为什么需要它：`cf_clearance` 与 **IP + UA + TLS 指纹**绑定，靠纯 HTTP 客户端拿不到；
 //! 而 WebKitGTK 就是 Linux 上 Tauri 用的同一套内核，验证一次即可在 CLI 里反复离线调试
@@ -11,12 +12,15 @@
 
 use crate::auth::LoginOutcome;
 use crate::host::ScopedCookie;
+use crate::storage::{self, StorageSnapshot};
 use gtk::glib::ControlFlow;
 use gtk::prelude::*;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
-use webkit2gtk::{CookieManagerExt, SettingsExt, WebContext, WebContextExt, WebView, WebViewExt};
+use webkit2gtk::{
+    CookieManagerExt, SettingsExt, WebContext, WebContextExt, WebView, WebViewExt,
+};
 
 /// 当前环境是否有可用的显示（X11 / Wayland）。
 ///
@@ -88,29 +92,64 @@ pub fn authenticate(
     window.add(&container);
     window.show_all();
 
-    // 共用的「收尾」：读当前地址 → 抓 Cookie → 写结果槽 → 退出主循环
+    // 共用的「收尾」：读当前地址 → 抓 Cookie 与存储 → 写结果槽 → 退出主循环
+    //
+    // 存储只能异步取（`evaluate_javascript` 是回调式），所以这里分两步：先把同步的 Cookie
+    // 收好，再等探针；探针拿不到（超时 / 被页面策略挡住）也照常以只有 Cookie 的登录态收尾。
     let collect = {
         let view = view.clone();
         let url = url.clone();
         let result = result.clone();
         let finished = finished.clone();
         move || {
-            if *finished.borrow() {
-                return;
+            // 用独立的槽装 outcome：FnMut 闭包可能被调用多次，值不能被 move 进去
+            let outcome: Rc<RefCell<Option<LoginOutcome>>> = Rc::new(RefCell::new(None));
+            {
+                if *finished.borrow() {
+                    return;
+                }
+                *finished.borrow_mut() = true;
+                let final_url = view
+                    .uri()
+                    .map(|u| u.to_string())
+                    .unwrap_or_else(|| url.clone());
+                match collect_cookies(&view, &final_url) {
+                    Ok(list) => {
+                        let mut login =
+                            LoginOutcome::success(&final_url, cookie_header(&list), list.len());
+                        login.url = final_url.clone();
+                        *outcome.borrow_mut() = Some(login);
+                    }
+                    Err(err) => {
+                        *result.borrow_mut() = Some(Err(err));
+                        gtk::main_quit();
+                        return;
+                    }
+                }
             }
-            *finished.borrow_mut() = true;
-            let final_url = view
-                .uri()
-                .map(|u| u.to_string())
-                .unwrap_or_else(|| url.clone());
-            let collected = collect_cookies(&view, &final_url).map(|list| {
-                let mut outcome =
-                    LoginOutcome::success(&final_url, cookie_header(&list), list.len());
-                outcome.url = final_url.clone();
-                outcome
+
+            let slot: Rc<RefCell<Option<StorageSnapshot>>> = Rc::new(RefCell::new(None));
+            collect_storage(&view, &url, slot.clone());
+
+            let deadline = Instant::now() + Duration::from_secs(4);
+            let done = result.clone();
+            let outcome_slot = outcome.clone();
+            gtk::glib::timeout_add_local(Duration::from_millis(150), move || {
+                if let Some(snapshot) = slot.borrow_mut().take() {
+                    if let Some(login) = outcome_slot.borrow_mut().as_mut() {
+                        login.storage = Some(snapshot);
+                    }
+                } else if Instant::now() < deadline {
+                    // 探针（IndexedDB 异步枚举）还没回来，继续等
+                    return ControlFlow::Continue;
+                }
+                // 到这里无论有没有快照都要收尾：快照只是登录态的一部分，不能拖住用户
+                if let Some(login) = outcome_slot.borrow_mut().take() {
+                    *done.borrow_mut() = Some(Ok(login));
+                }
+                gtk::main_quit();
+                ControlFlow::Break
             });
-            *result.borrow_mut() = Some(collected);
-            gtk::main_quit();
         }
     };
 
@@ -145,6 +184,68 @@ pub fn authenticate(
     gtk::main();
     let outcome = result.borrow_mut().take();
     outcome.unwrap_or_else(|| Ok(LoginOutcome::failure(url, "认证窗口已关闭，且没有取到 Cookie")))
+}
+
+/// 采集页面里的非 Cookie 登录信息（localStorage / sessionStorage / IndexedDB）。
+///
+/// 只能读**当前页面 origin** 的存储，且 WebKitGTK 侧的 Web Storage 没有可用的宿主 API
+/// （键值不在 `WebKitWebsiteDataManager` 里），所以统一走页面内的 JS 探针；探针异步
+/// （IndexedDB 枚举），这里起一个轮询把它取回塞进 `slot`，调用方负责超时收尾。
+fn collect_storage(view: &WebView, url: &str, slot: Rc<RefCell<Option<StorageSnapshot>>>) {
+    let origin = storage::origin_of(url).unwrap_or_default();
+    let extra: Vec<String> = if origin.is_empty() {
+        Vec::new()
+    } else {
+        vec![origin]
+    };
+    let script = storage::probe_script(&extra);
+    let world = format!("readerx_storage_{}", now_millis());
+    view.evaluate_javascript(
+        &script,
+        Some(&world),
+        None,
+        gtk::gio::Cancellable::NONE,
+        |_| {},
+    );
+
+    // 轮询结果：不依赖探针的返回值（它是异步的），只看窗口上的完成标记。
+    // 调用方另有硬超时，这里只负责「拿到就写、拿不到就算了」。
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let probe = view.clone();
+    gtk::glib::timeout_add_local(Duration::from_millis(150), move || {
+        if slot.borrow().is_some() {
+            return ControlFlow::Break;
+        }
+        if Instant::now() >= deadline {
+            return ControlFlow::Break;
+        }
+        let inner = slot.clone();
+        probe.evaluate_javascript(
+            storage::JS_PROBE_READ,
+            Some(&world),
+            None,
+            gtk::gio::Cancellable::NONE,
+            move |result| {
+                let text = result
+                    .ok()
+                    .map(|value| value.to_string().to_string())
+                    .unwrap_or_default();
+                if let Ok(snapshot) = storage::parse_probe_eval(&text) {
+                    if !snapshot.is_empty() {
+                        *inner.borrow_mut() = Some(snapshot);
+                    }
+                }
+            },
+        );
+        ControlFlow::Continue
+    });
+}
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// 取该站点（含父域）在 WebKit 会话里的 Cookie

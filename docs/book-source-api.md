@@ -69,17 +69,19 @@
 ## `webview`（网页登录，仅 Android）
 
 在 **Android** 应用内弹出原生 WebView 登录浮层（顶部有「取消 / 完成」）。
-点「完成」后宿主收集当前站点的 Cookie（**含 httpOnly**），自动完成两件事：
+点「完成」后宿主收集两类登录信息，自动完成两件事：
 
-1. 写入该书源的 HTTP 会话（等价于 `http.setCookie`，之后每次请求自动携带）；
+1. **Cookie**（含 httpOnly）与 **非 Cookie 存储**（localStorage / sessionStorage / IndexedDB 快照）
+   一起写入该书源的 HTTP 会话与登录态文件；
 2. 持久化到该书源独立文件（应用重启后自动注入，**不会**随书源 JSON 导出/分享）。
 
 | 成员 | 说明 |
 | --- | --- |
 | `webview.isSupported()` | 当前平台/环境是否支持网页登录（Android 为 true） |
 | `webview.login(url, opts?)` | 打开 `url` 登录页并**阻塞等待**用户操作，返回结果对象 |
+| `webview.storage()` | 读取登录时采集到的存储快照（只读，不触发认证） |
 
-返回对象：
+返回对象（`login`）：
 
 ```js
 {
@@ -87,13 +89,32 @@
   url: "https://…",       // 点完成时停留的地址
   cookies: "sid=…; token=…", // Cookie 文本（含 httpOnly）；ok 时已自动注入并持久化
   count: 2,               // Cookie 条数
-  message: ""             // 取消/失败原因，如「已取消登录」
+  message: "",            // 取消/失败原因，如「已取消登录」
+  storage: { … }          // 见下（没有采集到时该字段不出现）
 }
 ```
 
 `ok:true` 时**无需**再手动 `http.setCookie(...)`——宿主在返回前已处理。
 
-典型用法（发现接口提示未登录时自动拉起登录后重试）：
+### `webview.storage()`：不用 Cookie 记登录信息的站点
+
+一部分站点把凭证（JWT、`uid` + `token`）写在 **localStorage / sessionStorage** 里而不是 Cookie 里，
+纯 `http.*` 请求（`reqwest`，不跑 JS）看不到这些值 —— 这就是 `webview.storage()` 的用途。
+
+```js
+{
+  ok: true,
+  url: "https://example.com/home",   // 采集时停留的地址
+  origin: "https://example.com",     // 主 origin
+  localStorage: { token: "eyJ…", theme: "dark" },  // 键值对象
+  sessionStorage: { sid: "…" },
+  indexedDb: [ { origin: "https://example.com", name: "app", version: 3, stores: ["kv"] } ],
+  updatedAt: 1730000000000,          // 采集时间（Unix 毫秒）
+  origins: [ … ]                     // 仅当登录链路跨了多个 origin 时出现
+}
+```
+
+典型用法（登录后把 token 显式放进请求）：
 
 ```js
 async function searchBook(keyword) {
@@ -102,6 +123,13 @@ async function searchBook(keyword) {
     const login = await webview.login(BASE + "/user/login");
     if (!login.ok) throw new Error("该站需要登录：" + login.message);
     resp = await http.get(BASE + "/search", { headers: { Referer: BASE } });
+  }
+  // token 只存在 localStorage 的站点：取出来自己带上
+  const store = webview.storage();
+  if (store.localStorage.token) {
+    resp = await http.get(BASE + "/api/search?q=" + encodeURIComponent(keyword), {
+      headers: { Authorization: "Bearer " + store.localStorage.token },
+    });
   }
   // …解析 resp
 }
@@ -117,6 +145,15 @@ async function searchBook(keyword) {
   （message 说明被该书源设置禁用），规则内请自行降级；编辑页手动「网页登录」不受影响。
 - 桌面 / iOS / 纯浏览器预览：`isSupported()` 为 false，`login` 直接返回 `ok:false`
   （message 提示当前平台不支持），**不会抛错**，书源代码可自行降级。
+- **只读、不触发认证**：没有快照时返回 `ok:true` 与空对象（`localStorage` 为空对象），
+  规则里不必先判 `null`；关闭「自动网页认证」也不影响读取已保存的快照。
+- 快照在**登录时**采集（点「完成」的瞬间），之后不会自动刷新；重新登录即覆盖。
+- 只覆盖**页面 origin**：localStorage / sessionStorage 受同源策略限制，登录链路跨域时只有
+  最后停留的那个 origin 能读到，其余 origin 会出现在 `origins` 里但没有键值。
+- `indexedDb` **只记库名 / 版本 / 对象仓清单，不含记录内容**（记录往往是整表业务数据，
+  体积与隐私都不适合放进登录态文件）。
+- 快照不随书源 JSON 导出/分享；清空登录态（编辑页「清除登录」/ CLI `auth clear`）会一并删掉。
+- 单 origin 最多 500 条 / 类、单值最多 8192 字符（超出截断并由 `truncated` 标记）。
 
 ## `html`（CSS 选择器 + 正文清洗）
 
@@ -296,6 +333,9 @@ if (cryptoUtil.hexEncode(raw2) !== cryptoUtil.hexEncode(base64.decode(raw))) thr
 标准 ES（String/Array/Map/Set/RegExp/JSON/Date/Promise/async-await 等）齐全；
 `encodeURIComponent`/`decodeURIComponent` 可用。**没有**浏览器对象：
 无 `fetch`/`XMLHttpRequest`/`DOMParser`/`location`/`window`/`localStorage`，无定时器。
+
+站点把登录凭证写在 localStorage 里的情况见上面的 `webview.storage()`：引擎自身读不到浏览器存储，
+但登录时采集的快照由宿主交给书源 JS 用（`http.*` 不会自动带上这些值，需要显式放进请求）。
 
 ## 错误与超时
 

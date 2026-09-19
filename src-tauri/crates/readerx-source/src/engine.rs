@@ -238,6 +238,14 @@ fn nv_webview_login(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
     ret_string(out)
 }
 
+/// 登录时采集到的存储快照（localStorage / sessionStorage / IndexedDB）。
+/// 只读、不触发任何认证：没有快照时返回空视图，规则里不必判 null。
+fn nv_webview_storage(_: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
+    let out = with_call(|c| host::webview_storage(&c.source_id))
+        .unwrap_or_else(|| "{}".to_string());
+    ret_string(out)
+}
+
 fn nv_html_query_all(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let html = args.first().map(|a| arg_string(a, context)).unwrap_or_default();
     let sel = args.get(1).map(|a| arg_string(a, context)).unwrap_or_default();
@@ -387,6 +395,7 @@ fn native_registry() -> Vec<(&'static str, usize, NativeFunction)> {
         ("__httpClearCookies", 0, NativeFunction::from_fn_ptr(nv_http_clear_cookies)),
         ("__webviewLogin", 2, NativeFunction::from_fn_ptr(nv_webview_login)),
         ("__webviewLoginSupported", 0, NativeFunction::from_fn_ptr(nv_webview_login_supported)),
+        ("__webviewStorage", 0, NativeFunction::from_fn_ptr(nv_webview_storage)),
         ("__htmlQueryAll", 2, NativeFunction::from_fn_ptr(nv_html_query_all)),
         ("__htmlToText", 2, NativeFunction::from_fn_ptr(nv_html_to_text)),
         ("__sleep", 1, NativeFunction::from_fn_ptr(nv_sleep)),
@@ -453,7 +462,9 @@ const PROLOGUE: &str = r#"
     isSupported() { return __webviewLoginSupported() === "1"; },
     login(url, opts) {
       return __rxUnwrap(__webviewLogin(String(url), JSON.stringify(opts || null)));
-    }
+    },
+    // 登录时采集到的 localStorage / sessionStorage / IndexedDB 快照（只读）
+    storage() { return __rxUnwrap(__webviewStorage()); }
   };
   globalThis.html = {
     queryAll(html, selector) { return __rxUnwrap(__htmlQueryAll(String(html), String(selector))); },
@@ -964,6 +975,92 @@ mod tests {
         assert!(result.ok, "{:?}", result.error);
         let value = result.value.unwrap_or(Value::Null);
         assert_eq!(value["md5"], json!("44a24962f6b0e616c0ed0fdf91b943cd"));
+    }
+
+    /// `webview.storage()`：登录时采集的 localStorage / sessionStorage / IndexedDB 快照
+    /// 必须在书源沙箱里读得到（不用 Cookie 记登录信息的站点全靠它），且没有快照时给空视图。
+    #[test]
+    fn webview_storage_exposes_login_snapshot() {
+        use crate::storage::{StorageDatabase, StorageEntry, StorageOrigin, StorageSnapshot};
+        let source = crate::models::BookSource {
+            schema_version: 1,
+            id: "storage-source".to_string(),
+            name: "存储快照".to_string(),
+            book_source_url: "https://example.com".to_string(),
+            author: String::new(),
+            version: String::new(),
+            comment: String::new(),
+            enabled: true,
+            capabilities: Default::default(),
+            auto_auth: true,
+            group_id: None,
+            user_agent: String::new(),
+            headers: Default::default(),
+            update_time: 0,
+            js: String::new(),
+        };
+        crate::host::prepare_source(&source).unwrap();
+        crate::host::set_storage_snapshot(
+            "storage-source",
+            StorageSnapshot {
+                version: 1,
+                updated_at: 42,
+                origins: vec![StorageOrigin {
+                    origin: "https://example.com".to_string(),
+                    url: "https://example.com/home".to_string(),
+                    local_storage: vec![StorageEntry {
+                        key: "token".to_string(),
+                        value: "jwt-1".to_string(),
+                        truncated: false,
+                    }],
+                    session_storage: vec![StorageEntry {
+                        key: "sid".to_string(),
+                        value: "s-1".to_string(),
+                        truncated: false,
+                    }],
+                    indexed_db: vec![StorageDatabase {
+                        name: "app".to_string(),
+                        version: 2,
+                        stores: vec!["kv".to_string()],
+                    }],
+                }],
+            },
+            "https://example.com/login",
+        );
+
+        let js = r#"
+        function searchBook() {
+          const s = webview.storage();
+          if (!s.ok) throw new Error("storage.ok 应为 true");
+          if (s.localStorage.token !== "jwt-1") throw new Error("localStorage.token=" + s.localStorage.token);
+          if (s.sessionStorage.sid !== "s-1") throw new Error("sessionStorage.sid=" + s.sessionStorage.sid);
+          if (s.origin !== "https://example.com") throw new Error("origin=" + s.origin);
+          if (!s.indexedDb.length || s.indexedDb[0].name !== "app") throw new Error("indexedDb 缺失");
+          return { token: s.localStorage.token, updatedAt: s.updatedAt, db: s.indexedDb[0].stores.length };
+        }
+        "#;
+        let result = call_source_function("storage-source", js, "searchBook", &json!([]), 5_000)
+            .expect("命令层不应返回 Err");
+        assert!(result.ok, "{:?}", result.error);
+        let value = result.value.unwrap_or(Value::Null);
+        assert_eq!(value["token"], json!("jwt-1"));
+        assert_eq!(value["updatedAt"], json!(42));
+        assert_eq!(value["db"], json!(1));
+
+        // 没有任何快照的书源：返回空视图而不是抛错（规则里不必判 null）
+        let empty = r#"
+        function searchBook() {
+          const s = webview.storage();
+          return { ok: s.ok, keys: Object.keys(s.localStorage).length, dbs: s.indexedDb.length };
+        }
+        "#;
+        let result = call_source_function("no-storage-source", empty, "searchBook", &json!([]), 5_000)
+            .expect("命令层不应返回 Err");
+        assert!(result.ok, "{:?}", result.error);
+        let value = result.value.unwrap_or(Value::Null);
+        assert_eq!(value["ok"], json!(true));
+        assert_eq!(value["keys"], json!(0));
+        assert_eq!(value["dbs"], json!(0));
     }
 
     /// 二进制字符串（1 字符 = 1 字节，含 0x80–0xff 与非法 UTF-8 序列）在**真实 JS 调用链**上

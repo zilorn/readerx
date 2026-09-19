@@ -139,6 +139,36 @@ export interface SourceLoginResult {
   count: number;
   /** 可读消息（取消 / 平台不支持 / 错误原因） */
   message: string;
+  /**
+   * 登录时顺带采集到的非 Cookie 登录信息（localStorage / sessionStorage / IndexedDB）。
+   * 站点把凭证写在 localStorage 而不是 Cookie 里时靠它；书源 JS 用 `webview.storage()` 读。
+   */
+  storage?: SourceLoginStorage;
+}
+
+/** 存储快照（与 Rust `readerx_source::storage::StorageSnapshot` 同构） */
+export interface SourceLoginStorage {
+  version: number;
+  /** 采集时间（Unix 毫秒） */
+  updatedAt: number;
+  origins: Array<{
+    origin: string;
+    url: string;
+    localStorage: Array<{ key: string; value: string; truncated?: boolean }>;
+    sessionStorage: Array<{ key: string; value: string; truncated?: boolean }>;
+    /** 只记结构（库名 / 版本 / 对象仓），不含记录内容 */
+    indexedDb: Array<{ name: string; version: number; stores: string[] }>;
+  }>;
+}
+
+/** 存储快照里的条目总数（登录结果提示用） */
+export function storageEntryCount(storage?: SourceLoginStorage): number {
+  if (!storage) return 0;
+  return storage.origins.reduce(
+    (total, origin) =>
+      total + origin.localStorage.length + origin.sessionStorage.length + origin.indexedDb.length,
+    0,
+  );
 }
 
 export interface SourceCallMeta {
