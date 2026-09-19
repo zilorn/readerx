@@ -687,6 +687,10 @@ type ParagraphImage = ReaderInlineImage & { w?: number; h?: number };
  * `cstart` 为片段文本在单元原文中的起始偏移（书签/朗读标记用单元内绝对偏移）。
  * 片段序列按文本与图片引用缓存：朗读高亮、选区变化只重渲染文字片段，
  * 图片节点保持不动（不会因为每句高亮而重新解码）。
+ *
+ * 文字片段必须写成 JSX 表达式（`<>{renderMarkedText(...)}</>`）而不是直接调用后返回：
+ * 直接调用时 text 的动态子节点归 `<For>` 的回调（只跑一次）所有，之后 marks 再变也
+ * 不会重渲染，书签/朗读高亮/搜索命中就永远停在第一次渲染的那一段上。
  */
 function ParagraphContent(props: {
   text: string;
@@ -702,7 +706,7 @@ function ParagraphContent(props: {
     <For each={pieces()}>
       {(piece) =>
         piece.kind === "text" ? (
-          renderMarkedText(piece.text, props.cstart + piece.at, props.unit, props.marks)
+          <>{renderMarkedText(piece.text, props.cstart + piece.at, props.unit, props.marks)}</>
         ) : (
           <InlineImageBlock
             src={piece.img.src}
