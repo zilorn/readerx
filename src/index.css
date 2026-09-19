@@ -254,12 +254,16 @@
    ============================================================ */
 :root {
   --app-column: 480px;
+  /* 桌面外壳侧边栏当前占位宽度：0=该页面不显示侧边栏 / 64px=收起成图标栏 /
+     236px=展开。由 DesktopStage 实时写入（非桌面外壳下用不到）。 */
+  --sidebar-w: 0px;
 }
 
-/* 桌面外壳下浮层按内容区宽度居中（侧边栏 236px 不含在内） */
+/* 桌面外壳下浮层按内容区宽度居中（侧边栏占位由 --sidebar-w 给出，随显示与收展变化） */
 @media (min-width: 900px) {
   :root {
-    --app-column: min(720px, calc(100vw - 236px - 48px));
+    --sidebar-w: 236px;
+    --app-column: min(720px, calc(100vw - var(--sidebar-w) - 48px));
   }
 }
 

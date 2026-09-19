@@ -544,3 +544,25 @@ export function PackageIcon(p: SvgIconProps) {
     </Icon>
   );
 }
+
+/** 收起侧边栏（分栏面板 + 左向箭头） */
+export function SidebarCollapseIcon(p: SvgIconProps) {
+  return (
+    <Icon {...p}>
+      <rect x="3" y="3" width="18" height="18" rx="2" />
+      <path d="M9 3v18" />
+      <path d="m16 15-3-3 3-3" />
+    </Icon>
+  );
+}
+
+/** 展开侧边栏（分栏面板 + 右向箭头） */
+export function SidebarExpandIcon(p: SvgIconProps) {
+  return (
+    <Icon {...p}>
+      <rect x="3" y="3" width="18" height="18" rx="2" />
+      <path d="M9 3v18" />
+      <path d="m14 9 3 3-3 3" />
+    </Icon>
+  );
+}

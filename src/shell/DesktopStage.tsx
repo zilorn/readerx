@@ -3,8 +3,13 @@
  *
  * 与手机外壳（[`MobileStage`](./MobileStage.tsx)）共用同一批页面组件与同一份路由口径
  * （[`./routes`](./routes.ts)），差别只在「导航怎么摆、页面怎么切换」：
- * - 手机端是底部 Tab + 页面栈滑动动画；桌面端是常驻侧边栏 + 内容区，**没有转场动画**
+ * - 手机端是底部 Tab + 页面栈滑动动画；桌面端是侧边栏 + 内容区，**没有转场动画**
  *   （桌面窗口里横向滑入滑出不像原生行为），页面切换就是内容区整块替换；
+ * - **侧边栏只在主 Tab（书架 / 发现 / 设置）显示**：其余页面（阅读页、书源管理、二级页等）
+ *   整条侧边栏不显示，内容区铺满窗口 —— 与手机端「次级页不显示底部 Tab」是同一套口径；
+ * - 主 Tab 里侧边栏还能**手动收起**成一条图标栏（标题行右端的按钮切换，形态由
+ *   `store` 的 `readerx.sidebarCollapsed` 记住），展开 / 收起宽度都会写进 CSS 变量
+ *   `--sidebar-w`，让挂在 `body` 上的浮层继续按内容区居中（见 `index.css` 的 `--app-column`）；
  * - 主 Tab 与「WebDAV 导入」等**保活页面**同样常驻 DOM，切走只是 `display:none`，
  *   页内搜索词 / 列表 / 滚动位置原样保留（与手机端一致）；
  * - 次级页面按路由推入 / 弹出，离场即卸载 —— 桌面端没有「返回栈动画」，
@@ -21,12 +26,15 @@ import {
   on,
   onCleanup,
   onMount,
+  Show,
   type Component,
   type JSX,
 } from "solid-js";
 import { A, useLocation, useNavigate } from "@solidjs/router";
 import { PageBody } from "../components/PageBody";
+import { SidebarCollapseIcon, SidebarExpandIcon } from "../components/icons";
 import { registerAppScrollEl } from "../lib/appScroll";
+import { isSidebarCollapsed, setSidebarCollapsed } from "../lib/store";
 import { isFullHeightPath, isTabRoute, TAB_ROUTES } from "./routes";
 import { tabIcon } from "./tabIcons";
 
@@ -48,11 +56,32 @@ interface Pane {
 /** 阅读页在宽窗口下的单列限宽（与手机端 480px 一致的阅读节奏，只是两侧各多留白） */
 const READER_WIDTH = 680;
 
+/** 侧边栏展开宽度（与 `index.css` 里 `--sidebar-w` 的桌面默认值一致） */
+const SIDEBAR_WIDTH = 236;
+/** 侧边栏收起后的图标栏宽度 */
+const SIDEBAR_RAIL_WIDTH = 64;
+
 export function DesktopStage(props: DesktopStageProps) {
   const location = useLocation();
   const navigate = useNavigate();
   const path = createMemo(() => location.pathname);
   const isReader = createMemo(() => path().startsWith("/book/"));
+
+  /**
+   * 侧边栏只属于主 Tab：离开书架 / 发现 / 设置后整条不显示（阅读页要的是整屏正文，
+   * 二级页有自己的返回键），回到主 Tab 再按用户记住的形态显示。
+   */
+  const sidebarShown = createMemo(() => isTabRoute(path()));
+  const sidebarWidth = createMemo(() =>
+    !sidebarShown() ? 0 : isSidebarCollapsed() ? SIDEBAR_RAIL_WIDTH : SIDEBAR_WIDTH,
+  );
+
+  // 侧边栏当前占位宽度广播给 CSS：挂在 body 上的抽屉 / 弹层按内容区居中
+  // （`--app-column`），不跟着侧边栏的显示与收展走就会偏心
+  createEffect(() => {
+    document.documentElement.style.setProperty("--sidebar-w", `${sidebarWidth()}px`);
+  });
+  onCleanup(() => document.documentElement.style.removeProperty("--sidebar-w"));
 
   let paneSeq = 0;
   const initialPath = location.pathname;
@@ -171,7 +200,9 @@ export function DesktopStage(props: DesktopStageProps) {
 
   return (
     <div class="relative flex min-h-0 flex-1 overflow-hidden">
-      <SideNav />
+      <Show when={sidebarShown()}>
+        <SideNav collapsed={isSidebarCollapsed()} />
+      </Show>
       <div
         ref={stageEl}
         class="relative min-h-0 min-w-0 flex-1 overflow-hidden"
@@ -204,36 +235,73 @@ export function DesktopStage(props: DesktopStageProps) {
   );
 }
 
+interface SideNavProps {
+  /** 收起为图标栏（只留三个主 Tab 的图标，标题行最右端的按钮切换） */
+  collapsed: boolean;
+}
+
 /** 左侧导航：品牌 + 主 Tab（桌面端没有底部 Tab，主 Tab 只在这里） */
-function SideNav() {
+function SideNav(props: SideNavProps) {
   const location = useLocation();
   const isActive = (target: string) => location.pathname === target;
 
   return (
-    <nav class="flex w-[236px] flex-none flex-col gap-1 border-r border-border bg-surface px-3 py-4">
-      <div class="mb-3 flex items-center gap-2.5 px-2">
-        <BrandMark />
-        <span class="flex min-w-0 flex-col leading-tight">
-          <span class="text-[15px] font-bold tracking-[0.01em]">ReaderX</span>
-          <span class="text-[10.5px] text-text-3">本地书管理</span>
-        </span>
+    <nav
+      class="flex flex-none flex-col gap-1 overflow-hidden border-r border-border bg-surface px-3 py-4 transition-[width] duration-200"
+      classList={{ "w-[236px]": !props.collapsed, "w-[64px]": props.collapsed }}
+    >
+      {/* 标题行：品牌靠左，收起 / 展开按钮贴在这一行的**最右**（展开与收起两种形态下
+          都在侧边栏右上角，位置不跳） */}
+      <div
+        class="mb-3 flex items-center gap-2.5"
+        classList={{ "pl-2": !props.collapsed, "justify-end": props.collapsed }}
+      >
+        <Show when={!props.collapsed}>
+          <span class="flex min-w-0 flex-1 items-center gap-2.5">
+            <BrandMark />
+            <span class="flex min-w-0 flex-col leading-tight">
+              <span class="text-[15px] font-bold tracking-[0.01em]">ReaderX</span>
+              <span class="text-[10.5px] text-text-3">本地书管理</span>
+            </span>
+          </span>
+        </Show>
+        <SidebarToggle collapsed={props.collapsed} />
       </div>
       <For each={TAB_ROUTES}>
         {(item) => (
           <A
             href={item.path}
+            title={props.collapsed ? item.label : undefined}
+            aria-label={props.collapsed ? item.label : undefined}
             class="flex items-center gap-3 rounded-[10px] px-2.5 py-2 text-[13.5px] font-medium transition-colors duration-150"
             classList={{
+              "justify-center px-0": props.collapsed,
               "bg-accent-weak text-accent": isActive(item.path),
               "text-text-2 hover:bg-surface-2 hover:text-text": !isActive(item.path),
             }}
           >
             {tabIcon(item.path, 18)}
-            {item.label}
+            <Show when={!props.collapsed}>{item.label}</Show>
           </A>
         )}
       </For>
     </nav>
+  );
+}
+
+/** 收起 / 展开侧边栏：常驻标题行最右端（收起后同样在右上角，位置不跳） */
+function SidebarToggle(props: SideNavProps) {
+  const label = () => (props.collapsed ? "展开侧边栏" : "收起侧边栏");
+  return (
+    <button
+      type="button"
+      class="grid h-7 w-7 flex-none place-items-center rounded-lg text-text-3 transition-[background-color,color,scale] duration-150 hover:bg-surface-2 hover:text-text active:scale-[0.94]"
+      aria-label={label()}
+      title={label()}
+      onClick={() => setSidebarCollapsed(!props.collapsed)}
+    >
+      {props.collapsed ? <SidebarExpandIcon size={17} /> : <SidebarCollapseIcon size={17} />}
+    </button>
   );
 }
 

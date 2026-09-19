@@ -13,7 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   （不动手感），窗口宽度 ≥900px 时换成**侧边导航 + 内容区**的桌面外壳（`src/shell/DesktopStage.tsx`；
   窄窗口自动回到手机外壳，见 `src/lib/platform.ts` 的断点）。页面组件、路由、本地书库、保活页面
   注册表两端**共用一份**，没有为桌面复制页面；切换页面在桌面端不做横向滑动动画，直接换内容区。
-  挂在 `body` 上的底部抽屉 / 操作条改用 `--app-column` 变量，桌面端不会横跨整个窗口。
+  **侧边栏只在三个主 Tab（书架 / 发现 / 设置）显示** —— 阅读页、书源管理、书籍详情等其余页面
+  整条不显示、内容区铺满（与手机端「次级页不显示底部 Tab」同一套口径）；主 Tab 里还能用标题行
+  右端的按钮把侧边栏**收起成图标栏**（再点展开，形态由 `readerx.sidebarCollapsed` 记住），
+  侧边栏的实际占位写进 `--sidebar-w`。
+  挂在 `body` 上的底部抽屉 / 操作条改用 `--app-column` 变量（跟随侧边栏的显示与收展），
+  桌面端不会横跨整个窗口。
   桌面端另有三项系统集成：窗口默认 1180×820、最小 420×560 并居中（`tauri.conf.json`）、
   **原生文件选择器导入本地书**（Rust 侧 `readerx_pick_book_file` 读成字节后复用既有的
   TXT / EPUB / PDF 解析与「同名书重新导入」交互，手机端不受影响）、**Esc 返回上级页面**。

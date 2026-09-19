@@ -26,6 +26,7 @@ const SOURCE_PARALLEL_KEY = "readerx.onlineConcurrency";
 const SHELF_SOURCE_FILTER_KEY = "readerx.shelfSourceFilter";
 const SHELF_FILTER_KEY = "readerx.shelfFilter";
 const SOURCE_GROUP_FILTER_KEY = "readerx.sourceGroupFilter";
+const SIDEBAR_COLLAPSED_KEY = "readerx.sidebarCollapsed";
 
 export const FONT_MIN = 15;
 export const FONT_MAX = 28;
@@ -65,21 +66,35 @@ let initialized = false;
 export async function initReaderState(): Promise<void> {
   if (initialized) return;
   initialized = true;
-  const [storedTheme, storedShelf, storedFont, storedSpacing, storedPageMode, storedStatusBar, storedScope, storedSourceParallel, storedShelfSourceFilter, storedMenuSlider, storedShelfFilter, storedSourceGroupFilter] =
-    await Promise.all([
-      readState<string>(THEME_KEY),
-      readState<Record<string, ShelfEntry>>(SHELF_KEY),
-      readState<number>(FONT_KEY),
-      readState<number>(PARA_SPACING_KEY),
-      readState<PageMode>(PAGE_MODE_KEY),
-      readState<boolean>(STATUS_BAR_KEY),
-      readState<ProgressScope>(PROGRESS_SCOPE_KEY),
-      readState<number>(SOURCE_PARALLEL_KEY),
-      readState<boolean>(SHELF_SOURCE_FILTER_KEY),
-      readState<boolean>(MENU_SLIDER_KEY),
-      readState<string>(SHELF_FILTER_KEY),
-      readState<string>(SOURCE_GROUP_FILTER_KEY),
-    ]);
+  const [
+    storedTheme,
+    storedShelf,
+    storedFont,
+    storedSpacing,
+    storedPageMode,
+    storedStatusBar,
+    storedScope,
+    storedSourceParallel,
+    storedShelfSourceFilter,
+    storedMenuSlider,
+    storedShelfFilter,
+    storedSourceGroupFilter,
+    storedSidebarCollapsed,
+  ] = await Promise.all([
+    readState<string>(THEME_KEY),
+    readState<Record<string, ShelfEntry>>(SHELF_KEY),
+    readState<number>(FONT_KEY),
+    readState<number>(PARA_SPACING_KEY),
+    readState<PageMode>(PAGE_MODE_KEY),
+    readState<boolean>(STATUS_BAR_KEY),
+    readState<ProgressScope>(PROGRESS_SCOPE_KEY),
+    readState<number>(SOURCE_PARALLEL_KEY),
+    readState<boolean>(SHELF_SOURCE_FILTER_KEY),
+    readState<boolean>(MENU_SLIDER_KEY),
+    readState<string>(SHELF_FILTER_KEY),
+    readState<string>(SOURCE_GROUP_FILTER_KEY),
+    readState<boolean>(SIDEBAR_COLLAPSED_KEY),
+  ]);
 
   // 未保存过偏好时默认护眼(sepia)，不再跟随系统深浅色
   const mode = normalizeTheme(storedTheme) ?? "sepia";
@@ -118,6 +133,9 @@ export async function initReaderState(): Promise<void> {
   }
   if (typeof storedSourceGroupFilter === "string" && storedSourceGroupFilter.trim()) {
     setSourceGroupFilterSignal(storedSourceGroupFilter.trim());
+  }
+  if (typeof storedSidebarCollapsed === "boolean") {
+    setSidebarCollapsedSignal(storedSidebarCollapsed);
   }
 
   // 清理已移除功能的遗留偏好：不阻塞启动（主题等已就位），删失败只记日志
@@ -486,6 +504,29 @@ export function rememberSourceGroupFilter(key: string): void {
   if (next === sourceGroupFilter()) return;
   setSourceGroupFilterSignal(next);
   persistSourceGroupFilter(next);
+}
+
+// ---------------------------------------------------------------------------
+// 桌面端侧边栏收起态（全局偏好）
+// 侧边栏只在三个主 Tab（书架 / 发现 / 设置）显示，其余页面整条不显示（见
+// `shell/DesktopStage.tsx`）；在主 Tab 里还能手动把它收起成一条图标栏，这里记住该形态。
+// 手机外壳不读这个值 —— 手机端的导航是底部 Tab，与侧边栏无关。
+
+const [sidebarCollapsed, setSidebarCollapsedSignal] = createSignal<boolean>(false);
+let sidebarCollapsedWriteQueue: Promise<void> = Promise.resolve();
+
+/** 响应式：桌面端侧边栏是否已收起（图标栏形态） */
+export function isSidebarCollapsed(): boolean {
+  return sidebarCollapsed();
+}
+
+/** 收起 / 展开桌面端侧边栏并持久化（提交不变的值不落盘） */
+export function setSidebarCollapsed(collapsed: boolean): void {
+  if (collapsed === sidebarCollapsed()) return;
+  setSidebarCollapsedSignal(collapsed);
+  sidebarCollapsedWriteQueue = sidebarCollapsedWriteQueue.then(() =>
+    writeState(SIDEBAR_COLLAPSED_KEY, collapsed),
+  );
 }
 
 // ---------------------------------------------------------------------------
