@@ -1,0 +1,89 @@
+# ReaderX 桌面端普通构建（不发布）
+#
+# 用途：手动触发，按 **ABI 分别**构建 Linux 与 Windows 的桌面包并作为 artifact 上传，
+#       便于在合并前拿到真机可安装的产物；不发 GitHub Release、不签名。
+#
+# 使用：Actions -> 左侧选本工作流 -> Run workflow（可指定分支/tag）。
+#
+# 为什么分 ABI（与 Android 的 --split-per-abi 同一个理由）：
+# - Windows：x86_64 覆盖绝大多数机器，aarch64 用于骁龙 X 等 ARM 笔记本；两种产物必须分开，
+#   否则 ARM 机器上会装到 x64 包（靠系统模拟跑）；
+# - Linux：只出 x86_64 —— Tauri 的 Linux 桌面发行版基本只有 x86_64，ARM Linux 用户
+#   通常走发行版仓库或自行编译。
+#
+# 说明：
+# - Linux 跑在 ubuntu-22.04 上（而不是 latest）：Tauri 的 Linux 产物会链接系统 WebKitGTK，
+#   在更新的发行版上构建出的包对老发行版不友好（glibc 与 WebKit 版本都更高）；
+#   22.04 是当前兼容面最稳的基线；
+# - Windows 只出 NSIS 安装包：MSI 需要 WiX 且对中文路径/权限更挑剔，这里不做；
+# - WebView2 由 Windows 10/11 自带，不需要额外安装运行时。
+
+name: Build Desktop (no publish)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-desktop:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            bundles: appimage,deb,rpm
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bundles: nsis
+          - name: windows-aarch64
+            os: windows-latest
+            target: aarch64-pc-windows-msvc
+            bundles: nsis
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 多架构目标要显式装进工具链（Windows 的 aarch64 由 msvc 链接器原生支持，无需额外 SDK）
+      - name: Setup build environment
+        uses: ./.github/actions/setup-build
+        with:
+          rust-targets: ${{ matrix.target }}
+
+      - name: Build desktop bundles
+        run: pnpm tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+        timeout-minutes: 70
+
+      # 产物在 target/<目标三平台名>/release/bundle/ 下，各架构互不覆盖
+      - name: Verify bundle output
+        shell: bash
+        run: |
+          set -euo pipefail
+          find "src-tauri/target/${{ matrix.target }}/release/bundle" -maxdepth 2 -type f \
+            \( -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' -o -name '*-setup.exe' \) \
+            -exec ls -lh {} \;
+
+      - name: Upload bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: readerx-${{ matrix.name }}
+          # 只收最终安装包，不要把整个 bundle 目录（含 unpacked/ 中间产物）塞进 artifact
+          path: |
+            src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.AppImage
+            src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb
+            src-tauri/target/${{ matrix.target }}/release/bundle/rpm/*.rpm
+            src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error
+          retention-days: 14

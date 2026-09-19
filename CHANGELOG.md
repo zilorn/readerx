@@ -7,7 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **桌面端支持（Linux / Windows）**：同一份前端现在跑在两种外壳里 —— 手机端仍是底部 Tab 的手机列
+  （不动手感），窗口宽度 ≥900px 时换成**侧边导航 + 内容区**的桌面外壳（`src/shell/DesktopStage.tsx`；
+  窄窗口自动回到手机外壳，见 `src/lib/platform.ts` 的断点）。页面组件、路由、本地书库、保活页面
+  注册表两端**共用一份**，没有为桌面复制页面；切换页面在桌面端不做横向滑动动画，直接换内容区。
+  挂在 `body` 上的底部抽屉 / 操作条改用 `--app-column` 变量，桌面端不会横跨整个窗口。
+  桌面端另有三项系统集成：窗口默认 1180×820、最小 420×560 并居中（`tauri.conf.json`）、
+  **原生文件选择器导入本地书**（Rust 侧 `readerx_pick_book_file` 读成字节后复用既有的
+  TXT / EPUB / PDF 解析与「同名书重新导入」交互，手机端不受影响）、**Esc 返回上级页面**。
+- **桌面端网页登录窗口**：书源「网页登录」不再只限 Android —— Linux / Windows 上开一个独立登录窗口
+  （`plugins/tauri-plugin-webview-login` 的桌面实现），登录完点窗口里的「完成」或直接关窗即收尾。
+  抓取口径与 Android 一致：**Cookie 走内核 Cookie 库**（Linux 直接用 WebKitGTK 原生 `CookieManager`，
+  含 httpOnly 的 `cf_clearance` / `__cf_bm`），**非 Cookie 登录信息走存储探针**（脚本由核心 crate 提供、
+  插件原样执行）。窗口的 User-Agent 与会话实际发出的 UA 对齐（`cf_clearance` 与 UA + IP 绑定，
+  两边不一致会导致「验证过了但请求仍被拦」），书源未写 UA 时用内置默认值。
+  平台差异如实记录在 `desktop.rs` 与 `docs/cloudflare.md`：Android / Windows / macOS 的注入脚本跑在
+  **页面主世界**，localStorage 快照采得到；**Linux 的 WebKitGTK 把宿主脚本放在隔离世界**，
+  该平台只以 Cookie 为登录态来源（`cf.auto` 与 `webview.storage()` 的降级分支照常工作，
+  登录态文件跨端共享，在手机上采集到的快照在 Linux 上照样读得到）。
+- **CI 补齐桌面平台并统一构建环境**：新增 `.github/workflows/build-desktop.yml`（手动触发，**按 ABI
+  分别**出 Linux x86_64 的 AppImage/deb/rpm 与 Windows x86_64 / aarch64 的 NSIS 包，只传 artifact
+  不发布）；
+  `release.yml` 改为**一条 tag 一次发布三平台**（Android 签名 APK + Linux x86_64 包 + Windows
+  x86_64 / aarch64 安装包汇总到同一个 Release，按 ABI 分开构建、重名时自动补架构后缀，
+  版本校验抽成独立 job，发布说明如实注明桌面包未签名）；Android 两条工作流接上
+  共享的 composite action（`.github/actions/setup-build`）并加 Gradle 缓存与并发取消。
+  质量门槛（类型检查 / 前端构建 / Rust 单测）只在本地按需跑，不新增 Actions 工作流。
+
 ### Fixed
+
+- **书源「网页登录」等待期间不再占用主线程**：认证窗改由核心 crate 统一编排（会话先就绪、UA 对齐、
+  存储探针随请求下发），桌面登录窗口的窗口事件与页面求值都在工作线程上等待，点「完成」/ 关窗 /
+  超时三条路径都能稳定收尾。
 
 - **听书跟读高亮不再随朗读推进**：段内插图那次改动把段落文字交给 `ParagraphContent` 渲染时，
   `renderMarkedText(...)` 被当成普通函数直接调用并作为循环回调的返回值，动态文本节点因此

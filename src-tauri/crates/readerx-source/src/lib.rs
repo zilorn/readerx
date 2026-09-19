@@ -30,7 +30,8 @@ pub mod cli;
 pub mod backend_webkit;
 #[cfg(feature = "cdp")]
 pub mod backend_cdp;
-#[cfg(any(feature = "cdp", feature = "webkit"))]
+// profile 不依赖任何可选后端：默认 UA 是「书源请求实际以什么身份发出」的公共概念，
+// 认证编排（auth::perform）也要用它把登录窗口的 UA 对齐到请求 UA。
 pub mod profile;
 
 pub use models::{

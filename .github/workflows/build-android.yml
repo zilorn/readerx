@@ -4,6 +4,8 @@
 #       打包为 Actions artifact 供下载；不生成 GitHub Release、不做 release 签名。
 #
 # 使用：Actions -> 左侧选本工作流 -> Run workflow（可指定分支/tag）。
+#
+# 需要签名 APK 请用 release.yml（打 tag 触发）；这里只出 debug 包。
 
 name: Build Android (debug, no publish)
 
@@ -12,6 +14,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: build-android-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build-android-debug:
@@ -23,19 +29,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+      - name: Setup build environment
+        uses: ./.github/actions/setup-build
         with:
-          version: 11
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-
-      - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile
+          rust-targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
 
       - name: Setup JDK 17
         uses: actions/setup-java@v4
@@ -43,15 +40,15 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Rust toolchain with Android targets
-        uses: dtolnay/rust-toolchain@stable
+      # Gradle 依赖下载占 Android 构建的大头，缓存下来能省几分钟
+      - name: Cache Gradle
+        uses: actions/cache@v4
         with:
-          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('src-tauri/gen/android/**/*.gradle', 'src-tauri/gen/android/**/*.gradle.kts', 'src-tauri/gen/android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: gradle-${{ runner.os }}-
 
       # 与 release 工作流相同的 Android SDK/NDK 探测：选最高版本 NDK 并导出，
       # tauri CLI 的 ensure_ndk 会优先读取 NDK_HOME（CI 下不会自行下载 NDK）。

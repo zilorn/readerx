@@ -153,7 +153,7 @@ export function SourceInfoForm(props: SourceInfoFormProps) {
           />
         </label>
 
-        {/* 网页登录（WebView，仅 Android） */}
+        {/* 网页登录（应用内 WebView） */}
         <div class="space-y-2 rounded-[14px] border border-border bg-surface p-3.5">
           <div class="flex items-center gap-1.5">
             <GlobeKeyIcon size={16} class="text-text-2" />
@@ -207,7 +207,7 @@ export function SourceInfoForm(props: SourceInfoFormProps) {
           </div>
           {!props.loginSupported && (
             <p class="text-[10.5px] leading-[1.5] text-text-3">
-              当前平台不支持网页登录（仅 Android 端可用）；可在代码里用
+              当前平台不支持网页登录（Android 应用内浮层 / 桌面端独立登录窗口）；可在代码里用
               <code class="font-mono"> webview.login(url) </code>
               触发。
             </p>

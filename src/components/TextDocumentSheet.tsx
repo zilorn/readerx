@@ -40,7 +40,7 @@ export function TextDocumentSheet(props: TextDocumentSheetProps) {
   return (
     <Show when={props.open}>
       <div class="fixed inset-0 z-[70] animate-page-in-right bg-bg">
-        <div class="mx-auto flex h-full w-full max-w-[480px] flex-col overflow-hidden bg-bg min-[521px]:border-x min-[521px]:border-border min-[521px]:shadow-[0_0_44px_rgb(0_0_0/0.16)]">
+        <div class="mx-auto flex h-full w-full max-w-[var(--app-column)] flex-col overflow-hidden bg-bg min-[521px]:border-x min-[521px]:border-border min-[521px]:shadow-[0_0_44px_rgb(0_0_0/0.16)]">
           <header class="flex flex-none items-center gap-2.5 border-b border-border px-[18px] pb-2.5 pt-[max(env(safe-area-inset-top),12px)]">
             <span class="grid h-[34px] w-[34px] flex-none place-items-center rounded-[10px] bg-accent-weak text-accent">
               {props.icon}

@@ -6,6 +6,10 @@
  *   node scripts/release-notes.mjs 1.2.3
  *   node scripts/release-notes.mjs v1.2.3     # 兼容带 v 前缀的 tag
  *
+ * 输出 = `scripts/tip.md`（下载与安装说明：各平台 / 架构怎么选、签名情况）+ CHANGELOG 对应区块。
+ * 安装说明与产物形态绑定（新增平台、换打包方式、改签名策略都要改它），放在这里是为了
+ * 让这类文案改动不必进工作流；拼接口径固定为「说明在前、更新内容在后」。
+ *
  * 匹配规则（Keep a Changelog 风格，均可带可选的“ - YYYY-MM-DD”日期）：
  *   ## [1.2.3]
  *   ## [v1.2.3] - 2026-09-04

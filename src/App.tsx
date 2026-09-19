@@ -1,15 +1,17 @@
 import { lazy, onMount, onCleanup, Show, createEffect } from "solid-js";
 import type { Component } from "solid-js";
 import { Router, Route, type RouteSectionProps } from "@solidjs/router";
-import { RouteStage } from "./components/RouteStage";
+import { Toasts } from "./components/Toasts";
 import { GroupPicker } from "./components/GroupPicker";
+import { MobileStage } from "./shell/MobileStage";
+import { DesktopStage } from "./shell/DesktopStage";
 import { bookMetaById, ensureLocalBooksLoaded } from "./lib/books";
 import {
   assignBookGroup,
   closeGroupAssign,
   groupAssignBookId,
 } from "./lib/groups";
-import { currentToast, dismissToast } from "./lib/toast";
+import { isDesktopShell } from "./lib/platform";
 
 // ---- 路由页面全部走代码分割 + 懒加载（配合页面栈内 Suspense） ----
 const BookshelfPage = lazy(() => import("./pages/Bookshelf"));
@@ -28,9 +30,9 @@ const NotFoundPage = lazy(() => import("./pages/NotFound"));
 
 /**
  * 常驻（保活）页面：路径 → 组件。
- * 这些页面由页面栈 RouteStage 直接挂载并常驻 DOM —— 切 Tab、进书再返回都不会重新挂载，
- * 页内的搜索词 / 结果列表 / 勾选 / 滚动位置原样保留（首页、发现页、设置页，
- * 以及「WebDAV 导入」：进书阅读返回后仍停在原目录与原位置）。
+ * 两个外壳（手机 / 桌面）共用这份注册表，各自按它挂载并常驻 DOM —— 切 Tab、进书再返回
+ * 都不会重新挂载，页内的搜索词 / 结果列表 / 勾选 / 滚动位置原样保留（首页、发现页、
+ * 设置页，以及「WebDAV 导入」：进书阅读返回后仍停在原目录与原位置）。
  * 因此它们不再出现在下面的路由表里：路由只声明真正会 push / pop 的次级页面。
  */
 const KEPT_PAGES: Record<string, Component> = {
@@ -41,49 +43,32 @@ const KEPT_PAGES: Record<string, Component> = {
 };
 
 /**
- * 根布局：外层手机列 + 页面栈 RouteStage。
- * 滚动容器、底部 Tab 与页面切换动画统一由 RouteStage 以「页面层」维护，
- * 此处只保留外壳、全局 Toast，以及提示条「加入分组」拉起的移入分组抽屉
- * （抽屉跨页面：入架后可能已跳到阅读页 / 书架，故不能挂在发起入架的组件里）。
+ * 根布局：外壳（手机：手机列 + 底部 Tab；桌面：侧边栏 + 内容区）+ 全局提示。
+ * 滚动容器、导航与页面切换统一由外壳组件维护，此处只负责选外壳、全局 Toast，
+ * 以及提示条「加入分组」拉起的移入分组抽屉（抽屉跨页面：入架后可能已跳到阅读页 /
+ * 书架，故不能挂在发起入架的组件里）。
  */
 const AppShell: Component<RouteSectionProps> = (props) => {
   return (
     <div
-      class="relative mx-auto flex h-screen w-full max-w-[480px] flex-col overflow-hidden bg-bg min-[521px]:border-x min-[521px]:border-border min-[521px]:shadow-[0_0_44px_rgb(0_0_0/0.16)]"
+      class="relative mx-auto flex h-screen w-full flex-col overflow-hidden bg-bg"
+      classList={{
+        // 手机端（含桌面窗口拉窄到断点以下）：始终是居中的手机列
+        "max-w-[var(--app-column)] min-[521px]:border-x min-[521px]:border-border min-[521px]:shadow-[0_0_44px_rgb(0_0_0/0.16)]":
+          !isDesktopShell(),
+        // 桌面端：铺满窗口，由侧边栏与内容区分栏
+        "max-w-none": isDesktopShell(),
+      }}
       style={{ height: "100dvh" }}
     >
-      <RouteStage kept={KEPT_PAGES}>{props.children}</RouteStage>
-      <Show when={currentToast()}>
-        {(toast) => (
-          <div
-            class="absolute bottom-[calc(84px+env(safe-area-inset-bottom))] left-1/2 z-[95] max-w-[calc(100%-48px)] animate-toast-in text-[13px] leading-[1.4] shadow-lg shadow-black/20 [transform:translateX(-50%)]"
-            classList={{
-              "rounded-full px-4 py-[9px] text-center": !toast().action,
-              "bg-text text-bg": !toast().action && !toast().error,
-              "bg-danger text-white": !toast().action && toast().error,
-              "flex items-center gap-1.5 rounded-[14px] border border-border bg-surface py-1.5 pl-3.5 pr-1.5 text-text":
-                !!toast().action,
-            }}
-            role={toast().error ? "alert" : "status"}
-          >
-            <span class="min-w-0">{toast().text}</span>
-            <Show when={toast().action}>
-              {(action) => (
-                <button
-                  class="flex-none rounded-[10px] bg-accent-weak px-2.5 py-1 font-semibold text-accent transition-[scale,opacity] duration-100 active:scale-[0.96] active:opacity-80"
-                  onClick={() => {
-                    const run = action().onClick;
-                    dismissToast();
-                    run();
-                  }}
-                >
-                  {action().label}
-                </button>
-              )}
-            </Show>
-          </div>
-        )}
+      <Show
+        when={isDesktopShell()}
+        fallback={<MobileStage kept={KEPT_PAGES}>{props.children}</MobileStage>}
+      >
+        <DesktopStage kept={KEPT_PAGES}>{props.children}</DesktopStage>
       </Show>
+
+      <Toasts />
 
       {/* 入架提示里的「加入分组」：移入分组抽屉 */}
       <Show when={groupAssignBookId()}>

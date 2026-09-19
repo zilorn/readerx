@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use readerx_source::auth::{self, AuthProvider, LoginOutcome};
+use readerx_source::auth::{self, AuthProvider, AuthRequest, LoginOutcome};
 use readerx_source::cli::args::{AuthKind, Cli, USAGE};
 use readerx_source::cli::{auth_cmd, commands};
 use readerx_source::profile::DEFAULT_UA;
@@ -118,8 +118,19 @@ impl AuthProvider for WebkitProvider {
         Self::display_available()
     }
 
-    fn authenticate(&self, source_id: &str, url: &str) -> Result<LoginOutcome, String> {
-        readerx_source::backend_webkit::authenticate(source_id, url, self.wait_secs, &self.user_agent)
+    fn authenticate(
+        &self,
+        source_id: &str,
+        url: &str,
+        request: &AuthRequest,
+    ) -> Result<LoginOutcome, String> {
+        // 窗口 UA 必须与书源请求用的 UA 一致（cf_clearance 与 UA 绑定）：宿主给的会话 UA 优先
+        let user_agent = if request.user_agent.trim().is_empty() {
+            self.user_agent.clone()
+        } else {
+            request.user_agent.clone()
+        };
+        readerx_source::backend_webkit::authenticate(source_id, url, self.wait_secs, &user_agent)
     }
 }
 
@@ -142,7 +153,12 @@ impl AuthProvider for WebkitProvider {
     fn supported(&self) -> bool {
         false
     }
-    fn authenticate(&self, _source_id: &str, url: &str) -> Result<LoginOutcome, String> {
+    fn authenticate(
+        &self,
+        _source_id: &str,
+        url: &str,
+        _request: &AuthRequest,
+    ) -> Result<LoginOutcome, String> {
         Ok(LoginOutcome::failure(
             url,
             "本二进制未编译 webkit 后端（构建时加 --features webkit，需要 webkit2gtk-4.1 开发包）",
@@ -181,7 +197,18 @@ impl AuthProvider for CdpProvider {
         true
     }
 
-    fn authenticate(&self, source_id: &str, url: &str) -> Result<LoginOutcome, String> {
+    fn authenticate(
+        &self,
+        source_id: &str,
+        url: &str,
+        request: &AuthRequest,
+    ) -> Result<LoginOutcome, String> {
+        // 与 webkit 后端同一口径：宿主（书源会话）的 UA 优先于 CLI 身份文件
+        let user_agent = if request.user_agent.trim().is_empty() {
+            self.user_agent.clone()
+        } else {
+            request.user_agent.clone()
+        };
         readerx_source::backend_cdp::authenticate(
             source_id,
             url,
@@ -190,10 +217,10 @@ impl AuthProvider for CdpProvider {
                 browser: self.browser.clone(),
                 user_data_dir: self.user_data_dir.clone(),
                 wait_secs: self.wait_secs,
-                user_agent: if self.user_agent.is_empty() {
+                user_agent: if user_agent.is_empty() {
                     DEFAULT_UA.to_string()
                 } else {
-                    self.user_agent.clone()
+                    user_agent
                 },
                 quiet: false,
             },
@@ -209,7 +236,12 @@ impl AuthProvider for CdpProvider {
     fn supported(&self) -> bool {
         false
     }
-    fn authenticate(&self, _source_id: &str, url: &str) -> Result<LoginOutcome, String> {
+    fn authenticate(
+        &self,
+        _source_id: &str,
+        url: &str,
+        _request: &AuthRequest,
+    ) -> Result<LoginOutcome, String> {
         Ok(LoginOutcome::failure(url, "本二进制未编译 cdp 后端"))
     }
 }

@@ -678,7 +678,7 @@ export default function WebdavImportPage() {
 
       {/* 多选导入操作条 */}
       <Show when={showBar()}>
-        <div class="fixed inset-x-0 bottom-0 z-30 mx-auto w-full max-w-[480px] border-t border-border bg-surface px-[18px] pb-[calc(10px+env(safe-area-inset-bottom))] pt-3 shadow-[0_-8px_28px_rgb(0_0_0/0.14)]">
+        <div class="fixed inset-x-0 bottom-0 z-30 mx-auto w-full max-w-[var(--app-column)] border-t border-border bg-surface px-[18px] pb-[calc(10px+env(safe-area-inset-bottom))] pt-3 shadow-[0_-8px_28px_rgb(0_0_0/0.14)]">
           <div class="flex items-center gap-3">
             <Show
               when={importing()}

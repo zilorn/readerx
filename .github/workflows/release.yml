@@ -21,9 +21,12 @@
 #     ANDROID_KEY_ALIAS          # 别名（示例 readerx）
 #     ANDROID_KEY_PASSWORD       # key 口令
 #
-# 产物：按 ABI 拆分的签名 APK（arm64-v8a / armeabi-v7a / x86 / x86_64，不做 universal 融合包），
-#       每个 APK 分别作为该 tag 的 GitHub Release asset 发布，
-#       Release body 取 CHANGELOG.md 中与版本号对应的区块。
+# 产物：**一个 tag 出三个平台**，汇总到同一个 GitHub Release：
+#   - Android：按 ABI 拆分的**签名** APK（arm64-v8a / armeabi-v7a / x86 / x86_64，不做 universal 融合包）；
+#   - Linux x86_64：AppImage / deb / rpm（无代码签名证书，未签名）；
+#   - Windows x86_64 / aarch64：各出一个 NSIS 安装包（无代码签名证书，未签名）
+#     —— 与 Android 按 ABI 拆分同一个理由，ARM 机器不该装到靠模拟运行的 x64 包。
+#   Release body 取 CHANGELOG.md 中与版本号对应的区块，并附一段未签名说明。
 
 name: Release Android
 
@@ -36,20 +39,23 @@ permissions:
   contents: write
 
 jobs:
-  release-android:
-    name: Build & publish Android APK
+  # tag 与仓库版本一致性：tag v1.2.3 要求 tauri.conf.json 版本同为 1.2.3，
+  # 这样各平台产物里的版本号、Android 的 versionName/versionCode 才与 Release 一致。
+  # 提成独立 job 是为了让三平台共用同一份校验结果（各写一遍迟早走偏）。
+  validate:
+    name: Validate tag against committed version
     runs-on: ubuntu-latest
-    timeout-minutes: 120
-    env:
-      TAG: ${{ github.ref_name }}
-
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.check.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # tag 与仓库版本一致性：tag v1.2.3 要求 src-tauri/tauri.conf.json 版本同为 1.2.3，
-      # 这样打出的 APK 内版本号、Android versionName/versionCode 才与 Release 一致。
       - name: Validate tag against committed version
+        id: check
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
           VERSION="${TAG#v}"
           if [ -z "$VERSION" ] || [ "$VERSION" = "$TAG" ]; then
@@ -62,22 +68,25 @@ jobs:
             echo "::error::请先在 main 上执行 node scripts/bump-version.mjs ${VERSION} 并提交，再打 tag。"
             exit 1
           fi
-          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Building release ${TAG} (app version ${VERSION})"
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 11
+  release-android:
+    name: Build Android APK
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      VERSION: ${{ needs.validate.outputs.version }}
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile
+      - name: Setup build environment
+        uses: ./.github/actions/setup-build
+        with:
+          rust-targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
 
       - name: Setup JDK 17
         uses: actions/setup-java@v4
@@ -85,15 +94,16 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Rust toolchain with Android targets
-        uses: dtolnay/rust-toolchain@stable
+      # Gradle 依赖下载占 Android 构建的大头，缓存下来能省几分钟；
+      # key 带上 gen/android 下的构建脚本 hash，脚本变了就重新拉依赖。
+      - name: Cache Gradle
+        uses: actions/cache@v4
         with:
-          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('src-tauri/gen/android/**/*.gradle', 'src-tauri/gen/android/**/*.gradle.kts', 'src-tauri/gen/android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: gradle-${{ runner.os }}-
 
       # GitHub 托管的 runner 预装了 Android SDK/NDK；选最高版本的 NDK 并导出，
       # tauri CLI 的 ensure_ndk 会优先读取 NDK_HOME（CI 下不会自行下载 NDK）。
@@ -175,7 +185,87 @@ jobs:
           printf '%s\n' "${APKS[@]}" > "$RUNNER_TEMP/apk-paths.txt"
           echo "Prepared ${#APKS[@]} per-ABI APKs"
 
-      - name: Extract release notes from CHANGELOG.md
+      - name: Upload Android artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apks
+          # 只上传最终 APK：文件名里带版本与 ABI，发布时无需再改名
+          path: ${{ runner.temp }}/readerx-*.apk
+          if-no-files-found: error
+
+  release-desktop:
+    name: Build desktop bundles (${{ matrix.name }})
+    needs: validate
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 22.04 是 Linux 产物的兼容基线（见 build-desktop.yml 的说明）
+          - name: linux-x86_64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            bundles: appimage,deb,rpm
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bundles: nsis
+          # ARM 笔记本（骁龙 X 等）：单独出包，不要让用户装到靠模拟运行的 x64 包
+          - name: windows-aarch64
+            os: windows-latest
+            target: aarch64-pc-windows-msvc
+            bundles: nsis
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup build environment
+        uses: ./.github/actions/setup-build
+        with:
+          rust-targets: ${{ matrix.target }}
+
+      - name: Build desktop bundles
+        run: pnpm tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+        timeout-minutes: 70
+
+      # 产物在 target/<目标三平台名>/release/bundle/ 下：各架构互不覆盖，发布时按文件名区分
+      - name: Upload desktop bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.name }}
+          path: |
+            src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.AppImage
+            src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb
+            src-tauri/target/${{ matrix.target }}/release/bundle/rpm/*.rpm
+            src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs: [validate, release-android, release-desktop]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TAG: ${{ github.ref_name }}
+      VERSION: ${{ needs.validate.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 各平台产物先汇总再发布：`gh release create` 只跑一次，避免多个 job 抢同一个 release。
+      # 下载后按 artifact 名分目录（desktop-windows-x86_64/ 等），保留「这份包来自哪个架构」，
+      # 下面的发布步骤据此在重名时补 ABI 后缀。
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/assets
+
+      # 发布说明 = scripts/tip.md（下载与安装说明，含各平台 / 架构与签名情况）+ CHANGELOG 对应区块，
+      # 拼接由 scripts/release-notes.mjs 负责：安装说明是随产物走的文案，改它不必动工作流。
+      - name: Build release notes
         run: |
           node scripts/release-notes.mjs "${VERSION}" > "$RUNNER_TEMP/release-notes.md"
           echo "--- release notes ---"
@@ -185,15 +275,37 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          mapfile -t APKS < "$RUNNER_TEMP/apk-paths.txt"
+          set -euo pipefail
+          STAGE="$RUNNER_TEMP/release-assets"
+          mkdir -p "$STAGE"
+          mapfile -t FOUND < <(find "$RUNNER_TEMP/assets" -type f \
+            \( -name '*.apk' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' -o -name '*-setup.exe' \) | sort)
+          if [ "${#FOUND[@]}" -eq 0 ]; then
+            echo "::error::没有找到任何可发布的产物，检查各构建 job 的上传步骤。"
+            exit 1
+          fi
+          # 不同 ABI 的桌面包可能重名：同一个 Release 里必须先区分开，否则 GitHub 会以后上传的
+          # 覆盖先上传的，用户拿到的架构就错了。重名时补上来路目录里的架构（x86_64 / aarch64）。
+          mapfile -t BASENAMES < <(printf '%s\n' "${FOUND[@]}" | xargs -n1 basename)
+          ASSETS=()
+          for FILE in "${FOUND[@]}"; do
+            NAME="$(basename "$FILE")"
+            ARCH="$(basename "$(dirname "$FILE")")"
+            if [ "$(printf '%s\n' "${BASENAMES[@]}" | grep -cx "$NAME")" -gt 1 ]; then
+              NAME="${NAME%.*}-${ARCH#*-}.${NAME##*.}"
+            fi
+            cp "$FILE" "$STAGE/$NAME"
+            ASSETS+=("$STAGE/$NAME")
+            echo "asset: $NAME"
+          done
           PRERELEASE=""
           case "${VERSION}" in
             *-*) PRERELEASE="--prerelease" ;;
           esac
-          gh release create "${TAG}" "${APKS[@]}" \
+          gh release create "${TAG}" "${ASSETS[@]}" \
             --repo "${GITHUB_REPOSITORY}" \
             --title "${TAG}" \
             --notes-file "$RUNNER_TEMP/release-notes.md" \
             ${PRERELEASE}
-          echo "Released ${TAG} with ${#APKS[@]} APKs:"
-          printf '  %s\n' "${APKS[@]}"
+          echo "Released ${TAG} with ${#ASSETS[@]} assets:"
+          printf '  %s\n' "${ASSETS[@]}"

@@ -27,6 +27,8 @@ tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 tauri-plugin-http = "2"
 tauri-plugin-fs = "2"
+# 桌面端「导入本地书」用系统文件选择器（Android 走 SAF 的 input[type=file]）
+tauri-plugin-dialog = "2"
 tauri-plugin-tts = "0.1"
 # 书源「网页登录」：Android 原生 WebView 登录浮层（仅移动端注册）
 tauri-plugin-webview-login = { path = "plugins/tauri-plugin-webview-login" }

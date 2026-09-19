@@ -63,12 +63,13 @@
 
 - 刷新成功：规则拿到的就是重试后的正常响应，无额外字段；
 - 未弹窗/被取消/刷新后仍被拦截：原挑战响应返回，附 `cf` 字段说明原因（`disabled` 表示该书源
-  已关闭自动网页认证；桌面/iOS/浏览器预览恒为 `unsupported`），规则可据此提示或降级。
+  已关闭自动网页认证；iOS / 浏览器预览恒为 `unsupported`），规则可据此提示或降级。
 
 
-## `webview`（网页登录，仅 Android）
+## `webview`（网页登录，Android / Linux / Windows）
 
-在 **Android** 应用内弹出原生 WebView 登录浮层（顶部有「取消 / 完成」）。
+在应用内弹出 WebView 登录界面 —— Android 是叠在 Activity 上的原生浮层（顶部有「取消 / 完成」），
+Linux / Windows 是独立登录窗口（窗口右下角有「完成」，直接关窗也算完成）。
 点「完成」后宿主收集两类登录信息，自动完成两件事：
 
 1. **Cookie**（含 httpOnly）与 **非 Cookie 存储**（localStorage / sessionStorage / IndexedDB 快照）
@@ -77,7 +78,7 @@
 
 | 成员 | 说明 |
 | --- | --- |
-| `webview.isSupported()` | 当前平台/环境是否支持网页登录（Android 为 true） |
+| `webview.isSupported()` | 当前平台/环境是否支持网页登录（Android / Linux / Windows 应用内为 true） |
 | `webview.login(url, opts?)` | 打开 `url` 登录页并**阻塞等待**用户操作，返回结果对象 |
 | `webview.storage()` | 读取登录时采集到的存储快照（只读，不触发认证） |
 
@@ -100,6 +101,9 @@
 
 一部分站点把凭证（JWT、`uid` + `token`）写在 **localStorage / sessionStorage** 里而不是 Cookie 里，
 纯 `http.*` 请求（`reqwest`，不跑 JS）看不到这些值 —— 这就是 `webview.storage()` 的用途。
+快照能不能采到取决于平台：Android / Windows / macOS 能，**Linux 的 WebKitGTK 不能**
+（内核把宿主脚本与页面存储隔离，宿主侧没有读取入口），规则请留 `webview.storage()` 返回空视图时的
+降级分支 —— 详见 [cloudflare.md](./cloudflare.md) 的「平台差异」一节。
 
 ```js
 {
@@ -137,7 +141,7 @@ async function searchBook(keyword) {
 
 约定与限制：
 
-- `webview.login` 是**同步阻塞**等待（在浮层内完成/取消/超时前不返回），
+- `webview.login` 是**同步阻塞**等待（在登录界面里完成/取消/超时前不返回），
   且一次只允许一个登录窗口；已有窗口时新调用返回 `ok:false`。
 - 登录窗口 **15 分钟**无操作会自动关闭并返回 `ok:false`。
 - 目标地址仅支持 `http/https`；非法地址返回 `ok:false`（message 说明）。

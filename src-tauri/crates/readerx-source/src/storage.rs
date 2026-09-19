@@ -478,6 +478,8 @@ pub const JS_PROBE: &str = r#"(function () {
     window.__rxStorageProbeDone = true;
   }
   try {
+    // 只采同步部分时（`__RX_SYNC_ONLY__`，宿主在自己的主世界求值，拿不到异步回写）跳过 IndexedDB
+    if (!__RX_SYNC_ONLY__) {
     // `typeof idb.databases === "function"` 在部分运行时里本身就可能抛错（属性访问器），
     // 因此整段包在 try 里，拿不到库清单就按「只有 localStorage / sessionStorage」收尾
     var idb = window.indexedDB;
@@ -502,6 +504,7 @@ pub const JS_PROBE: &str = r#"(function () {
         }
       }
     }
+    }
   } catch (err) {}
   finish();
   return "pending";
@@ -509,12 +512,45 @@ pub const JS_PROBE: &str = r#"(function () {
 
 /// 把探针模板里的占位符换成实际常量与 origin 列表
 pub fn probe_script(extra_origins: &[String]) -> String {
+    with_probe_constants(extra_origins, false)
+}
+
+/// 只采**同步**存储（localStorage / sessionStorage）的探针：跳过 IndexedDB 枚举。
+///
+/// 给「在宿主自己的主世界求值、拿不到异步回写」的调用方用（桌面端登录窗口）：
+/// IndexedDB 枚举是 Promise，主世界的求值结果早就返回了，异步回写只会写进另一个世界，
+/// 采到的库清单也会丢。跳过它，把同步部分（登录凭证绝大多数在这里）稳稳拿到。
+pub fn probe_script_sync_only(extra_origins: &[String]) -> String {
+    with_probe_constants(extra_origins, true)
+}
+
+fn with_probe_constants(extra_origins: &[String], sync_only: bool) -> String {
     let extra = serde_json::to_string(extra_origins).unwrap_or_else(|_| "[]".to_string());
     JS_PROBE
         .replace("__RX_MAX_ENTRIES__", &MAX_ENTRIES_PER_ORIGIN.to_string())
         .replace("__RX_MAX_VALUE__", &MAX_VALUE_CHARS.to_string())
         .replace("__RX_MAX_DBS__", &MAX_DATABASES_PER_ORIGIN.to_string())
         .replace("__RX_EXTRA_ORIGINS__", &extra)
+        .replace("__RX_SYNC_ONLY__", if sync_only { "true" } else { "false" })
+}
+
+/// 把探针装进**页面**（只定义、不执行）：执行后页面里多出 `window.__rxStorageProbeRun()`，
+/// 调用一次即采集一次当前页面的存储（结果落在 `window.__rxStorageProbeResult`）。
+///
+/// 用在「页面加载前注入、用户点完成时再采集」的宿主上（Android 浮层 / CDP）：
+/// 探针在页面每次导航后自动就位，采集时刻却由宿主决定——登录写完 localStorage 之后
+/// 采到的才是登录态。注入到所有框架（iframe 登录页的凭证常写在 iframe 自己的 origin 上），
+/// 因此暴露在 `window` 上而不是包在闭包里；名字统一带 `__rx` 前缀，不与页面自身变量冲突。
+pub fn probe_run_script(extra_origins: &[String]) -> String {
+    let body = probe_script(extra_origins);
+    format!(
+        r#"(function () {{
+  if (window.__rxStorageProbeRun) return;
+  window.__rxStorageProbeRun = function () {{
+{body}
+  }};
+}})()"#
+    )
 }
 
 /// 读取探针结果并复位标记（宿主轮询到 `__rxStorageProbeDone` 后调用）
@@ -528,6 +564,26 @@ pub const JS_PROBE_READ: &str = r#"(function () {
 
 /// 探针是否完成（供轮询判断，不消费结果）
 pub const JS_PROBE_POLL: &str = r#"window.__rxStorageProbeDone ? "done" : "pending""#;
+
+/// 与 [`JS_PROBE_POLL`] 配套的「还没跑完」返回值
+pub const JS_PROBE_PENDING: &str = "pending";
+
+/// 探针「还没采完」时 [`JS_PROBE_READ`] 的返回标记（与 `pending` 占位符同义，供后端比对）
+pub const JS_PROBE_PENDING_MARK: &str = "";
+
+/// 宿主采集存储所需的四段脚本（认证后端只需原样执行，不必知道探针细节，见 `auth::ProbeScript`）：
+/// - `init`：页面加载前注入（**所有框架**），把探针装进页面世界；
+/// - `run`：用户完成登录后求值，触发一次采集；
+/// - `read`：求值读取采集结果（未采完时返回 `pending`）；
+/// - `pending`：`read` 的「还没采完」标记。
+pub fn probe_script_parts(extra_origins: &[String]) -> (String, String, String, String) {
+    (
+        probe_run_script(extra_origins),
+        "window.__rxStorageProbeRun()".to_string(),
+        JS_PROBE_READ.to_string(),
+        JS_PROBE_PENDING.to_string(),
+    )
+}
 
 #[cfg(test)]
 mod tests {
@@ -704,5 +760,83 @@ mod tests {
         // `display()` 给出 JS 字符串的 JSON 字面量，正是宿主从浏览器拿到的形状
         let snapshot = parse_probe_eval(&value.display().to_string()).unwrap();
         assert!(snapshot.is_empty());
+    }
+
+    /// 「注入时只定义、点完成时再采集」的探针：注入本身只定义 `window.__rxStorageProbeRun`，
+    /// 不采集；调用它才采集（桌面端登录窗口靠这个把采集时机推到用户点「完成」之后）。
+    ///
+    /// 用占位实现替掉 `window.localStorage`：探针在页面里读的就是这个全局，替掉即可验证
+    /// 「调用 → 采集 → `JS_PROBE_READ` 取回结果」的完整链路。
+    /// 注意：Boa 的 `window.location` 是只读访问器，不能赋值，所以给的是裸 `location` 全局
+    /// —— 探针读的正是裸全局。
+    #[test]
+    fn probe_run_script_defines_callable_probe() {
+        let mut context = boa_engine::Context::default();
+        let globals = "var window = globalThis;\n\
+             var location = { origin: 'https://a.test', href: 'https://a.test/login' };\n\
+             window.localStorage = { length: 1, key: function () { return 'token'; }, getItem: function () { return 'jwt-late'; } };\n";
+        context
+            .eval(boa_engine::Source::from_bytes(globals.as_bytes()))
+            .expect("测试用的全局对象应能建立");
+        // 注入本身不产生结果，只是把探针装进页面
+        assert_eq!(
+            context
+                .eval(boa_engine::Source::from_bytes(
+                    probe_run_script(&[]).as_bytes()
+                ))
+                .expect("注入脚本应在 Boa 中可执行")
+                .display()
+                .to_string(),
+            "undefined"
+        );
+        assert_eq!(
+            context
+                .eval(boa_engine::Source::from_bytes(
+                    b"typeof window.__rxStorageProbeRun"
+                ))
+                .expect("注入后应有探针函数")
+                .display()
+                .to_string(),
+            "\"function\""
+        );
+        context
+            .eval(boa_engine::Source::from_bytes(
+                b"window.__rxStorageProbeRun()",
+            ))
+            .expect("注入后应能调用探针");
+        let value = context
+            .eval(boa_engine::Source::from_bytes(JS_PROBE_READ.as_bytes()))
+            .expect("读取探针结果");
+        let snapshot = parse_probe_eval(&value.display().to_string()).unwrap();
+        assert_eq!(snapshot.origins.len(), 1);
+        assert_eq!(snapshot.origins[0].origin, "https://a.test");
+        assert_eq!(snapshot.origins[0].local_storage[0].key, "token");
+        assert_eq!(snapshot.origins[0].local_storage[0].value, "jwt-late");
+    }
+
+    /// 重复注入（每次导航都会重新注入）必须原样保留已经装好的探针：
+    /// 包裹一层计数再注入第二次，函数若被换掉计数就归零。
+    ///
+    /// 用独立进程上下文跑：Boa 在同一段求值里连续跑两遍「包装函数」的 IIFE 会抛内部类型错误
+    /// （引擎限制，与探针无关），因此这里分成两次 eval。
+    #[test]
+    fn probe_run_script_keeps_existing_probe() {
+        let mut context = boa_engine::Context::default();
+        context
+            .eval(boa_engine::Source::from_bytes(
+                b"var window = globalThis; window.__rxStorageProbeRun = function () { window.__rxCalls = (window.__rxCalls || 0) + 1; };",
+            ))
+            .expect("放置一个占位探针");
+        context
+            .eval(boa_engine::Source::from_bytes(
+                probe_run_script(&[]).as_bytes(),
+            ))
+            .expect("重复注入应能执行");
+        let calls = context
+            .eval(boa_engine::Source::from_bytes(
+                b"window.__rxStorageProbeRun(); window.__rxCalls",
+            ))
+            .expect("调用探针");
+        assert_eq!(calls.display().to_string(), "1");
     }
 }

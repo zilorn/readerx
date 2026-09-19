@@ -757,7 +757,7 @@ export default function BookshelfPage() {
 
       {/* 多选底部操作条：固定贴住屏幕最底部（期间底部 Tab 由 AppShell 临时隐藏） */}
       <Show when={selecting()}>
-        <div class="fixed inset-x-0 bottom-0 z-30 mx-auto w-full max-w-[480px] animate-sheet-up border-t border-border bg-surface px-[18px] pb-[calc(10px+env(safe-area-inset-bottom))] pt-3 shadow-[0_-8px_28px_rgb(0_0_0/0.14)]">
+        <div class="fixed inset-x-0 bottom-0 z-30 mx-auto w-full max-w-[var(--app-column)] animate-sheet-up border-t border-border bg-surface px-[18px] pb-[calc(10px+env(safe-area-inset-bottom))] pt-3 shadow-[0_-8px_28px_rgb(0_0_0/0.14)]">
           <Show when={selectedCount() > 0}>
             <div class="flex items-center gap-2.5">
               <button

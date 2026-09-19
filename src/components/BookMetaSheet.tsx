@@ -105,7 +105,7 @@ export function BookMetaSheet(props: BookMetaSheetProps) {
         onClick={close}
       />
       <div
-        class="fixed inset-x-0 bottom-0 z-[71] mx-auto flex max-h-[88%] max-w-[480px] animate-sheet-up flex-col overflow-hidden rounded-t-[16px] bg-surface shadow-[0_-10px_34px_rgb(0_0_0/0.22)]"
+        class="fixed inset-x-0 bottom-0 z-[71] mx-auto flex max-h-[88%] max-w-[var(--app-column)] animate-sheet-up flex-col overflow-hidden rounded-t-[16px] bg-surface shadow-[0_-10px_34px_rgb(0_0_0/0.22)]"
         role="dialog"
         aria-modal="true"
         aria-label="编辑书籍信息"

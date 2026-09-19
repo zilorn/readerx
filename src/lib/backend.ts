@@ -400,7 +400,29 @@ function toSummary(source: BookSource): BookSourceSummary {
 }
 
 // ---------------------------------------------------------------------------
-// 网页登录（WebView，仅 Android；登录 Cookie 由 Rust 按书源持久化并注入会话）
+// 桌面端：原生文件选择导入
+// ---------------------------------------------------------------------------
+
+/** 原生文件选择器的结果：文件名 + 字节（base64） */
+export interface PickedBookFile {
+  fileName: string;
+  dataBase64: string;
+}
+
+/**
+ * 桌面端导入本地书：弹系统文件选择器并读回所选文件。
+ *
+ * 原生对话框给出的是**文件路径**，WebView 读不了，所以由 Rust 读成字节经 IPC 传回来
+ * （与 PDF 页面图落盘同一套 base64 约定）；手机端不走这里（SAF 的 `input[type=file]`
+ * 直接就能拿到 `File`）。用户取消时返回 `null`。
+ */
+export async function pickBookFile(): Promise<PickedBookFile | null> {
+  if (!tauri) throw new Error("原生文件选择仅在应用内可用");
+  return invoke<PickedBookFile | null>("readerx_pick_book_file");
+}
+
+// ---------------------------------------------------------------------------
+// 网页登录（WebView；登录 Cookie 由 Rust 按书源持久化并注入会话）
 // ---------------------------------------------------------------------------
 
 /** 平台是否支持网页登录 */
@@ -428,7 +450,7 @@ export async function loginSourceWebview(
       url,
       cookies: "",
       count: 0,
-      message: "网页登录仅在 Android 应用内可用",
+      message: "网页登录仅在应用内可用",
     };
   }
   try {

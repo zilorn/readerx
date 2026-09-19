@@ -82,7 +82,7 @@ export default function SourceEditorPage() {
   const [confirmDelete, setConfirmDelete] = createSignal(false);
   const [confirmTemplate, setConfirmTemplate] = createSignal(false);
 
-  // 网页登录（WebView，仅 Android）
+  // 网页登录（应用内 WebView：Android 浮层 / 桌面登录窗口）
   const [loginUrl, setLoginUrl] = createSignal(draft().bookSourceUrl);
   const [loginBusy, setLoginBusy] = createSignal(false);
   const [loginSupported, setLoginSupported] = createSignal(true);

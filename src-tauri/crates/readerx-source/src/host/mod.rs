@@ -146,6 +146,20 @@ pub struct SourceState {
     pub(crate) storage: Mutex<Option<(crate::storage::StorageSnapshot, String)>>,
 }
 
+impl SourceState {
+    /// 会话当前生效的 User-Agent（空串 = 请求时会用内置默认值，见 [`session_base_headers`]）。
+    ///
+    /// 认证窗口（桌面端登录窗口）要按它设置自己的 UA：`cf_clearance` 与 UA 绑定，
+    /// 窗口里用另一个 UA 过验证，之后的 `http.*` 请求仍会被判为未通过。
+    pub fn user_agent_text(&self) -> String {
+        self.user_agent
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .trim()
+            .to_string()
+    }
+}
+
 /// 一条带作用域的 Cookie（值来自真实浏览器，见 crate::profile / backend_*）。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -2057,7 +2071,17 @@ fn text_encoding_args(args: &str, what: &str) -> Result<(String, &'static str), 
 // WebView 登录（书源 JS 引擎调用；编排见 crate::webview_login）
 // ---------------------------------------------------------------------------
 
-/// 平台是否支持网页登录（当前仅 Android）。
+/// 会话当前使用的 User-Agent（书源自带 / CLI `--ua` / 身份文件覆盖后的结果；空串 = 内置默认）。
+///
+/// 认证窗口要按它设置自己的 UA：`cf_clearance` 与 UA 绑定，窗口里用另一个 UA 过验证，
+/// 之后的 `http.*` 请求仍会被判为未通过。
+pub fn source_user_agent(source_id: &str) -> String {
+    source_state(source_id)
+        .map(|state| state.user_agent_text())
+        .unwrap_or_default()
+}
+
+/// 平台是否支持网页登录（Android 应用内浮层 / 桌面端登录窗口）。
 pub fn webview_login_supported() -> bool {
     crate::auth::is_supported()
 }

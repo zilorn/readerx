@@ -1,0 +1,254 @@
+/**
+ * 桌面外壳：左侧导航栏 + 右侧内容区（宽窗口用，见 `lib/platform.ts` 的断点）。
+ *
+ * 与手机外壳（[`MobileStage`](./MobileStage.tsx)）共用同一批页面组件与同一份路由口径
+ * （[`./routes`](./routes.ts)），差别只在「导航怎么摆、页面怎么切换」：
+ * - 手机端是底部 Tab + 页面栈滑动动画；桌面端是常驻侧边栏 + 内容区，**没有转场动画**
+ *   （桌面窗口里横向滑入滑出不像原生行为），页面切换就是内容区整块替换；
+ * - 主 Tab 与「WebDAV 导入」等**保活页面**同样常驻 DOM，切走只是 `display:none`，
+ *   页内搜索词 / 列表 / 滚动位置原样保留（与手机端一致）；
+ * - 次级页面按路由推入 / 弹出，离场即卸载 —— 桌面端没有「返回栈动画」，
+ *   但也因此不需要冻结离场快照。
+ *
+ * 阅读页（`/book/:id`）在宽窗口下由页面自己限宽居中（见页内样式），列表型页面则铺满内容区
+ * ——书架的封面本来就在 ≥768px 时自动换成多列网格。
+ */
+import {
+  createEffect,
+  createMemo,
+  createSignal,
+  For,
+  on,
+  onCleanup,
+  onMount,
+  type Component,
+  type JSX,
+} from "solid-js";
+import { A, useLocation, useNavigate } from "@solidjs/router";
+import { PageBody } from "../components/PageBody";
+import { registerAppScrollEl } from "../lib/appScroll";
+import { isFullHeightPath, isTabRoute, TAB_ROUTES } from "./routes";
+import { tabIcon } from "./tabIcons";
+
+export interface DesktopStageProps {
+  children?: JSX.Element;
+  /** 需要保活的常驻页面：路径 → 组件 */
+  kept?: Record<string, Component>;
+}
+
+interface Pane {
+  id: number;
+  path: string;
+  /** 常驻页面组件（保活层），与 children 互斥 */
+  component?: Component;
+  /** 瞬态页面创建时的路由出口内容 */
+  children?: JSX.Element;
+}
+
+/** 阅读页在宽窗口下的单列限宽（与手机端 480px 一致的阅读节奏，只是两侧各多留白） */
+const READER_WIDTH = 680;
+
+export function DesktopStage(props: DesktopStageProps) {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const path = createMemo(() => location.pathname);
+  const isReader = createMemo(() => path().startsWith("/book/"));
+
+  let paneSeq = 0;
+  const initialPath = location.pathname;
+  const initialKept = props.kept?.[initialPath];
+  const initialPane: Pane = initialKept
+    ? { id: paneSeq++, path: initialPath, component: initialKept }
+    : { id: paneSeq++, path: initialPath, children: props.children };
+
+  const [keptPanes, setKeptPanes] = createSignal<Pane[]>(initialKept ? [initialPane] : []);
+  const [transientPanes, setTransientPanes] = createSignal<Pane[]>(
+    initialKept ? [] : [initialPane],
+  );
+  const [currentId, setCurrentId] = createSignal(initialPane.id);
+
+  const allPanes = createMemo(() => [...keptPanes(), ...transientPanes()]);
+  const paneById = (id: number) => allPanes().find((pane) => pane.id === id);
+
+  const scrollById = new Map<number, HTMLDivElement>();
+  let targetPaneId = initialPane.id;
+
+  /** 内容区可用宽度（阅读页据此限宽居中） */
+  const [stageWidth, setStageWidth] = createSignal(0);
+  let stageEl: HTMLDivElement | undefined;
+
+  onMount(() => {
+    if (!stageEl) return;
+    const observer = new ResizeObserver(() => setStageWidth(stageEl?.clientWidth ?? 0));
+    observer.observe(stageEl);
+    setStageWidth(stageEl.clientWidth);
+    onCleanup(() => observer.disconnect());
+  });
+
+  /** 让 appScrollEl 指向当前页面的滚动容器（页面内「回到顶部」等逻辑依赖它） */
+  function registerTopScroll(): void {
+    const el = scrollById.get(currentId());
+    if (el) registerAppScrollEl(el);
+  }
+
+  function dropTransient(id: number): void {
+    setTransientPanes((list) => list.filter((pane) => pane.id !== id));
+  }
+
+  // 路由变化：复用常驻层，或新建 / 卸载瞬态层
+  createEffect(
+    on(path, (nextPath, prevPath) => {
+      if (prevPath === undefined || nextPath === prevPath) return;
+      const keptComponent = props.kept?.[nextPath];
+      const prevId = currentId();
+
+      let pane: Pane;
+      if (keptComponent) {
+        const existing = keptPanes().find((item) => item.path === nextPath);
+        if (existing) {
+          pane = existing;
+        } else {
+          pane = { id: paneSeq++, path: nextPath, component: keptComponent };
+          setKeptPanes((list) => [...list, pane]);
+        }
+      } else {
+        pane = { id: paneSeq++, path: nextPath, children: props.children };
+        setTransientPanes((list) => [...list, pane]);
+      }
+
+      if (pane.id !== prevId) {
+        const prev = paneById(prevId);
+        // 离散导航（不经过页面栈）：上一页是瞬态层就直接卸载，常驻层留着保活
+        if (prev && !prev.component) dropTransient(prev.id);
+      }
+      setCurrentId(pane.id);
+      targetPaneId = pane.id;
+      // 页面挂载完成后再注册滚动容器（本帧稍后 el 才存在）
+      window.requestAnimationFrame(() => {
+        if (targetPaneId !== pane.id) return;
+        registerTopScroll();
+      });
+      sweepMaps();
+    }),
+  );
+
+  function sweepMaps(): void {
+    const alive = new Set(allPanes().map((pane) => pane.id));
+    for (const id of [...scrollById.keys()]) {
+      if (!alive.has(id)) scrollById.delete(id);
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // 键盘快捷键（桌面端）：Esc 收起 / 返回
+  // ------------------------------------------------------------------
+  onMount(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      // 页内弹层 / 抽屉开着时先让它们自己处理（它们挂在 Portal 上、自己监听 Esc 或遮罩点击）
+      if (document.querySelector('[role="dialog"], [data-desktop-overlay]')) return;
+      if (isTabRoute(path())) return;
+      event.preventDefault();
+      if (window.history.length > 1) navigate(-1);
+      else navigate("/");
+    };
+    window.addEventListener("keydown", onKey);
+    onCleanup(() => window.removeEventListener("keydown", onKey));
+  });
+
+  /** 页面内容区的底部留白与限宽：自管整页高度的页面（阅读页 / 书源编辑页）自己处理 */
+  const contentClass = (panePath: string): string => {
+    if (isFullHeightPath(panePath)) return "";
+    return isReader() ? "" : "pb-8";
+  };
+
+  /** 阅读页在宽内容区里居中限宽；其余页面铺满（书架等列表页自己会分多列） */
+  const paneInnerStyle = (panePath: string) => {
+    if (!isReader() || panePath !== path()) return undefined;
+    const width = Math.min(READER_WIDTH, Math.max(0, stageWidth() - 96));
+    return width > 0 ? { width: `${width}px`, margin: "0 auto" } : undefined;
+  };
+
+  return (
+    <div class="relative flex min-h-0 flex-1 overflow-hidden">
+      <SideNav />
+      <div
+        ref={stageEl}
+        class="relative min-h-0 min-w-0 flex-1 overflow-hidden"
+        style={{ background: "var(--bg)" }}
+      >
+        <For each={allPanes()}>
+          {(pane) => (
+            <div
+              class="absolute inset-0 flex flex-col overflow-hidden"
+              style={{ display: pane.id === currentId() ? undefined : "none" }}
+            >
+              <div class="flex min-h-0 flex-1 flex-col" style={paneInnerStyle(pane.path)}>
+                <PageBody
+                  component={pane.component}
+                  renderChildren={pane.id === currentId()}
+                  contentClass={contentClass(pane.path)}
+                  onScrollEl={(el) => {
+                    scrollById.set(pane.id, el);
+                    if (pane.id === targetPaneId) registerAppScrollEl(el);
+                  }}
+                >
+                  {pane.children}
+                </PageBody>
+              </div>
+            </div>
+          )}
+        </For>
+      </div>
+    </div>
+  );
+}
+
+/** 左侧导航：品牌 + 主 Tab（桌面端没有底部 Tab，主 Tab 只在这里） */
+function SideNav() {
+  const location = useLocation();
+  const isActive = (target: string) => location.pathname === target;
+
+  return (
+    <nav class="flex w-[236px] flex-none flex-col gap-1 border-r border-border bg-surface px-3 py-4">
+      <div class="mb-3 flex items-center gap-2.5 px-2">
+        <BrandMark />
+        <span class="flex min-w-0 flex-col leading-tight">
+          <span class="text-[15px] font-bold tracking-[0.01em]">ReaderX</span>
+          <span class="text-[10.5px] text-text-3">本地书管理</span>
+        </span>
+      </div>
+      <For each={TAB_ROUTES}>
+        {(item) => (
+          <A
+            href={item.path}
+            class="flex items-center gap-3 rounded-[10px] px-2.5 py-2 text-[13.5px] font-medium transition-colors duration-150"
+            classList={{
+              "bg-accent-weak text-accent": isActive(item.path),
+              "text-text-2 hover:bg-surface-2 hover:text-text": !isActive(item.path),
+            }}
+          >
+            {tabIcon(item.path, 18)}
+            {item.label}
+          </A>
+        )}
+      </For>
+    </nav>
+  );
+}
+
+/** 侧边栏品牌标记：与手机端图标同色系的几何标记 */
+function BrandMark() {
+  return (
+    <span
+      class="grid h-8 w-8 flex-none place-items-center rounded-[9px] text-white"
+      style={{ background: "linear-gradient(135deg, var(--accent), var(--accent-deep))" }}
+      aria-hidden="true"
+    >
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H10a2 2 0 0 1 2 2v13a1.5 1.5 0 0 0-1.5-1.5H4z" />
+        <path d="M20 5.5A1.5 1.5 0 0 0 18.5 4H14a2 2 0 0 0-2 2v13a1.5 1.5 0 0 1 1.5-1.5H20z" />
+      </svg>
+    </span>
+  );
+}

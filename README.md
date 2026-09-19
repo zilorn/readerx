@@ -4,7 +4,8 @@
 
 # ReaderX
 
-基于 **Tauri 2 + SolidJS + TypeScript** 的移动端风格电子书阅读器。
+基于 **Tauri 2 + SolidJS + TypeScript** 的电子书阅读器：手机（Android）上是一个单手可用的
+移动端应用，桌面（Linux / Windows）上是侧边导航的窗口应用，两者共用同一套页面与本地书库。
 
 ## 功能
 
@@ -53,25 +54,47 @@ PDF 导入优先读文字层并还原成段落（页眉 / 页脚按「跨页重�
 - **在线阅读**：搜索结果或分类发现 → 在线书页预览 → 「加入书架」（只保存目录元数据），
   入架提示里可直接「加入分组」把新书归入书架分组；
 - **编辑与测试**：书源编辑页内置「保存并测试」，可逐能力填入参数运行并查看结果与 `console` 日志。
-- **网页登录 / 自动网页认证（Android）**：编辑页「网页登录」在应用内 WebView 浮层完成登录后自动捕获站点
-  Cookie（含 httpOnly），按书源持久化并注入会话（重启自动生效，不随书源 JSON 导出）；书源代码也可调用
-  `webview.login(url)` 触发。每个书源默认开启「自动网页认证」：请求命中 Cloudflare 挑战（或 `cf_clearance`
-  令牌过期）时自动拉起 WebView 认证并重试，可在编辑页单独关闭（见 [docs/cloudflare.md](./docs/cloudflare.md)）。
+- **网页登录 / 自动网页认证（Android / Linux / Windows）**：编辑页「网页登录」在应用内 WebView 里完成登录后
+  自动捕获站点 Cookie（含 httpOnly 的 `cf_clearance`），按书源持久化并注入会话（重启自动生效，不随书源 JSON
+  导出）；书源代码也可调用 `webview.login(url)` 触发。Android 是叠在 Activity 上的原生浮层，桌面端是独立
+  登录窗口（系统文件选择器同一套原生体验）。每个书源默认开启「自动网页认证」：请求命中 Cloudflare 挑战
+  （或 `cf_clearance` 令牌过期）时自动拉起 WebView 认证并重试，可在编辑页单独关闭
+  （见 [docs/cloudflare.md](./docs/cloudflare.md)）。
+  登录态里的 localStorage / sessionStorage / IndexedDB 快照在 Android 与 Windows / macOS 上采得到；
+  **Linux 的 WebKitGTK 把宿主脚本与页面存储隔离**，该平台只以 Cookie 为登录态来源（详见
+  [docs/cloudflare.md](./docs/cloudflare.md) 的平台差异一节）。
 
 > 书源仅供用户自行接入公开站点内容使用。**免责声明**：社区/第三方制作的书源与 ReaderX
 > 项目及其作者无关，项目作者没有参与任何书源的制作与维护。书源代码运行在本地沙箱，但作者无法
 > 保证其安全性——请仅导入你信任来源的书源，导入与启用时请阅读并确认相关提示。
 
+## 形态与平台
+
+| 平台 | 外壳 | 说明 |
+| --- | --- | --- |
+| Android | 手机列 + 底部 Tab | 主目标平台，`input[type=file]`（SAF）导入本地书 |
+| Linux / Windows 桌面 | 侧边导航 + 内容区（≥900px 宽时） | 窗口拉窄到 900px 以下自动回到手机外壳 |
+| 浏览器（`pnpm dev`） | 同上（按窗口宽度） | 无 Rust 后端的降级模式，仅用于调界面 |
+
+桌面端的差异只在外壳与系统集成上：窗口尺寸/最小尺寸约束、原生文件选择导入、Esc 返回、
+阅读页已经是左右方向键翻页；页面组件与本地书库两侧共用，不存在两份实现。
+
 ## 开发
 
 ```bash
 pnpm install
-pnpm dev            # Vite 开发服务器 → http://localhost:1420
+pnpm dev                 # Vite 开发服务器 → http://localhost:1420
 pnpm exec tsc --noEmit   # 类型检查
-pnpm build          # 前端产物构建（dist/）
+pnpm build               # 前端产物构建（dist/）
 
 pnpm tauri dev            # 桌面窗口
 pnpm tauri android dev    # Android 真机/模拟器
 ```
+
+构建与发版：`.github/workflows/` 下有三条工作流 —— `build-android.yml` 与
+`build-desktop.yml`（手动触发，只出 artifact 不发布）、
+`release.yml`（打 `v*` tag 触发，一次发布 Android APK + Linux x86_64 包 +
+Windows x86_64 / aarch64 安装包到同一个 Release；桌面按 ABI 分开出包）。
+质量门槛（`pnpm exec tsc --noEmit` / `pnpm build` / `cargo test`）在本地按需跑。
 
 详见 [AGENTS.md](./AGENTS.md)（仓库协作与代码约定）。

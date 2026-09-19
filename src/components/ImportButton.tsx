@@ -9,6 +9,8 @@ import {
   replaceBookContent,
   type BookDraft,
 } from "../lib/books";
+import { pickBookFile } from "../lib/backend";
+import { isDesktopShell } from "../lib/platform";
 import type { BookMeta, LocalBook } from "../lib/booksTypes";
 import {
   previewBookmarkInheritance,
@@ -38,6 +40,15 @@ interface PendingRisk {
   existing: BookMeta;
   draft: BookDraft;
   preview: BookmarkInheritPreview;
+}
+
+/** base64 → 字节：桌面端原生选择器读回的字节经 IPC 以 base64 传输 */
+function base64ToBytes(value: string): ArrayBuffer {
+  const binary = atob(value);
+  const buffer = new ArrayBuffer(binary.length);
+  const bytes = new Uint8Array(buffer);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return buffer;
 }
 
 /** 导入入口：点击呼出底部菜单，选择「导入本地书」或「从 WebDAV 导入」 */
@@ -137,9 +148,30 @@ export function ImportButton(props: ImportButtonProps) {
     }
   }
 
+  /**
+   * 选择本地书：桌面端走系统文件选择器（原生对话框给的是文件路径，WebView 打不开，
+   * 由 Rust 读成字节后包成 `File`）；手机端仍是 WebView 的 `<input type="file">`（SAF）。
+   */
   function openLocalPicker() {
     setOpen(false);
+    if (isDesktopShell()) {
+      void pickAndImport();
+      return;
+    }
     input?.click();
+  }
+
+  async function pickAndImport(): Promise<void> {
+    if (busy()) return;
+    try {
+      const picked = await pickBookFile();
+      // 用户取消：什么都不做
+      if (!picked) return;
+      const file = new File([base64ToBytes(picked.dataBase64)], picked.fileName);
+      await handleFile(file);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "读取所选文件失败", true);
+    }
   }
 
   function openWebDav() {

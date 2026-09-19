@@ -1,6 +1,6 @@
 # 处理 Cloudflare / 登录态 / 防盗链站点
 
-## 自动网页认证（Cloudflare 挑战，Android）
+## 自动网页认证（Cloudflare 挑战，Android / Linux / Windows）
 
 **每个书源默认开启「自动网页认证」**（书源 JSON 的 `autoAuth`，默认 `true`，可在书源编辑页的
 「网页登录」卡片里**单独关闭**）。它解决两类问题：站点套了 Cloudflare 人机挑战，或挑战令牌
@@ -10,11 +10,13 @@
 
 1. `http.*` 请求返回 Cloudflare 挑战页（`cf-mitigated: challenge`，或 403/503 + 典型挑战内容，
    恒为 HTML）；
-2. 若该书源 `autoAuth` 开启且平台支持（Android），自动拉起应用内 **WebView 浮层**加载出问题的
-   地址（GET/HEAD 用原地址，其它方法用站点根），用户在真实浏览器内核里完成验证；
-3. 点「完成」后宿主收集该站点 Cookie（含 httpOnly 的 `cf_clearance`、`__cf_bm` 等）→ 覆盖式
-   持久化到该书源（旧的失效令牌整行移除）并立即注入会话；同一次采集还会顺带抓下
-   localStorage / sessionStorage 快照（凭证不走 Cookie 的站点靠它，书源代码用 `webview.storage()` 读）；
+2. 若该书源 `autoAuth` 开启且平台支持（Android / Linux / Windows），自动拉起应用内 **WebView**
+   加载出问题的地址（GET/HEAD 用原地址，其它方法用站点根），用户在真实浏览器内核里完成验证
+   —— Android 是叠在 Activity 上的浮层，桌面端是独立登录窗口；
+3. 点「完成」（桌面端也可直接关窗）后宿主收集该站点 Cookie（含 httpOnly 的 `cf_clearance`、
+   `__cf_bm` 等）→ 覆盖式持久化到该书源（旧的失效令牌整行移除）并立即注入会话；同一次采集还会
+   顺带抓下 localStorage / sessionStorage 快照（凭证不走 Cookie 的站点靠它，书源代码用
+   `webview.storage()` 读，平台差异见下文）；
 4. 引擎**自动重试原请求一次**，之后书源代码拿到的就是重试结果——刷新成功时响应干净无标记，
    规则照常解析。
 
@@ -30,7 +32,7 @@
 [book-source-api.md](./book-source-api.md) 的 `Response`）：
 
 - 该书源关闭了「自动网页认证」：`cf.auto = "disabled"`；
-- 平台不支持（桌面 / iOS / 浏览器预览）：`cf.auto = "unsupported"`；
+- 平台不支持（iOS / 浏览器预览）：`cf.auto = "unsupported"`；
 - 距上次自动弹窗不足 45 秒：`cf.auto = "cooldown"`；
 - 用户取消 / 超时：`cf.auto = "cancelled"`；
 - 认证成功后重试仍被拦截（令牌未生效 / 站点校验浏览器指纹）：`cf.auto = "stale"`——此时把书源
@@ -71,12 +73,12 @@
 `cf_clearance` 与 **IP + UA + TLS 指纹**绑定。此时把书源 UA 调成与认证浏览器一致
 （`--ua` 或身份文件），或改用 `auth cdp` 让「认证」和「后续请求」出自同一浏览器环境。
 
-## 应用内网页登录（Android）
+## 应用内网页登录（Android / Linux / Windows）
 
 需要**账号登录**（或站点没被自动识别为 CF 挑战）时，仍可用原「网页登录」：
 
-1. 书源编辑页点「网页登录」→ 在浮层里完成验证码/扫码/账号登录；
-2. 点「完成」返回（编辑页会提示捕获到几个 Cookie / 几项存储）；
+1. 书源编辑页点「网页登录」→ 在应用内 WebView 里完成验证码/扫码/账号登录；
+2. 点「完成」返回（编辑页会提示捕获到几个 Cookie / 几项存储；桌面端直接关窗也算完成）；
 3. 直接「保存并测试」搜索/正文即可命中。
 
 与自动流程相同：Cookie 与 **localStorage / sessionStorage / IndexedDB 快照** 按书源**持久化**到独立
@@ -86,6 +88,26 @@
 凭证只在 localStorage 里的站点（Cookie 抓到了但请求仍未登录），书源代码用 `webview.storage()`
 取出 token 显式带进请求，见 [book-source-api.md](./book-source-api.md)。
 
+### 平台差异：存储快照能不能采到
+
+| 平台 | 登录界面 | 注入脚本 / 宿主脚本跑在哪 | 能否采到页面 localStorage |
+| --- | --- | --- | --- |
+| Android | Activity 上的原生 `WebView` 浮层 | 页面内（原生 `evaluateJavascript`） | 能 |
+| Windows | 独立登录窗口（WebView2） | 页面主世界 | 能 |
+| Linux | 独立登录窗口（WebKitGTK） | **隔离世界** | **不能** |
+| macOS | 独立登录窗口（WKWebView） | 页面主世界 | 能 |
+
+Linux 的隔离是 WebKitGTK 的行为，宿主侧没有绕过的入口：Tauri 的 `eval` / `eval_with_callback`、
+页面加载前注入的脚本、以及原生 `webkit_web_view_evaluate_javascript(world_name = NULL)` 读到的
+都是隔离世界的那一份空存储；WebKitGTK 公开 API 也不提供读取 Web Storage **值**的方法
+（`WebsiteDataManager.fetch` 只给 origin / 类型 / 大小）。因此 Linux 上登录态以 **Cookie** 为准：
+
+- `cf_clearance` / `__cf_bm` 这类令牌本来就是 Cookie，**不受影响**；
+- 凭证只写在 localStorage 的站点，Linux 上需要在书源代码里留降级分支
+  （`webview.storage()` 返回空视图时改用账号密码接口登录，或提示用户用手机端登录一次）；
+- 登录态文件是跨端共享的：在 Android / Windows 上登录采集到的存储快照，拷到 Linux 的同一数据
+  目录后 `webview.storage()` 照样读得到（见 [book-source-cli.md](./book-source-cli.md) 的目录说明）。
+
 ## 书源代码触发登录
 
 宿主在 Boa 引擎开放 `webview.login(url, opts?)`。返回对象与限制见
@@ -93,7 +115,7 @@
 
 - 书源代码触发的是「书源主动拉起」，受该书源 `autoAuth` 开关约束：关闭时返回 `ok:false`
   （message 说明被该书源设置禁用），规则内请自行降级；
-- 平台不支持（桌面/iOS/浏览器预览）时返回 `ok:false` 且不抛错。
+- 平台不支持（iOS / 浏览器预览）时返回 `ok:false` 且不抛错。
 
 ## 手动兜底（任意平台）
 

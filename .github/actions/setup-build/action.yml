@@ -1,0 +1,75 @@
+# 各工作流共用的构建环境准备
+#
+# 抽出来的理由：三条工作流（CI / 桌面构建 / 发版）都要「pnpm + Node + Rust + 缓存 + 依赖安装」，
+# 其中 Linux 还要额外装 WebKitGTK / GTK 开发包（Tauri 在 Linux 上必须有它才能编译，
+# 桌面端新增的 tauri-plugin-dialog 也会链到 GTK）。各写一遍迟早走偏，版本也难统一。
+#
+# 用法：
+#   - uses: ./.github/actions/setup-build
+#     with:
+#       rust-targets: aarch64-linux-android,armv7-linux-androideabi
+
+name: Setup build
+description: 准备 pnpm / Node / Rust 与（Linux 上的）系统依赖并安装前端依赖
+
+inputs:
+  node-version:
+    description: Node 版本
+    required: false
+    default: "22"
+  rust-targets:
+    description: 额外的 Rust target（逗号分隔，如 Android 的四个 ABI；留空表示只要宿主 target）
+    required: false
+    default: ""
+  system-deps:
+    description: 是否安装 Linux 系统依赖（Linux runner 上构建 Tauri 必须）
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Setup pnpm
+      uses: pnpm/action-setup@v4
+      with:
+        version: 11
+
+    - name: Setup Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+        cache: pnpm
+
+    # Linux 上 Tauri 的编译期依赖：webkit2gtk-4.1 与 GTK3 是 webview 本体，
+    # libsoup3 是它的网络层，librsvg 供图标渲染；patchelf 是 AppImage 打包必需，
+    # libayatana-appindicator 供托盘/状态栏（Tauri 默认启用）。
+    - name: Install Linux system dependencies
+      if: inputs.system-deps == 'true' && runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          libwebkit2gtk-4.1-dev \
+          libgtk-3-dev \
+          libsoup-3.0-dev \
+          libjavascriptcoregtk-4.1-dev \
+          librsvg2-dev \
+          libayatana-appindicator3-dev \
+          patchelf \
+          xvfb
+
+    - name: Setup Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: ${{ inputs.rust-targets }}
+
+    # Cargo 缓存按 rust-toolchain 与平台分开；workspaces 指向 src-tauri（Cargo.toml 在那里）
+    - name: Cache cargo
+      uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: src-tauri
+        key: ${{ runner.os }}-${{ inputs.rust-targets }}
+
+    - name: Install frontend dependencies
+      shell: bash
+      run: pnpm install --frozen-lockfile

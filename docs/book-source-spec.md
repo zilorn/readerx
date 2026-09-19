@@ -21,7 +21,7 @@
     "toc": true,                 //   目录
     "content": true              //   正文
   },
-  "autoAuth": true,              // 自动网页认证（登录/CF 挑战，仅 Android）；默认 true，可单独关闭
+  "autoAuth": true,              // 自动网页认证（登录/CF 挑战，Android / Linux / Windows）；默认 true，可单独关闭
   "groupId": "sg-m7x2k9",        // 本机分组归属（本地字段；导出时改写为可读的 groupName，见「分组」）
   "userAgent": "",               // 空 = 内置默认
   "headers": { "Referer": "https://..." }, // 每请求合并的默认头（可含 Cookie）
@@ -126,7 +126,7 @@
   超出即中止并返回可读错误（如 `循环次数超出上限（书源代码可能存在死循环）`），
   不会让界面一直转圈；但**不要依赖它做流程控制**，规则里出现死循环仍属错误写法。
 - `webview.login(url)`（Android 端网页登录，见 [book-source-api.md](./book-source-api.md)）
-  会**阻塞等待**用户在登录浮层内完成/取消/超时；期间不占用函数预算计时，
+  会**阻塞等待**用户在登录界面里完成/取消/超时；期间不占用函数预算计时，
   请只在确实需要登录时调用，避免把整个调用拖住。该书源关闭 `autoAuth` 时返回 `ok:false`。
 - `webview.storage()`：读取登录时采集的 localStorage / sessionStorage / IndexedDB 快照
   （凭证不用 Cookie 记的站点靠它把 token 显式带进请求）；只读、不触发认证，没有快照时返回空对象。

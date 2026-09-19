@@ -6,10 +6,14 @@
 
 **ReaderX** —— 基于 **Tauri 2 + SolidJS** 的移动端风格电子书阅读器（书架 / 导入 / 设置 / 阅读）。
 
-- 形态：移动端优先的 Web 前端（不要考虑桌面端，**只考虑移动端**），宿主为 Tauri（桌面窗口按手机宽度渲染，也可 `tauri android dev` 跑真机/模拟器）。
+- 形态：同一份 Web 前端 + Tauri 宿主，跑在**手机与桌面两端**：
+  - **Android（首要目标）**：手机列 + 底部 Tab，界面按单手操作设计；
+  - **Linux / Windows 桌面**：窗口宽度 ≥900px 时换成侧边导航 + 内容区（`src/lib/platform.ts` 的断点，
+    外壳见 `src/shell/`），窗口拉窄会自动回到手机外壳；
+  - 页面组件、路由、本地书库两端**共用一份**，不要为桌面复制一套页面；差异只在外壳与系统集成
+    （窗口尺寸约束、原生文件选择导入、Esc 返回）。
 - 包管理：**pnpm**（仓库已有 `pnpm-lock.yaml`，新增依赖请用 `pnpm add`）。
 - 本地书管理：此项目专注于本地书管理。
-- 专注于**移动端**，永久不考虑桌面端，请不要写有关桌面端的逻辑。
 
 ## 常用命令
 
@@ -56,14 +60,18 @@
   ```
 
 - **每个页面文件必须 default export 一个 Solid 组件**，并在 App.tsx 里用 `lazy(() => import(...))` 引入 —— 新增页面照抄现有写法即可，构建时 Vite 会自动拆 chunk。
-- 根布局 `AppShell` 负责：`<Suspense>` 承接懒加载 fallback、根据路由显示/隐藏底部 Tab、路由切换回滚滚动位置。
-- 主 Tab 页面才有底部导航；阅读页 / 404 等次级页不显示 Tab。
+- 根布局 `AppShell`（`src/App.tsx`）只负责：按窗口宽度选外壳（`MobileStage` / `DesktopStage`）、
+  承接 `<Suspense>` 的懒加载 fallback、全局 Toast，以及跨页面的「移入分组」抽屉。
+  页面栈与导航都在外壳里，加新外壳行为改 `src/shell/`，别往 AppShell 堆。
+- 主 Tab 页面（手机端）才有底部导航；阅读页 / 404 等次级页不显示 Tab；桌面端主 Tab 在侧边栏。
 - **常驻（保活）页面**：主 Tab（`/`、`/discover`、`/settings`）与 `/webdav-import` 由页面栈
-  `RouteStage` 直接挂载并常驻 DOM（注册表 `KEPT_PAGES` 在 `src/App.tsx`），切走只是
+  直接挂载并常驻 DOM（注册表 `KEPT_PAGES` 在 `src/App.tsx`，两个外壳共用），切走只是
   `display:none`、再进入复用同一层，页内状态与滚动位置原样保留 —— 这些路径**不写 `<Route>`**，
   路由表只声明真正会 push / pop 的次级页面。要保活一个新页面：加进 `KEPT_PAGES`，
   并让该页面用 `closeOnRouteChange`（`src/lib/keptPage.ts`）收起挂在 `<Portal>` 上的弹层
   （Portal 渲染到 document.body，不随页面层隐藏）。其余页面按推入 / 弹出卸载，正常写 `<Route>`。
+- 主 Tab 与「自管整页高度」的路由口径集中在 `src/shell/routes.ts`（手机底部导航与桌面侧边栏
+  都读它），新增主 Tab 只改这一处 + `KEPT_PAGES`。
 - 页面内跳转用 `useNavigate()` / `<A href>`（不要写原生 `<a href>`）。
 
 ## 状态约定（重要）
@@ -89,6 +97,19 @@
 - 提交前保证 `pnpm build` 通过；不要提交 `dist/` 与 `node_modules/`。
 - 提交前保证是否过度依赖一个文件中的代码，即一个文件承担了太多职责。
 
+## 桌面端约定
+
+- 外壳二选一由 `src/lib/platform.ts` 的**窗口宽度断点**决定（不是编译期分支）：`MobileStage` 是页面栈
+  滑动动画 + 底部 Tab，`DesktopStage` 是侧边栏 + 内容区。两者共用 `KEPT_PAGES` 保活注册表与
+  `src/shell/routes.ts` 的路由口径，新增主 Tab 只改 `routes.ts`。
+- 挂在 `<body>` 上的浮层（底部抽屉 / 操作条）宽度统一用 `max-w-[var(--app-column)]`（见 `src/index.css`），
+  这样手机列与桌面内容区都能正确居中；不要再写死 `max-w-[480px]`。
+- 手机专属能力（如 `input[type=file]` 的 SAF 导入）在桌面端要换成原生实现：桌面导入走
+  `readerx_pick_book_file`（系统文件选择器 + Rust 读字节），见 `src/components/ImportButton.tsx`。
+- 桌面登录窗口的实现在 `plugins/tauri-plugin-webview-login`：Linux 用 WebKitGTK 原生
+  `CookieManager` 读 Cookie（含 httpOnly），页面存储探针在各平台的实际能力见
+  `desktop.rs` 的实测表——**Linux 上宿主脚本与页面存储隔离，不要试图用 eval 读 localStorage**。
+
 ## 平台提醒
 
 - Tauri WebView 只认较新的 CSS：flex/grid/backdrop-filter 可用，但避免过度依赖实验特性（`color-mix` 已用，注意低版本 Android WebView 兼容性，必要时加 fallback）。
@@ -100,8 +121,13 @@
   `src-tauri/crates/readerx-source`，**不依赖 Tauri / GUI**；App 与独立二进制共用它，
   不要在主 crate 里再写第二份引擎或书源存储逻辑。
 - 该 crate 需要「真实浏览器」时一律通过 `readerx_source::auth` 的 `AuthProvider` 注册后端：
-  App 注册 Android WebView 插件，CLI 注册 webkit2gtk / CDP（都是可选 feature）。
-  新增平台认证方式时实现该 trait，不要往核心里塞 `#[cfg(target_os)]` 分支。
+  App 注册 `tauri-plugin-webview-login`（Android 原生浮层 / 桌面独立登录窗口，插件内部按平台分实现），
+  CLI 注册 webkit2gtk / CDP（都是可选 feature）。新增平台认证方式时实现该 trait，
+  不要往核心里塞 `#[cfg(target_os)]` 分支。
+- `AuthProvider::authenticate` 的入参是 `AuthRequest`：注入脚本、会话 UA（`cf_clearance` 与 UA 绑定，
+  窗口 UA 必须与请求 UA 一致）与存储探针（`ProbeScript` 四段脚本）。后端只原样执行探针，
+  不认识它的内部结构；探针本身住在 `storage.rs`，改格式时四个宿主（Android / 桌面 / CDP / CLI webkit）
+  一起考虑。
 - 数据目录由宿主在启动时用 `readerx_source::store::init_data_root` 指定（App 用应用数据目录，
   CLI 用 `--data-dir`），App 与 CLI 因此能交替读写同一份书源与登录态；改动文件格式要同时
   考虑两边的兼容（见 `store.rs` 的文件布局注释）。

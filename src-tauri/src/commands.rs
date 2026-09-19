@@ -21,6 +21,7 @@ use base64::Engine as _;
 use serde_json::Value;
 use tauri::AppHandle;
 use tauri::Manager;
+use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_fs::FsExt;
 use readerx_source::auth::LoginOutcome;
 
@@ -189,6 +190,65 @@ pub async fn readerx_third_party_notices(app: AppHandle) -> Result<String, Strin
 #[tauri::command]
 pub fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
+}
+
+// ---------------------------------------------------------------------------
+// 桌面端：原生文件选择导入
+// ---------------------------------------------------------------------------
+
+/// 导入本地书时允许的最大文件（PDF 扫描件常见几十 MB，给足余量）
+const MAX_IMPORT_BYTES: u64 = 256 * 1024 * 1024;
+
+/// 一次「原生文件选择导入」的结果：文件名 + 文件字节（base64）。
+///
+/// 桌面端用系统文件选择器（GTK / Win32 对话框），拿到的是**路径**而不是 Android
+/// SAF 那样的 `content://` URI —— WebView 打不开这种路径，所以由 Rust 读成字节
+/// 经 IPC 交给前端，前端再包成 `File` 走既有的解析流程（TXT / EPUB / PDF 三套解析器
+/// 与「同名书重新导入」的交互完全复用，不因平台分叉）。
+#[derive(serde::Serialize)]
+pub struct PickedBookFile {
+    pub file_name: String,
+    /// 文件字节的 base64（不带 data URL 前缀）
+    pub data_base64: String,
+}
+
+/// 弹出系统文件选择器并读回所选文件；用户取消返回 `Ok(None)`。
+///
+/// 不能走 [`blocking`]：原生对话框要跑在主线程上，丢进 blocking 线程池会直接报错
+/// （见 tauri-plugin-dialog 的说明），所以文件读取也一并放在这里完成。
+#[tauri::command]
+pub async fn readerx_pick_book_file(app: AppHandle) -> Result<Option<PickedBookFile>, String> {
+    let picked = app
+        .dialog()
+        .file()
+        .add_filter("电子书", &["txt", "epub", "equb", "pdf"])
+        .blocking_pick_file();
+    let Some(path) = picked else {
+        return Ok(None);
+    };
+    let path = path.into_path().map_err(|err| format!("无法解析所选文件路径: {err}"))?;
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| "所选文件没有文件名".to_string())?;
+
+    let meta = std::fs::metadata(&path).map_err(|err| format!("读取所选文件失败: {err}"))?;
+    if !meta.is_file() {
+        return Err("所选路径不是文件".to_string());
+    }
+    if meta.len() > MAX_IMPORT_BYTES {
+        return Err(format!(
+            "文件过大（{} MB），超过 {} MB 上限",
+            meta.len() / (1024 * 1024),
+            MAX_IMPORT_BYTES / (1024 * 1024)
+        ));
+    }
+    let bytes = std::fs::read(&path).map_err(|err| format!("读取所选文件失败: {err}"))?;
+    Ok(Some(PickedBookFile {
+        file_name,
+        data_base64: B64.encode(bytes),
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -467,7 +527,7 @@ pub async fn readerx_source_fetch_image(
 }
 
 // ---------------------------------------------------------------------------
-// 书源网页登录（WebView，仅 Android；Cookie 按源持久化）
+// 书源网页登录（应用内 WebView：Android 浮层 / 桌面登录窗口；Cookie 按源持久化）
 // ---------------------------------------------------------------------------
 
 /// 是否支持网页登录（Android 应用内为 true）。

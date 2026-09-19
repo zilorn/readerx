@@ -32,30 +32,15 @@ import {
   onCleanup,
   onMount,
   Show,
-  Suspense,
   type Component,
   type JSX,
 } from "solid-js";
-import { Dynamic } from "solid-js/web";
 import { useBeforeLeave, useLocation } from "@solidjs/router";
-import { ScrollArea } from "./ScrollArea";
-import { TabBar } from "./TabBar";
-import { LoadingScreen } from "./LoadingScreen";
+import { PageBody } from "../components/PageBody";
+import { TabBar } from "../components/TabBar";
 import { registerAppScrollEl } from "../lib/appScroll";
 import { shelfSelectingMode } from "../lib/store";
-
-/* 底部导航的主 Tab 路由；其余均为需「推入 / 弹出」的次级页面 */
-const TAB_ROUTES = new Set(["/", "/discover", "/settings"]);
-const isTabRoute = (path: string) => TAB_ROUTES.has(path);
-const isReaderPath = (path: string) => path.startsWith("/book/");
-
-/**
- * 自管整页高度的页面：内容区不滚动、页面内部再分栏（如书源编辑页的常驻 Tab +
- * JS 编辑器）。这些页面不能带内容区底部留白，否则会多出可滚动的几像素。
- */
-const FULL_HEIGHT_ROUTES = new Set(["/source-editor"]);
-const isFullHeightPath = (path: string) =>
-  isReaderPath(path) || FULL_HEIGHT_ROUTES.has(path);
+import { isFullHeightPath, isTabRoute } from "./routes";
 
 /* 与阅读器翻页动画同一套缓动曲线 */
 const EASE = "cubic-bezier(0.22, 1, 0.36, 1)";
@@ -81,7 +66,7 @@ type NavMode = "push" | "pop" | "fade";
 /** 新页入场方向：push 自右入、pop 自左回（fade 的新页始终垫底，无需入场姿态） */
 type IntroKind = "right" | "left";
 
-export interface RouteStageProps {
+export interface MobileStageProps {
   children?: JSX.Element;
   /** 需要保活的常驻页面：路径 → 组件 */
   kept?: Record<string, Component>;
@@ -129,7 +114,7 @@ function waitPageReady(el: HTMLElement, onReady: () => void): void {
   window.requestAnimationFrame(tick);
 }
 
-export function RouteStage(props: RouteStageProps) {
+export function MobileStage(props: MobileStageProps) {
   const location = useLocation();
   const path = createMemo(() => location.pathname);
 
@@ -429,32 +414,17 @@ export function RouteStage(props: RouteStageProps) {
               "z-index": outgoingOnTop() && pane.id === outgoingId() ? 2 : undefined,
             }}
           >
-            <ScrollArea
-              class="min-h-0 flex-1"
+            <PageBody
+              component={pane.component}
+              renderChildren={pane.id === currentId()}
               contentClass={isFullHeightPath(pane.path) ? "" : "pb-4"}
-              onEl={(el) => {
+              onScrollEl={(el) => {
                 scrollById.set(pane.id, el);
                 if (pane.id === targetPaneId) registerAppScrollEl(el);
               }}
             >
-              <Suspense
-                fallback={
-                  <div class="h-full" data-stage-loading="true">
-                    <LoadingScreen label="页面加载中…" />
-                  </div>
-                }
-              >
-                {/* 常驻层渲染注册表里的页面组件 */}
-                <Show when={pane.component}>
-                  {(component) => <Dynamic component={component()} />}
-                </Show>
-                {/* 瞬态层渲染路由出口，且只由当前层渲染：出口是路由的共享快照，
-                    离场中的旧层若一起渲染会把新页面的 DOM 抢走 */}
-                <Show when={!pane.component && pane.id === currentId()}>
-                  {pane.children}
-                </Show>
-              </Suspense>
-            </ScrollArea>
+              {pane.children}
+            </PageBody>
             <Show
               when={
                 isTabRoute(pane.path) &&

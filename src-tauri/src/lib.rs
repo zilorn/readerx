@@ -58,6 +58,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_fs::init())
+        // 桌面端导入本地书：系统文件选择器（移动端不支持，插件在那边会报错，故按平台注册）
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_tts::init())
         .plugin(tauri_plugin_webview_login::init())
         // 章节插图：按本地文件名直接读文件应答（只接受本应用写出的图片文件名）
@@ -78,7 +80,7 @@ pub fn run() {
             if let Ok(dir) = app.path().app_data_dir() {
                 readerx_source::store::init_data_root(dir);
             }
-            // 网页登录后端：把「插件(Android WebView)」注册为引擎的认证实现
+            // 网页登录后端：把「插件（Android 原生浮层 / 桌面独立登录窗口）」注册为引擎的认证实现
             webview_login::install(app.handle().clone());
             Ok(())
         })
@@ -98,6 +100,7 @@ pub fn run() {
             commands::readerx_tts_cache_stats,
             commands::readerx_tts_cache_clear,
             commands::readerx_license_text,
+            commands::readerx_pick_book_file,
             commands::readerx_third_party_notices,
             commands::readerx_sources_list,
             commands::readerx_source_get,

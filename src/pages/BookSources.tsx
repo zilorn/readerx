@@ -654,7 +654,7 @@ export default function BookSourcesPage() {
           onClick={() => setDeleteId(null)}
         />
         <div
-          class="fixed inset-x-0 bottom-0 z-[41] mx-auto max-w-[480px] animate-sheet-up rounded-t-[16px] bg-surface px-4 pb-[calc(20px+env(safe-area-inset-bottom))] pt-4 shadow-[0_-10px_34px_rgb(0_0_0/0.22)]"
+          class="fixed inset-x-0 bottom-0 z-[41] mx-auto max-w-[var(--app-column)] animate-sheet-up rounded-t-[16px] bg-surface px-4 pb-[calc(20px+env(safe-area-inset-bottom))] pt-4 shadow-[0_-10px_34px_rgb(0_0_0/0.22)]"
           role="dialog"
           aria-label="删除书源"
         >
@@ -686,7 +686,7 @@ export default function BookSourcesPage() {
           onClick={closeUrlImport}
         />
         <div
-          class="fixed inset-x-0 bottom-0 z-[41] mx-auto max-w-[480px] animate-sheet-up rounded-t-[16px] bg-surface px-4 pb-[calc(20px+env(safe-area-inset-bottom))] pt-4 shadow-[0_-10px_34px_rgb(0_0_0/0.22)]"
+          class="fixed inset-x-0 bottom-0 z-[41] mx-auto max-w-[var(--app-column)] animate-sheet-up rounded-t-[16px] bg-surface px-4 pb-[calc(20px+env(safe-area-inset-bottom))] pt-4 shadow-[0_-10px_34px_rgb(0_0_0/0.22)]"
           role="dialog"
           aria-label="从网址导入书源"
         >

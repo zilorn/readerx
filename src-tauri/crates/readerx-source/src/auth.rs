@@ -72,6 +72,49 @@ impl LoginOutcome {
     }
 }
 
+/// 宿主要求认证后端执行的存储探针（四段脚本，见 [`crate::storage::probe_script_parts`]）。
+///
+/// 后端只负责「原样执行」，不必知道探针内部实现：
+/// - `init`：页面加载前注入（**所有框架**），只把探针装进页面、不采集；
+/// - `run`：用户完成登录后求值一次，触发采集；
+/// - `read`：求值读取结果，返回 `pending` 表示还没采完（IndexedDB 枚举是异步的）；
+/// - `pending`：上面那个标记。
+///
+/// **必须在页面世界里跑**：WebKitGTK 上宿主的 `eval` 与初始化脚本都在隔离世界，
+/// 那里有自己的 `localStorage`，读不到页面写下的登录凭证；只有 `initialization_script`
+/// 注入的代码与页面脚本共享同一个世界，所以探针必须先注入、再调用。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProbeScript {
+    /// 页面加载前注入的脚本（只定义，不执行；空 = 不注入）
+    pub init: String,
+    /// 触发一次采集的表达式
+    pub run: String,
+    /// 读取采集结果的表达式（`pending` 表示还没采完）
+    pub read: String,
+    /// `read` 的「还没采完」标记
+    pub pending: String,
+}
+
+impl ProbeScript {
+    /// 是否可用（四段脚本都要就位）
+    pub fn is_ready(&self) -> bool {
+        !self.init.is_empty() && !self.run.is_empty() && !self.read.is_empty()
+    }
+}
+
+/// 一次认证的输入：除了起始地址，后端还需要宿主准备好的注入脚本与身份（UA）。
+#[derive(Debug, Clone, Default)]
+pub struct AuthRequest {
+    /// 页面加载前注入的脚本（每次导航都重新注入，见 [`AuthProvider::initialization_scripts`]）
+    pub scripts: Vec<String>,
+    /// 认证窗口的 User-Agent（空串 = 内核默认值）
+    pub user_agent: String,
+    /// 非 Cookie 登录信息的采集探针（后端自己采存储时忽略）
+    pub probe: Option<ProbeScript>,
+    /// 书源 id：桌面端用它给登录窗口起标题 / label（同时开多个源时能分辨）
+    pub source_id: String,
+}
+
 /// 认证后端：由宿主（App / CLI）实现并注册。
 ///
 /// 实现必须是 `Send + Sync`：引擎在工作线程上调用它，而认证窗口属于主线程。
@@ -81,7 +124,15 @@ pub trait AuthProvider: Send + Sync {
 
     /// 阻塞式执行一次认证：打开 `url` 让用户完成验证，返回捕获到的 Cookie。
     /// 失败 / 取消返回 `ok: false`，不返回 `Err`（`Err` 仅保留给后端自身不可用）。
-    fn authenticate(&self, source_id: &str, url: &str) -> Result<LoginOutcome, String>;
+    ///
+    /// `request` 里的注入脚本 / UA / 存储探针都由宿主备好，后端原样使用即可
+    /// （后端自己采存储时忽略探针，见 [`AuthRequest`]）。
+    fn authenticate(
+        &self,
+        source_id: &str,
+        url: &str,
+        request: &AuthRequest,
+    ) -> Result<LoginOutcome, String>;
 }
 
 static PROVIDER: OnceLock<Mutex<Option<Arc<dyn AuthProvider>>>> = OnceLock::new();
@@ -114,7 +165,7 @@ pub fn is_supported() -> bool {
 /// 否则应用内「网页登录」这类入口（先登录、后调用书源）抓到的 Cookie / 存储快照只会写进文件，
 /// 内存会话里没有，表现为**要重启才生效**。
 pub fn perform(source_id: &str, url: &str) -> Result<LoginOutcome, String> {
-    let _ = crate::host::ensure_source_state(source_id);
+    let state = crate::host::ensure_source_state(source_id)?;
     let provider = provider().ok_or_else(|| "网页认证后端尚未初始化".to_string())?;
     if !provider.supported() {
         return Ok(LoginOutcome::failure(
@@ -122,7 +173,35 @@ pub fn perform(source_id: &str, url: &str) -> Result<LoginOutcome, String> {
             "当前环境不支持网页认证（独立二进制请用 --auth webkit 或 --auth cdp）",
         ));
     }
-    provider.authenticate(source_id, url)
+    // 非 Cookie 登录信息（localStorage / sessionStorage / IndexedDB）只能由页面里的 JS 探针采集：
+    // 这里连同登录地址的 origin 一起交给后端（后端自己采存储时按需忽略）。
+    let extra: Vec<String> = crate::storage::origin_of(url).into_iter().collect();
+    let (init, run, read, pending) = crate::storage::probe_script_parts(&extra);
+    // 认证窗口的 UA 必须与书源请求实际发出的 UA 一致（cf_clearance 与 UA + IP 绑定）：
+    // 书源没写 UA 时请求会用内置默认值，窗口也必须用同一个，否则验证过了之后的 http.* 仍被拦。
+    let user_agent = {
+        let configured = state.user_agent_text();
+        if configured.is_empty() {
+            crate::profile::DEFAULT_UA.to_string()
+        } else {
+            configured
+        }
+    };
+    provider.authenticate(
+        source_id,
+        url,
+        &AuthRequest {
+            scripts: vec![init.clone()],
+            user_agent,
+            probe: Some(ProbeScript {
+                init: init.clone(),
+                run,
+                read,
+                pending,
+            }),
+            source_id: source_id.to_string(),
+        },
+    )
 }
 
 /// 把该书源已保存的登录态注入会话（幂等；进程内只注入一次）。

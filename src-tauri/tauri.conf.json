@@ -12,9 +12,13 @@
   "app": {
     "windows": [
       {
-        "title": "readerx",
-        "width": 800,
-        "height": 600
+        "title": "ReaderX",
+        "width": 1180,
+        "height": 820,
+        "minWidth": 420,
+        "minHeight": 560,
+        "center": true,
+        "resizable": true
       }
     ],
     "security": {

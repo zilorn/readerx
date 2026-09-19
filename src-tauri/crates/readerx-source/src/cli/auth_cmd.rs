@@ -8,7 +8,7 @@
 //!
 //! 另有 `auth show` / `auth clear` 查看与清理。
 
-use crate::auth::{self, AuthProvider};
+use crate::auth::{self, AuthProvider, AuthRequest};
 use crate::cli::args::Cli;
 use crate::cli::render as out;
 use crate::cli::source::{
@@ -17,7 +17,7 @@ use crate::cli::source::{
 };
 use crate::host::{self, ScopedCookie};
 use crate::models::BookSource;
-use crate::profile::Profile;
+use crate::profile::{Profile, DEFAULT_UA};
 use crate::store;
 use serde_json::json;
 use std::sync::Arc;
@@ -87,7 +87,22 @@ pub fn cmd_auth(cli: &Cli, provider: Option<Arc<dyn AuthProvider>>) -> Result<()
                     println!("在浏览器里完成登录 / 人机验证（最长 {} 秒）；完成后回车即取 Cookie", cli.wait_secs);
                 }
             }
-            let mut outcome = provider.authenticate(&source.id, &url)?;
+            let mut outcome = provider.authenticate(
+                &source.id,
+                &url,
+                &AuthRequest {
+                    // CLI 的 webkit / cdp 后端各自在窗口里跑存储探针，不需要宿主注入
+                    scripts: Vec::new(),
+                    probe: None,
+                    source_id: source.id.clone(),
+                    // 与请求实际发出的 UA 对齐（cf_clearance 与 UA 绑定）；
+                    // 书源没写 UA 时用内置默认值，与 webkit / cdp 后端原有口径一致
+                    user_agent: match session.user_agent_state().0 {
+                        ua if ua.trim().is_empty() => DEFAULT_UA.to_string(),
+                        ua => ua,
+                    },
+                },
+            )?;
             if let Err(err) = auth::persist_login_outcome(&source.id, &mut outcome) {
                 eprintln!("readerx-source: 保存登录 Cookie 失败：{err}");
             }

@@ -36,7 +36,7 @@ export function SourceSelectionBar(props: SourceSelectionBarProps) {
 
   return (
     <Show when={props.count > 0}>
-      <div class="fixed inset-x-0 bottom-0 z-30 mx-auto w-full max-w-[480px] animate-sheet-up border-t border-border bg-surface px-[18px] pb-[calc(10px+env(safe-area-inset-bottom))] pt-3 shadow-[0_-8px_28px_rgb(0_0_0/0.14)]">
+      <div class="fixed inset-x-0 bottom-0 z-30 mx-auto w-full max-w-[var(--app-column)] animate-sheet-up border-t border-border bg-surface px-[18px] pb-[calc(10px+env(safe-area-inset-bottom))] pt-3 shadow-[0_-8px_28px_rgb(0_0_0/0.14)]">
         <div class="flex items-stretch gap-2">
           <BarAction
             label="启用"

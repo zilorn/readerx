@@ -1,7 +1,7 @@
 [package]
 name = "tauri-plugin-webview-login"
 version = "0.1.0"
-description = "Android-only native WebView login overlay for ReaderX book sources"
+description = "Native WebView login overlay for ReaderX book sources (Android overlay / desktop window)"
 edition = "2021"
 build = "build.rs"
 links = "tauri-plugin-webview-login"
@@ -17,3 +17,21 @@ tauri-plugin = { version = "2", features = ["build"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2", features = [] }
+# 桌面端登录窗口只按宿主给的三段脚本执行存储探针（不认识探针内部结构），
+# 复用核心 crate 的 ProbeScript 类型即可；不引入引擎 / HTTP 依赖之外的东西。
+readerx-source = { path = "../../crates/readerx-source" }
+
+# 桌面（Linux/Windows）实现直接建 WebviewWindow 并读 Cookie 库，需要 wry 后端；
+# Android 用的是 Kotlin 浮层，不依赖 webview 特性。
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri = { version = "2", features = ["wry"] }
+
+# Linux（WebKitGTK）：桌面登录窗口的原生求值入口。
+# Tauri 的 eval 在 WebKitGTK 上跑隔离世界（读不到页面 localStorage），
+# 只有原生 `evaluate_javascript(script, None, …)` 才在页面主世界执行。
+[target.'cfg(target_os = "linux")'.dependencies]
+webkit2gtk = { version = "2.0", features = ["v2_40"] }
+# Cookie 库读写的句柄类型（与 webkit2gtk 2.0 锁定的同一版本）
+soup3 = { version = "0.5", package = "soup3" }
+# 与 webkit2gtk 2.0 锁定的同一版本（=1.1）：求值结果 `Value` 就是它的类型
+javascriptcore-rs = { version = "=1.1", package = "javascriptcore-rs" }
