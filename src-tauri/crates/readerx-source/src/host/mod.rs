@@ -328,6 +328,25 @@ pub fn source_state(source_id: &str) -> Result<Arc<SourceState>, String> {
         .ok_or_else(|| "书源会话尚未初始化".to_string())
 }
 
+/// 取会话状态；本进程还没建过时**按需创建**（从书源目录读定义后走 [`prepare_source`]）。
+///
+/// 为什么需要它：登录 / 认证的收尾（`http.setCookie`、存储快照写入）都发生在书源函数之外，
+/// 此时本进程可能一次都还没调用过该书源 —— 严格版 `source_state` 会返回 Err，调用方若是
+/// 「取不到就跳过」，登录态就只落了盘、内存会话里没有，表现为**要重启才生效**。
+/// 已有会话时这里不再 prepare，避免把 CLI `--ua` / 身份文件 / 抓取到的作用域 Cookie 覆盖掉。
+pub fn ensure_source_state(source_id: &str) -> Result<Arc<SourceState>, String> {
+    if let Ok(state) = source_state(source_id) {
+        return Ok(state);
+    }
+    if let Some(source) = crate::store::get_source(source_id)? {
+        if let Ok(state) = source_state(&source.id) {
+            return Ok(state);
+        }
+        prepare_source(&source)?;
+    }
+    source_state(source_id).map_err(|_| "书源会话尚未初始化".to_string())
+}
+
 /// 组装书源会话的基础请求头：默认头 + 手动 Cookie 行 + 作用域 Cookie + UA（空 UA 用内置默认）。
 /// 顺序与历史实现一致（默认头 → Cookie → UA），便于后续“末尾同名覆盖”。
 /// `url` 用于挑选作用域 Cookie（浏览器导入的 Cookie 只发给匹配的站点）。
@@ -1082,7 +1101,8 @@ pub fn http_set_cookie(source_id: &str, cookie_text: &str) {
     if text.is_empty() {
         return;
     }
-    if let Ok(state) = source_state(source_id) {
+    // 按需建会话：登录收尾早于「本进程第一次调用该书源」时也要立刻生效（否则只剩落盘）
+    if let Ok(state) = ensure_source_state(source_id) {
         let mut lines = state
             .extra_cookies
             .lock()
@@ -1105,7 +1125,7 @@ pub fn http_remove_cookie(source_id: &str, cookie_text: &str) -> u64 {
     if text.is_empty() {
         return 0;
     }
-    let Ok(state) = source_state(source_id) else {
+    let Ok(state) = ensure_source_state(source_id) else {
         return 0;
     };
     let mut lines = state
@@ -1118,7 +1138,7 @@ pub fn http_remove_cookie(source_id: &str, cookie_text: &str) -> u64 {
 }
 
 pub fn http_cookies(source_id: &str) -> String {
-    let list = source_state(source_id)
+    let list = ensure_source_state(source_id)
         .ok()
         .and_then(|state| {
             state
@@ -1132,7 +1152,7 @@ pub fn http_cookies(source_id: &str) -> String {
 }
 
 pub fn http_clear_cookies(source_id: &str) {
-    if let Ok(state) = source_state(source_id) {
+    if let Ok(state) = ensure_source_state(source_id) {
         if let Ok(mut lines) = state.extra_cookies.lock() {
             lines.clear();
         }
@@ -2081,7 +2101,8 @@ pub fn set_storage_snapshot(source_id: &str, snapshot: crate::storage::StorageSn
     if snapshot.is_empty() {
         return;
     }
-    if let Ok(state) = source_state(source_id) {
+    // 与 http.setCookie 同理：登录收尾可能早于本进程第一次调用该书源，按需把会话建起来
+    if let Ok(state) = ensure_source_state(source_id) {
         *state.storage.lock().unwrap_or_else(|e| e.into_inner()) =
             Some((snapshot, login_url.trim().to_string()));
     }
@@ -2109,6 +2130,69 @@ pub fn webview_storage(source_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 登录收尾早于「本进程第一次调用该书源」时，写入入口必须能自己把会话建起来。
+    ///
+    /// 回归：这些入口曾用严格版 `source_state`（取不到就跳过），于是应用内网页登录抓到的
+    /// Cookie / 存储快照只落了盘 —— 表现为要**重启**才生效（重启后 `seed_source_session`
+    /// 从文件读回来）。这里刻意不调用 `prepare_source`，直接写。
+    #[test]
+    fn session_writers_create_state_on_demand() {
+        let source_id = format!("lazy-{}", std::process::id());
+        let source = crate::models::BookSource {
+            schema_version: 1,
+            id: source_id.clone(),
+            name: "按需建会话".to_string(),
+            book_source_url: "https://example.com".to_string(),
+            author: String::new(),
+            version: String::new(),
+            comment: String::new(),
+            enabled: true,
+            capabilities: Default::default(),
+            auto_auth: true,
+            group_id: None,
+            user_agent: String::new(),
+            headers: Default::default(),
+            update_time: 0,
+            js: "function searchBook() { return []; }".to_string(),
+        };
+        // 数据根可能已被别的测试/宿主设定，这里只保证书源定义在数据根里读得到
+        let _ = crate::store::init_data_root(
+            std::env::temp_dir().join(format!("readerx-host-lazy-{}", std::process::id())),
+        );
+        crate::store::put_source(&source).unwrap();
+        assert!(
+            source_state(&source_id).is_err(),
+            "测试前提：本进程还没有该书源的会话"
+        );
+
+        http_set_cookie(&source_id, "sid=lazy");
+        set_storage_snapshot(
+            &source_id,
+            crate::storage::StorageSnapshot {
+                version: 1,
+                updated_at: 0,
+                origins: vec![crate::storage::StorageOrigin {
+                    origin: "https://example.com".to_string(),
+                    url: String::new(),
+                    local_storage: vec![crate::storage::StorageEntry {
+                        key: "token".to_string(),
+                        value: "jwt-lazy".to_string(),
+                        truncated: false,
+                    }],
+                    session_storage: Vec::new(),
+                    indexed_db: Vec::new(),
+                }],
+            },
+            "https://example.com/login",
+        );
+
+        assert!(source_state(&source_id).is_ok(), "写入入口应已建立会话");
+        assert!(http_cookies(&source_id).contains("sid=lazy"));
+        let view = crate::auth::storage_view(&source_id);
+        assert_eq!(view["localStorage"]["token"], "jwt-lazy");
+        assert_eq!(view["origin"], "https://example.com");
+    }
 
     fn response(status: u16, content_type: &str, extra_headers: &[(&str, &str)], body: &str) -> Value {
         let mut headers = Map::new();

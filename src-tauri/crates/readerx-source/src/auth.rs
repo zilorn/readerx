@@ -109,7 +109,12 @@ pub fn is_supported() -> bool {
 }
 
 /// 阻塞执行一次网页认证（引擎线程 / spawn_blocking 内使用）。
+///
+/// 认证结果要落进「每源会话」，所以这里先把会话准备好（本进程还没调用过该书源时按定义建一份）：
+/// 否则应用内「网页登录」这类入口（先登录、后调用书源）抓到的 Cookie / 存储快照只会写进文件，
+/// 内存会话里没有，表现为**要重启才生效**。
 pub fn perform(source_id: &str, url: &str) -> Result<LoginOutcome, String> {
+    let _ = crate::host::ensure_source_state(source_id);
     let provider = provider().ok_or_else(|| "网页认证后端尚未初始化".to_string())?;
     if !provider.supported() {
         return Ok(LoginOutcome::failure(
@@ -182,12 +187,12 @@ fn mark_seeded(source_id: &str) {
 // 认证结果落盘 + 注入会话（App 与 CLI 共用同一套编排）
 // ---------------------------------------------------------------------------
 
-/// 认证成功后的收尾：**覆盖式**持久化该书源的登录态（Cookie + 存储快照）并立即注入会话。
+/// 认证成功后的收尾：**立即注入会话**并**覆盖式持久化**该书源的登录态（Cookie + 存储快照）。
 ///
+/// - 注入先做、落盘后做：登录后本进程马上要用的就是内存会话，写盘失败也不该影响这一点
+///   （失败原因追加进 `outcome.message`：本次会话可用但重启会掉登录态，用户必须知道，不能静默）；
 /// - 旧的登录行按整行精确移除（避免同名 Cookie 新旧并存，见 docs/cloudflare.md）；
-/// - 存储快照交给 `store::write_login_session`，空快照不会抹掉上一次抓到的那一份；
-/// - 写盘失败时把原因追加进 `outcome.message`：本次会话可用但重启会掉登录态，
-///   这是用户必须知道的事，不能静默。
+/// - 存储快照交给 `store::write_login_session`，空快照不会抹掉上一次抓到的那一份。
 pub fn persist_login_outcome(source_id: &str, outcome: &mut LoginOutcome) -> Result<(), String> {
     if !outcome.ok {
         return Ok(());
@@ -203,18 +208,16 @@ pub fn persist_login_outcome(source_id: &str, outcome: &mut LoginOutcome) -> Res
             crate::host::http_remove_cookie(source_id, previous);
         }
     }
-    if let Err(err) =
-        crate::store::write_login_session(source_id, &outcome.url, &cookies, storage.clone())
-    {
-        outcome.message = format!("登录已完成，但登录态保存失败（重启后需重新登录）：{err}");
-    }
     if !cookies.is_empty() {
         crate::host::http_set_cookie(source_id, &cookies);
     }
-    if let Some(storage) = storage {
+    if let Some(storage) = storage.clone() {
         crate::host::set_storage_snapshot(source_id, storage, &outcome.url);
     }
     mark_seeded(source_id);
+    if let Err(err) = crate::store::write_login_session(source_id, &outcome.url, &cookies, storage) {
+        outcome.message = format!("登录已完成，但登录态保存失败（重启后需重新登录）：{err}");
+    }
     Ok(())
 }
 
@@ -223,5 +226,85 @@ pub fn storage_view(source_id: &str) -> serde_json::Value {
     match crate::host::storage_snapshot(source_id) {
         Some((snapshot, url)) => snapshot_view(&snapshot, &url),
         None => crate::storage::empty_view(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{BookSource, BookSourceCapabilities};
+    use crate::storage::{StorageEntry, StorageOrigin, StorageSnapshot};
+
+    /// 一次登录的收尾必须在**本进程立即**生效，不能等重启。
+    ///
+    /// 回归场景：应用内「网页登录」常发生在「本进程还没调用过该书源」之前，
+    /// 此时会话状态尚未建立，写入入口若「取不到就跳过」，Cookie 与存储快照就只落了盘
+    /// —— 表现为 `webview.storage()` 与请求头都要重启后才对。
+    #[test]
+    fn login_takes_effect_without_restart() {
+        let dir = std::env::temp_dir().join(format!("readerx-auth-live-{}", std::process::id()));
+        crate::store::init_data_root(&dir);
+        let source = BookSource {
+            schema_version: 1,
+            id: "live-login".to_string(),
+            name: "即时生效".to_string(),
+            book_source_url: "https://example.com".to_string(),
+            author: String::new(),
+            version: String::new(),
+            comment: String::new(),
+            enabled: true,
+            capabilities: BookSourceCapabilities::default(),
+            auto_auth: true,
+            group_id: None,
+            user_agent: String::new(),
+            headers: Default::default(),
+            update_time: 0,
+            js: "function searchBook() { return []; }".to_string(),
+        };
+        crate::store::put_source(&source).unwrap();
+        // 故意**不**调用 `host::prepare_source`：模拟「登录是该源在本进程的第一次交互」
+        assert!(
+            crate::host::source_state(&source.id).is_err(),
+            "测试前提：此时还没有会话状态"
+        );
+
+        // `perform` 会先把会话准备好（认证后端未注册时返回 Err，这里只验证会话已就绪）
+        let _ = perform(&source.id, "https://example.com/login");
+        assert!(
+            crate::host::source_state(&source.id).is_ok(),
+            "认证入口应先建立会话状态"
+        );
+
+        let mut outcome = LoginOutcome::success("https://example.com/login", "sid=1", 1).with_storage(
+            Some(StorageSnapshot {
+                version: 1,
+                updated_at: 0,
+                origins: vec![StorageOrigin {
+                    origin: "https://example.com".to_string(),
+                    url: "https://example.com/home".to_string(),
+                    local_storage: vec![StorageEntry {
+                        key: "token".to_string(),
+                        value: "jwt-live".to_string(),
+                        truncated: false,
+                    }],
+                    session_storage: Vec::new(),
+                    indexed_db: Vec::new(),
+                }],
+            }),
+        );
+        persist_login_outcome(&source.id, &mut outcome).unwrap();
+
+        // 内存会话立刻可用：`webview.storage()` 的视图与整行 Cookie 都在
+        let view = storage_view(&source.id);
+        assert_eq!(view["localStorage"]["token"], "jwt-live");
+        assert!(crate::host::http_cookies(&source.id).contains("sid=1"));
+
+        // 且此时已落盘（重启后仍能读回来的是同一份）
+        let saved = crate::store::read_login_session(&source.id).unwrap().unwrap();
+        assert_eq!(saved.cookie.as_deref(), Some("sid=1"));
+        assert_eq!(
+            saved.storage.unwrap().origins[0].local_storage[0].value,
+            "jwt-live"
+        );
     }
 }
