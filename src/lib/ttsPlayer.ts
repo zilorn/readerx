@@ -10,6 +10,9 @@
  *   AudioContext.suspend/resume 可精确停在句中位置；倍速用 playbackRate；
  * - 上一句/下一句、暂停/继续、倍速/音色即时生效（重读当前句）；
  *   章节播完自动切下一章（读完整本书），定时（分钟 / 本章结束）自动停止；
+ *   定时不随「停止朗读」一起清掉 —— 选中文字菜单的「朗读」会先停掉旧会话再起播，
+ *   分钟倒计时在停止期间冻结、重新起播接着走，本章定时留给下一次朗读，
+ *   只有面板里选「关闭」或真的到点才解除；
  * - 预热：HTTP 引擎下，阅读页空闲会预热当前章节窗口；也可 warmBook 批量把
  *   整本书逐句合成进按书籍的磁盘缓存（同书同声源下次直接命中，不再请求）。
  * - 视图章节由外部（阅读页）驱动：跟读跟随中引擎自动跨章用 jumpChapter +
@@ -106,9 +109,11 @@ export interface TtsPlayer {
   start: () => void;
   /**
    * 从当前视图章节内、镜像偏移 charOffset 所在句子开始朗读
-   * （选中文字菜单的「朗读」）；若正在朗读/暂停/出错会先停旧会话再按该句起播。
+   * （选中文字菜单的「朗读」）；若正在朗读/暂停/出错会先停旧会话再按该句起播，
+   * 已设定的定时照常保留（倒计时接着走）。
    */
   startFromChar: (charOffset: number) => void;
+  /** 停止朗读；已设定的定时保留（倒计时冻结，重新起播接着走） */
   stop: () => void;
   togglePlay: () => void;
   prev: () => void;
@@ -116,6 +121,7 @@ export interface TtsPlayer {
   setRate: (rate: number) => void;
   setVoice: (voiceId: string) => void;
   setEngine: (engine: TtsEngine) => void;
+  /** 设定定时停止（"off" 关闭）；定时不随停止朗读清除（分钟倒计时在停止期间冻结） */
   setTimer: (mode: TtsTimerMode, minutes?: number) => void;
   /**
    * 视图章节变化时调用（阅读页 createEffect(chapterIdx)）。
@@ -161,6 +167,8 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
   let pausedRequested = false;
   let timerHandle: number | undefined;
   let timerDeadline = 0;
+  /** 停止朗读时冻结的剩余毫秒（minutes 模式：停止期间不计时，重新起播接着走） */
+  let timerFrozenMs = 0;
   let disposed = false;
   let starting = false;
   // ---- 原生引擎（native）状态 ----
@@ -388,6 +396,8 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
   /** 逐句播放入口：按当前引擎分发到原生 / HTTP 两种路径 */
   async function playFrom(idxItem: number, stayPaused = false): Promise<void> {
     if (disposed) return;
+    // 停止期间冻结的倒计时在重新起播时接着走（定时不随停止被清掉）
+    if (!stayPaused && status() === "stopped") resumeMinuteTimer();
     const my = bump();
     pausedRequested = stayPaused;
     clearNativeWait();
@@ -673,12 +683,9 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
     items = [];
     chapterIdxEngine = ctx.chapterIndex();
     pendingAutoNav = -1;
-    clearTimerHandle();
-    if (timerMode() !== "off") {
-      setTimerMode("off");
-      setTimerMinutes(0);
-      setTimerRemainSec(null);
-    }
+    // 定时不随停止清掉：分钟模式冻结剩余时间、本章模式留给下一次朗读，
+    // 选中文字菜单「朗读」这种“停旧会话再起播”的路径因此不会丢定时
+    freezeMinuteTimer();
     setFocus(null);
     setError(null);
     setStatus("stopped");
@@ -803,26 +810,58 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
     }
   }
 
+  /** 跑分钟倒计时：每秒刷新剩余时间，到点停朗读并收起定时 */
+  function armMinuteTimer(remainMs: number): void {
+    timerFrozenMs = remainMs;
+    timerDeadline = Date.now() + remainMs;
+    const tick = (): void => {
+      const left = Math.max(0, timerDeadline - Date.now());
+      timerFrozenMs = left;
+      setTimerRemainSec(Math.round(left / 1000));
+      if (left <= 0) {
+        clearTimerHandle();
+        setTimerMode("off");
+        setTimerMinutes(0);
+        setTimerRemainSec(null);
+        ctx.notify?.("定时结束，已停止朗读");
+        stop();
+      }
+    };
+    tick();
+    timerHandle = window.setInterval(tick, 1000);
+  }
+
+  /** 停止朗读：冻结倒计时（定时留给下一次起播，不随停止被清掉） */
+  function freezeMinuteTimer(): void {
+    if (timerHandle === undefined) return;
+    clearTimerHandle();
+    const left = Math.max(0, timerDeadline - Date.now());
+    if (left <= 0) {
+      // 恰好走到 0 的边界：按到点处理，不留一个永远不走的定时
+      timerFrozenMs = 0;
+      setTimerMode("off");
+      setTimerMinutes(0);
+      setTimerRemainSec(null);
+      return;
+    }
+    timerFrozenMs = left;
+    setTimerRemainSec(Math.round(left / 1000));
+  }
+
+  /** 重新起播：接着走上次停止时冻结的剩余时间 */
+  function resumeMinuteTimer(): void {
+    if (timerMode() !== "minutes" || timerHandle !== undefined) return;
+    if (timerFrozenMs <= 0) return;
+    armMinuteTimer(timerFrozenMs);
+  }
+
   function setTimer(mode: TtsTimerMode, minutes = 0): void {
     clearTimerHandle();
+    timerFrozenMs = 0;
     setTimerMode(mode);
     setTimerMinutes(minutes);
     if (mode === "minutes" && minutes > 0) {
-      timerDeadline = Date.now() + minutes * 60_000;
-      const tick = (): void => {
-        const sec = Math.max(0, Math.round((timerDeadline - Date.now()) / 1000));
-        setTimerRemainSec(sec);
-        if (sec <= 0) {
-          clearTimerHandle();
-          setTimerMode("off");
-          setTimerMinutes(0);
-          setTimerRemainSec(null);
-          ctx.notify?.("定时结束，已停止朗读");
-          stop();
-        }
-      };
-      tick();
-      timerHandle = window.setInterval(tick, 1000);
+      armMinuteTimer(minutes * 60_000);
     } else {
       setTimerRemainSec(null);
     }
