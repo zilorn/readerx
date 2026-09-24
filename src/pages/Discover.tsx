@@ -576,10 +576,10 @@ export default function DiscoverPage() {
       <OnlineBookSheet
         pick={preview()}
         onClose={() => setPreview(null)}
-        onTagSearch={(tag) => {
-          // 点标签 → 收起抽屉并按该标签快速搜索
+        onQuickSearch={(kw) => {
+          // 点书名 / 作者 / 标签 → 收起抽屉并按该词快速搜索
           setPreview(null);
-          quickSearch(tag);
+          quickSearch(kw);
         }}
       />
     </div>

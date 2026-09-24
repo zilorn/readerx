@@ -5,6 +5,7 @@ import { PageHeader } from "../components/PageHeader";
 import { BookCover } from "../components/BookCover";
 import { BookMetaSheet } from "../components/BookMetaSheet";
 import { TagChips } from "../components/TagChips";
+import { QuickSearchText } from "../components/QuickSearchText";
 import { EditIcon, LinkIcon, RefreshIcon } from "../components/icons";
 import { openExternal } from "../lib/external";
 import {
@@ -163,10 +164,15 @@ export default function BookDetailPage() {
     else navigate("/");
   }
 
-  /** 点击标签：跳去发现页按该标签做一次全源快速搜索 */
-  function onTagQuickSearch(tag: string) {
-    navigate(`/discover?q=${encodeURIComponent(tag)}`);
+  /** 点击标签 / 书名 / 作者：跳去发现页按该词做一次全源快速搜索 */
+  function quickSearch(keyword: string) {
+    const kw = keyword.trim();
+    if (!kw) return;
+    navigate(`/discover?q=${encodeURIComponent(kw)}`);
   }
+
+  /** 展示用作者名（空作者不显示为可搜索，避免搜「佚名」） */
+  const authorName = createMemo(() => displayBook()?.author?.trim() ?? "");
 
   const rows = createMemo(() => {
     const current = displayBook();
@@ -230,11 +236,27 @@ export default function BookDetailPage() {
                 <BookCover bookId={book()!.id} variant="thumb" />
               </div>
               <div class="flex min-w-0 flex-1 flex-col justify-center gap-2">
-                <h2 class="break-words text-[18px] font-bold leading-snug">
-                  {displayBook()!.title}
+                <h2 class="text-[18px] font-bold leading-snug">
+                  <QuickSearchText
+                    text={displayBook()!.title}
+                    action="搜索书名"
+                    iconSize={14}
+                    iconClass="mt-[5px]"
+                    onSearch={quickSearch}
+                  />
                 </h2>
-                <p class="break-words text-[13px] leading-snug text-text-3">
-                  {displayBook()!.author || "佚名"}
+                <p class="text-[13px] leading-snug text-text-3">
+                  <Show when={authorName()} fallback={<span>佚名</span>}>
+                    {(author) => (
+                      <QuickSearchText
+                        text={author()}
+                        action="搜索作者"
+                        iconSize={12}
+                        iconClass="mt-[3px]"
+                        onSearch={quickSearch}
+                      />
+                    )}
+                  </Show>
                 </p>
                 <div class="mt-0.5 flex flex-wrap items-center gap-1.5">
                   <span class="rounded-full bg-accent-weak px-2 py-0.5 text-[11px] font-semibold text-accent">
@@ -263,7 +285,7 @@ export default function BookDetailPage() {
                 <div class="flex flex-wrap gap-1.5 pt-0.5">
                   <TagChips
                     tags={displayBook()!.tags ?? []}
-                    onTagClick={onTagQuickSearch}
+                    onTagClick={quickSearch}
                   />
                 </div>
               </Show>

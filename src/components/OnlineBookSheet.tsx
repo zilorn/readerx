@@ -16,6 +16,7 @@ import { addOnlineBookToShelf, fetchBookToc, mergeBookDetail, type PickedBook } 
 import { notifyAddedToShelf } from "../lib/groups";
 import { showToast } from "../lib/toast";
 import { TagChips } from "./TagChips";
+import { QuickSearchText } from "./QuickSearchText";
 import { BookIcon, CloseIcon, ListIcon, RefreshIcon } from "./icons";
 import { ScrollArea } from "./ScrollArea";
 import { SourceCover } from "./SourceCover";
@@ -34,8 +35,8 @@ export interface OnlineBookSheetProps {
   /** 当前预览的书；null 表示关闭抽屉 */
   pick: PickedBook | null;
   onClose: () => void;
-  /** 只读标签点击回调：调用方借此发起快速搜索（不提供则标签仅展示） */
-  onTagSearch?: (tag: string) => void;
+  /** 书名 / 作者 / 标签的快速搜索回调：调用方借此发起搜索（不提供则这些文字仅展示） */
+  onQuickSearch?: (keyword: string) => void;
 }
 
 export function OnlineBookSheet(props: OnlineBookSheetProps) {
@@ -237,6 +238,12 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
     props.onClose();
   };
 
+  /** 书名 / 作者 / 标签的快速搜索：入架过程中不响应，避免打断正在进行的入架 */
+  const quickSearch = (keyword: string): void => {
+    if (adding()) return;
+    props.onQuickSearch?.(keyword);
+  };
+
   return (
     <Show when={props.pick}>
       <Portal>
@@ -278,10 +285,30 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
                 />
                 <div class="flex min-w-0 flex-1 flex-col justify-center gap-1">
                   <h2 class="text-[17px] font-bold leading-snug">
-                    {hanText(info()?.bookName ?? "")}
+                    <QuickSearchText
+                      text={hanText(info()?.bookName ?? "")}
+                      action="搜索书名"
+                      iconSize={13}
+                      iconClass="mt-[5px]"
+                      onSearch={props.onQuickSearch ? quickSearch : undefined}
+                    />
                   </h2>
                   <p class="truncate text-[12.5px] text-text-3">
-                    {info()?.author ? hanText(info()!.author!) : "佚名"}
+                    <Show
+                      when={info()?.author?.trim()}
+                      fallback={<span>佚名</span>}
+                    >
+                      {(author) => (
+                        <QuickSearchText
+                          text={hanText(author())}
+                          action="搜索作者"
+                          textClass="truncate"
+                          iconSize={12}
+                          iconClass="mt-[3px]"
+                          onSearch={props.onQuickSearch ? quickSearch : undefined}
+                        />
+                      )}
+                    </Show>
                   </p>
                   <Show when={info()?.latest}>
                     <p class="truncate text-[12px] text-accent">
@@ -297,14 +324,7 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
                     <div class="mt-0.5 flex flex-wrap gap-1.5">
                       <TagChips
                         tags={displayTags()}
-                        onTagClick={
-                          props.onTagSearch
-                            ? (tag) => {
-                                if (adding()) return;
-                                props.onTagSearch?.(tag);
-                              }
-                            : undefined
-                        }
+                        onTagClick={props.onQuickSearch ? quickSearch : undefined}
                       />
                     </div>
                   </Show>
