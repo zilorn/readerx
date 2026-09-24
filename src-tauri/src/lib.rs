@@ -98,6 +98,7 @@ pub fn run() {
             commands::readerx_tts_cache_put,
             commands::readerx_tts_cache_get,
             commands::readerx_tts_cache_stats,
+            commands::readerx_tts_cache_apply_limit,
             commands::readerx_tts_cache_clear,
             commands::readerx_license_text,
             commands::readerx_pick_book_file,

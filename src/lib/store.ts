@@ -27,6 +27,7 @@ const SHELF_SOURCE_FILTER_KEY = "readerx.shelfSourceFilter";
 const SHELF_FILTER_KEY = "readerx.shelfFilter";
 const SOURCE_GROUP_FILTER_KEY = "readerx.sourceGroupFilter";
 const SIDEBAR_COLLAPSED_KEY = "readerx.sidebarCollapsed";
+const TTS_CACHE_LIMIT_KEY = "readerx.ttsCacheLimit";
 
 export const FONT_MIN = 15;
 export const FONT_MAX = 28;
@@ -80,6 +81,7 @@ export async function initReaderState(): Promise<void> {
     storedShelfFilter,
     storedSourceGroupFilter,
     storedSidebarCollapsed,
+    storedTtsCacheLimit,
   ] = await Promise.all([
     readState<string>(THEME_KEY),
     readState<Record<string, ShelfEntry>>(SHELF_KEY),
@@ -94,6 +96,7 @@ export async function initReaderState(): Promise<void> {
     readState<string>(SHELF_FILTER_KEY),
     readState<string>(SOURCE_GROUP_FILTER_KEY),
     readState<boolean>(SIDEBAR_COLLAPSED_KEY),
+    readState<number>(TTS_CACHE_LIMIT_KEY),
   ]);
 
   // 未保存过偏好时默认护眼(sepia)，不再跟随系统深浅色
@@ -136,6 +139,9 @@ export async function initReaderState(): Promise<void> {
   }
   if (typeof storedSidebarCollapsed === "boolean") {
     setSidebarCollapsedSignal(storedSidebarCollapsed);
+  }
+  if (typeof storedTtsCacheLimit === "number" && Number.isFinite(storedTtsCacheLimit)) {
+    setTtsCacheLimitValue(storedTtsCacheLimit);
   }
 
   // 清理已移除功能的遗留偏好：不阻塞启动（主题等已就位），删失败只记日志
@@ -527,6 +533,65 @@ export function setSidebarCollapsed(collapsed: boolean): void {
   sidebarCollapsedWriteQueue = sidebarCollapsedWriteQueue.then(() =>
     writeState(SIDEBAR_COLLAPSED_KEY, collapsed),
   );
+}
+
+// ---------------------------------------------------------------------------
+// 听书缓存额度（全局用户设置）：每本书最多保留多少段合成音频
+// ---------------------------------------------------------------------------
+// 与引擎 / 音色 / 倍速这些「听书偏好」（`ttsSettings.ts` 的 readerx.tts）分开存：
+// 这个额度不是听书偏好，而是 Rust 后端淘汰缓存时要读的**容量设置**，与
+// `readerx.onlineConcurrency` 同口径（后端直接读这个文件的裸数字）。
+
+/** 0 = 不限（后端同口径） */
+export const TTS_CACHE_LIMIT_UNLIMITED = 0;
+export const TTS_CACHE_LIMIT_DEFAULT = 1500;
+/** 与后端 `TTS_CACHE_LIMIT_MAX` 对齐 */
+export const TTS_CACHE_LIMIT_MAX = 200_000;
+
+/** 页面上提供的固定档位（第一项为「不限」） */
+export const TTS_CACHE_LIMIT_PRESETS = [
+  TTS_CACHE_LIMIT_UNLIMITED,
+  1500,
+  3000,
+  6000,
+] as const;
+
+const [ttsCacheLimit, setTtsCacheLimitSignal] = createSignal<number>(TTS_CACHE_LIMIT_DEFAULT);
+let ttsCacheLimitWriteQueue: Promise<void> = Promise.resolve();
+
+function clampTtsCacheLimit(value: number): number {
+  const rounded = Math.round(value);
+  // 负数非法（后端读 JSON 时 `as_u64` 同样取不到值）→ 回落默认，而不是被当成「不限」
+  if (!Number.isFinite(rounded) || rounded < TTS_CACHE_LIMIT_UNLIMITED) {
+    return TTS_CACHE_LIMIT_DEFAULT;
+  }
+  if (rounded === TTS_CACHE_LIMIT_UNLIMITED) return TTS_CACHE_LIMIT_UNLIMITED;
+  return Math.min(TTS_CACHE_LIMIT_MAX, rounded);
+}
+
+function setTtsCacheLimitValue(value: number): void {
+  setTtsCacheLimitSignal(clampTtsCacheLimit(value));
+}
+
+/** 响应式：每本书的音频缓存条目上限（0 = 不限） */
+export function currentTtsCacheLimit(): number {
+  return ttsCacheLimit();
+}
+
+/**
+ * 调整听书缓存额度并持久化（后端写盘时按它淘汰；0 = 不限）。
+ * 返回的 Promise 在**新值落盘后** resolve —— 调用方要在落盘后立刻让后端
+ * 按新额度收敛缓存（`readerx_tts_cache_apply_limit`），必须 await 它，
+ * 否则后端可能读到旧值。值没变时不写盘，直接 resolve。
+ */
+export function setTtsCacheLimit(value: number): Promise<void> {
+  const next = clampTtsCacheLimit(value);
+  if (next === ttsCacheLimit()) return ttsCacheLimitWriteQueue;
+  setTtsCacheLimitSignal(next);
+  ttsCacheLimitWriteQueue = ttsCacheLimitWriteQueue.then(() =>
+    writeState(TTS_CACHE_LIMIT_KEY, next),
+  );
+  return ttsCacheLimitWriteQueue;
 }
 
 // ---------------------------------------------------------------------------

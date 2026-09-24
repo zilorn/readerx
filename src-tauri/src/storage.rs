@@ -416,17 +416,46 @@ pub(crate) fn delete_book(app: &AppHandle, id: &str) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 // 听书音频缓存：按书籍独立目录存放（每句一个文件 + .mime 元数据）。
 // WebView 不落盘：全部经 command 读写；文件数超上限时按修改时间淘汰最旧。
+// 上限是**每本书**的条目数，用户可在「设置 → 数据 → 管理听书缓存」里调整
+// （`readerx.ttsCacheLimit`，0 = 不限）。
 // ---------------------------------------------------------------------------
 
-/// 每本书最多保留的音频条目数（超过后淘汰最旧的）
-const TTS_CACHE_MAX_FILES: u64 = 1500;
+/// 每本书最多保留的音频条目数的默认值（未设置偏好时用它）
+pub(crate) const TTS_CACHE_LIMIT_DEFAULT: u64 = 1500;
+/// 上限：再大就没有「上限」的意义了，同时避免误配置吃掉整块磁盘
+pub(crate) const TTS_CACHE_LIMIT_MAX: u64 = 200_000;
+/// 用户偏好 key（与 `readerx.onlineConcurrency` 同口径：Rust 侧直接读这个文件）
+const TTS_CACHE_LIMIT_KEY: &str = "readerx.ttsCacheLimit";
+/// 「不限」在偏好里的取值（JSON 数字 0）；对外部传入的非法值一律回落到默认值
+const TTS_CACHE_LIMIT_UNLIMITED: u64 = 0;
 
 fn valid_audio_key(key: &str) -> bool {
+    // 不含 `.`：音频文件与它的 `.mime` 元数据靠 `with_extension` 互相推导，
+    // key 里出现点会让 `a.b` 的元数据被当成 `a.mime`（见 prune_tts_cache_files）。
     !key.is_empty()
         && key.len() <= 64
         && key
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+}
+
+/// 归一化偏好里的上限：非法 / 缺失 → 默认值；0 表示不限；其余截断到 [1, MAX]。
+pub(crate) fn normalize_tts_cache_limit(raw: Option<u64>) -> u64 {
+    match raw {
+        None => TTS_CACHE_LIMIT_DEFAULT,
+        Some(TTS_CACHE_LIMIT_UNLIMITED) => TTS_CACHE_LIMIT_UNLIMITED,
+        Some(v) => v.min(TTS_CACHE_LIMIT_MAX),
+    }
+}
+
+/// 生效的每本书音频条目上限（0 = 不限）。读不到偏好时用默认值。
+/// 写入与「改设置后立即收敛」两处共用，保证两边的上限口径一致。
+pub(crate) fn tts_cache_limit(app: &AppHandle) -> u64 {
+    let raw = read_state(app, TTS_CACHE_LIMIT_KEY)
+        .ok()
+        .flatten()
+        .and_then(|v| v.as_u64());
+    normalize_tts_cache_limit(raw)
 }
 
 fn tts_cache_dir(app: &AppHandle, book_id: &str) -> Result<PathBuf, String> {
@@ -452,7 +481,7 @@ pub(crate) fn put_tts_audio(
     fs::write(dir.join(key), bytes).map_err(|e| format!("写入听书缓存失败: {e}"))?;
     fs::write(dir.join(format!("{key}.mime")), mime)
         .map_err(|e| format!("写入听书缓存元数据失败: {e}"))?;
-    prune_tts_cache(&dir);
+    prune_tts_cache(&dir, tts_cache_limit(app));
     Ok(())
 }
 
@@ -475,8 +504,12 @@ pub(crate) fn get_tts_audio(
     Ok(Some((mime, bytes)))
 }
 
-/// 淘汰最旧的音频文件（保留 .mime 不参与计数；删除时连同元数据一起删）
-fn prune_tts_cache(dir: &Path) {
+/// 淘汰最旧的音频文件（保留 .mime 不参与计数；删除时连同元数据一起删）。
+/// `limit` 为 0 表示不限，直接返回。
+fn prune_tts_cache(dir: &Path, limit: u64) {
+    if limit == TTS_CACHE_LIMIT_UNLIMITED {
+        return;
+    }
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
@@ -490,15 +523,46 @@ fn prune_tts_cache(dir: &Path) {
             audios.push((meta.modified().unwrap_or(SystemTime::UNIX_EPOCH), path));
         }
     }
-    if audios.len() as u64 <= TTS_CACHE_MAX_FILES {
-        return;
-    }
-    audios.sort_by_key(|(t, _)| *t);
-    let excess = audios.len() as u64 - TTS_CACHE_MAX_FILES;
-    for (_, path) in audios.into_iter().take(excess as usize) {
+    prune_tts_cache_files(select_tts_cache_evictions(audios, limit));
+}
+
+/// 删除淘汰出来的音频文件，并连带删除同名 `.mime` 元数据。
+/// key 不含点（见 `valid_audio_key`），所以 `with_extension` 能正确指向元数据。
+fn prune_tts_cache_files(evicted: Vec<PathBuf>) {
+    for path in evicted {
         let _ = fs::remove_file(&path);
         let _ = fs::remove_file(path.with_extension("mime"));
     }
+}
+
+/// 淘汰决策的纯函数部分（便于单测）：按修改时间从旧到新，返回需要删除的路径。
+/// 调用方负责真正删盘。
+fn select_tts_cache_evictions(
+    mut audios: Vec<(SystemTime, PathBuf)>,
+    limit: u64,
+) -> Vec<PathBuf> {
+    if limit == TTS_CACHE_LIMIT_UNLIMITED || audios.len() as u64 <= limit {
+        return Vec::new();
+    }
+    audios.sort_by_key(|(t, _)| *t);
+    let excess = audios.len() as u64 - limit;
+    audios.into_iter().take(excess as usize).map(|(_, path)| path).collect()
+}
+
+/// 按当前偏好上限收敛**全部**书籍的听书缓存（改设置后立即生效，不必等下一次写入）。
+pub(crate) fn apply_tts_cache_limit(app: &AppHandle) -> Result<(), String> {
+    let limit = tts_cache_limit(app);
+    let root = data_root(app)?.join("tts-audio");
+    if !root.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(&root).map_err(|e| format!("读取听书缓存目录失败: {e}"))?.flatten() {
+        let dir_path = entry.path();
+        if dir_path.is_dir() {
+            prune_tts_cache(&dir_path, limit);
+        }
+    }
+    Ok(())
 }
 
 /// 各书籍的听书缓存统计（仅统计有缓存的书籍）
@@ -631,4 +695,80 @@ pub(crate) fn write_source_login_cookie(
 /// 删除书源保存的登录态（Cookie + 存储快照一并清掉；存在与否均 Ok）。
 pub(crate) fn remove_source_login_cookie(_app: &AppHandle, id: &str) -> Result<(), String> {
     readerx_source::store::remove_login_cookie(id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// 造 n 个条目，修改时间从旧到新递增（下标越大越新）
+    fn audios(n: usize) -> Vec<(SystemTime, PathBuf)> {
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        (0..n)
+            .map(|i| {
+                (
+                    base + Duration::from_secs(i as u64),
+                    PathBuf::from(format!("/tmp/tts-audio/book/{i:04}")),
+                )
+            })
+            .collect()
+    }
+
+    fn evicted_names(n: usize, limit: u64) -> Vec<String> {
+        select_tts_cache_evictions(audios(n), limit)
+            .into_iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn keeps_everything_under_limit() {
+        assert!(evicted_names(10, 1500).is_empty());
+        assert!(evicted_names(10, 10).is_empty());
+    }
+
+    #[test]
+    fn evicts_oldest_first_and_only_the_excess() {
+        // 12 条、上限 10 → 只淘汰最旧的 2 条，且顺序是从旧到新
+        assert_eq!(
+            evicted_names(12, 10),
+            vec!["0000".to_string(), "0001".to_string()]
+        );
+    }
+
+    #[test]
+    fn limit_zero_means_unlimited() {
+        assert!(evicted_names(5_000, TTS_CACHE_LIMIT_UNLIMITED).is_empty());
+    }
+
+    #[test]
+    fn eviction_targets_the_mime_metadata_when_deleting() {
+        // `with_extension` 必须落在 `<key>.mime` 上（前提：key 本身不含点）
+        let audio = PathBuf::from("/tmp/tts-audio/book/00ab12cd");
+        assert_eq!(
+            audio.with_extension("mime"),
+            PathBuf::from("/tmp/tts-audio/book/00ab12cd.mime")
+        );
+    }
+
+    #[test]
+    fn normalize_falls_back_to_default_and_clamps() {
+        assert_eq!(normalize_tts_cache_limit(None), TTS_CACHE_LIMIT_DEFAULT);
+        assert_eq!(normalize_tts_cache_limit(Some(3000)), 3000);
+        assert_eq!(normalize_tts_cache_limit(Some(0)), TTS_CACHE_LIMIT_UNLIMITED);
+        assert_eq!(
+            normalize_tts_cache_limit(Some(TTS_CACHE_LIMIT_MAX + 1)),
+            TTS_CACHE_LIMIT_MAX
+        );
+    }
+
+    #[test]
+    fn audio_key_rejects_dots() {
+        // 含点的 key 会破坏 `.mime` 的推导，必须拒绝
+        assert!(valid_audio_key("00ab12cd"));
+        assert!(valid_audio_key("a-b_c9"));
+        assert!(!valid_audio_key("a.b"));
+        assert!(!valid_audio_key(""));
+    }
 }

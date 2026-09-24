@@ -97,6 +97,15 @@ pub struct TtsCacheStat {
     pub bytes: u64,
 }
 
+/// 听书缓存总览：统计 + 当前生效的每本书条目上限（0 = 不限）。
+/// 上限由后端按 `readerx.ttsCacheLimit` 归一化后回传，前端据此校正本地值。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TtsCacheOverview {
+    pub limit: u64,
+    pub books: Vec<TtsCacheStat>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalBook {

@@ -11,7 +11,7 @@ use crate::host;
 use crate::models::{
     BookChapterPatch, BookImageFile, BookImageInfo, BookItem, BookMeta, BookSource,
     BookSourceSummary, CachedAudio, ChapterContentResult, ChapterItem, FetchedImage, LocalBook,
-    SourceCallResult, TtsCacheStat,
+    SourceCallResult, TtsCacheOverview,
 };
 use crate::panic_guard;
 use crate::storage;
@@ -140,10 +140,26 @@ pub async fn readerx_tts_cache_get(
     .await
 }
 
-/// 各书籍的听书缓存统计（用于设置页展示与清理）
+/// 听书缓存总览：各书籍统计 + 当前生效的每本书条目上限（用于设置页展示与清理）
 #[tauri::command]
-pub async fn readerx_tts_cache_stats(app: AppHandle) -> Result<Vec<TtsCacheStat>, String> {
-    blocking("听书缓存统计", move || storage::list_tts_cache(&app)).await
+pub async fn readerx_tts_cache_stats(app: AppHandle) -> Result<TtsCacheOverview, String> {
+    blocking("听书缓存统计", move || {
+        Ok(TtsCacheOverview {
+            limit: storage::tts_cache_limit(&app),
+            books: storage::list_tts_cache(&app)?,
+        })
+    })
+    .await
+}
+
+/// 按当前的 `readerx.ttsCacheLimit` 立即收敛全部书籍的听书缓存
+/// （前端改完上限后调用：下调时马上释放磁盘，不必等下一次写入触发淘汰）。
+#[tauri::command]
+pub async fn readerx_tts_cache_apply_limit(app: AppHandle) -> Result<(), String> {
+    blocking("听书缓存额度收敛", move || {
+        storage::apply_tts_cache_limit(&app)
+    })
+    .await
 }
 
 /// 清除听书缓存；book_id 为 null 时清空全部书籍

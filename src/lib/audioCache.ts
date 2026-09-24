@@ -18,6 +18,12 @@ export interface TtsCacheStat {
   bytes: number;
 }
 
+/** 听书缓存总览：各书籍统计 + 当前生效的每本书条目上限（0 = 不限） */
+export interface TtsCacheOverview {
+  limit: number;
+  books: TtsCacheStat[];
+}
+
 const tauri = isTauri();
 
 /** 读取一句缓存音频（未命中或不可用返回 null） */
@@ -50,14 +56,27 @@ export async function writeTtsAudioCache(
   }
 }
 
-/** 各书籍缓存统计（设置页展示） */
-export async function listTtsAudioCaches(): Promise<TtsCacheStat[]> {
-  if (!tauri) return [];
+/** 听书缓存统计 + 当前生效上限（设置页展示） */
+export async function loadTtsAudioCaches(): Promise<TtsCacheOverview> {
+  if (!tauri) return { limit: 0, books: [] };
   try {
-    return await invoke<TtsCacheStat[]>("readerx_tts_cache_stats");
+    return await invoke<TtsCacheOverview>("readerx_tts_cache_stats");
   } catch (err) {
     console.error("[tts-cache] 读取统计失败", err);
-    return [];
+    return { limit: 0, books: [] };
+  }
+}
+
+/**
+ * 按当前上限立即收敛全部书籍的缓存（调用前须先把新额度写进 `readerx.ttsCacheLimit`）。
+ * 下调额度时用它马上释放磁盘，而不是等下一次写缓存才顺带淘汰。
+ */
+export async function applyTtsAudioCacheLimit(): Promise<void> {
+  if (!tauri) return;
+  try {
+    await invoke("readerx_tts_cache_apply_limit");
+  } catch (err) {
+    console.error("[tts-cache] 收敛缓存额度失败", err);
   }
 }
 
