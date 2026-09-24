@@ -1866,6 +1866,8 @@ export default function ReaderPage() {
     paginateTask = null;
     disarmPagedBusy();
     if (!mode || !src || !geo) {
+      // 退出分页阅读：回翻末页的挂起请求不再有机会落地，就地作废
+      if (!mode) wantLastPageCid = null;
       setPaged(null);
       return;
     }
@@ -1948,10 +1950,12 @@ export default function ReaderPage() {
       if (dropped || !isPaged() || pageSource() !== src) return;
       disarmPagedBusy();
       if (!result) return;
-      // 回翻“上一章末页”的挂起目标在此落地（无论新旧章页数是否相同）
-      if (wantLastPage) {
-        wantLastPage = false;
-        setPageIdx(Math.max(0, result.pages.length - 1));
+      // 回翻“上一章末页”的挂起目标在此落地（无论新旧章页数是否相同）；
+      // 只认当初回翻的那一章：中途改跳别章时请求即作废，不会把新章排到末页
+      if (wantLastPageCid !== null) {
+        const landingCid = wantLastPageCid;
+        wantLastPageCid = null;
+        if (landingCid === src.cid) setPageIdx(Math.max(0, result.pages.length - 1));
       }
       setPaged(result);
       // 打开书恢复进度：分页一就绪就立即落位，正文首次渲染即为目标页，
@@ -2097,8 +2101,9 @@ export default function ReaderPage() {
     return pct === null ? null : Math.min(100, Math.max(0, Math.round(pct)));
   });
 
-  // 需要跳转到上一章最后一页时置位（回翻/工具栏上一章）
-  let wantLastPage = false;
+  // 回翻跨章（在章首页继续往回翻）时记下目标章 cid：该章分页完成后落到末页。
+  // 工具栏「上一章」与目录跳章都是从章首读起，不置位；目标章中途被换掉则请求作废。
+  let wantLastPageCid: string | null = null;
   /** 本次切章是否由“翻页跨章浏览”触发（浏览不应打断听书语音） */
   let browseChapterPending = false;
 
@@ -2562,7 +2567,8 @@ export default function ReaderPage() {
     }
     if (!isFirstChapter()) {
       cancelFollowIfActive();
-      wantLastPage = true;
+      // 先记住要落地的目标章（而不是只置一个布尔标记），再切章
+      wantLastPageCid = renderBook()?.chapters[chapterIdx() - 1]?.cid ?? null;
       goToChapter(chapterIdx() - 1, true);
       return true;
     }
@@ -4169,10 +4175,8 @@ export default function ReaderPage() {
                   disabled={isFirstChapter()}
                   onClick={() => {
                     if (isPaged()) {
-                      if (!isFirstChapter()) {
-                        wantLastPage = true;
-                        goToChapter(chapterIdx() - 1, true);
-                      }
+                      // 与滚动模式同一口径：从上一章开头读起（末页只属于「回翻」）
+                      if (!isFirstChapter()) goToChapter(chapterIdx() - 1, true);
                     } else if (!isFirstChapter()) {
                       browseChapterPending = true;
                       setChapterIdx((c) => c - 1);
