@@ -9,7 +9,8 @@
 #        node scripts/bump-version.mjs 1.2.3        # 同步 package.json/tauri.conf.json/Cargo.toml/Cargo.lock
 #   2. CHANGELOG.md 中已写好对应区块，例如：
 #        ## [1.2.3] - 2026-09-04
-# 工作流会校验以上两项，不一致直接失败，避免发布版本错乱的包。
+# 版本号一致性由工作流校验，不一致直接失败，避免发布版本错乱的包；CHANGELOG 漏写本版条目不会
+# 让工作流失败，发布说明会回退到 [Unreleased] 区块（口径见 scripts/release-notes.mjs）。
 #
 # 签名（首次使用前配置一次）：
 #   生成 keystore（key 与 store 口令建议不同）：
@@ -26,7 +27,7 @@
 #   - Linux x86_64：AppImage / deb / rpm（无代码签名证书，未签名）；
 #   - Windows x86_64 / aarch64：各出一个 NSIS 安装包（无代码签名证书，未签名）
 #     —— 与 Android 按 ABI 拆分同一个理由，ARM 机器不该装到靠模拟运行的 x64 包。
-#   Release body 取 CHANGELOG.md 中与版本号对应的区块，并附一段未签名说明。
+#   Release body 取 CHANGELOG.md 中与版本号对应的区块（缺失时回退到 [Unreleased]），并附一段未签名说明。
 
 name: Release Android
 
@@ -263,8 +264,9 @@ jobs:
         with:
           path: ${{ runner.temp }}/assets
 
-      # 发布说明 = scripts/tip.md（下载与安装说明，含各平台 / 架构与签名情况）+ CHANGELOG 对应区块，
-      # 拼接由 scripts/release-notes.mjs 负责：安装说明是随产物走的文案，改它不必动工作流。
+      # 发布说明 = scripts/tip.md（下载与安装说明，含各平台 / 架构与签名情况）+ CHANGELOG 对应区块
+      # （版本区块缺失时回退到 [Unreleased]，口径见脚本内说明），拼接由 scripts/release-notes.mjs 负责：
+      # 安装说明是随产物走的文案，改它不必动工作流。
       - name: Build release notes
         run: |
           node scripts/release-notes.mjs "${VERSION}" > "$RUNNER_TEMP/release-notes.md"

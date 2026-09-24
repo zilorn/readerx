@@ -54,6 +54,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **发布说明在 CHANGELOG 缺本版条目时回退到 [Unreleased]**：`scripts/release-notes.mjs` 原先找不到
+  版本区块就直接失败（发版工作流随之中断），现在改为回退到 `## [Unreleased]` 区块 —— 忘写本版
+  条目时 Release 仍有一份真实的变更说明（就是这批「已提交但未发布」的内容），同时在 stderr 打一条
+  告警，CI 日志里能看见该补的条目。连 Unreleased 也没有、或两边都没有实际内容（只剩空的
+  `### Added` 之类小标题）时照旧非零退出，不会发出空说明。
+
 - **书架封面改为「固定宽度 + 每行本数自适应」**：原先写死一行三本，封面会被容器宽度拉伸
   —— 桌面内容区里三本各占几百像素。现在封面固定 96px，用 `auto-fill` 按容器宽度决定一行放
   几本，轨道整体居中、余量均分到两侧（不再贴边）；手机列与桌面内容区共用这一套规则，
