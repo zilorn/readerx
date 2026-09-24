@@ -223,6 +223,9 @@ const MAX_IMPORT_BYTES: u64 = 256 * 1024 * 1024;
 /// 经 IPC 交给前端，前端再包成 `File` 走既有的解析流程（TXT / EPUB / PDF 三套解析器
 /// 与「同名书重新导入」的交互完全复用，不因平台分叉）。
 #[derive(serde::Serialize)]
+// IPC 返回值按字段名序列化（tauri 只对**入参**做 camelCase 转换），
+// 这里的 rename_all 是前端 `picked.dataBase64` 能取到值的唯一保证。
+#[serde(rename_all = "camelCase")]
 pub struct PickedBookFile {
     pub file_name: String,
     /// 文件字节的 base64（不带 data URL 前缀）
@@ -615,5 +618,25 @@ pub fn readerx_open_devtools(webview: Webview) -> Result<(), String> {
     {
         let _ = webview;
         Err("当前构建未启用开发者工具".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// IPC 返回值**不做**字段名转换（tauri 只把入参转成 camelCase），前端按
+    /// `picked.dataBase64` / `picked.fileName` 取值 —— 字段名一旦漂回下划线，
+    /// 桌面端导入会在 WebView 里变成 `atob(undefined)`，只报内核那句
+    /// `InvalidCharacterError`，看不出跟字段名有关。
+    #[test]
+    fn picked_book_file_wire_format_is_camel_case() {
+        let value = serde_json::to_value(PickedBookFile {
+            file_name: "book.epub".to_string(),
+            data_base64: "Zm9v".to_string(),
+        })
+        .expect("序列化 PickedBookFile 失败");
+        assert_eq!(value["fileName"], "book.epub", "IPC 字段名必须是 fileName");
+        assert_eq!(value["dataBase64"], "Zm9v", "IPC 字段名必须是 dataBase64");
     }
 }

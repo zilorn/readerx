@@ -418,7 +418,12 @@ export interface PickedBookFile {
  */
 export async function pickBookFile(): Promise<PickedBookFile | null> {
   if (!tauri) throw new Error("原生文件选择仅在应用内可用");
-  return invoke<PickedBookFile | null>("readerx_pick_book_file");
+  const picked = await invoke<PickedBookFile | null>("readerx_pick_book_file");
+  if (!picked) return null;
+  // 字段名与后端对不上时（后端序列化口径改了、内核里还是旧二进制）必须在这里报出原因：
+  // 放过去只会变成 atob(undefined)，用户看到的是内核那句 InvalidCharacterError，无从下手
+  if (!picked.dataBase64) throw new Error("读取所选文件失败：没有拿到文件内容");
+  return picked;
 }
 
 // ---------------------------------------------------------------------------

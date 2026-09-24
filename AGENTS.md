@@ -36,6 +36,8 @@
 
 > 端口 1420 可能已被 `tauri android dev` 占用，勿再起第二个 dev server。
 
+如果需要grep可以使用rg（如果有），速度更快。
+
 ## 构建期产物
 
 - `src/generated/han-dict-<方向>.bin`（简繁转换词典，gzip）由 `scripts/han-dict.mjs` 生成，
