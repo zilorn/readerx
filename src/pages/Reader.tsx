@@ -1629,6 +1629,19 @@ export default function ReaderPage() {
   const [ttsSettingsOpen, setTtsSettingsOpen] = createSignal(false);
   const [prewarmText, setPrewarmText] = createSignal<string | null>(null);
 
+  /**
+   * 本次阅读会话是否已进入听书：起播（听书按钮 / 选区「朗读」）或打开听书设置面板后置位。
+   * 置位前不做任何后台合成 —— 只读书不听说时，HTTP 源不该替用户请求服务端。
+   */
+  let warmupArmed = false;
+
+  /** 进入听书（起播 / 打开听书面板）时置位并顺带预热当前章；重复进入不重复触发 */
+  function armTtsWarmup(): void {
+    if (warmupArmed) return;
+    warmupArmed = true;
+    if (ttsPlayer.status() === "stopped") ttsPlayer.warmup();
+  }
+
   /** 程序化定位引发的滚动窗口：此期间内的 scroll 事件不算用户手动滚动 */
   let suppressFollowCancelUntil = 0;
 
@@ -1672,15 +1685,17 @@ export default function ReaderPage() {
     if (done > 0) showToast(`预热完成：${done} 句已写入缓存`);
   }
 
-  // 预热：HTTP 自定义源下，停止状态时把当前章节后续句子合成进按书籍的缓存，
-  // 之后播放/下次同声源直接命中缓存，不再请求服务端
+  // 预热：仅开始听书后（起播 / 打开听书面板，见 armTtsWarmup）才做 —— HTTP 自定义源下，
+  // 停止状态时把当前章节后续句子合成进按书籍的缓存，之后播放 / 下次同声源直接命中缓存。
+  // 只读书不听说时不发起任何合成请求
   createEffect(() => {
     void chapter()?.cid;
     void currentTtsEngine();
     void bookId();
+    if (!warmupArmed) return;
     if (ttsPlayer.status() === "stopped") {
       void ensureTtsPrefsLoaded().then(() => {
-        if (ttsPlayer.status() === "stopped") ttsPlayer.warmup();
+        if (warmupArmed && ttsPlayer.status() === "stopped") ttsPlayer.warmup();
       });
     }
   });
@@ -3411,6 +3426,8 @@ export default function ReaderPage() {
   function handleSpeakAtOffset(start: number | null): void {
     const ch = chapter();
     if (!ch) return;
+    // 用户明确要听：置位预热开关（听书按钮的起播同样落到这里）
+    armTtsWarmup();
     // 收起选区（同时隐藏选区菜单），交给朗读句高亮展示
     clearVisibleSelection();
     const mir = mirror();
@@ -4092,7 +4109,11 @@ export default function ReaderPage() {
                       onPrev={() => ttsPlayer.prev()}
                       onNext={() => ttsPlayer.next()}
                       onToggle={() => ttsPlayer.togglePlay()}
-                      onOpenSettings={() => setTtsSettingsOpen(true)}
+                      onOpenSettings={() => {
+                        // 打开听书面板视同进入听书：此后按需预热
+                        armTtsWarmup();
+                        setTtsSettingsOpen(true);
+                      }}
                     />
                   </div>
                 </div>
