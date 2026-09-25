@@ -145,6 +145,7 @@ import {
   shelfEntries,
   updateReadingLocation,
 } from "../lib/store";
+import { isDesktopShell } from "../lib/platform";
 import { progressContextAt, readingPercent, resolveReadingTarget } from "../lib/progress";
 import {
   READER_PAGE_PAD_X,
@@ -152,6 +153,7 @@ import {
   spreadStart,
   type ReaderGeometry,
 } from "../lib/readerLayout";
+import { createEdgeHoverReveal } from "../lib/readerEdgeHover";
 import { sameRenderWindow } from "../lib/renderWindow";
 import { showToast } from "../lib/toast";
 import {
@@ -921,6 +923,10 @@ export default function ReaderPage() {
   const [pageIdx, setPageIdx] = createSignal(0);
   const [menuOpen, setMenuOpen] = createSignal(false);
   const [tocOpen, setTocOpen] = createSignal(false);
+  // 桌面端（鼠标贴阅读区边缘呼出，见 lib/readerEdgeHover.ts）：标记本次呼出是悬浮触发的，
+  // 鼠标离开边缘与浮层后自动收起；用户点按呼出的菜单 / 目录不在此列
+  const [menuByHover, setMenuByHover] = createSignal(false);
+  const [tocByHover, setTocByHover] = createSignal(false);
   const [bmPanelOpen, setBmPanelOpen] = createSignal(false);
   const [readerSettingsOpen, setReaderSettingsOpen] = createSignal(false);
   // 文本替换抽屉：replaceSeed 非空表示从选区菜单进入（查找框预填所选文字）
@@ -1451,6 +1457,10 @@ export default function ReaderPage() {
   const [area, setArea] = createSignal({ w: 0, h: 0 });
   let areaRef: HTMLDivElement | undefined;
   let frameRef: HTMLDivElement | undefined;
+  // 桌面端贴边呼出用：顶栏 / 底栏 / 目录面板的矩形就是「鼠标还停在浮层上」的判定依据
+  let headerRef: HTMLElement | undefined;
+  let bottomBarRef: HTMLDivElement | undefined;
+  let tocPanelRef: HTMLDivElement | undefined;
   let areaObserver: ResizeObserver | null = null;
   createEffect(() => {
     const ready = contentLoad() === "ready" && !!renderBook();
@@ -3506,6 +3516,39 @@ export default function ReaderPage() {
     onCleanup(() => window.removeEventListener("keydown", onKey));
   });
 
+  // 桌面端贴边呼出（鼠标操作，手机端不参与）：上 / 下边缘 → 顶栏 + 底栏一起弹出，
+  // 右边缘 → 目录侧栏滑出；鼠标离开边缘与浮层后只收起「悬浮呼出」的这一份
+  createEdgeHoverReveal({
+    enabled: isDesktopShell,
+    frameEl: () => frameRef,
+    onMenuEdge: () => {
+      if (menuOpen()) return; // 已经开着（点按呼出的也算）：不动它，也不接管收起
+      setMenuByHover(true);
+      setMenuOpen(true);
+    },
+    onTocEdge: () => {
+      if (tocOpen()) return;
+      setTocByHover(true);
+      setTocOpen(true);
+    },
+    onHide: () => {
+      if (menuByHover()) setMenuOpen(false);
+      if (tocByHover()) setTocOpen(false);
+    },
+    armed: () => menuByHover() || tocByHover(),
+    keepAliveEls: () => [headerRef, bottomBarRef, tocPanelRef],
+  });
+
+  // 收起后立即解除「悬浮呼出」标记：下次再开是点按还是悬浮，由当时那一次决定。
+  // 用 on(...) 而不是直接读信号：呼出时先写标记、再开菜单，直接读会在两次写入之间
+  // 看到「标记已置、菜单还没开」而把标记抹掉
+  createEffect(
+    on([menuOpen, tocOpen], ([menu, toc]) => {
+      if (!menu) setMenuByHover(false);
+      if (!toc) setTocByHover(false);
+    }),
+  );
+
   // -------------------------------------------------------------------
   // 选区操作：复制 / 书签（新增、重复选取则移除）/ 朗读
   // 选区区间统一换算成“本章镜像文本”的 [lo, hi)（可跨段落/跨页），
@@ -4197,6 +4240,7 @@ export default function ReaderPage() {
 
             {/* 顶部工具栏（菜单呼出后显示） */}
             <header
+              ref={headerRef}
               data-reader-ui
               class="absolute inset-x-0 top-0 z-30 select-none border-b border-border bg-topbar-bg backdrop-blur-[14px] transition-transform duration-200"
               classList={{
@@ -4242,7 +4286,7 @@ export default function ReaderPage() {
                   }
                 >
                 <button
-                  class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
+                  class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale,color] duration-150 hover:bg-surface-2 hover:text-text active:scale-[0.94] active:bg-surface-2"
                   aria-label={t("common.back")}
                   onClick={goBack}
                 >
@@ -4259,7 +4303,7 @@ export default function ReaderPage() {
                 <div class="flex flex-none items-center gap-1">
                   <Show when={isRemoteBook()}>
                     <button
-                      class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
+                      class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale,color] duration-150 hover:bg-surface-2 hover:text-text active:scale-[0.94] active:bg-surface-2"
                       aria-label={t("reader.downloadTitle")}
                       onClick={() => {
                         // 上一次选过的范围不带进这一次（下载进行中则保留，与进度显示一致）
@@ -4273,7 +4317,7 @@ export default function ReaderPage() {
                     </button>
                   </Show>
                   <button
-                    class="grid h-10 w-10 flex-none place-items-center rounded-xl transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
+                    class="grid h-10 w-10 flex-none place-items-center rounded-xl transition-[background-color,scale] duration-150 hover:bg-surface-2 active:scale-[0.94] active:bg-surface-2"
                     classList={{
                       "text-accent": bmPanelOpen(),
                       "text-text-2": !bmPanelOpen(),
@@ -4288,7 +4332,7 @@ export default function ReaderPage() {
                     />
                   </button>
                   <button
-                    class="grid h-10 w-10 flex-none place-items-center rounded-xl transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
+                    class="grid h-10 w-10 flex-none place-items-center rounded-xl transition-[background-color,scale] duration-150 hover:bg-surface-2 active:scale-[0.94] active:bg-surface-2"
                     classList={{
                       "text-accent": ttsPlayer.status() !== "stopped",
                       "text-text-2": ttsPlayer.status() === "stopped",
@@ -4313,7 +4357,7 @@ export default function ReaderPage() {
                     <HeadphonesIcon size={21} />
                   </button>
                   <button
-                    class="grid h-10 w-10 flex-none place-items-center rounded-xl transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
+                    class="grid h-10 w-10 flex-none place-items-center rounded-xl transition-[background-color,scale] duration-150 hover:bg-surface-2 active:scale-[0.94] active:bg-surface-2"
                     classList={{
                       "text-accent": readerSettingsOpen(),
                       "text-text-2": !readerSettingsOpen(),
@@ -4331,6 +4375,7 @@ export default function ReaderPage() {
 
             {/* 底部菜单栏 + 听书悬浮球（固定在菜单栏上方，随菜单一同滑入/滑出） */}
             <div
+              ref={bottomBarRef}
               class="absolute inset-x-0 bottom-0 z-30 transition-transform duration-200 select-none"
               classList={{
                 "translate-y-full": !menuOpen(),
@@ -4348,7 +4393,10 @@ export default function ReaderPage() {
                   !searchSession()
                 }
               >
-                <div class="flex items-center gap-2 px-3 pb-1.5 pt-2">
+                <div
+                  class="flex items-center gap-2 px-3 pb-1.5 pt-2"
+                  classList={{ "mx-auto w-full max-w-[520px]": isDesktopShell() }}
+                >
                   <Show when={!followEnabled()}>
                     <button
                       data-reader-ui
@@ -4389,19 +4437,25 @@ export default function ReaderPage() {
                   !searchSession()
                 }
               >
-                <MenuPageSlider
-                  page={pageIdx()}
-                  total={totalPages()}
-                  onCommit={seekToPage}
-                />
+                {/* 桌面端限宽：进度条横跨整个阅读列会拉得过长 */}
+                <div classList={{ "mx-auto w-full max-w-[520px]": isDesktopShell() }}>
+                  <MenuPageSlider
+                    page={pageIdx()}
+                    total={totalPages()}
+                    onCommit={seekToPage}
+                  />
+                </div>
               </Show>
 
               <footer
                 data-reader-ui
                 class="select-none border-t border-border bg-surface"
               >
+                {/* 桌面端限宽居中：菜单栏横跨整个阅读列，进度条与章节按钮跟着一起拉长会很难看；
+                    手机端与窄窗口不设限，照旧铺满 */}
                 <div
                   class="flex items-center gap-2 px-3.5 pt-2"
+                  classList={{ "mx-auto w-full max-w-[520px]": isDesktopShell() }}
                   style={{ "padding-bottom": `${menuBarPadBottom()}px` }}
                 >
                 {/* 搜索模式：底部显示 返回原进度 / 上一条 / x/y / 下一条 / 关闭 */}
@@ -4411,7 +4465,7 @@ export default function ReaderPage() {
                     <>
                       <div class="flex w-full items-center gap-1">
                         <button
-                          class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
+                          class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale,color] duration-150 hover:bg-surface-2 hover:text-text active:scale-[0.94] active:bg-surface-2"
                           aria-label={t("reader.restorePreSearchPosition")}
                           onClick={restorePreSearch}
                         >
@@ -4441,7 +4495,7 @@ export default function ReaderPage() {
                           </button>
                         </div>
                         <button
-                          class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
+                          class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale,color] duration-150 hover:bg-surface-2 hover:text-text active:scale-[0.94] active:bg-surface-2"
                           aria-label={t("reader.exitSearchMode")}
                           onClick={exitSearchMode}
                         >
@@ -4452,7 +4506,7 @@ export default function ReaderPage() {
                   }
                 >
                 <button
-                  class="inline-flex flex-1 items-center justify-center gap-1.5 rounded-[10px] border border-border bg-bg px-0.5 py-[9px] text-[12.5px] text-text-2 disabled:pointer-events-none disabled:opacity-30"
+                  class="inline-flex flex-1 items-center justify-center gap-1.5 rounded-[10px] border border-border bg-bg px-0.5 py-[9px] text-[12.5px] text-text-2 transition-colors duration-150 hover:bg-surface-2 disabled:pointer-events-none disabled:opacity-30"
                   disabled={isFirstChapter()}
                   onClick={() => {
                     if (isPaged()) {
@@ -4470,7 +4524,7 @@ export default function ReaderPage() {
                   {t("reader.prevChapter")}
                 </button>
                 <button
-                  class="inline-flex flex-[1.7] items-center justify-center gap-1.5 rounded-[10px] border border-transparent bg-accent px-0.5 py-[9px] text-[12.5px] font-semibold tabular-nums text-on-accent"
+                  class="inline-flex flex-[1.7] items-center justify-center gap-1.5 rounded-[10px] border border-transparent bg-accent px-0.5 py-[9px] text-[12.5px] font-semibold tabular-nums text-on-accent transition-opacity duration-150 hover:opacity-90"
                   onClick={() => setTocOpen(true)}
                 >
                   <ListIcon size={17} />
@@ -4486,7 +4540,7 @@ export default function ReaderPage() {
                   </span>
                 </button>
                 <button
-                  class="inline-flex flex-1 items-center justify-center gap-1.5 rounded-[10px] border border-border bg-bg px-0.5 py-[9px] text-[12.5px] text-text-2 disabled:pointer-events-none disabled:opacity-30"
+                  class="inline-flex flex-1 items-center justify-center gap-1.5 rounded-[10px] border border-border bg-bg px-0.5 py-[9px] text-[12.5px] text-text-2 transition-colors duration-150 hover:bg-surface-2 disabled:pointer-events-none disabled:opacity-30"
                   disabled={isLastChapter()}
                   onClick={() => {
                     if (isPaged()) {
@@ -4507,16 +4561,29 @@ export default function ReaderPage() {
               </footer>
             </div>
 
-            {/* 目录抽屉 */}
+            {/* 目录：手机端是自下而上的抽屉，桌面端是贴右边缘滑出的侧栏
+                （与「鼠标贴右边缘呼出目录」对应，见 lib/readerEdgeHover.ts） */}
             <Show when={tocOpen()}>
               <div
                 data-reader-ui
-                class="absolute inset-0 z-40 animate-sheet-fade bg-black/45 backdrop-blur-[2px]"
+                class="absolute inset-0 z-40 animate-sheet-fade"
+                classList={{
+                  "bg-black/45 backdrop-blur-[2px]": !isDesktopShell(),
+                  // 桌面端侧栏与正文并排，遮罩只做轻微压暗，不模糊整屏正文
+                  "bg-black/20": isDesktopShell(),
+                }}
                 onClick={() => setTocOpen(false)}
               />
               <div
+                ref={tocPanelRef}
                 data-reader-ui
-                class="absolute inset-x-0 bottom-0 z-[41] flex max-h-[72%] select-none animate-sheet-up flex-col overflow-hidden rounded-t-[16px] bg-surface shadow-[0_-10px_34px_rgb(0_0_0/0.22)]"
+                class="absolute z-[41] flex select-none flex-col overflow-hidden bg-surface"
+                classList={{
+                  "inset-x-0 bottom-0 max-h-[72%] animate-sheet-up rounded-t-[16px] shadow-[0_-10px_34px_rgb(0_0_0/0.22)]":
+                    !isDesktopShell(),
+                  "inset-y-0 right-0 w-[380px] max-w-[86%] animate-sheet-in-right border-l border-border shadow-[-10px_0_34px_rgb(0_0_0/0.22)]":
+                    isDesktopShell(),
+                }}
                 role="dialog"
                 aria-label={t("reader.toc")}
               >
@@ -4526,7 +4593,7 @@ export default function ReaderPage() {
                     {t("reader.chapterCount", { count: chapterCount() })}
                   </span>
                   <button
-                    class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
+                    class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale,color] duration-150 hover:bg-surface-2 hover:text-text active:scale-[0.94] active:bg-surface-2"
                     aria-label={t("reader.searchBook")}
                     onClick={() => {
                       setTocOpen(false);
@@ -4537,7 +4604,7 @@ export default function ReaderPage() {
                     <SearchIcon size={21} />
                   </button>
                   <button
-                    class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
+                    class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale,color] duration-150 hover:bg-surface-2 hover:text-text active:scale-[0.94] active:bg-surface-2"
                     aria-label={t("reader.closeToc")}
                     onClick={() => setTocOpen(false)}
                   >
@@ -4560,7 +4627,7 @@ export default function ReaderPage() {
                         isRemoteBook() && !downloading && !chapterHasContent(item);
                       return (
                         <button
-                          class={`flex w-full items-center gap-3 px-[18px] py-[11px] text-left text-[13.5px] transition-colors active:bg-surface-2 ${
+                          class={`flex w-full items-center gap-3 px-[18px] py-[11px] text-left text-[13.5px] transition-colors hover:bg-surface-2 active:bg-surface-2 ${
                             active
                               ? "bg-accent-weak font-semibold text-accent"
                               : "text-text-2"
@@ -4756,7 +4823,7 @@ export default function ReaderPage() {
                     })}
                   </span>
                   <button
-                    class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
+                    class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale,color] duration-150 hover:bg-surface-2 hover:text-text active:scale-[0.94] active:bg-surface-2"
                     aria-label={t("common.close")}
                     onClick={() => setDownloadOpen(false)}
                   >

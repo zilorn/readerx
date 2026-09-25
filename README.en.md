@@ -41,7 +41,8 @@ of pages and the same local library.
 - **Reading** `/book/:id`: chapter reading, previous / next chapter, table-of-contents drawer,
   reading progress synced across pages; on a wide desktop window the text is laid out as two
   side-by-side pages (one page on phones and narrow windows; the column width adapts to the
-  available width)
+  available width); on desktop, moving the mouse to the top / bottom edge of the reading area
+  reveals the menus, and the right edge slides out the table of contents
 - **Text-to-speech**: tap the headphone icon on the reading page to listen. Two engines:
   **native speech** (Android system TTS, the default) and a **custom HTTP source** (your own TTS
   endpoint returning audio bytes). A floating ball controls pause / previous sentence / next
