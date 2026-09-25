@@ -158,9 +158,10 @@ jobs:
         timeout-minutes: 90
 
       # 统一改名成 readerx-<版本>-android-<ABI>.apk（见 scripts/collect-artifacts.mjs）：
-      # 四个 ABI 必须齐全、且不接受未签名产物，否则当场失败
+      # 四个 ABI 必须齐全、且不接受未签名产物，否则当场失败。
+      # 输出目录写 ${{ runner.temp }}，与下面上传步骤的 path 同一个口径（理由见 desktop job 的注释）
       - name: Collect signed per-ABI APKs
-        run: node scripts/collect-artifacts.mjs android --out "$RUNNER_TEMP/artifacts"
+        run: node scripts/collect-artifacts.mjs android --out "${{ runner.temp }}/artifacts"
 
       - name: Upload Android artifacts
         uses: actions/upload-artifact@v4
@@ -209,9 +210,15 @@ jobs:
 
       # 产物在 target/<目标三平台名>/release/bundle/ 下，各架构互不覆盖；
       # 收集时统一改名成「平台-架构」口径（见 scripts/collect-artifacts.mjs），
-      # 于是发布步骤只按文件收，不必再按来路目录猜架构
+      # 于是发布步骤只按文件收，不必再按来路目录猜架构。
+      #
+      # 输出目录一律写 ${{ runner.temp }}（runner 在把脚本交给 shell 之前就展开好），
+      # 不要写 $RUNNER_TEMP：Windows 上 run 默认跑在 PowerShell 里，而 PowerShell 中
+      # $RUNNER_TEMP 是未定义变量（环境变量得写 $env:RUNNER_TEMP），会展开成空字符串，
+      # 路径变成盘根的 /artifacts —— 收集脚本照样成功，只是产物落到了别的目录，
+      # 直到上传步骤才以「No files were found with the provided path」暴露出来。
       - name: Collect desktop bundles
-        run: node scripts/collect-artifacts.mjs desktop --target ${{ matrix.target }} --out "$RUNNER_TEMP/artifacts"
+        run: node scripts/collect-artifacts.mjs desktop --target ${{ matrix.target }} --out "${{ runner.temp }}/artifacts"
 
       - name: Upload desktop bundles
         uses: actions/upload-artifact@v4

@@ -77,9 +77,10 @@ jobs:
         timeout-minutes: 90
 
       # 统一改名成 readerx-<版本>-android-<ABI>-debug.apk（见 scripts/collect-artifacts.mjs），
-      # 从下载到的 artifact 里一眼看出这是哪个平台的包
+      # 从下载到的 artifact 里一眼看出这是哪个平台的包。
+      # 输出目录写 ${{ runner.temp }}（runner 展开，不受 shell 影响），口径与上传 path 一致
       - name: Collect debug APK
-        run: node scripts/collect-artifacts.mjs android --debug --out "$RUNNER_TEMP/artifacts"
+        run: node scripts/collect-artifacts.mjs android --debug --out "${{ runner.temp }}/artifacts"
 
       - name: Upload APK artifacts
         uses: actions/upload-artifact@v4
