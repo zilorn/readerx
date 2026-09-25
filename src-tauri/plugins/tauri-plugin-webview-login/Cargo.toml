@@ -17,6 +17,8 @@ tauri-plugin = { version = "2", features = ["build"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2", features = [] }
+# 统一日志：登录窗口的每一步（打开 / Cookie 采集 / 存储探针 / 关窗）都写进宿主同一条日志流
+log = "0.4"
 # 桌面端登录窗口只按宿主给的三段脚本执行存储探针（不认识探针内部结构），
 # 复用核心 crate 的 ProbeScript 类型即可；不引入引擎 / HTTP 依赖之外的东西。
 readerx-source = { path = "../../crates/readerx-source" }

@@ -14,6 +14,9 @@ use readerx_source::cli::{auth_cmd, commands};
 use readerx_source::profile::DEFAULT_UA;
 
 fn main() {
+    // 进程一开始就装 logger：此时还不知道数据目录，先只输出标准错误
+    // （桌面 / CLI 直接看得到），等 dispatch 拿到数据根再挂文件目标
+    readerx_log::init(readerx_log::LogConfig::new("readerx-source"));
     let args: Vec<String> = std::env::args().skip(1).collect();
     let code = match run(&args) {
         Ok(()) => 0,
@@ -27,12 +30,16 @@ fn main() {
                 // 书源调用失败 / 认证未完成：原因已就地打印，这里只回退出码
                 "EXIT_FAILURE" => 1,
                 _ => {
-                    eprintln!("readerx-source: {message}");
+                    log::error!("{message}");
                     2
                 }
             }
         }
     };
+    // `process::exit` 不跑析构：先 flush，保证退出前的错误真的落进日志文件
+    if let Some(logger) = readerx_log::logger() {
+        logger.flush();
+    }
     std::process::exit(code);
 }
 
@@ -54,6 +61,25 @@ fn dispatch(cli: Cli) -> Result<(), String> {
         .clone()
         .unwrap_or_else(readerx_source::default_data_root);
     readerx_source::store::init_data_root(&root);
+
+    // 拿到数据根后把文件目标挂上：`<数据目录>/logs/readerx-source.log`。
+    // 重复 init 只会应用新配置（logger 是进程级单例），因此启动早期的那条也不丢。
+    let level = if cli.verbose { "debug" } else { "info" };
+    let logger = readerx_log::init(
+        readerx_log::LogConfig::new("readerx-source")
+            .with_dir(root.join(readerx_log::LOG_DIR_NAME))
+            .with_level(level),
+    );
+    log::info!(
+        "readerx-source 启动 command={} data_dir={} level={} log={}",
+        cli.command,
+        root.display(),
+        logger.level_spec(),
+        logger
+            .file_path()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "（未启用文件日志）".to_string())
+    );
 
     match cli.command.as_str() {
         "sources" | "list" => commands::cmd_sources(&cli),

@@ -6,6 +6,7 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { bookToMeta, type BookMeta, type LocalBook, type LocalBookChapter } from "./booksTypes";
 import { reportFailure } from "./errorReport";
+import { createLogger } from "./logger";
 import type {
   BookImageFile,
   BookImageInfo,
@@ -20,6 +21,8 @@ import type {
 } from "./bookSourcesTypes";
 
 const tauri = isTauri();
+
+const log = createLogger("backend");
 
 const memoryState = new Map<string, unknown>();
 const memoryBooks = new Map<string, LocalBook>();
@@ -178,7 +181,8 @@ export async function readLicenseText(): Promise<string | null> {
   try {
     return await invoke<string>("readerx_license_text");
   } catch (err) {
-    console.error("[backend] 读取开源许可失败", err);
+    // 降级：阅读器少一段许可文本，不影响读书（warn 而非 error）
+    log.warn("读取开源许可失败，返回空内容", err);
     return null;
   }
 }
@@ -189,7 +193,8 @@ export async function readThirdPartyNotices(): Promise<string | null> {
   try {
     return await invoke<string>("readerx_third_party_notices");
   } catch (err) {
-    console.error("[backend] 读取开源库声明失败", err);
+    // 降级：阅读器少一段声明文本，不影响读书
+    log.warn("读取第三方开源库声明失败，返回空内容", err);
     return null;
   }
 }
@@ -253,12 +258,15 @@ export async function callRemoteSource(
     return { ok: false, error: "书源功能仅在应用内可用", logs: [], elapsedMs: 0 };
   }
   try {
+    log.debug("调用书源函数", `sourceId=${sourceId}`, `fn=${fnName}`);
     return await invoke<SourceCallResult>("readerx_source_call", {
       sourceId,
       fnName,
       args,
     });
   } catch (err) {
+    // 失败以结果对象交给调用方展示，不走 reportFailure —— 在这里留一条日志
+    log.warn("调用书源函数失败", `sourceId=${sourceId}`, `fn=${fnName}`, err);
     return { ok: false, error: String(err), logs: [], elapsedMs: 0 };
   }
 }
@@ -302,15 +310,20 @@ export async function fetchRemoteSourceImage(
 ): Promise<SourceImageResult> {
   if (!tauri) return { data: "", error: "书源图片仅应用内可用" };
   try {
+    // 不记图片字节，只记哪本书源、哪张图
+    log.debug("下载书源封面图片", `sourceId=${sourceId}`, url);
     const r = await invoke<FetchedImage>("readerx_source_fetch_image", {
       sourceId,
       url,
       referer: referer || null,
     });
-    if (!r.ok || !r.data) return { data: "", error: r.error || "图片下载失败" };
+    if (!r.ok || !r.data) {
+      log.warn("书源封面图片下载失败", `sourceId=${sourceId}`, url, r.error);
+      return { data: "", error: r.error || "图片下载失败" };
+    }
     return { data: `data:${r.mime || "image/jpeg"};base64,${r.data}`, error: "" };
   } catch (err) {
-    console.error("[backend] 图片下载失败", err);
+    log.warn("书源封面图片下载失败", `sourceId=${sourceId}`, url, err);
     return { data: "", error: err instanceof Error ? err.message : String(err) };
   }
 }
@@ -336,16 +349,21 @@ export async function fetchRemoteChapterImageFile(
   });
   if (!tauri) return failed("书源图片仅应用内可用");
   try {
+    // 不记图片字节，只记哪本书源、哪本书、哪张图
+    log.debug("下载章节插图", `sourceId=${sourceId}`, `bookId=${bookId}`, url);
     const r = await invoke<BookImageFile>("readerx_book_image_fetch", {
       sourceId,
       bookId,
       url,
       referer: referer || null,
     });
-    if (!r.ok || !r.local) return failed(r.error || "图片下载失败");
+    if (!r.ok || !r.local) {
+      log.warn("章节插图下载失败", `sourceId=${sourceId}`, `bookId=${bookId}`, url, r.error);
+      return failed(r.error || "图片下载失败");
+    }
     return r;
   } catch (err) {
-    console.error("[backend] 章节图片下载失败", err);
+    log.warn("章节插图下载失败", `sourceId=${sourceId}`, `bookId=${bookId}`, url, err);
     return failed(err instanceof Error ? err.message : String(err));
   }
 }
@@ -356,11 +374,14 @@ export async function readChapterImageInfo(
 ): Promise<BookImageInfo[]> {
   if (!tauri || locals.length === 0) return [];
   try {
+    // 只记这一批的条目数，不记具体文件名
+    log.debug("读取章节插图信息", `n=${locals.length}`);
     return await invoke<BookImageInfo[]>("readerx_book_image_info", {
       locals: [...locals],
     });
   } catch (err) {
-    console.error("[backend] 读取章节图片信息失败", err);
+    // 降级：这一批图片按未知尺寸排版（不影响图片显示）
+    log.warn("读取章节插图信息失败，改用未知尺寸", `n=${locals.length}`, err);
     return [];
   }
 }
@@ -422,7 +443,11 @@ export async function pickBookFile(): Promise<PickedBookFile | null> {
   if (!picked) return null;
   // 字段名与后端对不上时（后端序列化口径改了、内核里还是旧二进制）必须在这里报出原因：
   // 放过去只会变成 atob(undefined)，用户看到的是内核那句 InvalidCharacterError，无从下手
-  if (!picked.dataBase64) throw new Error("读取所选文件失败：没有拿到文件内容");
+  if (!picked.dataBase64) {
+    // 只记文件名与「内容为空」这个事实，不记文件内容
+    log.warn("原生文件选择未返回文件内容", `fileName=${picked.fileName}`);
+    throw new Error("读取所选文件失败：没有拿到文件内容");
+  }
   return picked;
 }
 
@@ -454,9 +479,12 @@ export async function openDevTools(): Promise<void> {
 export async function isSourceLoginSupported(): Promise<boolean> {
   if (!tauri) return false;
   try {
-    return await invoke<boolean>("readerx_source_login_supported");
+    const supported = await invoke<boolean>("readerx_source_login_supported");
+    log.debug("查询网页登录支持", `supported=${supported}`);
+    return supported;
   } catch (err) {
-    console.error("[backend] 查询网页登录支持失败", err);
+    // 降级：按「不支持」处理，用户仍可用账号密码类书源
+    log.warn("查询网页登录支持失败，按不支持处理", err);
     return false;
   }
 }
@@ -479,11 +507,15 @@ export async function loginSourceWebview(
     };
   }
   try {
+    // 只记书源与登录页地址，不记 Cookie（Cookie 由 Rust 落盘，不经过前端日志）
+    log.debug("打开网页登录", `sourceId=${sourceId}`, url);
     return await invoke<SourceLoginResult>("readerx_source_login_webview", {
       sourceId,
       url,
     });
   } catch (err) {
+    // 失败以结果对象交给调用方展示，不走 reportFailure —— 在这里留一条日志
+    log.warn("网页登录失败", `sourceId=${sourceId}`, err);
     return { ok: false, url, cookies: "", count: 0, message: String(err) };
   }
 }

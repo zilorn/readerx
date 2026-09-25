@@ -20,6 +20,10 @@ import { createSignal } from "solid-js";
 import { fetchRemoteChapterImageFile } from "./backend";
 import { cachedImageSize, invalidateImageAsset, rememberImageSize } from "./imageAssets";
 import { currentSourceParallel } from "./store";
+import { createLogger } from "./logger";
+
+/** 正文图片下载的日志出口：单张失败 debug，一批结束按聚合结果记一条 */
+const log = createLogger("chapterImages");
 
 /** 图片下载并发上限（受全局「书源并发」设置约束，且不高于此值：正文图片数量多，避免占满会话） */
 const NETWORK_CONCURRENCY_CAP = 4;
@@ -182,6 +186,7 @@ function loadChapterImage(options: LoadImageOptions): Promise<ChapterImageFile |
   entry.phase = "loading";
   entry.error = "";
   bumpRevision();
+  const started = performance.now();
   const task = (async (): Promise<ChapterImageFile | null> => {
     const release = await acquireSlot();
     try {
@@ -200,18 +205,42 @@ function loadChapterImage(options: LoadImageOptions): Promise<ChapterImageFile |
         // 手动重试：文件名由地址哈希决定、重下不会改名，必须让渲染地址带版本参数
         // 重新请求一次，否则 WebView 仍按已失败的旧地址处理
         if (refresh) invalidateImageAsset(result.local);
+        log.debug(
+          "图片下载完成",
+          `book=${bookId}`,
+          `url=${url}`,
+          `purpose=${purpose}`,
+          `local=${result.local}`,
+          `ms=${Math.round(performance.now() - started)}`,
+        );
         return { local: result.local, width: result.width, height: result.height };
       }
       entry.phase = "failed";
       entry.error = result.error || "图片下载失败";
       entry.failedBy = purpose;
       entry.failedAt = Date.now();
+      log.debug(
+        "图片下载失败",
+        `book=${bookId}`,
+        `url=${url}`,
+        `purpose=${purpose}`,
+        `ms=${Math.round(performance.now() - started)}`,
+        entry.error,
+      );
       return null;
     } catch (err) {
       entry.phase = "failed";
       entry.error = err instanceof Error ? err.message : String(err);
       entry.failedBy = purpose;
       entry.failedAt = Date.now();
+      log.debug(
+        "图片下载异常",
+        `book=${bookId}`,
+        `url=${url}`,
+        `purpose=${purpose}`,
+        `ms=${Math.round(performance.now() - started)}`,
+        entry.error,
+      );
       return null;
     } finally {
       release();
@@ -254,6 +283,8 @@ export async function ensureChapterImages(
 ): Promise<Map<string, ChapterImageFile | null>> {
   const result = new Map<string, ChapterImageFile | null>();
   const tasks: Promise<void>[] = [];
+  const started = performance.now();
+  const purpose = request.purpose ?? "read";
   for (const url of request.urls) {
     if (!url) continue;
     if (request.shouldStop?.()) break;
@@ -272,6 +303,23 @@ export async function ensureChapterImages(
     );
   }
   await Promise.all(tasks);
+  let ready = 0;
+  for (const file of result.values()) {
+    if (file) ready++;
+  }
+  const failed = result.size - ready;
+  // 一批图片的聚合结果：逐张失败在上面记 debug，这里只对「有失败」的一批记一条
+  // （被放弃、还没发出请求的图不在 result 里，因此不算失败）
+  if (failed > 0) {
+    log.warn(
+      "一批图片有下载失败（可读到时重试）",
+      `book=${request.bookId}`,
+      `purpose=${purpose}`,
+      `failed=${failed}`,
+      `total=${result.size}`,
+      `ms=${Math.round(performance.now() - started)}`,
+    );
+  }
   return result;
 }
 

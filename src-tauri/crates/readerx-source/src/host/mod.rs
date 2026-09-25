@@ -53,6 +53,12 @@ const AUTO_AUTH_COOLDOWN: Duration = Duration::from_secs(45);
 /// CF 挑战检测时最多扫描的响应体前缀长度
 const CF_SCAN_BODY: usize = 32 * 1024;
 
+/// 把一段文本里出现的 URL 逐个脱敏，**只用于日志**。
+///
+/// 实现在 `readerx-log`：App 侧回传的前端日志也要过同一道，两处各写一份迟早会走偏。
+/// 这里保留一个别名，让引擎各处（host / engine / auth / cli）的调用点读起来短一些。
+pub(crate) use readerx_log::redact::urls_in_text as redact_urls;
+
 static SOURCES: OnceLock<Mutex<HashMap<String, Arc<SourceState>>>> = OnceLock::new();
 /// 全局最近一次自动拉起网页认证的时间（跨源共用：同一时刻只该有一个认证窗口）
 static AUTO_AUTH_LAST_TRY: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
@@ -319,15 +325,26 @@ pub fn prepare_source(source: &BookSource) -> Result<(), String> {
         .filter(|(k, v)| !k.is_empty() && !v.is_empty())
         .collect();
     headers.retain(|(k, _)| k != "user-agent" && k != "cookie");
+    let header_count = headers.len();
+    let user_agent = source.user_agent.trim().to_string();
     *state.default_headers.lock().unwrap_or_else(|e| e.into_inner()) = headers;
-    *state.user_agent.lock().unwrap_or_else(|e| e.into_inner()) =
-        source.user_agent.trim().to_string();
+    *state.user_agent.lock().unwrap_or_else(|e| e.into_inner()) = user_agent.clone();
     // 书源自身配置（或空 = 内置默认）不算外部覆盖
     *state
         .user_agent_external
         .lock()
         .unwrap_or_else(|e| e.into_inner()) = false;
     *state.auto_auth.lock().unwrap_or_else(|e| e.into_inner()) = source.auto_auth;
+    // UA 本身不是秘密（每个请求都会带着它），但默认头里可能有鉴权头：只记条数
+    log::debug!(
+        "书源会话已就绪 source={} headers={header_count} ua={}",
+        source.id,
+        if user_agent.is_empty() {
+            DEFAULT_UA
+        } else {
+            &user_agent
+        }
+    );
     Ok(())
 }
 
@@ -534,14 +551,29 @@ fn decode_body(bytes: &[u8], content_type: &str) -> String {
 
 /// 执行一次 HTTP 请求（单发，不做 CF 挑战自动认证）；成功返回响应对象 Value。
 fn do_http_request(source_id: &str, method: &str, raw_url: &str, opts: &str) -> Result<Value, String> {
+    let started = Instant::now();
     let url = raw_url.trim();
     if !(url.starts_with("http://") || url.starts_with("https://")) {
+        // 方法与地址都是书源可控的，可以记；请求体 / 参数值一律不进日志
+        log::warn!(
+            "http 请求被拒：仅支持 http/https 绝对地址 method={method} url={}",
+            readerx_log::redact::url(url)
+        );
         return Err("仅支持 http/https 绝对地址".to_string());
     }
     let opts: Value = if opts.trim().is_empty() || opts.trim() == "null" {
         Value::Null
     } else {
-        serde_json::from_str(opts).map_err(|e| format!("http 参数解析失败: {e}"))?
+        match serde_json::from_str(opts) {
+            Ok(value) => value,
+            Err(e) => {
+                log::warn!(
+                    "http 参数解析失败 method={method} url={} reason={e}",
+                    readerx_log::redact::url(url)
+                );
+                return Err(format!("http 参数解析失败: {e}"));
+            }
+        }
     };
     let o = opts.as_object().cloned().unwrap_or_default();
     let method = method.to_uppercase();
@@ -624,7 +656,20 @@ fn do_http_request(source_id: &str, method: &str, raw_url: &str, opts: &str) -> 
         req = req.body(bytes);
     }
 
-    let resp = req.send().map_err(|e| format!("请求失败: {e}"))?;
+    let resp = match req.send() {
+        Ok(resp) => resp,
+        Err(e) => {
+            // 只记「哪次请求、发了多久、为什么失败」：请求体与查询参数值不进日志
+            // （错误文本里的地址单独脱敏，reqwest 会把完整 URL 带在原因里）
+            log::warn!(
+                "http 请求失败 source={source_id} method={method} url={} ms={} reason={}",
+                readerx_log::redact::url(url),
+                started.elapsed().as_millis(),
+                redact_urls(&e.to_string())
+            );
+            return Err(format!("请求失败: {e}"));
+        }
+    };
     let status = resp.status();
     let status_text = status.canonical_reason().unwrap_or("").to_string();
     let content_type = resp
@@ -652,9 +697,15 @@ fn do_http_request(source_id: &str, method: &str, raw_url: &str, opts: &str) -> 
     // 限量读取响应体
     let mut reader = resp.take(BODY_LIMIT + 1);
     let mut bytes = Vec::new();
-    reader
-        .read_to_end(&mut bytes)
-        .map_err(|e| format!("读取响应失败: {e}"))?;
+    if let Err(e) = reader.read_to_end(&mut bytes) {
+        log::warn!(
+            "读取响应失败 source={source_id} method={method} url={} status={} ms={} reason={e}",
+            readerx_log::redact::url(url),
+            status.as_u16(),
+            started.elapsed().as_millis()
+        );
+        return Err(format!("读取响应失败: {e}"));
+    }
     let truncated = bytes.len() as u64 > BODY_LIMIT;
     bytes.truncate(BODY_LIMIT as usize);
     let body = decode_body(&bytes, &content_type);
@@ -669,6 +720,14 @@ fn do_http_request(source_id: &str, method: &str, raw_url: &str, opts: &str) -> 
     if truncated {
         out.insert("truncated".into(), json!(true));
     }
+    // 每个 HTTP 请求都记一条：这是书源排障时最常翻的一行
+    log::debug!(
+        "http 响应 source={source_id} method={method} url={} status={} bytes={} truncated={truncated} ms={}",
+        readerx_log::redact::url(url),
+        status.as_u16(),
+        bytes.len(),
+        started.elapsed().as_millis()
+    );
     Ok(Value::Object(out))
 }
 
@@ -783,11 +842,20 @@ pub fn http_request(source_id: &str, method: &str, raw_url: &str, opts: &str) ->
         .map(|s| s.auto_auth.lock().map(|g| *g).unwrap_or(false))
         .unwrap_or(false);
     if !auto_auth {
+        // 书源自己关掉了自动认证：属于预期配置，不打扰 info 级别的日志
+        log::debug!(
+            "检测到 Cloudflare 挑战但该书源已关闭自动网页认证 source={source_id} url={}",
+            readerx_log::redact::url(raw_url)
+        );
         mark_cf_challenge(&mut first, "disabled", Some("该书源已关闭自动网页认证"));
         return serialize_value(&first);
     }
     // 平台能力：App 为 Android WebView，独立二进制为 webkit / CDP 后端
     if !crate::auth::is_supported() {
+        log::info!(
+            "检测到 Cloudflare 挑战，但当前环境没有可用的网页认证后端 source={source_id} url={}",
+            readerx_log::redact::url(raw_url)
+        );
         mark_cf_challenge(
             &mut first,
             "unsupported",
@@ -797,6 +865,10 @@ pub fn http_request(source_id: &str, method: &str, raw_url: &str, opts: &str) ->
     }
     // 全局冷却：避免批量下载 / 并发搜索时连续弹多个认证窗
     if !claim_auto_auth_slot() {
+        log::debug!(
+            "自动网页认证处于冷却期内，本次不拉起认证窗 source={source_id} url={}",
+            readerx_log::redact::url(raw_url)
+        );
         mark_cf_challenge(&mut first, "cooldown", Some("距上次自动认证过近，请稍后重试"));
         return serialize_value(&first);
     }
@@ -810,10 +882,19 @@ pub fn http_request(source_id: &str, method: &str, raw_url: &str, opts: &str) ->
         origin_of(raw_url.trim()).unwrap_or_else(|| raw_url.trim().to_string())
     };
 
+    // 拉起认证窗是用户可感知的动作（会弹窗），必须留一条 info：出问题时先看这里
+    log::info!(
+        "触发自动网页认证 source={source_id} method={method} url={}",
+        readerx_log::redact::url(&target)
+    );
     let outcome = match crate::auth::perform(source_id, &target) {
         Ok(o) => o,
         Err(err) => {
             // 登录桥异常（极少见）：按取消处理，避免阻塞书源代码
+            log::error!(
+                "自动网页认证后端异常 source={source_id} url={} reason={err}",
+                readerx_log::redact::url(&target)
+            );
             mark_cf_challenge(&mut first, "cancelled", Some(&err));
             return serialize_value(&first);
         }
@@ -833,15 +914,31 @@ pub fn http_request(source_id: &str, method: &str, raw_url: &str, opts: &str) ->
         } else {
             outcome.message.clone()
         };
+        log::info!(
+            "自动网页认证未完成 source={source_id} url={} cookie={} reason={msg}",
+            readerx_log::redact::url(&target),
+            outcome.count
+        );
         mark_cf_challenge(&mut first, "cancelled", Some(&msg));
         return serialize_value(&first);
     }
 
     // 认证成功（新 Cookie 已持久化并注入会话）：用原参数重试一次，不再递归自动认证
+    log::debug!(
+        "自动网页认证成功，用原参数重试一次 source={source_id} method={method} url={} cookie={}",
+        readerx_log::redact::url(raw_url),
+        outcome.count
+    );
     match one() {
         Ok(second) => {
             let mut second = second;
             if is_cf_challenge_response(&second) {
+                // 令牌没生效才会走到这里：UA / 指纹对不上时用户看到的仍是挑战页，
+                // 属于「降级」而非崩溃，warn 提醒排查方向
+                log::warn!(
+                    "自动网页认证后仍被 Cloudflare 拦截 source={source_id} url={}（令牌未生效或站点校验浏览器指纹）",
+                    readerx_log::redact::url(raw_url)
+                );
                 mark_cf_challenge(
                     &mut second,
                     "stale",
@@ -850,7 +947,13 @@ pub fn http_request(source_id: &str, method: &str, raw_url: &str, opts: &str) ->
             }
             serialize_value(&second)
         }
-        Err(message) => error_payload(message),
+        Err(message) => {
+            log::warn!(
+                "自动网页认证后重试仍失败 source={source_id} url={} reason={message}",
+                readerx_log::redact::url(raw_url)
+            );
+            error_payload(message)
+        }
     }
 }
 
@@ -1057,6 +1160,32 @@ pub fn fetch_image_bytes(
     url: &str,
     referer: &str,
 ) -> Result<(String, Vec<u8>), String> {
+    let started = Instant::now();
+    let result = fetch_image_bytes_inner(source_id, url, referer);
+    // 这条入口的 Err 有七八个出口，包一层统一记录，比在每个 return 前各写一条可靠
+    match &result {
+        Ok((mime, bytes)) => log::debug!(
+            "图片下载完成 source={source_id} mime={mime} bytes={} ms={} url={}",
+            bytes.len(),
+            started.elapsed().as_millis(),
+            readerx_log::redact::url(url.trim())
+        ),
+        Err(reason) => log::warn!(
+            "图片下载失败 source={source_id} ms={} reason={} url={}",
+            started.elapsed().as_millis(),
+            redact_urls(reason),
+            readerx_log::redact::url(url.trim())
+        ),
+    }
+    result
+}
+
+/// [`fetch_image_bytes`] 的实现体：日志只写数量与原因，图片字节本身不进日志
+fn fetch_image_bytes_inner(
+    source_id: &str,
+    url: &str,
+    referer: &str,
+) -> Result<(String, Vec<u8>), String> {
     let url = url.trim();
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return Err("仅支持 http/https 图片地址".to_string());
@@ -1129,6 +1258,8 @@ pub fn http_set_cookie(source_id: &str, cookie_text: &str) {
             let overflow = lines.len() - MAX_COOKIE_LINES / 2;
             lines.drain(0..overflow);
         }
+        // Cookie 内容绝不进日志：只记当前累积了多少行
+        log::debug!("写入登录 Cookie source={source_id} lines={}", lines.len());
     }
 }
 
@@ -1148,7 +1279,13 @@ pub fn http_remove_cookie(source_id: &str, cookie_text: &str) -> u64 {
         .unwrap_or_else(|e| e.into_inner());
     let before = lines.len();
     lines.retain(|l| l.trim() != text);
-    (before - lines.len()) as u64
+    let removed = (before - lines.len()) as u64;
+    // 只记「移除了几行」：被移除的 Cookie 文本本身不写日志
+    log::debug!(
+        "移除登录 Cookie source={source_id} removed={removed} lines={}",
+        lines.len()
+    );
+    removed
 }
 
 pub fn http_cookies(source_id: &str) -> String {
@@ -1167,12 +1304,17 @@ pub fn http_cookies(source_id: &str) -> String {
 
 pub fn http_clear_cookies(source_id: &str) {
     if let Ok(state) = ensure_source_state(source_id) {
+        let mut cleared = 0usize;
         if let Ok(mut lines) = state.extra_cookies.lock() {
+            cleared += lines.len();
             lines.clear();
         }
         if let Ok(mut scoped) = state.scoped_cookies.lock() {
+            cleared += scoped.len();
             scoped.clear();
         }
+        // 「清空登录态」是用户可感知的动作，但 Cookie 内容依旧不写：只记清掉了几条
+        log::debug!("清空登录 Cookie 与会话作用域 Cookie source={source_id} cleared={cleared}");
     }
 }
 
@@ -1212,11 +1354,18 @@ impl SessionHandle {
             .user_agent
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = ua.trim().to_string();
+        let external = !ua.trim().is_empty();
         *self
             .state
             .user_agent_external
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = !ua.trim().is_empty();
+            .unwrap_or_else(|e| e.into_inner()) = external;
+        // UA 必须与认证窗口一致（cf_clearance 绑定 UA），出问题时要能对照：记文本与来源
+        log::debug!(
+            "会话 UA 已设置 source={} external={external} ua={}",
+            self.state.source_id,
+            if external { ua.trim() } else { DEFAULT_UA }
+        );
     }
 
     /// 会话当前生效的 User-Agent 与来源：`(ua 文本, 是否为外部覆盖)`。
@@ -1291,6 +1440,12 @@ impl SessionHandle {
                 }
             }
         }
+        // 只记新增 / 覆盖条数：浏览器导入的 Cookie 值绝不进日志
+        log::debug!(
+            "写入作用域 Cookie source={} added={added} replaced={replaced} total={}",
+            self.state.source_id,
+            guard.len()
+        );
         (added, replaced)
     }
 
@@ -2154,6 +2309,18 @@ pub fn webview_storage(source_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 错误文本里的 URL 脱敏由 `readerx-log` 提供（这里只确认别名确实接上了：
+    /// 引擎的调用点写的是 `redact_urls`，接错等于整条脱敏悄悄失效）。
+    #[test]
+    fn error_text_urls_are_redacted_for_logs() {
+        let message = "请求失败: error sending request for url (https://example.com/api?token=abcdef&id=7)";
+        let redacted = redact_urls(message);
+        assert!(redacted.contains("token=***"), "{redacted}");
+        assert!(!redacted.contains("abcdef"), "{redacted}");
+        // 普通文本原样保留
+        assert_eq!(redact_urls("没有地址的原因"), "没有地址的原因");
+    }
 
     /// 登录收尾早于「本进程第一次调用该书源」时，写入入口必须能自己把会话建起来。
     ///

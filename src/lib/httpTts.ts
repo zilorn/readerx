@@ -30,6 +30,10 @@ import {
 } from "./ttsSettings";
 import { readTtsAudioCache, writeTtsAudioCache } from "./audioCache";
 import { describeError } from "./errorReport";
+import { createLogger } from "./logger";
+
+/** 自定义源合成细节用 debug 记（失败原因由调用方 ttsPlayer 带书 / 章 / 句序号记 warn） */
+const log = createLogger("httpTts");
 
 const MARKER = /\{\$TEXT(?:\?\s*URLencoding=(\d+))?\}/g;
 const RATE_MARKER = /\{\$RATE(?:\?\s*URLencoding=(\d+))?\}/g;
@@ -140,6 +144,7 @@ export async function synthesizeHttpAudio(text: string, bookId?: string): Promis
   }
   if (!text.trim()) throw new Error("没有可朗读的文本");
 
+  const started = performance.now();
   // 1) 磁盘缓存命中 → 直接用缓存字节，不再请求服务端
   const book = bookId ?? "";
   let key = "";
@@ -147,9 +152,22 @@ export async function synthesizeHttpAudio(text: string, bookId?: string): Promis
     key = await sentenceCacheKey(text);
     const hit = await readTtsAudioCache(book, key);
     if (hit && hit.data) {
+      log.debug(
+        "自定义源合成命中磁盘缓存",
+        `book=${book}`,
+        `chars=${text.length}`,
+        `ms=${Math.round(performance.now() - started)}`,
+      );
       return { mime: hit.mime || "audio/mpeg", bytes: base64ToBytes(hit.data) };
     }
   }
+  // 句子文本绝不进日志：只记书籍、方法、句长
+  log.debug(
+    "自定义源合成请求开始",
+    `book=${book || "（无）"}`,
+    `method=${method}`,
+    `chars=${text.length}`,
+  );
 
   // 2) 请求服务端合成
   const rate = currentTtsRate();
@@ -173,20 +191,40 @@ export async function synthesizeHttpAudio(text: string, bookId?: string): Promis
     }
   } catch (err) {
     if (err instanceof DOMException && err.name === "AbortError") {
+      log.debug("自定义源请求超时", `book=${book || "（无）"}`, `ms=${Math.round(performance.now() - started)}`);
       throw new Error("自定义源请求超时（45 秒），请检查地址与网络");
     }
+    log.debug(
+      "自定义源请求异常",
+      `book=${book || "（无）"}`,
+      `ms=${Math.round(performance.now() - started)}`,
+      err,
+    );
     throw new Error(`自定义源请求失败：${describeError(err)}`);
   }
 
   if (!res.ok) {
+    log.debug(
+      "自定义源返回非 2xx",
+      `book=${book || "（无）"}`,
+      `status=${res.status}`,
+      `ms=${Math.round(performance.now() - started)}`,
+    );
     throw new Error(`自定义源返回错误：HTTP ${res.status}`);
   }
   const ct = res.headers.get("content-type") ?? "";
   if (ct && !ct.toLowerCase().startsWith("audio/")) {
+    log.debug(
+      "自定义源未返回音频",
+      `book=${book || "（无）"}`,
+      `contentType=${ct || "未知"}`,
+      `ms=${Math.round(performance.now() - started)}`,
+    );
     throw new Error(`自定义源未返回音频（Content-Type: ${ct || "未知"}）`);
   }
   const buf = await res.arrayBuffer();
   if (!buf || buf.byteLength === 0) {
+    log.debug("自定义源返回了空音频", `book=${book || "（无）"}`);
     throw new Error("自定义源返回了空音频");
   }
   const mime = ct || "audio/mpeg";
@@ -198,5 +236,12 @@ export async function synthesizeHttpAudio(text: string, bookId?: string): Promis
     void writeTtsAudioCache(book, key, data64, mime);
   }
 
+  log.debug(
+    "自定义源合成完成",
+    `book=${book || "（无）"}`,
+    `mime=${mime}`,
+    `bytes=${bytes.byteLength}`,
+    `ms=${Math.round(performance.now() - started)}`,
+  );
   return { mime, bytes };
 }

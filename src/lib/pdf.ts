@@ -39,6 +39,9 @@ import {
   type RunningHeadBounds,
 } from "./pdf/pdfText";
 import { loadPdfJs, type PdfDocument, type PdfOutlineNode, type PdfPage } from "./pdf/pdfjs";
+import { createLogger } from "./logger";
+
+const log = createLogger("pdf");
 
 export interface ParsedPdf {
   title: string;
@@ -273,6 +276,8 @@ async function buildChapter(
  * `file` 必须是 `.pdf`（调用方已按扩展名判定格式）。
  */
 export async function parsePdfFile(file: File, options: ParsePdfOptions): Promise<ParsedPdf> {
+  const started = performance.now();
+  log.debug("开始解析 PDF", `file=${file.name}`, `bytes=${file.size}`, `book=${options.bookId}`);
   const pdfjs = await loadPdfJs();
   // 直接把 ArrayBuffer 交给 pdf.js：它会转移给 worker（不再复制一份），大文件省一半内存
   const bytes = await file.arrayBuffer();
@@ -287,8 +292,9 @@ export async function parsePdfFile(file: File, options: ParsePdfOptions): Promis
     let info: Record<string, unknown> = {};
     try {
       info = (await doc.getMetadata()).info ?? {};
-    } catch {
+    } catch (err) {
       /* 元数据读不出来不影响导入 */
+      log.warn("PDF 元数据读取失败，退回文件名作书名", `file=${file.name}`, err);
     }
     const metaText = (key: string): string => {
       const value = info[key];
@@ -317,6 +323,13 @@ export async function parsePdfFile(file: File, options: ParsePdfOptions): Promis
       outline && outline.length <= MAX_OUTLINE_CHAPTERS
         ? outlineRanges(outline, pageCount, weights, fallbackTitle)
         : chunkRanges(pageCount, weights, options.charsPerChapter);
+    if (outline && outline.length > MAX_OUTLINE_CHAPTERS) {
+      log.warn(
+        "PDF 大纲过于零碎，已退回按字数分章",
+        `outline=${outline.length}`,
+        `pages=${pageCount}`,
+      );
+    }
 
     const chapters: LocalBookChapter[] = [];
     for (const range of ranges) {
@@ -324,6 +337,7 @@ export async function parsePdfFile(file: File, options: ParsePdfOptions): Promis
       if (chapter) chapters.push(chapter);
     }
     if (chapters.length === 0) {
+      log.warn("PDF 未解析出可读内容（文件可能已加密或损坏）", `pages=${pageCount}`);
       throw new Error("PDF 中没有解析出可读内容，请确认文件未加密且未损坏");
     }
 
@@ -335,6 +349,16 @@ export async function parsePdfFile(file: File, options: ParsePdfOptions): Promis
       first.cleanup?.();
     }
 
+    log.info(
+      "PDF 解析完成",
+      `file=${file.name}`,
+      `pages=${pageCount}`,
+      `chapters=${chapters.length}`,
+      `chars=${totalChars}`,
+      `scanned=${scanned}`,
+      `imagePages=${imagePages.size}`,
+      `ms=${Math.round(performance.now() - started)}`,
+    );
     return {
       title: metaText("Title") || fallbackTitle,
       author: metaText("Author") || "佚名",
@@ -354,9 +378,13 @@ async function usableOutlineFrom(
 ): Promise<PdfOutlineEntry[] | null> {
   try {
     const nodes = await doc.getOutline();
-    if (!nodes || nodes.length === 0) return null;
+    if (!nodes || nodes.length === 0) {
+      log.debug("PDF 没有自带大纲，按字数分章", `pages=${pageCount}`);
+      return null;
+    }
     return usableOutline(await collectOutline(doc, nodes), pageCount);
-  } catch {
+  } catch (err) {
+    log.warn("PDF 大纲读取失败，退回按字数分章", err);
     return null;
   }
 }

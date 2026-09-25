@@ -195,7 +195,12 @@ fn nv_log(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsVa
         parts.push(arg_string(arg, context));
     }
     let line = parts.join(" ");
-    with_call(|c| c.push_log(line));
+    with_call(|c| {
+        // 规则作者的 console.log 除了随调用结果返回（CLI / App 展示），也镜像一条到统一日志：
+        // 排查线上问题时不用重跑书源，翻日志文件就能看到规则自己打的线索
+        log::debug!("[书源 {}] {line}", c.source_id);
+        c.push_log(line)
+    });
     Ok(JsValue::undefined())
 }
 
@@ -590,9 +595,13 @@ fn engine_error_message(what: &str, error: &boa_engine::JsError) -> String {
         } else {
             "执行栈超出上限"
         };
-        return format!("{what}被中断：{reason}");
+        let message = format!("{what}被中断：{reason}");
+        log::error!("书源引擎异常：{}", host::redact_urls(&message));
+        return message;
     }
-    format!("{what}时引擎异常: {text}")
+    let message = format!("{what}时引擎异常: {text}");
+    log::error!("书源引擎异常：{}", host::redact_urls(&message));
+    message
 }
 
 /// 在同一 Context 中执行一次入口调用。
@@ -694,6 +703,14 @@ pub fn call_source_function(
     let fn_tag = fn_name.to_string();
     let fn_in_thread = fn_name.to_string();
     let args_owned = args.clone();
+    // 参数只记编码后的长度：里面可能是关键词 / 章节地址，也可能带登录信息
+    let args_len = args.to_string().chars().count();
+    log::debug!(
+        "书源调用开始 source={source_id} fn={fn_name} args={args_len} 字符 budget={}ms",
+        budget_ms.max(1_000)
+    );
+    // 线程名与失败日志都要用，clone 一份（source_id 随后被 move 进引擎线程）
+    let source_tag = source_id.clone();
 
     let handle = std::thread::Builder::new()
         .name(format!("booksource-{fn_tag}"))
@@ -719,16 +736,36 @@ pub fn call_source_function(
                 elapsed_ms: started.elapsed().as_millis() as u64,
             })
         })
-        .map_err(|e| format!("无法创建书源引擎线程: {e}"))?;
+        .map_err(|e| {
+            let message = format!("无法创建书源引擎线程: {e}");
+            log::error!("书源调用无法开始 source={source_tag} fn={fn_tag} reason={message}");
+            message
+        })?;
 
     // 兜底：线程若在兜底之外异常结束，也返回结构化失败（不 panic、不丢错误原因）
-    Ok(handle.join().unwrap_or_else(|_| SourceCallResult {
+    let result = handle.join().unwrap_or_else(|_| SourceCallResult {
         ok: false,
         value: None,
         error: Some(format!("书源函数「{fn_tag}」执行线程异常退出")),
         logs: Vec::new(),
         elapsed_ms: started.elapsed().as_millis() as u64,
-    }))
+    });
+    // 这里只写「谁、多久、为什么」：返回值与 logs 由调用方展示，不重复灌进日志
+    match &result {
+        SourceCallResult { ok: true, .. } => log::info!(
+            "书源调用完成 source={source_tag} fn={fn_tag} ms={}",
+            result.elapsed_ms
+        ),
+        call => {
+            // 失败原因常把完整 URL（含 token）带进来：过一遍脱敏再写
+            let reason = host::redact_urls(&call.error.clone().unwrap_or_default());
+            log::error!(
+                "书源调用失败 source={source_tag} fn={fn_tag} ms={} reason={reason}",
+                result.elapsed_ms
+            );
+        }
+    }
+    Ok(result)
 }
 
 // ---------------------------------------------------------------------------
@@ -746,6 +783,7 @@ pub fn fetch_chapter_contents(
     if chapters.is_empty() {
         return Ok(Vec::new());
     }
+    let started = Instant::now();
     let workers = concurrency.clamp(1, host::CONCURRENCY_CAP).min(chapters.len());
     let source_id = source_id.to_string();
     let js = js.to_string();
@@ -777,6 +815,10 @@ pub fn fetch_chapter_contents(
                             Ok(context) => context,
                             Err(build_error) => {
                                 // 解析失败：把本 worker 尚未领取的章节全部标记错误，避免静默缺失
+                                log::warn!(
+                                    "书源正文引擎初始化失败 source={source_id} chapters={} reason={build_error}",
+                                    chapters.len()
+                                );
                                 loop {
                                     let idx = next.fetch_add(1, Ordering::SeqCst);
                                     if idx >= chapters.len() {
@@ -827,12 +869,19 @@ pub fn fetch_chapter_contents(
                                         error: String::new(),
                                     }
                                 }
-                                Err(error) => ChapterContentResult {
-                                    ok: false,
-                                    chapter_name: chapter.chapter_name.clone(),
-                                    text: String::new(),
-                                    error,
-                                },
+                                Err(error) => {
+                                    // 单章失败不拖垮整批：记章节标题与原因（正文本身绝不进日志）
+                                    log::warn!(
+                                        "章节正文拉取失败 source={source_id} chapter={} reason={error}",
+                                        chapter.chapter_name
+                                    );
+                                    ChapterContentResult {
+                                        ok: false,
+                                        chapter_name: chapter.chapter_name.clone(),
+                                        text: String::new(),
+                                        error,
+                                    }
+                                }
                             };
                             if let Some(slot) = slots.get(idx) {
                                 if let Ok(mut guard) = slot.lock() {
@@ -875,6 +924,14 @@ pub fn fetch_chapter_contents(
             error: fallback.clone(),
         }));
     }
+    // 整批一条 info：章节数与耗时是判断「站点变慢 / 规则失效」的第一手线索
+    let succeeded = results.iter().filter(|item| item.ok).count();
+    log::info!(
+        "批量正文拉取结束 source={source_id} requested={} ok={succeeded} failed={} workers={workers} ms={}",
+        results.len(),
+        results.len() - succeeded,
+        started.elapsed().as_millis()
+    );
     Ok(results)
 }
 

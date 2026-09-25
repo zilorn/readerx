@@ -14,6 +14,10 @@
  * 测量与渲染共用本模块导出的版式构造器（inline style），保证两者排版一致。
  */
 import { normalizeInlineImages, type LocalBookChapter } from "./booksTypes";
+import { createLogger } from "./logger";
+
+/** 分页排版的日志出口：只在排版异常退回未分页时留一条 warn */
+const log = createLogger("pagination");
 
 /** 章节单元里的图片引用（块级图 / 段内图共用） */
 export interface ReaderImageRef {
@@ -804,6 +808,7 @@ export function startChapterPagination(
   const steps = paginateChapterSteps(chapter, author, layout, imageSizes);
   let cancelled = false;
   let step = steps.next();
+  const started = performance.now();
   const promise = (async () => {
     try {
       let lastSliced = performance.now();
@@ -823,7 +828,16 @@ export function startChapterPagination(
         }
         step = steps.next();
       }
-    } catch {
+    } catch (err) {
+      // 排版异常会让本章回退到「未分页」渲染：原因必须留痕，否则只剩一个空白页无从排查
+      log.warn(
+        "章节排版失败，退回未分页渲染",
+        `chapter=${chapter.title}`,
+        `paragraphs=${chapter.paragraphs?.length ?? 0}`,
+        `fontSize=${layout.fontSize}`,
+        `ms=${Math.round(performance.now() - started)}`,
+        err,
+      );
       return null;
     }
   })();

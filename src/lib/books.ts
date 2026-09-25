@@ -34,6 +34,8 @@ import type {
   LocalBook,
   LocalBookChapter,
 } from "./booksTypes";
+// 只取类型：PDF 解析器（pdf.js + worker）仍然只在真正导入 PDF 时动态载入
+import type { ParsedPdf } from "./pdf";
 import {
   bookSourceOf,
   bookToMeta,
@@ -47,6 +49,19 @@ import {
 import { ensureShelfEntry } from "./store";
 import { clearAllBookmarks, removeBookmarksForBook } from "./bookmarks";
 import { invalidateBookLengths } from "./progress";
+import { createLogger } from "./logger";
+
+/** 本地书库的日志出口：导入 / 删除 / 清空 / 按需取正文都要能从日志还原 */
+const log = createLogger("books");
+
+/** 草稿字数与章节数（导入日志只记这两个聚合值，正文一个字都不写） */
+function draftSize(draft: Pick<BookDraft, "chapters">): { chapters: number; chars: number } {
+  let chars = 0;
+  for (const chapter of draft.chapters) {
+    for (const paragraph of chapter.paragraphs ?? []) chars += paragraph.length;
+  }
+  return { chapters: draft.chapters.length, chars };
+}
 
 export type ImportSplitChoice =
   | { kind: "auto" }
@@ -227,12 +242,23 @@ export function ensureLocalBooksLoaded(): Promise<void> {
   if (metasState() !== null) return Promise.resolve();
   if (!ensureMetaPromise) {
     ensureMetaPromise = (async () => {
+      const started = performance.now();
       try {
         const metas = await listRemoteBookMetas();
         setMetasState(sortByImportedAt(metas));
-      } catch {
+        log.info(
+          "书库载入完成",
+          `n=${metas.length}`,
+          `ms=${Math.round(performance.now() - started)}`,
+        );
+      } catch (err) {
         /* 后端暂不可用（如纯浏览器调试）时按空书库渲染 */
         setMetasState([]);
+        log.error(
+          "书库载入失败，已按空书库渲染",
+          `ms=${Math.round(performance.now() - started)}`,
+          err,
+        );
       } finally {
         ensureMetaPromise = null;
       }
@@ -254,11 +280,18 @@ export function ensureLocalBookContent(id: string): Promise<LocalBook | null> {
   const task = (async (): Promise<LocalBook | null> => {
     await ensureLocalBooksLoaded();
     if (!bookMetaById(id)) return null; // 元数据里已没有该书
+    const started = performance.now();
     try {
       const full = await getRemoteBook(id);
       if (!full) return null;
       upsertFull(full);
       upsertMetaFromFull(full);
+      log.debug(
+        "按需读取正文完成",
+        `book=${id}`,
+        `n=${full.chapters.length}`,
+        `ms=${Math.round(performance.now() - started)}`,
+      );
       return full;
     } finally {
       materializing.delete(id);
@@ -428,6 +461,13 @@ export async function parseTxtFile(
   choice: ImportSplitChoice,
   overrides?: { title?: string; author?: string },
 ): Promise<BookDraft> {
+  const started = performance.now();
+  log.debug(
+    "开始解析 TXT",
+    `file=${file.name}`,
+    `bytes=${file.size}`,
+    `split=${choice.kind}`,
+  );
   const bytes = new Uint8Array(await file.arrayBuffer());
   const text = decodeTxtBytes(bytes);
   if (!text.trim()) throw new Error("TXT 文件内容为空，无法导入");
@@ -454,7 +494,7 @@ export async function parseTxtFile(
         ? "按字数分章"
         : `未匹配到章节标题，${result.ruleName}`;
 
-  return toDraft(
+  const draft = toDraft(
     file,
     "txt",
     overrides?.title ?? titleFromFileName(file.name),
@@ -462,6 +502,14 @@ export async function parseTxtFile(
     splitDesc,
     localChapters,
   );
+  log.info(
+    "TXT 解析完成",
+    `file=${file.name}`,
+    `chapters=${draft.chapters.length}`,
+    `chars=${draft.totalChars}`,
+    `ms=${Math.round(performance.now() - started)}`,
+  );
+  return draft;
 }
 
 /** 解析 EPUB：沿用 EPUB 自带的目录结构（spine）逐文件成章 */
@@ -469,19 +517,40 @@ export async function parseEpubFileDraft(
   file: File,
   overrides?: { title?: string; author?: string },
 ): Promise<BookDraft> {
-  // EPUB 解析器（含解压库）只在真正导入电子书时才载入，不进首屏
-  const { parseEpubFile } = await import("./epub");
-  const parsed = await parseEpubFile(file);
-  return toDraft(
-    file,
-    "epub",
-    overrides?.title ?? parsed.title,
-    overrides?.author ?? parsed.author,
-    `按 EPUB 目录结构（${parsed.chapters.length} 章）`,
-    parsed.chapters,
-    parsed.cover,
-    parsed.intro,
+  const started = performance.now();
+  let draft: BookDraft;
+  try {
+    // EPUB 解析器（含解压库）只在真正导入电子书时才载入，不进首屏
+    const { parseEpubFile } = await import("./epub");
+    const parsed = await parseEpubFile(file);
+    draft = toDraft(
+      file,
+      "epub",
+      overrides?.title ?? parsed.title,
+      overrides?.author ?? parsed.author,
+      `按 EPUB 目录结构（${parsed.chapters.length} 章）`,
+      parsed.chapters,
+      parsed.cover,
+      parsed.intro,
+    );
+  } catch (err) {
+    log.error(
+      "EPUB 解析失败",
+      `file=${file.name}`,
+      `bytes=${file.size}`,
+      `ms=${Math.round(performance.now() - started)}`,
+      err,
+    );
+    throw err;
+  }
+  log.info(
+    "EPUB 解析完成",
+    `file=${file.name}`,
+    `chapters=${draft.chapters.length}`,
+    `chars=${draft.totalChars}`,
+    `ms=${Math.round(performance.now() - started)}`,
   );
+  return draft;
 }
 
 /**
@@ -493,10 +562,24 @@ export async function parsePdfFileDraft(
   file: File,
   overrides?: { title?: string; author?: string },
 ): Promise<BookDraft> {
-  const { parsePdfFile } = await import("./pdf");
+  const started = performance.now();
   // 书 id 必须在这里就定下来：页面图按它命名落盘，落库时沿用同一个 id
   const bookId = newBookId();
-  const parsed = await parsePdfFile(file, { bookId });
+  let parsed: ParsedPdf;
+  try {
+    const { parsePdfFile } = await import("./pdf");
+    parsed = await parsePdfFile(file, { bookId });
+  } catch (err) {
+    log.error(
+      "PDF 解析失败",
+      `file=${file.name}`,
+      `bytes=${file.size}`,
+      `book=${bookId}`,
+      `ms=${Math.round(performance.now() - started)}`,
+      err,
+    );
+    throw err;
+  }
   const textChapters = parsed.chapters.filter((chapter) => chapter.paragraphs.length > 0).length;
   const renderedPages = parsed.chapters.reduce(
     (sum, chapter) =>
@@ -509,7 +592,7 @@ export async function parsePdfFileDraft(
       : textChapters === 0
         ? `PDF 页面图片（${parsed.chapters.length} 章）`
         : `按 PDF 大纲 / 页分章（${parsed.chapters.length} 章，${renderedPages} 页图片）`;
-  return toDraft(
+  const draft = toDraft(
     file,
     "pdf",
     overrides?.title ?? parsed.title,
@@ -520,6 +603,15 @@ export async function parsePdfFileDraft(
     undefined,
     bookId,
   );
+  log.info(
+    "PDF 解析完成",
+    `file=${file.name}`,
+    `chapters=${draft.chapters.length}`,
+    `chars=${draft.totalChars}`,
+    `imagePages=${renderedPages}`,
+    `ms=${Math.round(performance.now() - started)}`,
+  );
+  return draft;
 }
 
 /** 将确认后的草稿交给 Rust 后端持久化并同步到两级响应式清单 */
@@ -527,6 +619,7 @@ export async function persistBookDraft(
   draft: BookDraft,
   source: BookSource = "local",
 ): Promise<LocalBook> {
+  const started = performance.now();
   const book: LocalBook = {
     // PDF 等格式在解析阶段已分配 id（页面图按它落盘），沿用同一个 id
     id: draft.bookId ?? newBookId(),
@@ -547,6 +640,17 @@ export async function persistBookDraft(
   await saveRemoteBook(book);
   upsertMetaFromFull(book);
   upsertFull(book);
+  const size = draftSize(draft);
+  log.info(
+    "导入完成",
+    `source=${source}`,
+    `book=${book.id}`,
+    `title=${book.title}`,
+    `format=${book.format}`,
+    `chapters=${size.chapters}`,
+    `chars=${size.chars}`,
+    `ms=${Math.round(performance.now() - started)}`,
+  );
   return book;
 }
 
@@ -555,10 +659,19 @@ export async function persistBookDraft(
  * 与 persistBookDraft 不同：不经过分章/文件导入流程，作者/格式/章节由调用方给出。
  */
 export async function addBookRecord(book: LocalBook): Promise<void> {
+  const started = performance.now();
   await saveRemoteBook(book);
   ensureShelfEntry(book.id);
   upsertMetaFromFull(book);
   upsertFull(book);
+  log.info(
+    "加入书架完成",
+    `book=${book.id}`,
+    `title=${book.title}`,
+    `format=${book.format}`,
+    `chapters=${book.chapters.length}`,
+    `ms=${Math.round(performance.now() - started)}`,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -741,6 +854,7 @@ export async function replaceBookContent(
   existing: LocalBook | BookMeta,
   draft: BookDraft,
 ): Promise<LocalBook> {
+  const started = performance.now();
   const base = existing as LocalBook;
   const next: LocalBook = {
     ...base,
@@ -764,6 +878,16 @@ export async function replaceBookContent(
     upsertMetaFromFull(next);
     upsertFull(next);
   });
+  const size = draftSize(draft);
+  log.info(
+    "重新导入完成",
+    `book=${next.id}`,
+    `title=${next.title}`,
+    `format=${next.format}`,
+    `chapters=${size.chapters}`,
+    `chars=${size.chars}`,
+    `ms=${Math.round(performance.now() - started)}`,
+  );
   return next;
 }
 
@@ -772,11 +896,29 @@ export async function replaceBookContent(
  * 供「先解析 → 检测同名 → 再决定新增/重新导入」的流程使用。
  */
 export async function parseBookFile(file: File): Promise<BookDraft> {
+  const started = performance.now();
   const format = detectBookFormat(file.name);
-  if (!format) throw new Error("仅支持导入 .txt / .epub / .pdf 文件");
-  if (format === "txt") return await parseTxtFile(file, { kind: "auto" });
-  if (format === "pdf") return await parsePdfFileDraft(file);
-  return await parseEpubFileDraft(file);
+  log.info(
+    "开始导入本地书",
+    `file=${file.name}`,
+    `bytes=${file.size}`,
+    `format=${format ?? "不支持"}`,
+  );
+  try {
+    if (!format) throw new Error("仅支持导入 .txt / .epub / .pdf 文件");
+    if (format === "txt") return await parseTxtFile(file, { kind: "auto" });
+    if (format === "pdf") return await parsePdfFileDraft(file);
+    return await parseEpubFileDraft(file);
+  } catch (err) {
+    log.error(
+      "导入本地书失败",
+      `file=${file.name}`,
+      `format=${format ?? "不支持"}`,
+      `ms=${Math.round(performance.now() - started)}`,
+      err,
+    );
+    throw err;
+  }
 }
 
 /**
@@ -813,9 +955,18 @@ export async function importLocalBookFile(file: File): Promise<LocalBook> {
 
 /** 删除一本本地书（内容 + 清单 + 书签） */
 export async function removeLocalBook(id: string): Promise<void> {
+  const started = performance.now();
+  const meta = bookMetaById(id);
   await deleteRemoteBook(id);
   removeBookmarksForBook(id);
   removeFromBoth(id);
+  log.info(
+    "删除书籍完成",
+    `book=${id}`,
+    `title=${meta?.title ?? "未知"}`,
+    `format=${meta?.format ?? "未知"}`,
+    `ms=${Math.round(performance.now() - started)}`,
+  );
 }
 
 /** 设置本地书所属书架分组（磁盘就地打补丁，正文不整本传回） */
@@ -834,8 +985,15 @@ export async function clearLocalGroup(groupId: string): Promise<void> {
 
 /** 清空全部本地书籍（不可恢复，书签一并清空） */
 export async function clearLocalBooks(): Promise<void> {
+  const started = performance.now();
+  const count = bookMetaList().length;
   await clearRemoteBooks();
   clearAllBookmarks();
   setMetasState([]);
   setFullsState([]);
+  log.info(
+    "清空书库完成",
+    `n=${count}`,
+    `ms=${Math.round(performance.now() - started)}`,
+  );
 }

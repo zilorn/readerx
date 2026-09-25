@@ -30,14 +30,24 @@ use readerx_source::auth::LoginOutcome;
 ///
 /// `what` 同时用于错误前缀（与历史文案保持一致）与 panic 兜底文案；
 /// 工作线程内的 panic 会被转成 `"{what}内部异常: …"` 由前端展示。
+///
+/// 这里也是**所有命令的统一日志点**：成功记一条 debug（含耗时，排查「哪一步慢」）、
+/// 失败记一条 warn（含真实原因）。逐个命令手写日志既容易漏，也会与前端提示重复。
 async fn blocking<F, T>(what: &'static str, task: F) -> Result<T, String>
 where
     F: FnOnce() -> Result<T, String> + Send + 'static,
     T: Send + 'static,
 {
-    tauri::async_runtime::spawn_blocking(move || panic_guard::catch_result(what, task))
+    let started = std::time::Instant::now();
+    let result = tauri::async_runtime::spawn_blocking(move || panic_guard::catch_result(what, task))
         .await
-        .map_err(|e| format!("{what}任务失败: {e}"))?
+        .map_err(|e| format!("{what}任务失败: {e}"))?;
+    let elapsed = started.elapsed().as_millis();
+    match &result {
+        Ok(_) => log::debug!("{what}完成 {elapsed} ms"),
+        Err(error) => log::warn!("{what}失败（{elapsed} ms）：{error}"),
+    }
+    result
 }
 
 #[tauri::command]

@@ -114,6 +114,10 @@ pub(crate) fn store(
     );
     fs::create_dir_all(root).map_err(|e| format!("创建图片目录失败: {e}"))?;
     fs::write(root.join(&name), bytes).map_err(|e| format!("写入图片失败: {e}"))?;
+    log::debug!(
+        "章节插图已落盘 book={book_id} file={name} mime={mime} bytes={}",
+        bytes.len()
+    );
     Ok(name)
 }
 
@@ -176,6 +180,9 @@ pub(crate) fn remove_book(root: &Path, book_id: &str) -> u64 {
             removed += 1;
         }
     }
+    if removed > 0 {
+        log::debug!("已清理书籍插图 book={book_id} files={removed}");
+    }
     removed
 }
 
@@ -207,7 +214,12 @@ pub(crate) fn serve(root: &Path, request: &http::Request<Vec<u8>>) -> http::Resp
                 .body(bytes)
                 .unwrap_or_else(|_| http::Response::new(Vec::new()))
         }
-        Err(_) => plain(http::StatusCode::NOT_FOUND, "图片不存在"),
+        // 图片文件读不出来时前端会显示可重试占位：正文里那张图为什么是空的，
+        // 答案就在这条日志里（文件被清理 / 磁盘错误 / 名字对不上）
+        Err(error) => {
+            log::debug!("章节插图读取失败 file={name}: {error}");
+            plain(http::StatusCode::NOT_FOUND, "图片不存在")
+        }
     }
 }
 

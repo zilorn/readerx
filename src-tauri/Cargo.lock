@@ -3779,6 +3779,8 @@ name = "readerx"
 version = "0.2.0-beta.1"
 dependencies = [
  "base64 0.22.1",
+ "log",
+ "readerx-log",
  "readerx-source",
  "serde",
  "serde_json",
@@ -3790,6 +3792,14 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-plugin-tts",
  "tauri-plugin-webview-login",
+]
+
+[[package]]
+name = "readerx-log"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "time",
 ]
 
 [[package]]
@@ -3805,7 +3815,9 @@ dependencies = [
  "gtk",
  "hmac",
  "libc",
+ "log",
  "md-5",
+ "readerx-log",
  "reqwest 0.12.28",
  "scraper",
  "serde",
@@ -5033,6 +5045,7 @@ name = "tauri-plugin-webview-login"
 version = "0.1.0"
 dependencies = [
  "javascriptcore-rs",
+ "log",
  "readerx-source",
  "serde",
  "serde_json",

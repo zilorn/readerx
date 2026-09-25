@@ -278,7 +278,14 @@ pub fn parse_probe(raw: &str) -> Result<StorageSnapshot, String> {
     if text.is_empty() || text == "null" {
         return Ok(StorageSnapshot::default());
     }
-    let value: Value = serde_json::from_str(text).map_err(|e| format!("解析存储快照失败: {e}"))?;
+    let value: Value = match serde_json::from_str(text) {
+        Ok(value) => value,
+        Err(e) => {
+            // 只记长度与原因：探针输出里就是登录凭证，内容绝不进日志
+            log::warn!("存储快照解析失败 bytes={} reason={e}", text.len());
+            return Err(format!("解析存储快照失败: {e}"));
+        }
+    };
     let mut snapshot = StorageSnapshot::default();
 
     match value.get("origins").cloned() {
@@ -328,6 +335,13 @@ fn origin_from_value(value: &Value) -> StorageOrigin {
         .and_then(|v| v.as_str())
         .map(normalize_origin)
         .unwrap_or_default();
+    if origin.is_empty() {
+        // 这一项随后会被 `retain` 丢掉：留一条线索，好区分「探针没跑」与「探针跑了但 origin 是空的」
+        log::warn!(
+            "存储快照条目缺少可用 origin，已丢弃 url={}",
+            readerx_log::redact::url(value.get("url").and_then(|v| v.as_str()).unwrap_or(""))
+        );
+    }
     StorageOrigin {
         origin,
         url: value

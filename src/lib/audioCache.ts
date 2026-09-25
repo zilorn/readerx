@@ -6,6 +6,9 @@
  * 纯浏览器 dev（非 Tauri）时全部 no-op，避免打断播放。
  */
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import { createLogger } from "./logger";
+
+const log = createLogger("tts-cache");
 
 export interface CachedAudioHit {
   data: string; // base64
@@ -36,7 +39,8 @@ export async function readTtsAudioCache(
     const hit = await invoke<CachedAudioHit | null>("readerx_tts_cache_get", { bookId, key });
     return hit ?? null;
   } catch (err) {
-    console.error("[tts-cache] 读取缓存失败", err);
+    // 降级：读不到就当没缓存，重新合成这一句（不记音频数据）
+    log.warn("读取听书缓存失败，按未命中处理", `bookId=${bookId}`, `key=${key}`, err);
     return null;
   }
 }
@@ -52,7 +56,8 @@ export async function writeTtsAudioCache(
   try {
     await invoke("readerx_tts_cache_put", { bookId, key, data, mime });
   } catch (err) {
-    console.error("[tts-cache] 写入缓存失败", err);
+    // 降级：这次没存下来，下次播放这句还得重新合成（不记音频数据）
+    log.warn("写入听书缓存失败", `bookId=${bookId}`, `key=${key}`, err);
   }
 }
 
@@ -62,7 +67,8 @@ export async function loadTtsAudioCaches(): Promise<TtsCacheOverview> {
   try {
     return await invoke<TtsCacheOverview>("readerx_tts_cache_stats");
   } catch (err) {
-    console.error("[tts-cache] 读取统计失败", err);
+    // 降级：设置页显示空统计，不影响缓存本身
+    log.warn("读取听书缓存统计失败，返回空统计", err);
     return { limit: 0, books: [] };
   }
 }
@@ -76,7 +82,8 @@ export async function applyTtsAudioCacheLimit(): Promise<void> {
   try {
     await invoke("readerx_tts_cache_apply_limit");
   } catch (err) {
-    console.error("[tts-cache] 收敛缓存额度失败", err);
+    // 降级：额度已写入偏好，本次没立即释放磁盘，下次写缓存时会顺带淘汰
+    log.warn("收敛听书缓存额度失败", err);
   }
 }
 
@@ -86,6 +93,11 @@ export async function clearTtsAudioCache(bookId?: string): Promise<void> {
   try {
     await invoke("readerx_tts_cache_clear", { bookId: bookId ?? null });
   } catch (err) {
-    console.error("[tts-cache] 清理失败", err);
+    // 降级：缓存文件留在磁盘上，用户可再点一次清理
+    log.warn(
+      "清理听书缓存失败",
+      bookId ? `bookId=${bookId}` : "范围=全部书籍",
+      err,
+    );
   }
 }

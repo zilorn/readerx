@@ -12,6 +12,9 @@
 import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
 import { createSignal } from "solid-js";
 import { readChapterImageInfo } from "./backend";
+import { createLogger } from "./logger";
+
+const log = createLogger("imageAssets");
 
 /** 章节插图自定义协议名（与 src-tauri/src/lib.rs 的 BOOK_IMAGE_PROTOCOL 一致） */
 const IMAGE_PROTOCOL = "readerx-img";
@@ -31,7 +34,8 @@ function imageUrlPrefix(): string | null {
       urlPrefix = convertFileSrc("", IMAGE_PROTOCOL);
       protocolReady = true;
     } catch (err) {
-      console.error("[imageAssets] 无法构造图片协议地址", err);
+      // 降级：拿不到协议前缀，全书插图都无法显示（占位 / 重试由章节块负责）
+      log.warn("构造章节插图协议地址失败，插图将无法显示", `protocol=${IMAGE_PROTOCOL}`, err);
       return null;
     }
   }

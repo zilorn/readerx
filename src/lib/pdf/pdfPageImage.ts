@@ -11,6 +11,9 @@
  */
 import { putBookPdfPageImage } from "../backend";
 import { makeCoverThumb } from "../coverImage";
+import { createLogger } from "../logger";
+
+const log = createLogger("pdf");
 
 /** 本模块对 pdf.js 页面对象的最小要求（只用到取视口与渲染两件事） */
 export interface RenderablePdfPage {
@@ -96,7 +99,12 @@ export async function renderPdfPageImage(
     }
   } catch (err) {
     // 落盘失败（纯浏览器调试 / 磁盘异常）：退回 data URL，至少这一页能读
-    console.error("[pdf] 页面图片落盘失败，改用内嵌图片", err);
+    log.warn(
+      "PDF 页面图落盘失败，改用内嵌图片",
+      `bookId=${bookId}`,
+      `page=${pageNumber}`,
+      err,
+    );
   }
   return { src: rendered.dataUrl, width: rendered.width, height: rendered.height };
 }

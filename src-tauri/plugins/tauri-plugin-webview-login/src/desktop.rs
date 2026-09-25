@@ -66,15 +66,30 @@ pub fn authenticate(
 ) -> Result<LoginOutcome, String> {
     let url = url.trim().to_string();
     if !(url.starts_with("http://") || url.starts_with("https://")) {
+        // 登录地址可能带 token 之类的查询参数，完整地址不进日志：这里只记长度
+        log::warn!(
+            "桌面登录只支持 http/https 地址，收到 {} 字符的地址",
+            url.chars().count()
+        );
         return Err("仅支持 http/https 的登录地址".to_string());
     }
     let label = label_for(&request.source_id);
     if app.get_webview_window(&label).is_some() {
+        log::warn!(
+            "已有登录窗口在开着（source={}），本次不再打开",
+            request.source_id
+        );
         return Ok(LoginOutcome::failure(
             url,
             "已经有一个登录窗口开着，请先在窗口里完成或关闭它",
         ));
     }
+    log::info!(
+        "打开桌面登录窗口 source={} host={} timeout={}s",
+        request.source_id,
+        url_host(&url),
+        request.timeout_secs
+    );
 
     let done = Arc::new(AtomicBool::new(false));
     let parsed = url
@@ -88,16 +103,28 @@ pub fn authenticate(
         // 完成条只在顶层文档注入：iframe 里画不出「整体完成」的语义
         .initialization_script(completion_bar_script());
     if !request.user_agent.trim().is_empty() {
+        // UA 必须与书源请求一致（cf_clearance 与 UA 绑定），记下来供比对
+        log::debug!(
+            "登录窗口使用宿主 UA source={} ua={}",
+            request.source_id,
+            request.user_agent.trim()
+        );
         builder = builder.user_agent(request.user_agent.trim());
     }
     for script in &request.scripts {
         // 探针要覆盖所有框架：登录凭证常写在 iframe 自己的 origin 上
+        log::debug!(
+            "注入登录窗口脚本 source={} script={} 字符",
+            request.source_id,
+            script.chars().count()
+        );
         builder = builder.initialization_script_for_all_frames(script);
     }
 
     let window = builder
         .build()
         .map_err(|err| format!("打开登录窗口失败：{err}"))?;
+    log::debug!("登录窗口已创建 source={} label={label}", request.source_id);
     {
         let done = done.clone();
         window.on_window_event(move |event| {
@@ -111,13 +138,19 @@ pub fn authenticate(
         });
     }
     if let Err(err) = window.set_focus() {
-        eprintln!("[readerx] 登录窗口聚焦失败：{err}");
+        log::warn!("登录窗口聚焦失败：{err}");
     }
 
     let outcome = wait_for_completion(&window, &done, &url, request);
     if let Err(err) = window.close() {
-        eprintln!("[readerx] 关闭登录窗口失败：{err}");
+        log::warn!("关闭登录窗口失败：{err}");
     }
+    log::debug!(
+        "登录窗口已收尾 source={} ok={} cookie={}",
+        request.source_id,
+        outcome.ok,
+        outcome.count
+    );
     Ok(outcome)
 }
 
@@ -144,12 +177,13 @@ fn wait_for_completion(
         .map(|text| text.contains("true"))
         .unwrap_or(false);
         if poll_started.elapsed() > POLL_INTERVAL {
-            eprintln!(
-                "[readerx] 主世界求值耗时 {:?}（超过轮询间隔）",
+            log::warn!(
+                "登录窗口主世界求值耗时 {:?}（超过轮询间隔，页面可能过重）",
                 poll_started.elapsed()
             );
         }
         if finished {
+            log::debug!("用户点了「完成」，开始收尾");
             break;
         }
         if done.load(Ordering::SeqCst) {
@@ -173,10 +207,18 @@ fn wait_for_completion(
     let cookies = match collect_cookies(window, &final_url) {
         Ok(list) => list,
         Err(err) => {
+            log::warn!("读取登录 Cookie 失败：{err}");
             return LoginOutcome::failure(final_url, format!("读取 Cookie 失败：{err}"));
         }
     };
+    // 只记条数与主机名：Cookie 值绝不进日志，最终地址也可能带 token
+    log::debug!(
+        "登录窗口 Cookie 库读取完成 n={} host={}",
+        cookies.len(),
+        url_host(&final_url)
+    );
     if cookies.is_empty() {
+        log::warn!("登录窗口没有取到任何 Cookie（closed={closed} timed_out={timed_out}）");
         return LoginOutcome::failure(
             final_url,
             if closed {
@@ -199,6 +241,14 @@ fn wait_for_completion(
     outcome
 }
 
+/// URL 的主机名（**日志专用**：登录地址可能带 token 之类的查询参数，完整地址不进日志）
+fn url_host(url: &str) -> String {
+    tauri::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(|host| host.to_string()))
+        .unwrap_or_default()
+}
+
 /// 读内核 Cookie 库里的该站点 Cookie（含 httpOnly）。
 ///
 /// 按「host → 逐级父域」逐个查询：`cookies_for_url` 只给该 URL 可见的 Cookie，
@@ -211,9 +261,11 @@ fn collect_cookies(window: &WebviewWindow, url: &str) -> Result<Vec<Cookie<'stat
         if let Some(list) =
             crate::desktop_main_world::cookies_in_store(window, &candidates, COOKIE_READ_WAIT)
         {
+            // 只记条数：Cookie 值绝不进日志
+            log::debug!("原生 Cookie 库读取完成 n={}", list.len());
             return Ok(list);
         }
-        eprintln!("[readerx] 原生 Cookie 库读取没有响应，回退到运行时接口");
+        log::warn!("原生 Cookie 库读取没有响应，回退到运行时接口");
     }
     let mut list: Vec<Cookie<'static>> = Vec::new();
     for candidate in candidates {
@@ -358,29 +410,35 @@ fn request_probe_result(
     probe: Option<&readerx_source::auth::ProbeScript>,
 ) -> Option<String> {
     let Some(probe) = probe else {
-        eprintln!("[readerx] 本次登录没有存储探针（宿主未提供），只收 Cookie");
+        log::debug!("本次登录没有存储探针（宿主未提供），只收 Cookie");
         return None;
     };
     if !probe.is_ready() {
-        eprintln!("[readerx] 存储探针脚本不完整，只收 Cookie");
+        log::warn!("存储探针脚本不完整（四段缺一），只收 Cookie");
         return None;
     }
+    log::debug!("存储探针开始 host={}", url_host(url));
     // 先触发采集（`run`），再轮询读回（`read`）
     if eval_page_text(window, &probe.run, STORAGE_WAIT).is_none() {
-        eprintln!("[readerx] 触发存储探针没有得到响应（{url}）");
+        log::warn!("触发存储探针没有得到响应 host={}", url_host(url));
     }
     let start = Instant::now();
     loop {
         match eval_page_text(window, &probe.read, POLL_INTERVAL) {
             // 非空且不是「还没采完」才是结果；空串可能是首轮尚未写入，继续等
             Some(text) if !text.trim().is_empty() && !text.contains(&probe.pending) => {
+                // 探针内容是登录凭证，只记长度不记内容
+                log::debug!("存储探针已返回结果 bytes={}", text.len());
                 return Some(text);
             }
             _ => {}
         }
         if start.elapsed() >= STORAGE_WAIT {
             // 采不到不是错误：页面本来就可能没有存储（纯 Cookie 登录），也可能是内核隔离
-            eprintln!("[readerx] 存储探针在 {STORAGE_WAIT:?} 内没有结果，只收 Cookie（{url}）");
+            log::debug!(
+                "存储探针在 {STORAGE_WAIT:?} 内没有结果，只收 Cookie（host={}）",
+                url_host(url)
+            );
             return None;
         }
         std::thread::sleep(Duration::from_millis(200));

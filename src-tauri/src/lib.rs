@@ -1,5 +1,6 @@
 mod book_images;
 mod commands;
+mod logging;
 mod models;
 mod storage;
 mod webview_login;
@@ -26,15 +27,19 @@ const INTERNAL_ERROR_EVENT: &str = "readerx-internal-error";
 /// panic hook 用的 AppHandle（setup 时写入）。
 static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
 
-/// 兜底提示 + 日志：任何漏网的 panic 都先把「消息 + 位置」打出来（Android 上可在 logcat 看到），
-/// 再推给前端弹提示；即使异常无法补救，用户也知道发生了什么。
+/// 兜底提示 + 日志：任何漏网的 panic 都先记进统一日志（含位置，Android 上 logcat 与
+/// 日志文件都能看到），再推给前端弹提示；即使异常无法补救，用户也知道发生了什么。
 fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         let location = info
             .location()
             .map(|loc| format!("{}:{}:{}", loc.file(), loc.line(), loc.column()))
             .unwrap_or_else(|| "未知位置".to_string());
-        eprintln!("[readerx] 内部异常 @ {location}: {info}");
+        log::error!("内部异常 @ {location}: {info}");
+        // 立刻落盘：panic 之后进程可能马上被系统收走，缓冲区里的最后几条不能丢
+        if let Some(logger) = readerx_log::logger() {
+            logger.flush();
+        }
         // 交给独立线程推送：panic 线程可能正持有 Tauri 内部锁，在 hook 里直接
         // emit 有阻塞风险；这里立即返回，让 unwind / 收场流程照常进行。
         let message = format!("{}（{location}）", info);
@@ -53,6 +58,9 @@ fn install_panic_hook() {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 日志要最早装：启动早期（还没拿到应用数据目录）的失败同样要留下痕迹。
+    // 先只打标准错误 / logcat，文件目标在 setup 里挂上（见 logging::attach_app_dir）。
+    logging::init_early();
     install_panic_hook();
     let result = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -75,13 +83,18 @@ pub fn run() {
         .setup(|app| {
             // panic hook 需要 AppHandle 才能把内部异常推给前端
             let _ = APP_HANDLE.set(app.handle().clone());
+            // 日志文件目标挂到应用数据目录，并把用户设置的级别应用上去
+            logging::attach_app_dir(app.handle());
             // 书源引擎的数据根 = 应用数据目录：书源定义与登录态与独立二进制（CLI）
             // 用同一套路径规则，两边可以交替读写同一份数据（见 readerx-source::store）
             if let Ok(dir) = app.path().app_data_dir() {
                 readerx_source::store::init_data_root(dir);
+            } else {
+                log::warn!("无法定位应用数据目录，书源与登录态将退回默认目录");
             }
             // 网页登录后端：把「插件（Android 原生浮层 / 桌面独立登录窗口）」注册为引擎的认证实现
             webview_login::install(app.handle().clone());
+            log::info!("后端就绪，等待界面调用");
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -117,13 +130,20 @@ pub fn run() {
             commands::readerx_book_pdf_page,
             commands::readerx_source_login_supported,
             commands::readerx_source_login_webview,
-            commands::readerx_source_login_clear
+            commands::readerx_source_login_clear,
+            logging::readerx_log_write,
+            logging::readerx_log_tail,
+            logging::readerx_log_clear,
+            logging::readerx_log_set_level
         ])
         .run(tauri::generate_context!());
 
-    // 启动 / 运行失败（窗口、插件、事件循环）：打印可读原因后退出，不 panic
+    // 启动 / 运行失败（窗口、插件、事件循环）：记进日志后退出，不 panic
     if let Err(error) = result {
-        eprintln!("[readerx] 应用启动失败: {error}");
+        log::error!("应用启动失败: {error}");
+        if let Some(logger) = readerx_log::logger() {
+            logger.flush();
+        }
         std::process::exit(1);
     }
 }

@@ -47,15 +47,31 @@ pub fn authenticate(
 ) -> Result<LoginOutcome, String> {
     let url = url.trim().to_string();
     if !(url.starts_with("http://") || url.starts_with("https://")) {
+        log::warn!(
+            "webkit 认证地址非法（仅支持 http/https） source={source_id} url={}",
+            readerx_log::redact::url(&url)
+        );
         return Err("仅支持 http/https 的认证地址".to_string());
     }
     if !display_available() {
+        log::warn!("webkit 认证不可用 source={source_id} reason=没有可用的显示环境");
         return Ok(LoginOutcome::failure(
             url,
             "没有可用的显示环境：无头机器请用 xvfb-run 运行，或改用 --auth cdp 连接已有 Chrome",
         ));
     }
     gtk::init().map_err(|e| format!("初始化 GTK 失败: {e}"))?;
+    log::debug!(
+        "webkit 认证窗口准备中 source={source_id} url={} ua={}",
+        readerx_log::redact::url(&url),
+        if user_agent.trim().is_empty() {
+            "（内核默认）"
+        } else {
+            user_agent.trim()
+        }
+    );
+    // 收尾闭包要把它带进 GTK 回调（那些回调要求 'static），先拿一份自有的
+    let source_label = source_id.to_string();
 
     // 会话化上下文：认证产生的 Cookie 只活在本次窗口里，不落系统 WebKit 数据目录
     let context = WebContext::new_ephemeral();
@@ -91,6 +107,7 @@ pub fn authenticate(
     container.pack_start(&bar, false, false, 0);
     window.add(&container);
     window.show_all();
+    log::debug!("webkit 认证窗口已就绪 source={source_label}");
 
     // 共用的「收尾」：读当前地址 → 抓 Cookie 与存储 → 写结果槽 → 退出主循环
     //
@@ -101,6 +118,7 @@ pub fn authenticate(
         let url = url.clone();
         let result = result.clone();
         let finished = finished.clone();
+        let source_label = source_label.clone();
         move || {
             // 用独立的槽装 outcome：FnMut 闭包可能被调用多次，值不能被 move 进去
             let outcome: Rc<RefCell<Option<LoginOutcome>>> = Rc::new(RefCell::new(None));
@@ -115,12 +133,19 @@ pub fn authenticate(
                     .unwrap_or_else(|| url.clone());
                 match collect_cookies(&view, &final_url) {
                     Ok(list) => {
+                        // 只记条数：Cookie 值绝不进日志
+                        log::debug!(
+                            "webkit 认证收尾：读取 Cookie source={source_label} n={} url={}",
+                            list.len(),
+                            readerx_log::redact::url(&final_url)
+                        );
                         let mut login =
                             LoginOutcome::success(&final_url, cookie_header(&list), list.len());
                         login.url = final_url.clone();
                         *outcome.borrow_mut() = Some(login);
                     }
                     Err(err) => {
+                        log::warn!("webkit 认证收尾失败 source={source_label} reason={err}");
                         *result.borrow_mut() = Some(Err(err));
                         gtk::main_quit();
                         return;
@@ -134,14 +159,24 @@ pub fn authenticate(
             let deadline = Instant::now() + Duration::from_secs(4);
             let done = result.clone();
             let outcome_slot = outcome.clone();
+            let timeout_tag = source_label.clone();
             gtk::glib::timeout_add_local(Duration::from_millis(150), move || {
                 if let Some(snapshot) = slot.borrow_mut().take() {
+                    // 只记规模：快照内容就是登录凭证
+                    log::debug!(
+                        "webkit 存储快照已就绪 source={timeout_tag} origins={}",
+                        snapshot.origins.len()
+                    );
                     if let Some(login) = outcome_slot.borrow_mut().as_mut() {
                         login.storage = Some(snapshot);
                     }
                 } else if Instant::now() < deadline {
                     // 探针（IndexedDB 异步枚举）还没回来，继续等
                     return ControlFlow::Continue;
+                } else {
+                    log::debug!(
+                        "webkit 存储探针在等待窗口内没有结果，本次登录态只带 Cookie source={timeout_tag}"
+                    );
                 }
                 // 到这里无论有没有快照都要收尾：快照只是登录态的一部分，不能拖住用户
                 if let Some(login) = outcome_slot.borrow_mut().take() {
@@ -173,7 +208,11 @@ pub fn authenticate(
                 return ControlFlow::Break;
             }
             if Instant::now() >= deadline {
-                eprintln!("readerx-source: 认证等待超时，取当前 Cookie 并关闭窗口");
+                // 超时不是失败：取当前 Cookie 照常收尾，但要让用户知道为什么会提前结束
+                log::warn!(
+                    "webkit 认证等待超时（{} 秒），取当前 Cookie 并关闭窗口 source={source_label}",
+                    wait_secs.max(10)
+                );
                 collect();
                 return ControlFlow::Break;
             }
@@ -183,7 +222,10 @@ pub fn authenticate(
 
     gtk::main();
     let outcome = result.borrow_mut().take();
-    outcome.unwrap_or_else(|| Ok(LoginOutcome::failure(url, "认证窗口已关闭，且没有取到 Cookie")))
+    outcome.unwrap_or_else(|| {
+        log::warn!("webkit 认证窗口已关闭且没有取到 Cookie source={source_id}");
+        Ok(LoginOutcome::failure(url, "认证窗口已关闭，且没有取到 Cookie"))
+    })
 }
 
 /// 采集页面里的非 Cookie 登录信息（localStorage / sessionStorage / IndexedDB）。
@@ -200,6 +242,12 @@ fn collect_storage(view: &WebView, url: &str, slot: Rc<RefCell<Option<StorageSna
     };
     let script = storage::probe_script(&extra);
     let world = format!("readerx_storage_{}", now_millis());
+    // 只记 origin 与脚本长度：探针结果里是登录凭证，内容不进日志
+    log::debug!(
+        "webkit 存储探针已注入 origin={} script={} 字符",
+        extra.first().map(String::as_str).unwrap_or("（无）"),
+        script.len()
+    );
     view.evaluate_javascript(
         &script,
         Some(&world),
@@ -226,14 +274,24 @@ fn collect_storage(view: &WebView, url: &str, slot: Rc<RefCell<Option<StorageSna
             None,
             gtk::gio::Cancellable::NONE,
             move |result| {
-                let text = result
-                    .ok()
-                    .map(|value| value.to_string().to_string())
-                    .unwrap_or_default();
-                if let Ok(snapshot) = storage::parse_probe_eval(&text) {
-                    if !snapshot.is_empty() {
-                        *inner.borrow_mut() = Some(snapshot);
+                let text = match result {
+                    Ok(value) => value.to_string().to_string(),
+                    Err(err) => {
+                        // 读不到探针结果不是致命错误：本次登录态退化成只有 Cookie
+                        log::warn!("webkit 读取存储探针结果失败（本次只带 Cookie）：{err}");
+                        String::new()
                     }
+                };
+                match storage::parse_probe_eval(&text) {
+                    Ok(snapshot) => {
+                        if !snapshot.is_empty() {
+                            *inner.borrow_mut() = Some(snapshot);
+                        }
+                    }
+                    Err(err) => log::warn!(
+                        "webkit 存储探针结果解析失败（本次只带 Cookie） bytes={} reason={err}",
+                        text.len()
+                    ),
                 }
             },
         );
@@ -315,6 +373,12 @@ fn query_cookies(manager: &webkit2gtk::CookieManager, uri: &str) -> Vec<soup::Co
             let _ = context.iteration(false);
         }
         std::thread::sleep(Duration::from_millis(1));
+    }
+    if !*done.borrow() {
+        log::warn!(
+            "webkit 查询 Cookie 库超时 uri={}",
+            readerx_log::redact::url(uri)
+        );
     }
     let result = collected.borrow().clone();
     result

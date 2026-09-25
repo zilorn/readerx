@@ -6,6 +6,7 @@
  */
 import { createSignal } from "solid-js";
 import { httpFetch } from "./http";
+import { createLogger } from "./logger";
 import {
   deleteRemoteSource,
   getRemoteSource,
@@ -29,6 +30,8 @@ import type {
 // ---------------------------------------------------------------------------
 // 响应式书源清单（null = 尚未载入）
 // ---------------------------------------------------------------------------
+
+const log = createLogger("bookSources");
 
 const [sourcesState, setSourcesState] = createSignal<BookSourceSummary[] | null>(null);
 let ensurePromise: Promise<void> | null = null;
@@ -78,8 +81,8 @@ export async function refreshBookSources(): Promise<void> {
   try {
     await loadBookSourceList();
   } catch (err) {
-    console.error("[bookSources] 刷新书源清单失败", err);
     // 刷新失败保留旧清单，避免清空可用书源
+    log.warn("刷新书源清单失败，保留当前清单", err);
   }
 }
 

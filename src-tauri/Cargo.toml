@@ -17,7 +17,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 # 单一 workspace：主 crate、书源网页登录插件、书源引擎核心 crate 共享同一 target 目录，
 # 便于 tauri 移动端构建发现插件的 android 工程，也让独立二进制复用同一份依赖。
 [workspace]
-members = [".", "plugins/tauri-plugin-webview-login", "crates/readerx-source"]
+members = [".", "plugins/tauri-plugin-webview-login", "crates/readerx-source", "crates/readerx-log"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -44,6 +44,11 @@ tauri-plugin-webview-login = { path = "plugins/tauri-plugin-webview-login" }
 # 同一份代码也编译成独立二进制（cargo build -p readerx-source --features cli），
 # 供不启动 App 的离线调试与带登录态的站点验证使用。
 readerx-source = { path = "crates/readerx-source" }
+# 统一日志设施：级别过滤 + 文件轮转 + 标准错误 / Android logcat。
+# 主 crate、书源引擎、独立二进制共用一份实现，业务代码只写 log::info! 这类门面宏。
+readerx-log = { path = "crates/readerx-log" }
+# log 门面：业务代码直接用 log::info! / log::warn! 写日志（readerx-log 负责输出）
+log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"

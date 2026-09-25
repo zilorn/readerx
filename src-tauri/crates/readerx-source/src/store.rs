@@ -35,7 +35,11 @@ static DATA_ROOT: OnceLock<PathBuf> = OnceLock::new();
 
 /// 设置数据根（进程内一次；重复调用忽略后续值并返回首次设定的路径）。
 pub fn init_data_root(root: impl Into<PathBuf>) -> &'static Path {
-    let _ = DATA_ROOT.set(root.into());
+    // 只有真正生效的那一次才记：宿主可能先后调用多次（App 启动 + 命令层），
+    // 重复刷屏会把「数据目录到底是哪个」这条关键信息淹掉
+    if DATA_ROOT.set(root.into()).is_ok() {
+        log::info!("书源数据根已初始化 path={}", data_root().display());
+    }
     data_root()
 }
 
@@ -106,7 +110,15 @@ pub fn put_source(source: &BookSource) -> Result<(), String> {
     }
     let text =
         serde_json::to_string_pretty(source).map_err(|e| format!("序列化书源失败: {e}"))?;
-    write_atomic(&source_path(&source.id)?, &text)
+    let path = source_path(&source.id)?;
+    write_atomic(&path, &text)?;
+    log::debug!(
+        "书源已写入 id={} file={} bytes={}",
+        source.id,
+        path.display(),
+        text.len()
+    );
+    Ok(())
 }
 
 /// 读取一个书源（不存在返回 Ok(None)）
@@ -125,6 +137,9 @@ pub fn delete_source(id: &str) -> Result<(), String> {
     let path = source_path(id)?;
     if path.exists() {
         fs::remove_file(&path).map_err(|e| format!("删除书源失败: {e}"))?;
+        log::debug!("书源已删除 id={id} file={}", path.display());
+    } else {
+        log::debug!("书源无需删除（文件不存在） id={id} file={}", path.display());
     }
     Ok(())
 }
@@ -154,12 +169,16 @@ pub fn list_sources_with_warnings() -> Result<(Vec<BookSource>, Vec<SourceFileWa
             .and_then(|text| serde_json::from_str::<BookSource>(&text).map_err(|e| e.to_string()))
         {
             Ok(source) => sources.push(source),
-            Err(err) => warnings.push((
-                path.file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-                err,
-            )),
+            Err(err) => {
+                // 坏文件不能静默：CLI 会把告警打给用户，日志里也留一份（事后排障只认日志）
+                log::warn!("书源文件解析失败 file={} reason={err}", path.display());
+                warnings.push((
+                    path.file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    err,
+                ))
+            }
         }
     }
     sources.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
@@ -242,20 +261,57 @@ fn now_millis() -> u64 {
         .unwrap_or(0)
 }
 
+/// 整行 Cookie 的条数（`k=v; k2=v2` → 2）。**只用于日志**：Cookie 值本身绝不进日志。
+fn cookie_pairs(cookie: &str) -> usize {
+    cookie
+        .split(';')
+        .filter(|part| !part.trim().is_empty())
+        .count()
+}
+
 fn read_login_state(id: &str) -> Result<Option<SourceLoginState>, String> {
     let path = session_path(id)?;
     if !path.exists() {
+        log::debug!("读取登录态：文件不存在 id={id} file={}", path.display());
         return Ok(None);
     }
     let text = fs::read_to_string(&path).map_err(|e| format!("读取登录态失败: {e}"))?;
     let state: SourceLoginState =
         serde_json::from_str(&text).map_err(|e| format!("解析登录态失败: {e}"))?;
+    // 只记条数与文件名：Cookie 值与存储快照内容都不写
+    log::debug!(
+        "读取登录态 id={id} file={} cookie={} storage_origins={}",
+        path.display(),
+        cookie_pairs(&state.cookie),
+        state.storage.as_ref().map(|s| s.origins.len()).unwrap_or(0)
+    );
     Ok(Some(state))
 }
 
 fn write_login_state(id: &str, state: &SourceLoginState) -> Result<(), String> {
     let text = serde_json::to_string_pretty(state).map_err(|e| format!("序列化登录态失败: {e}"))?;
-    write_atomic(&session_path(id)?, &text)
+    let path = session_path(id)?;
+    match write_atomic(&path, &text) {
+        Ok(()) => {
+            // 只记条数与体积：登录态内容绝不进日志
+            log::debug!(
+                "登录态已写入 id={id} file={} cookie={} storage_origins={} bytes={}",
+                path.display(),
+                cookie_pairs(&state.cookie),
+                state.storage.as_ref().map(|s| s.origins.len()).unwrap_or(0),
+                text.len()
+            );
+            Ok(())
+        }
+        Err(err) => {
+            // 写盘失败直接决定「重启后登录还在不在」，必须留痕（错误仍原样返回给调用方）
+            log::warn!(
+                "登录态写入失败 id={id} file={} reason={err}",
+                path.display()
+            );
+            Err(err)
+        }
+    }
 }
 
 /// 读取书源已保存的登录 Cookie；没有返回 Ok(None)。
@@ -364,6 +420,12 @@ pub fn remove_login_cookie(id: &str) -> Result<(), String> {
     let path = session_path(id)?;
     if path.exists() {
         fs::remove_file(&path).map_err(|e| format!("删除登录态失败: {e}"))?;
+        log::debug!("登录态已删除 id={id} file={}", path.display());
+    } else {
+        log::debug!(
+            "登录态无需删除（文件不存在） id={id} file={}",
+            path.display()
+        );
     }
     Ok(())
 }

@@ -50,10 +50,38 @@ impl AuthProvider for PluginProvider {
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             app: Some(self.app.clone()),
         };
+        log::info!(
+            "拉起网页登录界面 source={source_id} url={}",
+            readerx_log::redact::url(url)
+        );
+        let started = std::time::Instant::now();
         let outcome: PluginOutcome =
             tauri_plugin_webview_login::open_login(url, &platform).unwrap_or_else(|err| {
+                log::warn!("打开登录界面失败 source={source_id}: {err}");
                 PluginOutcome::failure(url, err)
             });
+        // 只记「收了多少条」：Cookie 值与存储快照内容都属于凭据，绝不进日志
+        let storage = storage_of(&outcome);
+        let storage_entries: usize = storage
+            .as_ref()
+            .map(|snapshot| {
+                snapshot
+                    .origins
+                    .iter()
+                    .map(|origin| {
+                        origin.local_storage.len()
+                            + origin.session_storage.len()
+                            + origin.indexed_db.len()
+                    })
+                    .sum()
+            })
+            .unwrap_or(0);
+        log::info!(
+            "网页登录结束 source={source_id} ok={} cookies={} storage={storage_entries} 耗时={}ms",
+            outcome.ok,
+            outcome.count,
+            started.elapsed().as_millis()
+        );
         Ok(LoginOutcome {
             ok: outcome.ok,
             url: outcome.url.clone(),
@@ -61,7 +89,7 @@ impl AuthProvider for PluginProvider {
             count: outcome.count as usize,
             message: outcome.message.clone(),
             // Android 浮层直接回传结构化快照；桌面窗口回传探针原始读数，这里统一解析
-            storage: storage_of(&outcome),
+            storage,
         })
     }
 }

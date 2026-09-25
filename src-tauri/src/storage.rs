@@ -133,10 +133,13 @@ fn stream_migrate_if_large(app: &AppHandle, id: &str, path: &Path) {
         return;
     }
     let Ok(root) = crate::book_images::images_root(app) else {
+        log::warn!("书籍图片迁移无法定位图片目录（{id}），本次跳过");
         return;
     };
-    if let Err(error) = crate::book_images::migrate_book_file(&root, id, path) {
-        eprintln!("[readerx] 书籍图片迁移跳过（{id}）: {error}");
+    match crate::book_images::migrate_book_file(&root, id, path) {
+        Ok(true) => log::info!("书籍图片迁移完成 id={id}（data URL 已抽成本地文件）"),
+        Ok(false) => {}
+        Err(error) => log::warn!("书籍图片迁移跳过（{id}）: {error}"),
     }
 }
 
@@ -312,8 +315,14 @@ pub(crate) fn list_book_meta(app: &AppHandle) -> Result<Vec<BookMeta>, String> {
         if let Some(id) = path.file_stem().and_then(|s| s.to_str()) {
             stream_migrate_if_large(app, id, &path);
         }
-        let Ok(scan) = scan_book_file(&path) else {
-            continue;
+        let scan = match scan_book_file(&path) {
+            Ok(scan) => scan,
+            Err(error) => {
+                // 解析不出来的书文件不会出现在书架上：用户看到的是「书凭空少了」，
+                // 必须留下原因，否则只能靠猜
+                log::warn!("跳过无法解析的书籍文件 {}：{error}", path.display());
+                continue;
+            }
         };
         books.push(BookMeta {
             id: scan.id,
@@ -337,6 +346,7 @@ pub(crate) fn list_book_meta(app: &AppHandle) -> Result<Vec<BookMeta>, String> {
         });
     }
     books.sort_by_key(|book| std::cmp::Reverse(book.imported_at));
+    log::debug!("书库元数据扫描完成 books={}", books.len());
     Ok(books)
 }
 
@@ -359,6 +369,7 @@ pub(crate) fn get_book(app: &AppHandle, id: &str) -> Result<Option<LocalBook>, S
         .unwrap_or(false);
     if migrated {
         // 迁移后立刻落盘：下次读取就是瘦身后的正文
+        log::info!("书籍图片旧数据迁移完成 id={id}");
         write_book_file(&dir, id, &book)?;
     }
     Ok(Some(book))
@@ -410,6 +421,7 @@ pub(crate) fn delete_book(app: &AppHandle, id: &str) -> Result<(), String> {
     if let Ok(root) = crate::book_images::images_root(app) {
         crate::book_images::remove_book(&root, id);
     }
+    log::info!("书籍已删除 id={id}（含听书缓存与章节插图）");
     Ok(())
 }
 
@@ -529,6 +541,12 @@ fn prune_tts_cache(dir: &Path, limit: u64) {
 /// 删除淘汰出来的音频文件，并连带删除同名 `.mime` 元数据。
 /// key 不含点（见 `valid_audio_key`），所以 `with_extension` 能正确指向元数据。
 fn prune_tts_cache_files(evicted: Vec<PathBuf>) {
+    if evicted.is_empty() {
+        return;
+    }
+    // 「整本预热完，前面章节的音频却被静默淘汰」曾经是个查不出来的问题：
+    // 淘汰必须留痕，出问题时能对上「额度 / 实际句数」
+    log::debug!("听书缓存淘汰 n={}", evicted.len());
     for path in evicted {
         let _ = fs::remove_file(&path);
         let _ = fs::remove_file(path.with_extension("mime"));
@@ -615,6 +633,10 @@ pub(crate) fn clear_tts_cache(app: &AppHandle, book_id: Option<&str>) -> Result<
                 fs::remove_dir_all(&root).map_err(|e| format!("清除听书缓存失败: {e}"))?;
             }
         }
+    }
+    match book_id {
+        Some(id) => log::info!("已清除听书缓存 book={id}"),
+        None => log::info!("已清除全部听书缓存"),
     }
     Ok(())
 }

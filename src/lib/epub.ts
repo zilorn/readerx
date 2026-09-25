@@ -12,6 +12,9 @@ import { unzipSync } from "fflate";
 import type { ChapterBlock, LocalBookChapter, ParagraphPart } from "./booksTypes";
 import { chapterCid, imageRefToBlock, paragraphFromParts } from "./booksTypes";
 import { makeCoverThumb } from "./coverImage";
+import { createLogger } from "./logger";
+
+const log = createLogger("epub");
 
 export interface ParsedEpub {
   title: string;
@@ -39,6 +42,7 @@ function parseXml(text: string): Document {
   const doc = new DOMParser().parseFromString(text, "application/xml");
   if (!doc.querySelector("parsererror")) return doc;
   // 个别 EPUB 的 XML 不严格，退回宽松解析
+  log.debug("EPUB XML 非良构，退回宽松解析", `chars=${text.length}`);
   return new DOMParser().parseFromString(text, "text/html");
 }
 
@@ -49,6 +53,7 @@ function parseHtml(text: string): Document {
   } catch {
     /* 忽略非良构错误 */
   }
+  log.debug("EPUB XHTML 解析失败，退回 HTML 解析", `chars=${text.length}`);
   return new DOMParser().parseFromString(text, "text/html");
 }
 
@@ -428,6 +433,31 @@ function findCoverManifestId(opfDoc: Document): string | null {
 // 入口
 
 export async function parseEpubFile(file: File): Promise<ParsedEpub> {
+  const started = performance.now();
+  log.debug("开始解析 EPUB", `file=${file.name}`, `bytes=${file.size}`);
+  try {
+    const parsed = await parseEpubEntries(file);
+    log.info(
+      "EPUB 解析完成",
+      `file=${file.name}`,
+      `chapters=${parsed.chapters.length}`,
+      `ms=${Math.round(performance.now() - started)}`,
+    );
+    return parsed;
+  } catch (err) {
+    // 原因（缺 container.xml / OPF / 正文文件、无章节等）由这里带出去，调用方只负责提示
+    log.warn(
+      "EPUB 解析失败",
+      `file=${file.name}`,
+      `bytes=${file.size}`,
+      `ms=${Math.round(performance.now() - started)}`,
+      err,
+    );
+    throw err;
+  }
+}
+
+async function parseEpubEntries(file: File): Promise<ParsedEpub> {
   const bytes = new Uint8Array(await file.arrayBuffer());
   let entries: Record<string, Uint8Array>;
   try {
@@ -517,6 +547,7 @@ export async function parseEpubFile(file: File): Promise<ParsedEpub> {
   }
 
   if (chapters.length === 0) {
+    log.warn("EPUB 未解析出可读章节（文件可能已加密）", `spine=${spineOrder.length}`);
     throw new Error("EPUB 中没有解析出可读章节，请确认文件未加密");
   }
 

@@ -56,8 +56,8 @@ pub fn load_source_file(path: &Path) -> Result<BookSource, String> {
             let first = serde_json::from_value::<BookSource>(items[0].clone())
                 .map_err(|e| format!("解析书源失败: {e}"))?;
             if items.len() > 1 {
-                eprintln!(
-                    "readerx-source: 文件里有 {} 个书源，只运行第一个「{}」（可用 --source <id> 指定已安装书源）",
+                log::warn!(
+                    "书源文件里有 {} 个书源，只运行第一个「{}」（可用 --source <id> 指定已安装书源）",
                     items.len(),
                     first.name
                 );
@@ -95,8 +95,8 @@ pub fn apply_profile(cli: &Cli, source: &BookSource, session: &host::SessionHand
     if !profile.cookies.is_empty() {
         let (added, replaced) = session.set_scoped_cookies(&profile.cookies);
         if cli.verbose {
-            eprintln!(
-                "readerx-source: 注入浏览器 Cookie {} 条（新增 {added}，覆盖 {replaced}）",
+            log::debug!(
+                "注入浏览器 Cookie {} 条（新增 {added}，覆盖 {replaced}）",
                 profile.cookies.len()
             );
         }
@@ -165,8 +165,8 @@ pub fn prepare_and_call(
         } else {
             cli.profile.user_agent.clone()
         };
-        eprintln!(
-            "readerx-source: 会话已就绪（UA {}，整行 Cookie {}，作用域 Cookie {}，已存登录态{}）",
+        log::debug!(
+            "会话已就绪（UA {}，整行 Cookie {}，作用域 Cookie {}，已存登录态{}）",
             if ua.is_empty() { "内置默认" } else { ua.as_str() },
             session.legacy_cookie_lines().len(),
             session.scoped_cookie_count(),
@@ -205,7 +205,8 @@ pub fn call_and_print(cli: &Cli, fn_name: &str, args: &Value) -> Result<(), Stri
         match (&result.ok, &result.value, &result.error) {
             (true, Some(value), _) => out::print_value(value),
             (true, None, _) => println!("（返回空）"),
-            (_, _, Some(error)) => eprintln!("readerx-source: 调用失败：{error}"),
+            // 失败原因里可能带着含 token 的完整地址，过一遍脱敏再写日志
+            (_, _, Some(error)) => log::warn!("调用失败 reason={}", host::redact_urls(error)),
             _ => println!("（失败：未返回原因）"),
         }
         println!("耗时 {} ms", started.elapsed().as_millis());
@@ -248,8 +249,8 @@ pub fn apply_saved_profile(cli: &Cli, source: &BookSource, session: &host::Sessi
             if !profile.cookies.is_empty() {
                 let (added, replaced) = session.set_scoped_cookies(&profile.cookies);
                 if cli.verbose {
-                    eprintln!(
-                        "readerx-source: 套用已保存登录态（{} 条 Cookie：新增 {added}，覆盖 {replaced}）",
+                    log::debug!(
+                        "套用已保存登录态（{} 条 Cookie：新增 {added}，覆盖 {replaced}）",
                         profile.cookies.len()
                     );
                 }
@@ -261,7 +262,7 @@ pub fn apply_saved_profile(cli: &Cli, source: &BookSource, session: &host::Sessi
                 session.set_user_agent(&profile.user_agent);
             }
         }
-        Err(err) => eprintln!("readerx-source: 读取登录态 {} 失败：{err}", path.display()),
+        Err(err) => log::warn!("读取登录态失败 file={} reason={err}", path.display()),
     }
 }
 

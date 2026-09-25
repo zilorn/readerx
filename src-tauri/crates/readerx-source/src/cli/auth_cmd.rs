@@ -104,7 +104,7 @@ pub fn cmd_auth(cli: &Cli, provider: Option<Arc<dyn AuthProvider>>) -> Result<()
                 },
             )?;
             if let Err(err) = auth::persist_login_outcome(&source.id, &mut outcome) {
-                eprintln!("readerx-source: 保存登录 Cookie 失败：{err}");
+                log::warn!("保存登录 Cookie 失败 source={} reason={err}", source.id);
             }
             // 后端自己也会写盘，这里重新打开会话来读最新状态
             let session = host::SessionHandle::open(&source)?;
@@ -127,7 +127,12 @@ pub fn cmd_auth(cli: &Cli, provider: Option<Arc<dyn AuthProvider>>) -> Result<()
                     println!("提示：{}", outcome.message);
                 }
             } else {
-                eprintln!("readerx-source: 认证未完成：{}", outcome.message);
+                // 失败原因由认证后端给出，可能带着含 token 的地址：脱敏后再写
+                log::warn!(
+                    "认证未完成 source={} reason={}",
+                    source.id,
+                    host::redact_urls(&outcome.message)
+                );
                 return Err("EXIT_FAILURE".to_string());
             }
             Ok(())
@@ -371,9 +376,8 @@ fn filter_cookies_for_source(
         .cloned()
         .collect();
     if kept.len() < cookies.len() && cli.verbose {
-        eprintln!(
-            "readerx-source: 按 {} 过滤 Cookie：{} → {} 条（用 --url <地址> 可换站点，--url '' 收全部）",
-            host,
+        log::debug!(
+            "按 {host} 过滤 Cookie：{} → {} 条（用 --url <地址> 可换站点，--url '' 收全部）",
             cookies.len(),
             kept.len()
         );

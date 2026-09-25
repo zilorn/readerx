@@ -34,6 +34,10 @@ import {
   storageEntryCount,
 } from "../lib/bookSourcesTypes";
 import { showToast } from "../lib/toast";
+import { createLogger } from "../lib/logger";
+
+/** 书源编辑页的日志出口：测试调用是本页最需要留痕的用户动作 */
+const log = createLogger("source-editor");
 
 /** 编辑页内的三块内容（常驻 Tab；不是路由） */
 type EditorTab = "info" | "code" | "test";
@@ -178,7 +182,23 @@ export default function SourceEditorPage() {
       return;
     }
     const fn = fnName();
+    const started = performance.now();
+    log.info("书源测试开始", `source=${source.id}`, `sourceName=${source.name}`, `fn=${fn}`);
     const r = await callRemoteSource(source.id, fn, parsed);
+    const ms = Math.round(performance.now() - started);
+    if (r.ok) {
+      // 成功只留一条 debug：返回的书目内容不进日志
+      log.debug("书源测试成功", `source=${source.id}`, `fn=${fn}`, `ok=true`, `ms=${ms}`);
+    } else {
+      log.warn(
+        "书源测试失败",
+        `source=${source.id}`,
+        `sourceName=${source.name}`,
+        `fn=${fn}`,
+        `ms=${ms}`,
+        r.error ?? "无返回",
+      );
+    }
     const pretty =
       r.ok && r.value !== undefined
         ? JSON.stringify(r.value, null, 2)

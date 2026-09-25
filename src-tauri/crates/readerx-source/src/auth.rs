@@ -144,6 +144,8 @@ fn provider_slot() -> &'static Mutex<Option<Arc<dyn AuthProvider>>> {
 /// 注册认证后端（进程内一次；重复注册覆盖旧的）。
 pub fn install_provider(provider: Arc<dyn AuthProvider>) {
     *provider_slot().lock().unwrap_or_else(|e| e.into_inner()) = Some(provider);
+    // 认证失败时第一件要确认的事就是「到底装上了哪个后端、它自己说支持吗」
+    log::debug!("网页认证后端已注册 supported={}", is_supported());
 }
 
 /// 当前认证后端（未注册返回 None）。
@@ -165,9 +167,27 @@ pub fn is_supported() -> bool {
 /// 否则应用内「网页登录」这类入口（先登录、后调用书源）抓到的 Cookie / 存储快照只会写进文件，
 /// 内存会话里没有，表现为**要重启才生效**。
 pub fn perform(source_id: &str, url: &str) -> Result<LoginOutcome, String> {
-    let state = crate::host::ensure_source_state(source_id)?;
-    let provider = provider().ok_or_else(|| "网页认证后端尚未初始化".to_string())?;
+    let started = std::time::Instant::now();
+    // 认证会弹窗 / 开新窗口，是用户可感知的完整动作：开始与结束各记一条
+    log::info!(
+        "网页认证开始 source={source_id} url={}",
+        readerx_log::redact::url(url)
+    );
+    let state = match crate::host::ensure_source_state(source_id) {
+        Ok(state) => state,
+        Err(err) => {
+            log::error!("网页认证无法开始 source={source_id} reason={err}");
+            return Err(err);
+        }
+    };
+    let Some(provider) = provider() else {
+        log::warn!("网页认证无法开始 source={source_id} reason=网页认证后端尚未初始化");
+        return Err("网页认证后端尚未初始化".to_string());
+    };
     if !provider.supported() {
+        log::warn!(
+            "网页认证未开始 source={source_id} reason=当前环境没有可用的认证后端（独立二进制请用 --auth webkit 或 --auth cdp）"
+        );
         return Ok(LoginOutcome::failure(
             url,
             "当前环境不支持网页认证（独立二进制请用 --auth webkit 或 --auth cdp）",
@@ -187,7 +207,7 @@ pub fn perform(source_id: &str, url: &str) -> Result<LoginOutcome, String> {
             configured
         }
     };
-    provider.authenticate(
+    let outcome = provider.authenticate(
         source_id,
         url,
         &AuthRequest {
@@ -201,7 +221,27 @@ pub fn perform(source_id: &str, url: &str) -> Result<LoginOutcome, String> {
             }),
             source_id: source_id.to_string(),
         },
-    )
+    );
+    match &outcome {
+        // 只记「成功与否 + Cookie 条数」：Cookie 文本与存储快照内容都不进日志
+        Ok(result) => log::info!(
+            "网页认证结束 source={source_id} ok={} cookie={} ms={} reason={}",
+            result.ok,
+            result.count,
+            started.elapsed().as_millis(),
+            if result.message.trim().is_empty() {
+                "（无）"
+            } else {
+                result.message.trim()
+            }
+        ),
+        Err(err) => log::error!(
+            "网页认证后端异常 source={source_id} ms={} reason={}",
+            started.elapsed().as_millis(),
+            crate::host::redact_urls(err)
+        ),
+    }
+    outcome
 }
 
 /// 把该书源已保存的登录态注入会话（幂等；进程内只注入一次）。
@@ -294,8 +334,24 @@ pub fn persist_login_outcome(source_id: &str, outcome: &mut LoginOutcome) -> Res
         crate::host::set_storage_snapshot(source_id, storage, &outcome.url);
     }
     mark_seeded(source_id);
-    if let Err(err) = crate::store::write_login_session(source_id, &outcome.url, &cookies, storage) {
-        outcome.message = format!("登录已完成，但登录态保存失败（重启后需重新登录）：{err}");
+    match crate::store::write_login_session(source_id, &outcome.url, &cookies, storage) {
+        Ok(()) => {
+            // 只记条数：Cookie 文本与存储快照内容都不进日志
+            let pairs = cookies
+                .split(';')
+                .filter(|part| !part.trim().is_empty())
+                .count();
+            let storage_note = if outcome.storage.is_some() { "有" } else { "无" };
+            log::debug!(
+                "登录态已落盘并注入会话 source={source_id} cookie={pairs} storage={storage_note}"
+            )
+        }
+        Err(err) => {
+            // 不吞错：原因照旧追加进 outcome.message（用户必须知道重启会掉登录态），
+            // 日志里也留一条，便于事后区分「认证失败」与「认证成功但没存下来」
+            log::warn!("登录态落盘失败 source={source_id} reason={err}");
+            outcome.message = format!("登录已完成，但登录态保存失败（重启后需重新登录）：{err}");
+        }
     }
     Ok(())
 }

@@ -9,7 +9,10 @@
  * 相同文案短时间内只提示一次：批量下载 / 逐章落盘这类循环失败时不会刷屏。
  */
 import { isTauri } from "@tauri-apps/api/core";
+import { createLogger, type LogLevel } from "./logger";
 import { showToast } from "./toast";
+
+const log = createLogger("error-report");
 
 /** 后端内部异常事件名（与 src-tauri/src/lib.rs 的 panic hook 保持一致） */
 export const BACKEND_ERROR_EVENT = "readerx-internal-error";
@@ -39,9 +42,21 @@ export function describeError(error: unknown): string {
   return String(error);
 }
 
-/** 提示一次失败（带去重与退避）：`what` 说明失败的操作，`error` 为原始异常 */
-export function reportFailure(what: string, error: unknown, durationMs = 4_200): void {
-  console.error(`[readerx] ${what}`, error);
+/**
+ * 提示一次失败（带去重与退避）：`what` 说明失败的操作，`error` 为原始异常。
+ *
+ * 这里同时是这些失败的**日志点**：调用方只调这一个函数就够了，不要再自己补一条
+ * `log.error` —— 同一个事件在日志里出现两次，只会让人怀疑是不是真的发生了两次。
+ * `level` 默认 warn（可恢复的失败 / 降级）；未捕获异常这类用 error。
+ */
+export function reportFailure(
+  what: string,
+  error: unknown,
+  durationMs = 4_200,
+  level: LogLevel = "warn",
+): void {
+  if (level === "error") log.error(what, error);
+  else log.warn(what, error);
   const reason = describeError(error);
   const text = (reason ? `${what}：${reason}` : what).slice(0, MAX_TEXT_LEN);
   const now = Date.now();
@@ -63,11 +78,11 @@ export function installGlobalErrorReporting(): void {
   window.addEventListener("error", (event) => {
     // 图片等资源加载失败由各自组件兜底（占位 / 重试），这里只处理脚本异常
     if (event.error || event.message) {
-      reportFailure("发生未预期的错误", event.error ?? event.message);
+      reportFailure("发生未预期的错误", event.error ?? event.message, 4_200, "error");
     }
   });
   window.addEventListener("unhandledrejection", (event) => {
-    reportFailure("操作未能完成", event.reason);
+    reportFailure("操作未能完成", event.reason, 4_200, "error");
   });
 }
 
@@ -80,11 +95,11 @@ export async function listenBackendErrors(): Promise<void> {
   try {
     const { listen } = await import("@tauri-apps/api/event");
     await listen<string>(BACKEND_ERROR_EVENT, (event) => {
-      // 无法补救的内部异常：停留久一点，确保用户看得到
-      reportFailure("应用内部异常", event.payload, 8_000);
+      // 无法补救的内部异常：按 error 记日志，提示也停留久一点，确保用户看得到
+      reportFailure("应用内部异常", event.payload, 8_000, "error");
     });
   } catch (error) {
-    // 订阅本身失败也不该再抛：退化成控制台日志
-    console.error("[readerx] 订阅后端异常事件失败", error);
+    // 订阅本身失败也不该再抛：退化成一条 error 日志（此时也没有别的出口了）
+    log.error("订阅后端内部异常事件失败", error);
   }
 }

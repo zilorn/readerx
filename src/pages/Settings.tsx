@@ -16,6 +16,7 @@ import {
 } from "../components/icons";
 import { PageHeader } from "../components/PageHeader";
 import { LicenseSheet } from "../components/LicenseSheet";
+import { LogSheet } from "../components/LogSheet";
 import { ThirdPartyNoticesSheet } from "../components/ThirdPartyNoticesSheet";
 import { ToggleSwitch } from "../components/ToggleSwitch";
 import { openDevTools } from "../lib/backend";
@@ -88,6 +89,7 @@ export default function SettingsPage() {
   const [resetConfirming, setResetConfirming] = createSignal(false);
   const [licenseOpen, setLicenseOpen] = createSignal(false);
   const [noticesOpen, setNoticesOpen] = createSignal(false);
+  const [logOpen, setLogOpen] = createSignal(false);
   let timer: number | undefined;
 
   onCleanup(() => {
@@ -285,13 +287,22 @@ export default function SettingsPage() {
           </div>
         </section>
 
-        {/* 调试（仅桌面端） */}
-        <Show when={isDesktopPlatform()}>
-          <section class="mb-6">
-            <h2 class="mx-1 mb-2 text-[12.5px] font-medium tracking-[0.04em] text-text-3">
-              调试
-            </h2>
-            <div class="overflow-hidden rounded-[14px] border border-border bg-surface">
+        {/* 调试：应用日志两端都有（手机上没有它就只能连电脑抓 logcat），
+            开发者工具仅桌面端（Android 的 WebView 不提供该 API） */}
+        <section class="mb-6">
+          <h2 class="mx-1 mb-2 text-[12.5px] font-medium tracking-[0.04em] text-text-3">
+            调试
+          </h2>
+          <div class="divide-y divide-border overflow-hidden rounded-[14px] border border-border bg-surface">
+            <Row
+              icon={<TerminalIcon size={18} />}
+              label="应用日志"
+              desc="查看最近的后端与界面日志，可复制或清空"
+              onClick={() => setLogOpen(true)}
+            >
+              <ChevronRightIcon size={18} class="flex-none text-text-3" />
+            </Row>
+            <Show when={isDesktopPlatform()}>
               <Row
                 icon={<TerminalIcon size={18} />}
                 label="开发者工具"
@@ -300,9 +311,9 @@ export default function SettingsPage() {
               >
                 <ChevronRightIcon size={18} class="flex-none text-text-3" />
               </Row>
-            </div>
-          </section>
-        </Show>
+            </Show>
+          </div>
+        </section>
 
         {/* 关于 */}
         <section class="mb-6">
@@ -352,6 +363,7 @@ export default function SettingsPage() {
           open={noticesOpen()}
           onClose={() => setNoticesOpen(false)}
         />
+        <LogSheet open={logOpen()} onClose={() => setLogOpen(false)} />
 
         <p class="-mt-2 mb-2.5 text-center text-[11px] text-text-3">
           ReaderX {appVersion()} · 基于 Tauri 2 构建

@@ -17,6 +17,10 @@ import {
 } from "./books";
 import type { BookFormat, BookMeta, LocalBook } from "./booksTypes";
 import { ensureShelfEntry } from "./store";
+import { createLogger } from "./logger";
+
+/** WebDAV 的日志出口：只记服务器地址与路径，绝不记密码 / Authorization 头 */
+const log = createLogger("webdav");
 
 export interface DavServer {
   id: string;
@@ -142,6 +146,13 @@ export function createDavServer(input: DavServerInput): DavServer {
     setActiveIdSignal(server.id);
     persistActive();
   }
+  // 只记地址与用户名，密码绝不进日志
+  log.info(
+    "新增 WebDAV 服务器",
+    `id=${server.id}`,
+    `name=${server.name}`,
+    `url=${server.url}`,
+  );
   return server;
 }
 
@@ -162,6 +173,7 @@ export function updateDavServer(id: string, input: DavServerInput): void {
     ),
   );
   persistServers();
+  log.info("更新 WebDAV 服务器", { id, url });
 }
 
 export function deleteDavServer(id: string): void {
@@ -171,12 +183,14 @@ export function deleteDavServer(id: string): void {
     persistActive();
   }
   persistServers();
+  log.info("删除 WebDAV 服务器", { id });
 }
 
 export function activateDavServer(id: string): void {
   if (!servers().some((s) => s.id === id)) return;
   setActiveIdSignal(id);
   persistActive();
+  log.info("切换激活 WebDAV 服务器", { id, url: davServerById(id)?.url });
 }
 
 // ---------------------------------------------------------------------------
@@ -223,6 +237,12 @@ function httpErrorLabel(status: number): string {
 
 async function assertOk(res: Response, fallback: string): Promise<void> {
   if (res.ok) return;
+  log.warn(
+    "WebDAV 请求失败",
+    `status=${res.status}`,
+    `reason=${httpErrorLabel(res.status)}`,
+    `action=${fallback}`,
+  );
   throw new Error(`${fallback}（${httpErrorLabel(res.status)}）`);
 }
 
@@ -231,6 +251,7 @@ export async function listDavDirectory(
   server: DavServer,
   path: string,
 ): Promise<DavEntry[]> {
+  const started = performance.now();
   const url = davListUrl(server, path);
   let res: Response;
   try {
@@ -247,12 +268,27 @@ export async function listDavDirectory(
         "<d:prop><d:resourcetype/><d:getcontentlength/></d:prop>" +
         "</d:propfind>",
     });
-  } catch {
+  } catch (err) {
+    log.warn(
+      "WebDAV 连接失败",
+      `server=${server.url}`,
+      `path=${path}`,
+      `ms=${Math.round(performance.now() - started)}`,
+      err,
+    );
     throw new Error("无法连接服务器，请检查地址与网络");
   }
   await assertOk(res, "读取目录失败");
   const xml = await res.text();
-  return parseMultiStatus(xml, url, path);
+  const entries = parseMultiStatus(xml, url, path);
+  log.info(
+    "WebDAV 列目录完成",
+    `server=${server.url}`,
+    `path=${path}`,
+    `entries=${entries.length}`,
+    `ms=${Math.round(performance.now() - started)}`,
+  );
+  return entries;
 }
 
 /**
@@ -361,6 +397,7 @@ export async function downloadDavFile(
   server: DavServer,
   path: string,
 ): Promise<{ bytes: ArrayBuffer; fileName: string }> {
+  const started = performance.now();
   const url = davFileUrl(server, path);
   let res: Response;
   try {
@@ -368,12 +405,27 @@ export async function downloadDavFile(
       method: "GET",
       headers: { ...authHeaders(server) },
     });
-  } catch {
+  } catch (err) {
+    log.warn(
+      "WebDAV 下载失败：无法连接服务器",
+      `server=${server.url}`,
+      `path=${path}`,
+      `ms=${Math.round(performance.now() - started)}`,
+      err,
+    );
     throw new Error("下载失败，无法连接服务器");
   }
   await assertOk(res, "下载书籍失败");
   const bytes = await res.arrayBuffer();
   const fileName = path.split("/").filter(Boolean).pop() ?? path;
+  log.debug(
+    "WebDAV 文件下载完成",
+    `server=${server.url}`,
+    `path=${path}`,
+    `file=${fileName}`,
+    `bytes=${bytes.byteLength}`,
+    `ms=${Math.round(performance.now() - started)}`,
+  );
   return { bytes, fileName };
 }
 
@@ -385,12 +437,27 @@ export async function fetchDavBookDraft(
   server: DavServer,
   path: string,
 ): Promise<BookDraft> {
+  const started = performance.now();
   const { bytes, fileName } = await downloadDavFile(server, path);
   const format = detectBookFormat(fileName);
   if (!format) throw new Error(`不支持的书籍格式：${fileName}`);
   const file = new File([bytes], fileName, { type: mimeOfFormat(format) });
-  if (format === "txt") return await parseTxtFile(file, { kind: "auto" });
-  return format === "pdf" ? await parsePdfFileDraft(file) : await parseEpubFileDraft(file);
+  const draft =
+    format === "txt"
+      ? await parseTxtFile(file, { kind: "auto" })
+      : format === "pdf"
+        ? await parsePdfFileDraft(file)
+        : await parseEpubFileDraft(file);
+  log.debug(
+    "WebDAV 书籍解析完成",
+    `server=${server.url}`,
+    `path=${path}`,
+    `file=${fileName}`,
+    `format=${format}`,
+    `chapters=${draft.chapters.length}`,
+    `ms=${Math.round(performance.now() - started)}`,
+  );
+  return draft;
 }
 
 /** 交给解析器的文件 MIME（TXT 需带编码提示，PDF / EPUB 用各自的正式类型） */
@@ -405,9 +472,19 @@ export async function importDavFile(
   server: DavServer,
   path: string,
 ): Promise<LocalBook> {
+  const started = performance.now();
   const draft = await fetchDavBookDraft(server, path);
   const book = await persistBookDraft(draft, "webdav");
   ensureShelfEntry(book.id);
+  log.info(
+    "WebDAV 导入完成",
+    `server=${server.url}`,
+    `path=${path}`,
+    `book=${book.id}`,
+    `title=${book.title}`,
+    `chapters=${book.chapters.length}`,
+    `ms=${Math.round(performance.now() - started)}`,
+  );
   return book;
 }
 

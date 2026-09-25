@@ -58,6 +58,10 @@ import {
   stopSourceNode,
 } from "./webAudio";
 import { buildChapterSpeechItems, type ChapterSpeechItem } from "./ttsSegment";
+import { createLogger } from "./logger";
+
+/** 听书播放器的日志出口：只记书 / 章 / 句序号与原因，句子的文字内容绝不进日志 */
+const log = createLogger("tts");
 
 export type TtsStatus = "stopped" | "loading" | "playing" | "paused" | "error";
 export type TtsTimerMode = "off" | "minutes" | "chapter";
@@ -267,11 +271,26 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
     const key = httpCacheKey(item);
     const hit = audioBytesCache.get(key);
     if (hit) return hit;
+    const started = performance.now();
     let audio: { mime: string; bytes: Uint8Array } | null = null;
     try {
       audio = await synthesizeHttpAudio(item.text, ctx.bookId());
     } catch (err) {
       lastSynthError = err instanceof Error ? err.message : String(err);
+      // my === 0 表示后台预取路径（播放预取 / 章节窗口预热）：失败按 debug 记，
+      // 免得源不可用时后台每句一条 warn；真正朗读失败才 warn（用户当场可感知）
+      const detail = [
+        `book=${ctx.bookId()}`,
+        `chapter=${chapterIdxEngine}`,
+        `unit=${item.unit}`,
+        `ls=${item.ls}`,
+        `le=${item.le}`,
+        `cacheKey=${key}`,
+        `ms=${Math.round(performance.now() - started)}`,
+        lastSynthError,
+      ];
+      if (my === 0) log.debug("预热句子合成失败", ...detail);
+      else log.warn("朗读句子合成失败", ...detail);
     }
     if (audio === null) return null;
     // 任务未被取代、接口配置未变时写入会话内存缓存
@@ -882,6 +901,13 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
     const start = nearestIndexFor(ctx.readingOffset?.() ?? null);
     const end = Math.min(items.length, start + 14);
     let k = start;
+    const started = performance.now();
+    log.info(
+      "章节窗口预热开始",
+      `book=${ctx.bookId()}`,
+      `chapter=${vi}`,
+      `n=${end - start}`,
+    );
     void (async () => {
       while (!disposed && k < end && status() === "stopped") {
         const group: Promise<unknown>[] = [];
@@ -890,6 +916,13 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
         }
         if (group.length > 0) await Promise.all(group);
       }
+      log.info(
+        "章节窗口预热结束",
+        `book=${ctx.bookId()}`,
+        `chapter=${vi}`,
+        `n=${k - start}`,
+        `ms=${Math.round(performance.now() - started)}`,
+      );
     })();
   }
 
@@ -901,6 +934,7 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
     if (disposed || currentTtsEngine() !== "http" || !httpTtsConfigured()) return 0;
     const bookId = ctx.bookId();
     const chapterCount = ctx.chapterCount();
+    const started = performance.now();
     // 预扫描总句数（同时校验无内容章节的边界）
     let total = 0;
     const plan: string[] = [];
@@ -916,9 +950,11 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
     }
     total = plan.length;
     if (total === 0) return 0;
+    log.info("整本预热开始", `book=${bookId}`, `chapters=${chapterCount}`, `n=${total}`);
     onProgress?.(0, total);
 
     let done = 0;
+    let failed = 0;
     const CHUNK = WARM_CONCURRENCY;
     const queue = [...plan];
     // 一个句子一把：synthesizeHttpAudio 内部先查磁盘缓存，命中即瞬间返回
@@ -926,10 +962,21 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
       while (!disposed && queue.length > 0 && status() === "stopped") {
         const text = queue.shift();
         if (text === undefined) return;
+        const synthStarted = performance.now();
         try {
           await synthesizeHttpAudio(text, bookId);
-        } catch {
+        } catch (err) {
           /* 单句失败不中断整本预热 */
+          failed += 1;
+          // 逐句失败按 debug 记（整本预热可能成百上千句，汇总在结束时记一条 warn）；
+          // 只记序号与原因，句子文本绝不进日志
+          log.debug(
+            "整本预热单句合成失败",
+            `book=${bookId}`,
+            `n=${done + 1}/${total}`,
+            `ms=${Math.round(performance.now() - synthStarted)}`,
+            err,
+          );
         }
         done += 1;
         onProgress?.(done, total);
@@ -940,6 +987,20 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
       workers.push(worker());
     }
     await Promise.all(workers);
+    const ms = Math.round(performance.now() - started);
+    log.info(
+      "整本预热结束",
+      `book=${bookId}`,
+      `done=${done}`,
+      `n=${total}`,
+      `failed=${failed}`,
+      `stopped=${status() !== "stopped"}`,
+      `ms=${ms}`,
+    );
+    // 失败集中在一条汇总里（逐句失败已在上面按 debug 记）
+    if (failed > 0) {
+      log.warn("整本预热有句子合成失败", `book=${bookId}`, `failed=${failed}`, `n=${total}`);
+    }
     return done;
   }
 

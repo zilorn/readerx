@@ -50,7 +50,8 @@ pub fn eval_in_page(
                     let text = match result {
                         Ok(value) => js_value_to_text(&value),
                         Err(err) => {
-                            eprintln!("[readerx] 主世界求值失败：{err}");
+                            // 求值失败在 WebKitGTK 上不罕见（页面策略 / 时序）：记原因即可
+                            log::warn!("登录窗口主世界求值失败：{err}");
                             String::new()
                         }
                     };
@@ -60,9 +61,21 @@ pub fn eval_in_page(
         })
         .is_ok();
     if !dispatched {
+        log::warn!("主世界求值未能派发到主线程（窗口可能已销毁）");
         return None;
     }
-    rx.recv_timeout(timeout).ok().filter(|text| !text.is_empty())
+    match rx.recv_timeout(timeout) {
+        // 空结果不是错误：`undefined` / 首轮探针都长这样
+        Ok(text) if text.is_empty() => {
+            log::debug!("主世界求值返回空结果");
+            None
+        }
+        Ok(text) => Some(text),
+        Err(err) => {
+            log::warn!("主世界求值等待超时：{err}");
+            None
+        }
+    }
 }
 
 /// 该站点的 Cookie：WebKitGTK **原生 CookieManager**（含 httpOnly 的 `cf_clearance`）。
@@ -82,6 +95,7 @@ pub fn cookies_in_store(
             let manager = match view.web_context().and_then(|context| context.cookie_manager()) {
                 Some(manager) => manager,
                 None => {
+                    log::warn!("原生 Cookie 库不可用：WebView 没有 CookieManager");
                     let _ = tx.send(Vec::new());
                     return;
                 }
@@ -116,9 +130,16 @@ pub fn cookies_in_store(
         })
         .is_ok();
     if !dispatched {
+        log::warn!("原生 Cookie 库读取未能派发到主线程（窗口可能已销毁）");
         return None;
     }
-    rx.recv_timeout(timeout).ok()
+    match rx.recv_timeout(timeout) {
+        Ok(list) => Some(list),
+        Err(err) => {
+            log::warn!("原生 Cookie 库读取等待超时：{err}");
+            None
+        }
+    }
 }
 
 /// 阻塞式查询一个 URI 下的 Cookie：WebKit 只给异步接口（回调在主上下文里跑），
@@ -144,6 +165,10 @@ fn query_cookies(manager: &webkit2gtk::CookieManager, uri: &str) -> Vec<SoupCook
             let _ = context.iteration(false);
         }
         std::thread::sleep(Duration::from_millis(1));
+    }
+    if !*done.borrow() {
+        // 查的是本机 Cookie 库，正常都是毫秒级；超时说明主循环没在转，值得留痕
+        log::warn!("原生 Cookie 库查询超时 uri={uri}");
     }
     let result = collected.borrow().clone();
     result

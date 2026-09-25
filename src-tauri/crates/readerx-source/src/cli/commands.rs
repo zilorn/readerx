@@ -68,7 +68,7 @@ pub fn cmd_sources(cli: &Cli) -> Result<(), String> {
         );
     }
     for (file, err) in warnings {
-        eprintln!("readerx-source: 跳过无法解析的书源文件 {file}：{err}");
+        log::warn!("跳过无法解析的书源文件 file={file} reason={err}");
     }
     Ok(())
 }
@@ -211,7 +211,12 @@ pub fn cmd_run(cli: &Cli) -> Result<(), String> {
         }
         if !toc.ok {
             if let Some(error) = &toc.error {
-                eprintln!("readerx-source: bookToc 失败：{error}");
+                // 原因里可能带含 token 的完整地址：脱敏后再写
+                log::warn!(
+                    "bookToc 失败 source={} reason={}",
+                    source.id,
+                    crate::host::redact_urls(error)
+                );
             }
         }
     }

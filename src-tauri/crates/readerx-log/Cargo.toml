@@ -1,0 +1,14 @@
+[package]
+name = "readerx-log"
+version = "0.1.0"
+description = "ReaderX 统一日志设施：级别过滤、文件轮转、标准错误 / Android logcat 输出"
+edition = "2021"
+publish = false
+
+# 与 readerx-source 一样不依赖 Tauri / GUI：App、书源引擎、独立二进制共用同一份实现。
+[dependencies]
+# log 门面：三方库（tauri / reqwest / wry…）也走它，日志因此只有一个出口
+log = "0.4"
+# 时间戳按本地时区打印（时间戳是排错时唯一能对上用户描述的东西），
+# 只启用 local-offset：格式化靠 std 手写，不额外拉 formatting / macros 两套依赖。
+time = { version = "0.3", features = ["local-offset"] }

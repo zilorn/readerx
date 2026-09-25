@@ -59,15 +59,17 @@ impl Default for Options {
 
 /// 执行一次 CDP 认证。`source_id` 仅用于日志。
 pub fn authenticate(source_id: &str, url: &str, options: &Options) -> Result<LoginOutcome, String> {
+    let started = Instant::now();
     let mut session = CdpSession::connect(options)?;
     if let Some(note) = session.note.clone() {
-        eprintln!("readerx-source: {note}");
+        log::info!("{note}");
     }
     session.open_page(url)?;
     if !options.quiet {
-        eprintln!(
-            "readerx-source: 已在浏览器打开 {url}\n\
-             readerx-source: 完成登录 / 人机验证后**按回车**取回 Cookie（最长 {} 秒；超时自动取当前 Cookie）",
+        // 交互提示：用户要按回车才会继续，不能只进日志文件
+        log::info!(
+            "已在浏览器打开 {}；完成登录 / 人机验证后按回车取回 Cookie（最长 {} 秒；超时自动取当前 Cookie）",
+            readerx_log::redact::url(url),
             options.wait_secs
         );
     }
@@ -83,6 +85,9 @@ pub fn authenticate(source_id: &str, url: &str, options: &Options) -> Result<Log
         .filter(|cookie| domain_hits(&cookie.domain, &host))
         .collect();
     if matched.is_empty() {
+        log::warn!(
+            "CDP 认证未取到该站点的 Cookie source={source_id} host={host}（验证没做完 / 页面没加载完）"
+        );
         return Ok(LoginOutcome::failure(
             url,
             format!(
@@ -102,6 +107,12 @@ pub fn authenticate(source_id: &str, url: &str, options: &Options) -> Result<Log
     }
     // 同时按整行注入：部分站点 Cookie 没有域信息时也能生效
     crate::host::http_set_cookie(source_id, &text);
+    log::debug!(
+        "CDP 认证完成 source={source_id} host={host} cookie={} storage={} ms={}",
+        matched.len(),
+        if snapshot.is_some() { "有" } else { "无" },
+        started.elapsed().as_millis()
+    );
     Ok(LoginOutcome::success(url, text, matched.len()).with_storage(snapshot))
 }
 
@@ -267,6 +278,11 @@ impl CdpSession {
                 }
             }
         }
+        log::debug!(
+            "CDP 调试端点就绪 endpoint={} 本次拉起浏览器={}",
+            readerx_log::redact::url(&endpoint),
+            spawned.is_some()
+        );
 
         // 优先连「浏览器级」端点：可以用 Target.createTarget 精确控制我们打开的标签页
         let ws_url = browser_ws_url(&endpoint).or_else(|_| {
@@ -303,6 +319,7 @@ impl CdpSession {
 
     /// 打开目标页：新建标签页（浏览器级端点）或复用已有页面
     fn open_page(&mut self, url: &str) -> Result<(), String> {
+        log::debug!("CDP 打开页面 url={}", readerx_log::redact::url(url));
         match self.send("Target.createTarget", json!({ "url": url })) {
             Ok(value) => {
                 if let Some(id) = value.get("targetId").and_then(|v| v.as_str()) {
@@ -317,6 +334,7 @@ impl CdpSession {
             }
             Err(err) => {
                 // 端点不支持浏览器级命令（例如直接连的页面 WebSocket）：改用 Page.navigate
+                log::debug!("Target.createTarget 不可用，改用 Page.navigate：{err}");
                 let _ = self.send("Page.enable", json!({}));
                 self.send("Page.navigate", json!({ "url": url }))
                     .map(|_| ())
@@ -347,11 +365,18 @@ impl CdpSession {
                 self.pump();
                 std::thread::sleep(Duration::from_millis(200));
             }
+            log::debug!("CDP 非交互等待结束（约 8 秒加载窗口），开始收尾取 Cookie");
             return;
         }
         while Instant::now() < deadline && !done.load(Ordering::SeqCst) {
             self.pump();
             std::thread::sleep(Duration::from_millis(200));
+        }
+        if done.load(Ordering::SeqCst) {
+            log::debug!("CDP 认证等待被用户回车结束，开始收尾取 Cookie");
+        } else {
+            // 超时不是失败：仍然把浏览器里已有的 Cookie 取回来
+            log::info!("CDP 认证等待超时（{wait_secs} 秒），按当前状态取 Cookie 收尾");
         }
     }
 
@@ -448,6 +473,8 @@ impl CdpSession {
                     .unwrap_or(0),
             });
         }
+        // 只记条数：Cookie 值绝不进日志
+        log::debug!("CDP 读取 Cookie 库 n={}", out.len());
         Ok(out)
     }
 
@@ -459,6 +486,10 @@ impl CdpSession {
     fn collect_storage(&mut self, login_url: &str) -> Option<StorageSnapshot> {
         let contexts = self.frame_contexts();
         if contexts.is_empty() {
+            log::warn!(
+                "CDP 存储采集跳过：没有可用的页面执行上下文 url={}",
+                readerx_log::redact::url(login_url)
+            );
             return None;
         }
         let mut snapshot = StorageSnapshot::default();
@@ -482,11 +513,24 @@ impl CdpSession {
                 // 拿不到执行上下文时，至少把 CDP 直接读到的键值留下来
                 None => None,
             };
+            if context_id.is_some() && probe_page.is_none() {
+                // 只是「少了 IndexedDB 库清单」，localStorage 仍由 CDP 直读，不影响登录本身
+                log::warn!(
+                    "CDP 存储探针没有结果 origin={origin}（仅缺 IndexedDB 清单，其余存储照收）"
+                );
+            }
             let _ = frame_id;
             let page = probe_page.unwrap_or_default();
             if local.is_empty() && session.is_empty() && page.indexed_db.is_empty() {
                 continue;
             }
+            // 只记条数：存储内容就是登录凭证，绝不进日志
+            log::debug!(
+                "CDP 存储采集 origin={origin} local={} session={} indexeddb={}",
+                local.len(),
+                session.len(),
+                page.indexed_db.len()
+            );
             snapshot.origins.push(storage::StorageOrigin {
                 origin: origin.clone(),
                 url: if page.url.trim().is_empty() {
@@ -500,6 +544,11 @@ impl CdpSession {
             });
         }
         snapshot.normalize();
+        log::debug!(
+            "CDP 存储采集结束 origins={} 结果={}",
+            snapshot.origins.len(),
+            if snapshot.is_empty() { "空" } else { "有" }
+        );
         (!snapshot.is_empty()).then_some(snapshot)
     }
 
@@ -509,7 +558,10 @@ impl CdpSession {
         let _ = self.send("Page.enable", json!({}));
         let tree = match self.send("Page.getFrameTree", json!({})) {
             Ok(tree) => tree,
-            Err(_) => return Vec::new(),
+            Err(err) => {
+                log::warn!("CDP 取页面框架树失败，本次不采存储：{err}");
+                return Vec::new();
+            }
         };
         let mut frames = Vec::new();
         flatten_frames(tree.get("frameTree"), &mut frames, 0);
@@ -535,7 +587,7 @@ impl CdpSession {
     fn dom_storage_items(&mut self, origin: &str, local: bool) -> Result<Vec<(String, String)>, String> {
         // DOMStorage 需要先 enable 才认这个 storageId
         let _ = self.send("DOMStorage.enable", json!({}));
-        let result = self.send(
+        let result = match self.send(
             "DOMStorage.getDOMStorageItems",
             json!({
                 "storageId": {
@@ -543,7 +595,17 @@ impl CdpSession {
                     "isLocalStorage": local,
                 }
             }),
-        )?;
+        ) {
+            Ok(result) => result,
+            Err(err) => {
+                // 单类存储读不到不影响 Cookie 与登录本身，但「少采了什么」要留痕
+                log::warn!(
+                    "CDP 读取{}失败 origin={origin} reason={err}",
+                    if local { " localStorage" } else { " sessionStorage" }
+                );
+                return Err(err);
+            }
+        };
         let entries = result
             .get("entries")
             .and_then(|v| v.as_array())
@@ -584,10 +646,12 @@ impl CdpSession {
     fn close_spawned(&mut self) {
         if let Some(id) = self.created_target.clone() {
             let _ = self.send("Target.closeTarget", json!({ "targetId": id }));
+            log::debug!("CDP 已关闭本次创建的标签页");
         }
         if let Some(mut child) = self.spawned.take() {
             let _ = child.kill();
             let _ = child.wait();
+            log::debug!("CDP 已关闭本次拉起的浏览器");
         }
     }
 }
@@ -673,6 +737,12 @@ fn spawn_browser(binary: &str, options: &Options) -> Result<(Child, String), Str
         .stderr(Stdio::null())
         .spawn()
         .map_err(|e| format!("启动浏览器 {binary} 失败: {e}"))?;
+    // UA 必须与书源请求一致（cf_clearance 绑定 UA），这里记下来供对照；Cookie 值不记
+    log::debug!(
+        "CDP 已拉起浏览器 binary={binary} port={port} profile={} ua={}",
+        profile_dir.display(),
+        options.user_agent
+    );
     Ok((child, format!("http://127.0.0.1:{port}")))
 }
 

@@ -59,6 +59,10 @@ import {
   buildSourceChapterContent,
   type SourceContentBuild,
 } from "./sourceContent";
+import { createLogger } from "./logger";
+
+/** 在线书的日志出口：逐章走 debug，聚合结果走 info / warn（正文一个字都不写） */
+const log = createLogger("online");
 
 /** 预取窗口半径（前后各 N 章，共 2N+1 章）：后台把这一圈章节的正文抓下来落盘，
  *  顺序阅读 / 听书跨章时下一章永远已经就绪；正在读的那一章永远最先取（见 runWindowFetch）。
@@ -182,10 +186,30 @@ export async function fetchBookToc(
   source: BookSourceSummary,
   item: BookItem,
 ): Promise<ChapterItem[]> {
+  const started = performance.now();
   const result = await callRemoteSource(source.id, "bookToc", [item]);
-  if (!result.ok) throw new Error(result.error ?? "获取目录失败");
+  const ms = Math.round(performance.now() - started);
+  if (!result.ok) {
+    log.warn(
+      "拉取目录失败",
+      `source=${source.id}`,
+      `sourceName=${source.name}`,
+      `book=${item.bookName}`,
+      `ms=${ms}`,
+      result.error ?? "获取目录失败",
+    );
+    throw new Error(result.error ?? "获取目录失败");
+  }
   const value = result.value;
-  if (!Array.isArray(value)) throw new Error("bookToc 未返回章节数组");
+  if (!Array.isArray(value)) {
+    log.warn(
+      "书源 bookToc 未返回章节数组",
+      `source=${source.id}`,
+      `book=${item.bookName}`,
+      `ms=${ms}`,
+    );
+    throw new Error("bookToc 未返回章节数组");
+  }
   const chapters: ChapterItem[] = [];
   for (const raw of value as unknown[]) {
     const r = raw as Record<string, unknown>;
@@ -193,7 +217,23 @@ export async function fetchBookToc(
     const chapterUrl = typeof r.chapterUrl === "string" ? r.chapterUrl.trim() : "";
     if (chapterName && chapterUrl) chapters.push({ chapterName, chapterUrl });
   }
-  if (chapters.length === 0) throw new Error("目录为空（书源未解析出章节）");
+  if (chapters.length === 0) {
+    log.warn(
+      "目录为空（书源未解析出章节）",
+      `source=${source.id}`,
+      `book=${item.bookName}`,
+      `raw=${value.length}`,
+      `ms=${ms}`,
+    );
+    throw new Error("目录为空（书源未解析出章节）");
+  }
+  log.debug(
+    "拉取目录完成",
+    `source=${source.id}`,
+    `book=${item.bookName}`,
+    `chapters=${chapters.length}`,
+    `ms=${ms}`,
+  );
   return chapters;
 }
 
@@ -248,7 +288,12 @@ export async function addOnlineBookToShelf(
   const coverUrl = (item.cover ?? "").trim();
   if (coverUrl) {
     void attachOnlineBookCover(source, book, coverUrl).catch((err) => {
-      console.warn("[online] 拉取书源封面失败", err);
+      log.warn(
+        "书源封面下载失败，书架回退程序化封面",
+        `book=${book.id}`,
+        `source=${source.id}`,
+        err,
+      );
     });
   }
   return book;
@@ -431,6 +476,7 @@ function cancelSlot(bookId: string, kind: "window" | "download"): void {
   if (!slot?.active) return;
   slot.token.cancelled = true;
   patchSlot(bookId, kind, { cancelled: true, pending: [] });
+  log.debug(kind === "download" ? "用户停止批量下载" : "后台窗口预取被取消", `book=${bookId}`);
 }
 
 /** 停止后台窗口预取（不再取新章节；在飞请求的结果按取消丢弃） */
@@ -451,6 +497,7 @@ export function cancelChapterReload(bookId: string): void {
   patchRuns(bookId, (runs) =>
     runs.reload?.token === reload.token ? { ...runs, reload: null } : runs,
   );
+  log.debug("用户取消重新加载本章", `book=${bookId}`, `chapter=${reload.index}`);
 }
 
 /** 停止该书的全部章节拉取（返回书架 / 离开阅读页等场景） */
@@ -627,6 +674,7 @@ async function fetchChapterPlans(
   slice: number[],
   token: CancelToken,
 ): Promise<BatchPlan[]> {
+  const started = performance.now();
   const jobs: Array<{ index: number; item: ChapterItem }> = [];
   for (const idx of slice) {
     const chapter = book.chapters[idx];
@@ -634,6 +682,12 @@ async function fetchChapterPlans(
       jobs.push({ index: idx, item: { chapterName: chapter.title, chapterUrl: chapter.url } });
     } else {
       markFailure(bookId, idx, "章节缺少地址");
+      log.debug(
+        "章节缺少地址，无法拉取正文",
+        `book=${bookId}`,
+        `chapter=${idx}`,
+        `title=${book.chapters[idx]?.title ?? "未知"}`,
+      );
     }
   }
   if (jobs.length === 0) return [];
@@ -642,23 +696,57 @@ async function fetchChapterPlans(
     toBookItem(book),
     jobs.map((job) => job.item),
   );
+  const ms = Math.round(performance.now() - started);
   if (token.cancelled) return [];
   const plans: BatchPlan[] = [];
+  /** 书源这次返回了空正文的章节：整批结束时汇总一条 warn（避免逐章刷屏） */
+  const emptyChapters: number[] = [];
   for (let offset = 0; offset < jobs.length; offset++) {
     const job = jobs[offset];
     const chapter = book.chapters[job.index];
     const res = results[offset];
     if (!chapter) continue;
     if (!res?.ok) {
-      markFailure(bookId, job.index, res?.error || "未知错误");
+      const error = res?.error || "未知错误";
+      markFailure(bookId, job.index, error);
+      // 逐章失败按 debug 记（一次批量可能几十章失败，汇总在批末记一条 warn）
+      log.debug(
+        "章节正文拉取失败",
+        `book=${bookId}`,
+        `chapter=${job.index}`,
+        `title=${job.item.chapterName}`,
+        `batch=${jobs.length}`,
+        `ms=${ms}`,
+        error,
+      );
       continue;
     }
-    plans.push({
-      chapterIndex: job.index,
-      chapter,
-      build: buildSourceChapterContent(res.text, chapter.url || undefined),
-    });
+    const build = buildSourceChapterContent(res.text, chapter.url || undefined);
+    plans.push({ chapterIndex: job.index, chapter, build });
+    const empty = build.paragraphs.length === 0 && !build.hasImages;
+    if (empty) emptyChapters.push(job.index);
+    // 逐章明细：只记「哪一章、拿到多少段落 / 有无图」，正文一个字都不写
+    // （ms 是这一批网络请求的耗时，batch 是本批章节数）
+    log.debug(
+      "章节正文已取回",
+      `book=${bookId}`,
+      `chapter=${job.index}`,
+      `title=${job.item.chapterName}`,
+      `paragraphs=${build.paragraphs.length}`,
+      `images=${build.hasImages}`,
+      `empty=${empty}`,
+      `batch=${jobs.length}`,
+      `ms=${ms}`,
+    );
     if (offset % 3 === 2) await yieldToMain(); // 分片解析不长时间独占主线程
+  }
+  if (emptyChapters.length > 0) {
+    log.warn(
+      "书源返回空正文（已记为已拉取，可重新加载本章再试）",
+      `book=${bookId}`,
+      `n=${emptyChapters.length}`,
+      `chapters=${emptyChapters.slice(0, 20).join(",")}`,
+    );
   }
   return plans;
 }
@@ -735,6 +823,17 @@ async function runWindowFetch(bookId: string, center: number): Promise<void> {
     targets,
     { resetFailures: textWork },
   );
+  const started = performance.now();
+  /** 本次拉取开始前该书已有的失败章节数：收尾时用它算出「本次新增的失败」 */
+  const failuresAtStart = runsOf(bookId).failures.size;
+  log.info(
+    "阅读窗口预取开始",
+    `book=${bookId}`,
+    `title=${initial.title}`,
+    `chapter=${focus}`,
+    `targets=${targets.length}`,
+    `phase=${textWork ? "正文" : "图片"}`,
+  );
   windowFocus.set(bookId, focus);
   let done = 0;
   let pending = targets;
@@ -795,11 +894,30 @@ async function runWindowFetch(bookId: string, center: number): Promise<void> {
     }
   } catch (err) {
     // 意外中断（磁盘 I/O 等）：收尾清掉活动状态，避免该书永远卡在“获取中”
-    console.error("[online] 窗口预取意外中断", err);
+    log.error("窗口预取意外中断", `book=${bookId}`, err);
   } finally {
     // 焦点留给接手的批量下载继续用（它靠这个焦点优先取回正在读的章节）
     if (!onlineDownloadActive(bookId)) windowFocus.delete(bookId);
     finishRun(bookId, "window", { done, cancelled: token.cancelled });
+    const failures = Math.max(0, runsOf(bookId).failures.size - failuresAtStart);
+    log.info(
+      "阅读窗口预取结束",
+      `book=${bookId}`,
+      `chapter=${focus}`,
+      `targets=${targets.length}`,
+      `done=${done}`,
+      `failed=${failures}`,
+      `cancelled=${token.cancelled}`,
+      `ms=${Math.round(performance.now() - started)}`,
+    );
+    if (failures > 0 && !token.cancelled) {
+      log.warn(
+        "窗口预取有章节失败",
+        `book=${bookId}`,
+        `failed=${failures}`,
+        `targets=${targets.length}`,
+      );
+    }
   }
 }
 
@@ -835,6 +953,17 @@ async function runDownloadFetch(bookId: string): Promise<OnlineDownloadSummary |
   for (let i = 0; i < initial.chapters.length; i++) {
     if (!chapterHasContent(initial.chapters[i])) targets.push(i);
   }
+  const started = performance.now();
+  /** 本次下载开始前该书已有的失败章节数：收尾时用它算出「本次新增的失败」 */
+  const failuresAtStart = runsOf(bookId).failures.size;
+  log.info(
+    "批量下载开始",
+    `book=${bookId}`,
+    `title=${initial.title}`,
+    `chapters=${initial.chapters.length}`,
+    `targets=${targets.length}`,
+    `source=${sourceId}`,
+  );
   const targetSet = new Set(targets);
   const handled = new Set<number>();
   /** 目标里已有正文（本次取回 / 别的任务抢先写回 / 用户重载完成）的章节数 */
@@ -914,16 +1043,42 @@ async function runDownloadFetch(bookId: string): Promise<OnlineDownloadSummary |
     if (!token.cancelled) await runDownloadImages(bookId, sourceId, token);
   } catch (err) {
     // 意外中断（磁盘 I/O 等）：收尾清掉活动状态，避免该书永远卡在“下载中”
-    console.error("[online] 章节下载意外中断", err);
+    log.error("批量下载意外中断", `book=${bookId}`, err);
   } finally {
     windowFocus.delete(bookId);
     finishRun(bookId, "download", { done: settled, cancelled: token.cancelled });
   }
+  // 返回给调用方的仍是「结束时该书仍失败的章节数」（与本次新增的失败分开记，语义不变）
+  const failedChapters = runsOf(bookId).failures.size;
+  const newFailures = Math.max(0, failedChapters - failuresAtStart);
+  const images = runsOf(bookId).download?.images ?? EMPTY_IMAGE_PROGRESS;
+  log.info(
+    "批量下载结束",
+    `book=${bookId}`,
+    `title=${initial.title}`,
+    `targets=${targets.length}`,
+    `done=${settled}`,
+    `failedChapters=${failedChapters}`,
+    `newFailed=${newFailures}`,
+    `images=${images.done}/${images.total}`,
+    `imagesFailed=${images.failed}`,
+    `cancelled=${token.cancelled}`,
+    `ms=${Math.round(performance.now() - started)}`,
+  );
+  if (newFailures > 0 && !token.cancelled) {
+    log.warn(
+      "批量下载有章节失败",
+      `book=${bookId}`,
+      `newFailed=${newFailures}`,
+      `failedChapters=${failedChapters}`,
+      `targets=${targets.length}`,
+    );
+  }
   return {
     cancelled: token.cancelled,
     done: settled,
-    failedChapters: runsOf(bookId).failures.size,
-    images: runsOf(bookId).download?.images ?? EMPTY_IMAGE_PROGRESS,
+    failedChapters,
+    images,
   };
 }
 
@@ -960,6 +1115,14 @@ async function runDownloadImages(
     pending: [],
     images: { total, done: 0, failed: 0 },
   });
+  const imagesStarted = performance.now();
+  log.info(
+    "批量下载进入图片阶段",
+    `book=${bookId}`,
+    `title=${book.title}`,
+    `chapters=${jobs.length}`,
+    `images=${total}`,
+  );
   for (const job of jobs) {
     if (token.cancelled) return;
     const results = await ensureChapterImages({
@@ -980,7 +1143,25 @@ async function runDownloadImages(
     done += job.urls.length;
     await persistReadyImages(bookId, job.index, ready);
     sync();
+    log.debug(
+      "批量下载图片章节完成",
+      `book=${bookId}`,
+      `chapter=${job.index}`,
+      `images=${job.urls.length}`,
+      `ready=${ready.size}`,
+      `ms=${Math.round(performance.now() - imagesStarted)}`,
+    );
   }
+  // 一批图片的聚合结果：失败张数 / 总张数（逐张失败已由 chapterImages 记 debug，
+  // 有失败的一批在那里记 warn，这里不再重复一条）
+  log.info(
+    "批量下载图片阶段结束",
+    `book=${bookId}`,
+    `images=${total}`,
+    `done=${done}`,
+    `failed=${failedImages}`,
+    `ms=${Math.round(performance.now() - imagesStarted)}`,
+  );
 }
 
 /** 阅读窗口预取：确保 [idx ± LAZY_WINDOW] 内章节有正文（当前章优先）；
@@ -1106,6 +1287,7 @@ export async function loadReadingChapterImages(
   if (!chapter) return new Map();
   const urls = pendingImageUrls(chapter);
   if (urls.length === 0) return new Map();
+  const started = performance.now();
   const results = await ensureChapterImages({
     sourceId: book.bookSourceId!,
     bookId,
@@ -1119,6 +1301,14 @@ export async function loadReadingChapterImages(
     if (file) ready.set(url, file);
   }
   await persistReadyImages(bookId, chapterIndex, ready);
+  log.debug(
+    "阅读章节图片下载完成",
+    `book=${bookId}`,
+    `chapter=${chapterIndex}`,
+    `images=${urls.length}`,
+    `ready=${ready.size}`,
+    `ms=${Math.round(performance.now() - started)}`,
+  );
   return results;
 }
 
@@ -1209,6 +1399,7 @@ async function prefetchWindowImages(
     pending: [],
     images: { total, done: 0, failed: 0 },
   });
+  const imagesStarted = performance.now();
   for (const job of jobs) {
     if (token.cancelled || focusMoved()) break;
     const results = await ensureChapterImages({
@@ -1221,6 +1412,7 @@ async function prefetchWindowImages(
     });
     const ready = new Map<string, ChapterImageFile>();
     let settled = 0;
+    let chapterFailed = 0;
     for (const [url, file] of results) {
       if (file) {
         ready.set(url, file);
@@ -1231,6 +1423,7 @@ async function prefetchWindowImages(
       // 只有真的试过并失败的才计数（下一轮 / 阅读时还会再试）
       if (chapterImagePhase(url) === "failed") {
         failed++;
+        chapterFailed++;
         settled++;
       }
     }
@@ -1238,6 +1431,27 @@ async function prefetchWindowImages(
     // 成功的那部分照常写回书库（即使随后要放弃这一轮：字节已经下下来了，不该白下）
     await persistReadyImages(bookId, job.index, ready);
     patchSlot(bookId, "window", { images: { total, done, failed } });
+    log.debug(
+      "窗口图片预取章节完成",
+      `book=${bookId}`,
+      `chapter=${job.index}`,
+      `images=${job.urls.length}`,
+      `ready=${ready.size}`,
+      `failed=${chapterFailed}`,
+      `ms=${Math.round(performance.now() - imagesStarted)}`,
+    );
+  }
+  // 窗口图片预取的聚合结果：逐张失败已由 chapterImages 记 debug（有失败的一批在那里记 warn）
+  if (total > 0) {
+    log.info(
+      "窗口图片预取结束",
+      `book=${bookId}`,
+      `chapter=${center}`,
+      `images=${total}`,
+      `done=${done}`,
+      `failed=${failed}`,
+      `ms=${Math.round(performance.now() - imagesStarted)}`,
+    );
   }
   return focusMoved();
 }
@@ -1251,8 +1465,16 @@ export async function retryReadingImage(
   const book = localBookById(bookId);
   if (!book || !isOnlineBook(book) || !url) return null;
   const chapter = book.chapters[chapterIndex];
+  const started = performance.now();
   const file = await retryChapterImage(book.bookSourceId!, bookId, url, chapter?.url ?? null);
   if (file) await persistReadyImages(bookId, chapterIndex, new Map([[url, file]]));
+  log.debug(
+    file ? "图片手动重试成功" : "图片手动重试仍失败",
+    `book=${bookId}`,
+    `chapter=${chapterIndex}`,
+    `url=${url}`,
+    `ms=${Math.round(performance.now() - started)}`,
+  );
   return file;
 }
 
@@ -1298,6 +1520,7 @@ export async function reloadChapterContent(
   }
   const sourceId = book.bookSourceId!;
   const epoch = tocEpochOf(bookId);
+  const started = performance.now();
   const token: CancelToken = { cancelled: false };
   // 占位：其余拉取跳过这一章，避免重复请求与互相覆盖（不阻塞它们继续取别的章节）
   patchRuns(bookId, (runs) => ({ ...runs, reload: { index: chapterIndex, token } }));
@@ -1315,10 +1538,30 @@ export async function reloadChapterContent(
     if (!res?.ok) {
       const error = res?.error || "获取正文失败";
       markFailure(bookId, chapterIndex, error);
+      log.warn(
+        "重新加载本章失败",
+        `book=${bookId}`,
+        `chapter=${chapterIndex}`,
+        `title=${chapter.title}`,
+        `ms=${Math.round(performance.now() - started)}`,
+        error,
+      );
       return { applied: false, cancelled: false, error };
     }
-    if (token.cancelled) return { applied: false, cancelled: true };
+    if (token.cancelled) {
+      log.debug("重新加载本章已取消", `book=${bookId}`, `chapter=${chapterIndex}`);
+      return { applied: false, cancelled: true };
+    }
     const build = buildSourceChapterContent(res.text, chapter.url);
+    if (build.paragraphs.length === 0 && !build.hasImages) {
+      // 用户主动重载却拿到空正文：这是要能从日志还原的失败（页面结构变了 / 正文选择器失效）
+      log.warn(
+        "重新加载本章拿到空正文（书源可能改了页面结构）",
+        `book=${bookId}`,
+        `chapter=${chapterIndex}`,
+        `title=${chapter.title}`,
+      );
+    }
 
     // 新正文会替换本章书签锚定的文字：先预演，部分书签无法精确定位时交调用方询问
     if (options?.confirmRisk) {
@@ -1334,21 +1577,34 @@ export async function reloadChapterContent(
       );
       if (preview.failedCount > 0) {
         const proceed = await options.confirmRisk(preview);
-        if (!proceed) return { applied: false, cancelled: true };
+        if (!proceed) {
+          log.info("用户放弃重新加载本章", `book=${bookId}`, `chapter=${chapterIndex}`);
+          return { applied: false, cancelled: true };
+        }
       }
     }
-    if (token.cancelled) return { applied: false, cancelled: true };
+    if (token.cancelled) {
+      log.debug("重新加载本章已取消", `book=${bookId}`, `chapter=${chapterIndex}`);
+      return { applied: false, cancelled: true };
+    }
 
     // 拉取期间目录可能被覆盖更新（下标含义已变）：本次结果作废，不写到别的章节上
     if (tocEpochOf(bookId) !== epoch) {
+      log.warn("重新加载本章结果作废：期间目录已更新", `book=${bookId}`, `chapter=${chapterIndex}`);
       return { applied: false, cancelled: false, error: "目录已更新，未写入本章" };
     }
     const latest = localBookById(bookId);
     if (!latest) {
+      log.warn(
+        "重新加载本章结果作废：书籍已不在书库",
+        `book=${bookId}`,
+        `chapter=${chapterIndex}`,
+      );
       return { applied: false, cancelled: false, error: "书籍已不在书库，未重新加载" };
     }
     const target = latest.chapters[chapterIndex];
     if (!target) {
+      log.warn("重新加载本章结果作废：章节已变化", `book=${bookId}`, `chapter=${chapterIndex}`);
       return { applied: false, cancelled: false, error: "章节已变化，未重新加载" };
     }
     // 只构建/回写本章的新对象（不整本深拷贝），大书含图时不再反复整本过 IPC
@@ -1366,13 +1622,29 @@ export async function reloadChapterContent(
       { epoch, overwrite: true },
     );
     if (written === 0) {
+      log.warn("重新加载本章结果作废：目录已更新", `book=${bookId}`, `chapter=${chapterIndex}`);
       return { applied: false, cancelled: false, error: "目录已更新，未写入本章" };
     }
     clearFailures(bookId, [chapterIndex]);
+    log.info(
+      "重新加载本章完成",
+      `book=${bookId}`,
+      `chapter=${chapterIndex}`,
+      `title=${chapter.title}`,
+      `paragraphs=${draft.paragraphs.length}`,
+      `ms=${Math.round(performance.now() - started)}`,
+    );
     return { applied: true, cancelled: false };
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
     markFailure(bookId, chapterIndex, error);
+    log.warn(
+      "重新加载本章异常",
+      `book=${bookId}`,
+      `chapter=${chapterIndex}`,
+      `ms=${Math.round(performance.now() - started)}`,
+      error,
+    );
     return { applied: false, cancelled: false, error };
   } finally {
     settle();
@@ -1467,6 +1739,12 @@ export async function applyOnlineTocAppend(
     }
     return { ...latest, chapters };
   });
+  log.info(
+    "目录追加更新完成",
+    `book=${bookId}`,
+    `added=${next ? added.length : 0}`,
+    `chapters=${next?.chapters.length ?? 0}`,
+  );
   return next ? added.length : 0;
 }
 
@@ -1501,6 +1779,12 @@ export async function applyOnlineTocOverwrite(
       }),
     };
   });
+  log.info(
+    "目录覆盖更新完成",
+    `book=${bookId}`,
+    `fresh=${fresh.length}`,
+    `chapters=${next?.chapters.length ?? 0}`,
+  );
   return next?.chapters.length ?? 0;
 }
 
@@ -1559,6 +1843,7 @@ export function mergeSourceBookTags(
 export async function refreshOnlineBookInfo(
   bookId: string,
 ): Promise<RefreshOnlineBookInfoResult> {
+  const started = performance.now();
   const meta = bookMetaById(bookId);
   if (!meta || !isOnlineBook(meta) || !meta.bookSourceId || !meta.bookUrl) {
     throw new Error("仅在线书支持重新拉取书籍信息");
@@ -1578,7 +1863,16 @@ export async function refreshOnlineBookInfo(
     ...(tags.length > 0 ? { tags } : {}),
   };
   const result = await callRemoteSource(source.id, "bookDetail", [item]);
-  if (!result.ok) throw new Error(result.error ?? "拉取书籍信息失败");
+  if (!result.ok) {
+    log.warn(
+      "重新拉取书籍信息失败",
+      `book=${bookId}`,
+      `source=${source.id}`,
+      `ms=${Math.round(performance.now() - started)}`,
+      result.error ?? "拉取书籍信息失败",
+    );
+    throw new Error(result.error ?? "拉取书籍信息失败");
+  }
   const merged = mergeBookDetail(item, result.value);
 
   let introUpdated = false;
@@ -1614,5 +1908,14 @@ export async function refreshOnlineBookInfo(
       await updateBookInfo(bookId, { tags: nextTags, sourceTags: freshTags });
     }
   }
+  log.info(
+    "重新拉取书籍信息完成",
+    `book=${bookId}`,
+    `title=${meta.title}`,
+    `introUpdated=${introUpdated}`,
+    `coverUpdated=${coverUpdated}`,
+    `tagsUpdated=${tagsUpdated}`,
+    `ms=${Math.round(performance.now() - started)}`,
+  );
   return { introUpdated, coverUpdated, tagsUpdated };
 }

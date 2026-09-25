@@ -122,3 +122,12 @@ aes-gcm（Apache-2.0 OR MIT）
 getrandom（MIT OR Apache-2.0）
     随机数：AES-GCM 的随机 IV
     https://github.com/rust-random/getrandom
+
+log（MIT OR Apache-2.0）
+    统一日志门面：业务代码只写 log::info! 这类宏，输出目标（文件 / 标准错误 / logcat）由 readerx-log 决定
+    https://github.com/rust-lang/log
+
+time（MIT OR Apache-2.0）
+    日志时间戳的本地时区换算（按用户所在时区打印，排障时能直接对上用户描述的时间）
+    https://github.com/time-rs/time
+

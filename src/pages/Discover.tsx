@@ -32,6 +32,10 @@ import { currentSourceParallel, lastSourceGroupFilter, rememberSourceGroupFilter
 import { OnlineBookSheet } from "../components/OnlineBookSheet";
 import { SourceCover } from "../components/SourceCover";
 import { closeOnRouteChange } from "../lib/keptPage";
+import { createLogger } from "../lib/logger";
+
+/** 发现页的日志出口：搜索 / 发现是用户主动发起、最需要留痕的动作 */
+const log = createLogger("discover");
 
 type Mode = "search" | "discover";
 
@@ -250,6 +254,9 @@ export default function DiscoverPage() {
     if (!kw) return;
     const sources = searchSources();
     const seq = ++searchSeq;
+    const searchStarted = performance.now();
+    // 关键词是用户主动发起的搜索动作，排错必需，可以记
+    log.info("搜索开始", `keyword=${kw}`, `sources=${sources.length}`);
     setSearching(true);
     setSearchDone(false);
     setErrorText("");
@@ -266,6 +273,7 @@ export default function DiscoverPage() {
     let cursor = 0;
     let doneSources = 0;
     async function runOne(source: BookSourceSummary): Promise<void> {
+      const started = performance.now();
       const r = await callRemoteSource(source.id, "searchBook", [kw]);
       if (seq !== searchSeq) return; // 已被更新的搜索接管，不再写入本轮结果
       if (r.ok && Array.isArray(r.value)) {
@@ -279,8 +287,26 @@ export default function DiscoverPage() {
           found += batch.length;
           setResults((prev) => [...prev, ...batch].slice(0, RESULT_LIMIT));
         }
+        // 逐源 debug（只记条数与耗时，不记书目内容）
+        log.debug(
+          "搜索书源返回",
+          `source=${source.id}`,
+          `fn=searchBook`,
+          `ok=true`,
+          `n=${batch.length}`,
+          `ms=${Math.round(performance.now() - started)}`,
+        );
       } else if (r.error) {
         errors.push(`${source.name}: ${r.error}`);
+        // 「某个书源在搜索里一直失败」是最常见的用户反馈：逐源失败记一条 warn
+        log.warn(
+          "搜索书源失败",
+          `source=${source.id}`,
+          `sourceName=${source.name}`,
+          `fn=searchBook`,
+          `ms=${Math.round(performance.now() - started)}`,
+          r.error,
+        );
       }
       doneSources += 1;
       setSearchProgress(doneSources);
@@ -300,6 +326,15 @@ export default function DiscoverPage() {
     if (errors.length > 0 && found === 0) {
       setErrorText(errors[0]);
     }
+    // 一次搜索只留一条汇总 info：逐源明细在上面按 debug / warn 记
+    log.info(
+      "搜索结束",
+      `keyword=${kw}`,
+      `sources=${sources.length}`,
+      `found=${found}`,
+      `failedSources=${errors.length}`,
+      `ms=${Math.round(performance.now() - searchStarted)}`,
+    );
   }
 
   async function selectDiscoverSource(source: BookSourceSummary) {
@@ -309,7 +344,9 @@ export default function DiscoverPage() {
     setDiscResults([]);
     setDiscError("");
     setDiscBusy(true);
+    const started = performance.now();
     const r = await callRemoteSource(source.id, "discoverCategories", []);
+    const ms = Math.round(performance.now() - started);
     if (r.ok && Array.isArray(r.value)) {
       const cats: { name: string; url: string }[] = [];
       for (const raw of r.value as unknown[]) {
@@ -319,6 +356,14 @@ export default function DiscoverPage() {
         }
       }
       setCategories(cats);
+      log.debug(
+        "发现页分类返回",
+        `source=${source.id}`,
+        `fn=discoverCategories`,
+        `ok=true`,
+        `n=${cats.length}`,
+        `ms=${ms}`,
+      );
       if (cats.length === 0) {
         // 无分类函数/结果 → 直接走默认发现
         await loadDiscoverPage(source, null, 1, true);
@@ -326,7 +371,15 @@ export default function DiscoverPage() {
         await loadDiscoverPage(source, cats[0], 1, true);
       }
     } else {
-      // 无 discoverCategories → 直接默认发现
+      // 无 discoverCategories → 直接默认发现（能力缺失属正常回退，只记 debug）
+      log.debug(
+        "发现页分类不可用，走默认发现",
+        `source=${source.id}`,
+        `fn=discoverCategories`,
+        `ok=${r.ok}`,
+        `ms=${ms}`,
+        r.error ?? "",
+      );
       await loadDiscoverPage(source, null, 1, true);
     }
     setDiscBusy(false);
@@ -346,7 +399,9 @@ export default function DiscoverPage() {
     if (replace) setDiscResults([]);
     const cat = category ?? { name: "", url: categoryUrl() };
     const args = [cat, page];
+    const started = performance.now();
     const r = await callRemoteSource(source.id, "discoverBooks", args);
+    const ms = Math.round(performance.now() - started);
     if (r.ok && Array.isArray(r.value)) {
       const list: ResultEntry[] = [];
       for (const raw of r.value as unknown[]) {
@@ -355,8 +410,28 @@ export default function DiscoverPage() {
       }
       setDiscResults((prev) => (replace ? list : [...prev, ...list]));
       setDiscPage(page);
+      log.debug(
+        "发现页书目返回",
+        `source=${source.id}`,
+        `fn=discoverBooks`,
+        `ok=true`,
+        `category=${cat.name || "默认"}`,
+        `page=${page}`,
+        `n=${list.length}`,
+        `ms=${ms}`,
+      );
     } else if (r.error) {
       setDiscError(r.error);
+      log.warn(
+        "发现页拉取书目失败",
+        `source=${source.id}`,
+        `sourceName=${source.name}`,
+        `fn=discoverBooks`,
+        `category=${cat.name || "默认"}`,
+        `page=${page}`,
+        `ms=${ms}`,
+        r.error,
+      );
     }
     setDiscBusy(false);
   }

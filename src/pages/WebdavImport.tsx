@@ -49,6 +49,9 @@ import {
 import { BookmarkRiskDialog } from "../components/BookmarkRiskDialog";
 import { showToast } from "../lib/toast";
 import { closeOnRouteChange } from "../lib/keptPage";
+import { createLogger } from "../lib/logger";
+
+const log = createLogger("webdav");
 
 let reloadSeq = 0;
 
@@ -380,7 +383,8 @@ export default function WebdavImportPage() {
         ok++;
       } catch (err) {
         failed++;
-        console.error("[webdav] 导入失败:", list[i], err);
+        // 失败原因：WebDAV 下载 / 解析这一步（只记远端路径，不记服务器凭据）
+        log.warn("WebDAV 导入失败", `path=${list[i]}`, err);
       }
     }
     setImporting(false);

@@ -9,7 +9,8 @@ use serde_json::Value;
 pub fn print_json(value: &Value) {
     match serde_json::to_string(value) {
         Ok(text) => println!("{text}"),
-        Err(err) => eprintln!("readerx-source: JSON 序列化失败：{err}"),
+        // 走日志而不是 stderr：`--json` 下 stderr 是诊断通道，级别与落盘由统一日志设施管
+        Err(err) => log::error!("--json 输出序列化失败 reason={err}"),
     }
 }
 
