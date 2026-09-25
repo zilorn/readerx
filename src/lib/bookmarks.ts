@@ -13,15 +13,15 @@
  *   2) 全文匹配 + before/after 前后文锚定消除重复匹配；
  *   3) 仍多义时取与记录偏移最近的候选，并标记 uncertain，由调用方提示。
  *
- * 持久化走 Rust 后端 readState/writeState（WebView 不落盘）。
+ * 持久化走 Rust 后端（WebView 不落盘）：**每本书一个文件** `books/<id>/bookmarks.json`，
+ * 与正文（content.json）、元信息（bookdetail.json）分开存放，因此打开一本书只读它自己的
+ * 书签，加一条书签也只重写这一本的文件，不牵连其它书。
  */
 import { createSignal } from "solid-js";
-import { readState, writeState } from "./backend";
+import { readRemoteBookmarks, saveRemoteBookmarks } from "./backend";
 import { assignChapterCids, type LocalBook, type LocalBookChapter } from "./booksTypes";
 import { t } from "./i18n";
 import { chapterUnits, type ReaderBlock } from "./pagination";
-
-const STORAGE_KEY = "readerx.bookmarks";
 
 /** 书签记录的展示/锚定上下文长度 */
 export const BOOKMARK_CONTEXT = 32;
@@ -102,27 +102,55 @@ export function unitAtGlobalOffset(
 // ---------------------------------------------------------------------------
 
 const [bookmarkMap, setBookmarkMap] = createSignal<BookmarkMap>({});
-let loadPromise: Promise<void> | null = null;
+/** 已经从磁盘读成功的书（读失败的不记，下次调用还会再试） */
+const loadedBooks = new Set<string>();
+/** 正在读的书：同一时刻只发一次请求 */
+const loadingBooks = new Map<string, Promise<void>>();
+/** 本地已改过、磁盘内容还没读回来的书：读回来的结果只做并集，不覆盖用户刚加的书签 */
+const dirtyBooks = new Set<string>();
 let writeQueue: Promise<void> = Promise.resolve();
 
-export function ensureBookmarksLoaded(): Promise<void> {
-  if (loadPromise) return loadPromise;
-  loadPromise = (async () => {
-    try {
-      const stored = await readState<BookmarkMap>(STORAGE_KEY);
-      if (stored && typeof stored === "object") setBookmarkMap(stored);
-    } catch {
-      /* 后端不可用时保持空书签 */
-    }
-  })().finally(() => {
-    loadPromise = null;
-  });
-  return loadPromise;
+/**
+ * 载入某本书的书签（幂等）。书签按书分文件存放，打开一本书只读这一本；
+ * 已载入过的直接返回，读失败的会在下次调用时重试。
+ */
+export function ensureBookmarksLoaded(bookId: string): Promise<void> {
+  if (!bookId || loadedBooks.has(bookId)) return Promise.resolve();
+  const pending = loadingBooks.get(bookId);
+  if (pending) return pending;
+  const task = (async () => {
+    const stored = await readRemoteBookmarks<Bookmark>(bookId);
+    // 读不出来时不能当成「这本书没有书签」：标记成已载入会让下一次写入用空列表
+    // 覆盖磁盘，等于把用户已存的书签删掉
+    if (stored === null) return;
+    setBookmarkMap((prev) => {
+      const local = prev[bookId] ?? [];
+      const list = dirtyBooks.has(bookId) ? mergeBookmarks(stored, local) : stored;
+      return { ...prev, [bookId]: list };
+    });
+    loadedBooks.add(bookId);
+  })().finally(() => loadingBooks.delete(bookId));
+  loadingBooks.set(bookId, task);
+  return task;
 }
 
-function persist(): void {
-  const snapshot = { ...bookmarkMap() };
-  writeQueue = writeQueue.then(() => writeState(STORAGE_KEY, snapshot));
+/** 按 id 合并两份书签：磁盘上的在前，本地新增（磁盘上还没有的）补在后面 */
+function mergeBookmarks(stored: Bookmark[], local: Bookmark[]): Bookmark[] {
+  const known = new Set(stored.map((bm) => bm.id));
+  return [...stored, ...local.filter((bm) => !known.has(bm.id))];
+}
+
+/**
+ * 把某本书的书签落盘：先等这本书读完（否则可能用半份列表覆盖磁盘），
+ * 再写当前内存值；写入按调用顺序排队。
+ */
+function persist(bookId: string): void {
+  dirtyBooks.add(bookId);
+  writeQueue = writeQueue.then(async () => {
+    await ensureBookmarksLoaded(bookId);
+    if (!loadedBooks.has(bookId)) return;
+    await saveRemoteBookmarks(bookId, bookmarkMap()[bookId] ?? []);
+  });
 }
 
 /** 书签所属章节的展示名（章节无标题时兜底为「第 N 章」） */
@@ -186,35 +214,42 @@ export function addBookmark(bookmark: Bookmark): void {
   const list = map[bookmark.bookId] ?? [];
   map[bookmark.bookId] = [...list, bookmark];
   setBookmarkMap(map);
-  persist();
+  persist(bookmark.bookId);
 }
 
 export function removeBookmark(id: string): void {
-  let changed = false;
   const map: BookmarkMap = {};
+  const touched: string[] = [];
   for (const [bookId, list] of Object.entries(bookmarkMap())) {
     const next = list.filter((bm) => bm.id !== id);
-    if (next.length !== list.length) changed = true;
+    if (next.length !== list.length) touched.push(bookId);
     if (next.length > 0) map[bookId] = next;
   }
-  if (!changed) return;
+  if (touched.length === 0) return;
   setBookmarkMap(map);
-  persist();
+  for (const bookId of touched) persist(bookId);
 }
 
-/** 删除一本书时清空其书签 */
+/**
+ * 删除一本书时清掉内存里的书签。磁盘上的 `books/<id>/bookmarks.json` 随书籍目录
+ * 一起被删（Rust 侧 delete_book），这里只负责让界面上的书签立刻消失。
+ */
 export function removeBookmarksForBook(bookId: string): void {
-  const map = { ...bookmarkMap() };
-  if (!(bookId in map)) return;
-  delete map[bookId];
-  setBookmarkMap(map);
-  persist();
+  loadedBooks.delete(bookId);
+  dirtyBooks.delete(bookId);
+  setBookmarkMap((prev) => {
+    if (!(bookId in prev)) return prev;
+    const map = { ...prev };
+    delete map[bookId];
+    return map;
+  });
 }
 
-/** 清空全部书签 */
+/** 清空内存里的全部书签（清空书库时调用；磁盘上随各书目录一起删掉） */
 export function clearAllBookmarks(): void {
+  loadedBooks.clear();
+  dirtyBooks.clear();
   setBookmarkMap({});
-  persist();
 }
 
 export function newBookmarkId(): string {
@@ -401,7 +436,7 @@ export async function previewChapterBookmarkReplacement(
   chapterIndex: number,
   nextChapter: LocalBookChapter,
 ): Promise<BookmarkInheritPreview> {
-  await ensureBookmarksLoaded();
+  await ensureBookmarksLoaded(book.id);
   const chapter = book.chapters[chapterIndex];
   const cid = chapter?.cid;
   const list = cid ? bookmarksFor(book.id).filter((bm) => bm.chapterCid === cid) : [];
@@ -441,7 +476,7 @@ export async function previewBookmarkInheritance(
   book: Pick<LocalBook, "id">,
   nextChapters: LocalBookChapter[],
 ): Promise<BookmarkInheritPreview> {
-  await ensureBookmarksLoaded();
+  await ensureBookmarksLoaded(book.id);
   const list = bookmarksFor(book.id);
   const total = list.length;
   if (total === 0) return { total, failedCount: 0, samples: [] };

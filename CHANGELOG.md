@@ -70,6 +70,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   收集与改名集中在 `scripts/collect-artifacts.mjs`，三条工作流共用：收不到产物、release APK
   未签名、产物重名都会当场失败；发布步骤也不必再靠 artifact 目录名猜架构，重名时不再静默
   加后缀，而是直接报错。
+- **本地书与书签改为每本一个目录**：此前整本书是一个 `books/<id>.json`（元信息与全部正文挤在
+  一起），书签更是所有书堆在 `state/readerx.bookmarks.json` 里 —— 改一个分组名要把几百 MB 正文
+  读回来再整本写一遍，加一条书签要把全库书签重写一遍。现在每本书是独立目录
+  `books/<id>/{bookdetail.json, content.json, bookmarks.json}`：元信息、正文、书签各写各的文件，
+  互不牵连（新模块 `src-tauri/src/book_store.rs`）。元信息补丁只动 `bookdetail.json`、逐章回写
+  只动 `content.json`、书签只动这一本的 `bookmarks.json`；删书连同书签一起删，不再需要单独清理。
+  书签读写改走 `readerx_bookmarks_get` / `readerx_bookmarks_put`（按书写），前端也不再常驻整库
+  书签，打开哪本书才读哪本。旧数据在启动后首次读写书籍时自动迁移：整本 `books/<id>.json` 拆成
+  `bookdetail.json` + `content.json`，成功后才删旧文件；全库一份的书签按书拆进各自的
+  `bookmarks.json`，全部迁完后旧文件改名为 `readerx.bookmarks.json.migrated` 留底。迁移中途失败
+  的书仍按旧布局读取（列表与阅读页都留有回退），不会因为一次写盘失败就从书架上凭空消失。
 
 ### Fixed
 

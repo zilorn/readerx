@@ -32,6 +32,7 @@ const log = createLogger("backend");
 
 const memoryState = new Map<string, unknown>();
 const memoryBooks = new Map<string, LocalBook>();
+const memoryBookmarks = new Map<string, unknown[]>();
 const memorySources = new Map<string, BookSource>();
 
 /** 读取一条状态（readerx.* 前缀）；不存在或纯浏览器环境返回 null */
@@ -127,9 +128,46 @@ export async function saveRemoteBookChapters(
 export async function deleteRemoteBook(id: string): Promise<void> {
   if (!tauri) {
     memoryBooks.delete(id);
+    memoryBookmarks.delete(id);
     return;
   }
   await invoke("readerx_book_delete", { id });
+}
+
+// ---------------------------------------------------------------------------
+// 书签：按书独立文件（books/<id>/bookmarks.json），与正文、其它书的书签互不相干
+// ---------------------------------------------------------------------------
+
+/**
+ * 读取一本书的书签；读失败返回 null（调用方据此区分「没有书签」与「读不出来」，
+ * 后者不能当成空列表写回去，否则会把已存的书签覆盖掉）。
+ */
+export async function readRemoteBookmarks<T>(bookId: string): Promise<T[] | null> {
+  if (!tauri) {
+    return (memoryBookmarks.get(bookId) as T[] | undefined) ?? [];
+  }
+  try {
+    return await invoke<T[]>("readerx_bookmarks_get", { bookId });
+  } catch (err) {
+    reportFailure(t("library.bookmarks.readFailed"), err);
+    return null;
+  }
+}
+
+/** 覆盖式保存一本书的书签；失败时已提示用户（内存里的书签仍可见，但没落盘） */
+export async function saveRemoteBookmarks(
+  bookId: string,
+  bookmarks: readonly unknown[],
+): Promise<void> {
+  if (!tauri) {
+    memoryBookmarks.set(bookId, [...bookmarks]);
+    return;
+  }
+  try {
+    await invoke("readerx_bookmarks_put", { bookId, bookmarks });
+  } catch (err) {
+    reportFailure(t("library.bookmarks.writeFailed"), err);
+  }
 }
 
 /** 单本元信息补丁入参：外层 undefined = 不改动；null = 清除（intro/cover/tags/sourceTags/groupId） */
@@ -179,6 +217,7 @@ export async function patchRemoteBookMeta(
 export async function clearRemoteBooks(): Promise<void> {
   if (!tauri) {
     memoryBooks.clear();
+    memoryBookmarks.clear();
     return;
   }
   const metas = await listRemoteBookMetas();

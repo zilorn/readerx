@@ -16,6 +16,8 @@ export const library = {
 
   // 书籍读写
   "library.book.readFailed": "读取书籍失败",
+  "library.bookmarks.readFailed": "读取书签失败",
+  "library.bookmarks.writeFailed": "保存书签失败",
 
   // 书源
   "library.source.listFailed": "读取书源列表失败",

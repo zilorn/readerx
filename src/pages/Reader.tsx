@@ -971,9 +971,9 @@ export default function ReaderPage() {
 
   const isPaged = () => currentPageMode() === "paged";
 
-  // 书签数据（跨页面载入一次）
+  // 书签数据：每本书一个文件，换书时载入那一本（已载入过的直接命中缓存）
   createEffect(() => {
-    void ensureBookmarksLoaded();
+    void ensureBookmarksLoaded(bookId());
   });
 
   // 书载入后：补建档案、按存档的精确文本位置（cid+偏移）恢复章节。

@@ -6,6 +6,7 @@
 //! 意外异常只让这次调用失败，用户能看到原因，而不是应用直接闪退。
 
 use crate::book_images;
+use crate::book_store;
 use crate::chapter_runs;
 use crate::engine;
 use crate::host;
@@ -70,10 +71,10 @@ pub async fn readerx_state_remove(app: AppHandle, key: String) -> Result<(), Str
 
 #[tauri::command]
 pub async fn readerx_book_put(app: AppHandle, book: LocalBook) -> Result<(), String> {
-    blocking("书籍写入", move || storage::put_book(&app, &book)).await
+    blocking("书籍写入", move || book_store::put_book(&app, book)).await
 }
 
-/// 只回写一本书的若干章节（在线书逐批下载正文用）：整本 JSON 仍在 Rust 侧读写，
+/// 只回写一本书的若干章节（在线书逐批下载正文用）：正文仍在 Rust 侧读写，
 /// 经 IPC 只传本次变动章节，避免把大书（含 data URL 图片）反复整本拷贝到 WebView。
 #[tauri::command]
 pub async fn readerx_book_chapters_put(
@@ -82,7 +83,7 @@ pub async fn readerx_book_chapters_put(
     updates: Vec<BookChapterPatch>,
 ) -> Result<(), String> {
     blocking("章节写入", move || {
-        storage::put_book_chapters(&app, &book_id, &updates)
+        book_store::put_book_chapters(&app, &book_id, &updates)
     })
     .await
 }
@@ -91,16 +92,16 @@ pub async fn readerx_book_chapters_put(
 /// 应用启动 / 书架渲染只调用它——正文经 readerx_book_get 按需单本拉取。
 #[tauri::command]
 pub async fn readerx_book_list_meta(app: AppHandle) -> Result<Vec<BookMeta>, String> {
-    blocking("书库元数据读取", move || storage::list_book_meta(&app)).await
+    blocking("书库元数据读取", move || book_store::list_book_meta(&app)).await
 }
 
 /// 读取单本书全文（阅读页打开时按需调用）；文件不存在返回 null。
 #[tauri::command]
 pub async fn readerx_book_get(app: AppHandle, id: String) -> Result<Option<LocalBook>, String> {
-    blocking("书籍读取", move || storage::get_book(&app, &id)).await
+    blocking("书籍读取", move || book_store::get_book(&app, &id)).await
 }
 
-/// 单本元信息补丁（分组 / 书名 / 封面 / 标签…）：正文整体留在磁盘，不整本传回 WebView。
+/// 单本元信息补丁（分组 / 书名 / 封面 / 标签…）：只动 bookdetail.json，正文不读也不传。
 #[tauri::command]
 pub async fn readerx_book_patch_meta(
     app: AppHandle,
@@ -108,14 +109,34 @@ pub async fn readerx_book_patch_meta(
     patch: crate::models::BookMetaPatch,
 ) -> Result<(), String> {
     blocking("书籍元信息写入", move || {
-        storage::patch_book_meta(&app, &id, &patch)
+        book_store::patch_book_meta(&app, &id, &patch)
     })
     .await
 }
 
 #[tauri::command]
 pub async fn readerx_book_delete(app: AppHandle, id: String) -> Result<(), String> {
-    blocking("书籍删除", move || storage::delete_book(&app, &id)).await
+    blocking("书籍删除", move || book_store::delete_book(&app, &id)).await
+}
+
+/// 读取某本书的书签（books/<id>/bookmarks.json）；没有书签返回空列表。
+/// 书签按书分文件，读写都不必碰正文，也不必碰其它书的书签。
+#[tauri::command]
+pub async fn readerx_bookmarks_get(app: AppHandle, book_id: String) -> Result<Vec<Value>, String> {
+    blocking("书签读取", move || book_store::get_bookmarks(&app, &book_id)).await
+}
+
+/// 覆盖式写入某本书的书签（记录结构由前端定义，后端原样落盘）
+#[tauri::command]
+pub async fn readerx_bookmarks_put(
+    app: AppHandle,
+    book_id: String,
+    bookmarks: Vec<Value>,
+) -> Result<(), String> {
+    blocking("书签写入", move || {
+        book_store::put_bookmarks(&app, &book_id, &bookmarks)
+    })
+    .await
 }
 
 #[tauri::command]

@@ -16,6 +16,8 @@ export const library = {
 
   // Books
   "library.book.readFailed": "Couldn't read the book",
+  "library.bookmarks.readFailed": "Couldn't read bookmarks",
+  "library.bookmarks.writeFailed": "Couldn't save bookmarks",
 
   // Book sources
   "library.source.listFailed": "Couldn't read the source list",

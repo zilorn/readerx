@@ -1,4 +1,5 @@
 mod book_images;
+mod book_store;
 mod chapter_runs;
 mod commands;
 mod logging;
@@ -105,6 +106,9 @@ pub fn run() {
             } else {
                 log::warn!("无法定位应用数据目录，书源与登录态将退回默认目录");
             }
+            // 本地书的旧布局（整本 books/<id>.json、全库一份的 state/readerx.bookmarks.json）
+            // 由 book_store 在首次书籍 / 书签读写时迁移（book_store::migrate_legacy_layout）：
+            // 那是磁盘 I/O，跟着调用它的 blocking 线程跑，不占用启动线程。
             // 网页登录后端：把「插件（Android 原生浮层 / 桌面独立登录窗口）」注册为引擎的认证实现
             webview_login::install(app.handle().clone());
             log::info!("后端就绪，等待界面调用");
@@ -121,6 +125,8 @@ pub fn run() {
             commands::readerx_book_get,
             commands::readerx_book_patch_meta,
             commands::readerx_book_delete,
+            commands::readerx_bookmarks_get,
+            commands::readerx_bookmarks_put,
             commands::readerx_tts_cache_put,
             commands::readerx_tts_cache_get,
             commands::readerx_tts_cache_stats,

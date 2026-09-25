@@ -11,7 +11,7 @@
 //! 旧数据（`src` 是 data URL，或 Rust 侧回写丢过 `remote` 字段）在书籍读取 / 回写时
 //! 由 [`migrate_book`] 就地迁移：写成文件后只留引用，失败则原样保留（不丢图）。
 
-use crate::models::{BookImageFile, BookImageInfo, LocalBook};
+use crate::models::{BookImageFile, BookImageInfo, LocalBook, LocalBookChapter};
 use base64::Engine;
 use std::fs;
 use std::io::{BufReader, BufWriter, Read, Write};
@@ -512,11 +512,21 @@ pub(crate) fn migrate_book_file(root: &Path, book_id: &str, path: &Path) -> Resu
 /// 写盘失败时保留原 data URL（图片不丢，只是这次没瘦身）。返回是否有改动。
 pub(crate) fn migrate_book(root: &Path, book: &mut LocalBook) -> bool {
     let book_id = book.id.clone();
-    if !valid_book_id(&book_id) {
+    migrate_chapters(root, &book_id, &mut book.chapters)
+}
+
+/// 只迁移一组章节里的图片（书籍按 bookdetail / content / bookmarks 分文件存储后，
+/// 正文与元信息不再同一次读写，因此迁移也按章节切片调用）。口径同 [`migrate_book`]。
+pub(crate) fn migrate_chapters(
+    root: &Path,
+    book_id: &str,
+    chapters: &mut [LocalBookChapter],
+) -> bool {
+    if !valid_book_id(book_id) {
         return false;
     }
     let mut changed = false;
-    for chapter in &mut book.chapters {
+    for chapter in chapters.iter_mut() {
         let Some(blocks) = chapter.blocks.as_mut() else {
             continue;
         };
@@ -524,7 +534,7 @@ pub(crate) fn migrate_book(root: &Path, book: &mut LocalBook) -> bool {
             if block.kind == "img" {
                 changed |= migrate_image_fields(
                     root,
-                    &book_id,
+                    book_id,
                     &mut block.src,
                     &mut block.remote,
                     &mut block.local,
@@ -538,7 +548,7 @@ pub(crate) fn migrate_book(root: &Path, book: &mut LocalBook) -> bool {
             for img in imgs.iter_mut() {
                 changed |= migrate_image_fields(
                     root,
-                    &book_id,
+                    book_id,
                     &mut img.src,
                     &mut img.remote,
                     &mut img.local,
