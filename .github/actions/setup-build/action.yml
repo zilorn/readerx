@@ -43,6 +43,11 @@ runs:
     # Linux 上 Tauri 的编译期依赖：webkit2gtk-4.1 与 GTK3 是 webview 本体，
     # libsoup3 是它的网络层，librsvg 供图标渲染；patchelf 是 AppImage 打包必需，
     # libayatana-appindicator 供托盘/状态栏（Tauri 默认启用）。
+    #
+    # libspeechd-dev 是听书的系统语音后端（tts -> speech-dispatcher -> speech-dispatcher-sys）：
+    # 该 sys crate 在**构建期**用 bindgen 解析 speech-dispatcher/libspeechd.h 生成绑定，
+    # 只有运行时库（libspeechd2）不够，缺头文件会以 `'speech-dispatcher/libspeechd.h' file not found`
+    # 直接中断 Linux 构建；它同时带来链接所需的 libspeechd.so。
     - name: Install Linux system dependencies
       if: inputs.system-deps == 'true' && runner.os == 'Linux'
       shell: bash
@@ -55,6 +60,7 @@ runs:
           libjavascriptcoregtk-4.1-dev \
           librsvg2-dev \
           libayatana-appindicator3-dev \
+          libspeechd-dev \
           patchelf \
           xvfb
 

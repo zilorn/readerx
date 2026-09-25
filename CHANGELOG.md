@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Linux 桌面端构建中断在 speech-dispatcher 头文件**：听书的系统语音后端在 Linux 上走
+  `tts -> speech-dispatcher -> speech-dispatcher-sys`，而该 sys crate 用 bindgen 在**构建期**解析
+  `speech-dispatcher/libspeechd.h`；构建环境此前只把它当普通系统库、没装开发包，于是 Linux x86_64
+  一编译就报 `fatal error: 'speech-dispatcher/libspeechd.h' file not found`（本机装过
+  speech-dispatcher 的机器上不会暴露）。构建环境现在补上 `libspeechd-dev`（同时带来链接用的
+  `libspeechd.so`）；Linux 发行包也如实声明运行时依赖（deb `libspeechd2`、rpm
+  `libspeechd.so.2()(64bit)`），避免装完启动时缺 `libspeechd.so.2` —— AppImage 由打包流程
+  连带该库，不受影响。
+
 ## [0.2.0] - 2026-09-25
 
 ### Added

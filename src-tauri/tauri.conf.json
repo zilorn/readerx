@@ -38,6 +38,14 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "linux": {
+      "deb": {
+        "depends": ["libspeechd2"]
+      },
+      "rpm": {
+        "depends": ["libspeechd.so.2()(64bit)"]
+      }
+    }
   }
 }

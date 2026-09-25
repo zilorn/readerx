@@ -8,8 +8,9 @@
  * - 音色来自系统已安装的语音（getVoices），Android 上含本地与联网两种；
  *   中文文本优先展示中文语音，其余语言也一并列出。
  *
- * 桌面 Linux 默认不编译该插件的桌面后端（需要系统 speech-dispatcher），
- * 本模块在非 Tauri / 插件不可用环境直接返回不可用，由 UI 提示。
+ * 桌面 Linux 的该后端交给系统 speech-dispatcher（构建期需 libspeechd-dev 提供
+ * speech-dispatcher/libspeechd.h，发行包声明 libspeechd2 依赖）；系统没装 / 没跑
+ * speech-dispatcher 时拉不到语音，本模块按「不可用」处理，由 UI 与播放器提示。
  */
 import { createSignal } from "solid-js";
 import { isTauri } from "@tauri-apps/api/core";
