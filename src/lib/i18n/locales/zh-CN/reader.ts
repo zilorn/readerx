@@ -29,7 +29,9 @@ export const reader = {
   "reader.imageCount": "{count} 张图片",
   "reader.menuChapterProgress": "{index}/{total}章",
   "reader.statusPageProgress": " · {page} / {total} 页",
+  "reader.statusPageRange": " · {from}–{to} / {total} 页",
   "reader.menuPageProgress": " · {page}/{total}页",
+  "reader.menuPageRange": " · {from}–{to}/{total}页",
 
   // 目录抽屉
   "reader.toc": "目录",

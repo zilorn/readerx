@@ -42,9 +42,15 @@ export const reader = {
   "reader.statusPageProgress": " · {page} / {total} pages",
   "reader.statusPageProgress_one": " · {page} / {total} page",
   "reader.statusPageProgress_other": " · {page} / {total} pages",
+  "reader.statusPageRange": " · {from}–{to} / {total} pages",
+  "reader.statusPageRange_one": " · {from}–{to} / {total} page",
+  "reader.statusPageRange_other": " · {from}–{to} / {total} pages",
   "reader.menuPageProgress": " · {page}/{total} pages",
   "reader.menuPageProgress_one": " · {page}/{total} page",
   "reader.menuPageProgress_other": " · {page}/{total} pages",
+  "reader.menuPageRange": " · {from}–{to}/{total} pages",
+  "reader.menuPageRange_one": " · {from}–{to}/{total} page",
+  "reader.menuPageRange_other": " · {from}–{to}/{total} pages",
 
   // Table of contents drawer
   "reader.toc": "Contents",

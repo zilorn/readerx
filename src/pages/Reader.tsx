@@ -93,7 +93,7 @@ import {
 } from "../lib/books";
 import { withDisplayReplacements } from "../lib/textReplacements";
 import { withHanBook } from "../lib/hanDisplay";
-import { t } from "../lib/i18n";
+import { t, type MessageKey } from "../lib/i18n";
 import {
   BOOKMARK_MAX_LEN,
   addBookmark,
@@ -146,6 +146,12 @@ import {
   updateReadingLocation,
 } from "../lib/store";
 import { progressContextAt, readingPercent, resolveReadingTarget } from "../lib/progress";
+import {
+  READER_PAGE_PAD_X,
+  resolveReaderGeometry,
+  spreadStart,
+  type ReaderGeometry,
+} from "../lib/readerLayout";
 import { sameRenderWindow } from "../lib/renderWindow";
 import { showToast } from "../lib/toast";
 import {
@@ -163,7 +169,6 @@ import {
 } from "../lib/ttsPlayer";
 import { currentTtsEngine, ensureTtsPrefsLoaded } from "../lib/ttsSettings";
 
-const PAD_X = 24; // 阅读区左右留白
 const PAD_TOP = 14; // 正文顶部留白
 const PAD_BOTTOM_PAGED = 30; // 分页底部留白（容纳页号）
 const PAD_BOTTOM_SCROLL = 28; // 滚动底部留白
@@ -993,6 +998,8 @@ export default function ReaderPage() {
         Math.min(max, Math.max(0, target?.chapterIndex ?? entry?.chapter ?? 0)),
       );
       setPageIdx(0);
+      // 内存里的“读到哪”跟着回到章首：换书 / 目录变更后它属于上一本书，留着会污染后续定位
+      setViewOffset(0);
       // 进入章节开头后，等排版/正文就绪再把视口精确滚动到存档文本位置
       const t = target && target.charOffset > 0 ? target : null;
       const onCid =
@@ -1438,12 +1445,16 @@ export default function ReaderPage() {
   // areaRef 尚未赋值；必须等 contentLoad 转 ready（阅读区 DOM 挂载后）再量一次。
   // 这里读的是渲染窗口：书库正文回写换了对象引用不再重跑（否则每次回写都会
   // setArea 一个新对象 → layout 失效 → 当前章整章重新分页 = 下载时高频闪烁）。
+  //
+  // 量的是**可用空间**（frameRef，外壳给阅读页的整块区域）：正文块自己按它决定单页/双页
+  // 与列宽，再居中放进这块区域，所以不能再拿正文块（areaRef）的宽度当输入（会自相缠绕）。
   const [area, setArea] = createSignal({ w: 0, h: 0 });
   let areaRef: HTMLDivElement | undefined;
+  let frameRef: HTMLDivElement | undefined;
   let areaObserver: ResizeObserver | null = null;
   createEffect(() => {
     const ready = contentLoad() === "ready" && !!renderBook();
-    const el = areaRef;
+    const el = frameRef;
     if (!ready || !el) return;
     // 尺寸没变就不写信号：避免下游分页因一次无意义的面积更新而整章重排
     const measure = () => {
@@ -1464,15 +1475,32 @@ export default function ReaderPage() {
     }
   });
 
+  /**
+   * 阅读页几何（单页 / 双页、列宽、正文块宽度）：只由可用宽度与上下留白决定。
+   * 手机列与桌面窄窗口恒为一页；桌面宽窗口并排两页，见 `lib/readerLayout.ts`。
+   */
+  const geometry = createMemo<ReaderGeometry | null>(() =>
+    resolveReaderGeometry(area(), { top: topPad(), bottom: bottomPadPaged() }),
+  );
+
+  /** 一屏并排的页数（宽窗口 2，其余 1） */
+  const pageColumns = createMemo(() => geometry()?.columns ?? 1);
+
+  /** 滚动模式正文宽度（始终单栏；宽窗口下不再横跨整个内容区） */
+  const flowWidth = createMemo(() => geometry()?.flowWidth ?? 0);
+
+  /** 一屏正文块宽度（双页 = 两页 + 中缝），用于居中限宽 */
+  const blockWidth = createMemo(() => geometry()?.blockWidth ?? 0);
+
   const layout = createMemo<PaginateLayout | null>(() => {
-    const a = area();
-    if (a.w < 100 || a.h < 140) return null;
+    const geo = geometry();
+    if (!geo) return null;
     return {
-      textWidth: a.w - PAD_X * 2,
-      pageHeight: a.h - topPad() - bottomPadPaged(),
+      textWidth: geo.columnWidth,
+      pageHeight: geo.pageHeight,
       fontSize: currentFontSize(),
       paraSpacingEm: currentParaSpacing(),
-      imageCapHeight: Math.max(180, Math.min(a.h * 0.5, 460)),
+      imageCapHeight: Math.max(180, Math.min(area().h * 0.5, 460)),
     };
   });
 
@@ -1873,8 +1901,10 @@ export default function ReaderPage() {
       if (!pg) return false;
       const page = pageIndexOfChar(pg.pages, mir, f.item.start);
       if (page < 0) return false;
-      if (page !== pageIdx()) {
-        setPageIdx(page);
+      // 朗读句落在本屏（含右页）就算已可见，不翻页
+      const first = snapPage(pageIdx());
+      if (page < first || page >= first + pageColumns()) {
+        setPageIdx(snapPage(page));
       }
       return true;
     }
@@ -2038,7 +2068,10 @@ export default function ReaderPage() {
       if (wantLastPageCid !== null) {
         const landingCid = wantLastPageCid;
         wantLastPageCid = null;
-        if (landingCid === src.cid) setPageIdx(Math.max(0, result.pages.length - 1));
+        // 此处 setPaged 还没落地（totalPages 仍是上一轮的值），屏首要按新结果自己算
+        if (landingCid === src.cid) {
+          setPageIdx(spreadStart(Math.max(0, result.pages.length - 1), pageColumns()));
+        }
       }
       setPaged(result);
       // 打开书恢复进度：分页一就绪就立即落位，正文首次渲染即为目标页，
@@ -2049,16 +2082,92 @@ export default function ReaderPage() {
 
   const totalPages = createMemo(() => paged()?.pages.length ?? 0);
 
+  /**
+   * 页下标 → 所在**屏**的第一页（双页模式屏首恒为偶数页）。
+   * 翻页、进度条跳页、书签/搜索定位、朗读跟随都要先落到屏首，
+   * 否则阅读视图会停在「半屏」上（左页是上一屏的右页，看着像翻页没生效）。
+   */
+  function snapPage(page: number): number {
+    const total = totalPages();
+    if (total <= 0) return 0;
+    const clamped = Math.min(Math.max(0, Math.round(page)), total - 1);
+    return spreadStart(clamped, pageColumns());
+  }
+
+  /**
+   * 当前屏显示的页（双页模式两页并排；末屏可能只剩左页一页）。
+   * 数组元素就是分页结果里的页数组引用，`<For>` 据此复用 DOM：翻一屏只重挂新出现的页。
+   */
+  const spreadPages = createMemo<PageFragment[][]>(() => {
+    if (!isPaged()) return [];
+    const pages = paged()?.pages;
+    if (!pages || pages.length === 0) return [];
+    const first = snapPage(pageIdx());
+    const out: PageFragment[][] = [];
+    for (let i = 0; i < pageColumns(); i++) {
+      const page = pages[first + i];
+      if (!page) break;
+      out.push(page);
+    }
+    return out;
+  });
+
+  /** 当前屏页号（1 起）：单页 from === to，双页 from–to —— 页码显示与朗读跳页共用 */
+  const pageCounter = createMemo(() => {
+    const total = totalPages();
+    const from = total > 0 ? snapPage(pageIdx()) + 1 : 0;
+    const to = Math.min(from + pageColumns() - 1, total);
+    return { from, to, total, count: total, spread: to > from };
+  });
+
+  /**
+   * 当前屏**实际显示**的正文总宽：双页 = 两页 + 中缝，末屏只剩一页时就只有一页宽。
+   * 正文按页槽从左往右摆（不居中：只剩一页时它仍在左页位置，与前面每一屏的左页对齐），
+   * 页号据此居中在自己的那几页下方。
+   */
+  const spreadWidth = createMemo(() => {
+    const count = spreadPages().length;
+    const geo = geometry();
+    if (!geo || count === 0) return 0;
+    return count * geo.columnWidth + (count - 1) * geo.gap;
+  });
+
+  /** 页码文案：单页用 single，双页（一屏两页）用 range；两套 key 中英各一条 */
+  function pageProgressText(single: MessageKey, range: MessageKey): string {
+    const p = pageCounter();
+    return p.spread
+      ? t(range, { from: p.from, to: p.to, total: p.total, count: p.count })
+      : t(single, { page: p.from, total: p.total, count: p.count });
+  }
+
   /** 菜单进度条拖动提交：跳到当前章的指定页（与手动翻页一致地先解除跟读跟随） */
   function seekToPage(page: number): void {
     const total = totalPages();
     if (total <= 0 || !isPaged()) return;
-    const next = Math.min(total - 1, Math.max(0, Math.round(page)));
+    const next = snapPage(page);
     if (next === pageIdx()) return;
     cancelFollowIfActive();
     offerJumpBack();
     setPageIdx(next);
   }
+
+  // 单页 ↔ 双页切换（窗口宽度跨过阈值）：一屏页数、列宽、总页数全变了，同一个页码不再对应
+  // 同一段文字 —— 按当前页首行的**文本偏移**重新落位（与打开书恢复进度共用 applyResume）。
+  // 用 viewOffset（已提交的阅读位置）而不是分页结果：本效果可能在整章重新排版清空分页之后才跑。
+  createEffect(
+    on(pageColumns, () => {
+      if (!isPaged()) return;
+      const ch = chapter();
+      const char = viewOffset();
+      if (ch && char > 0) {
+        setResumeTarget({ cid: ch.cid, char });
+        return;
+      }
+      // 章首 / 无正文可锚定：只需把页码夹回屏首
+      const next = spreadStart(pageIdx(), pageColumns());
+      if (next !== pageIdx()) setPageIdx(next);
+    }),
+  );
 
   // -------------------------------------------------------------------
   // 定点跳转后的「返回原进度」提示：目录跳章 / 菜单进度条跳页会离开当前阅读位置，
@@ -2190,21 +2299,21 @@ export default function ReaderPage() {
   /** 本次切章是否由“翻页跨章浏览”触发（浏览不应打断听书语音） */
   let browseChapterPending = false;
 
-  // 几何/字号变化导致同章重排时，按比例保留阅读位置
+  // 几何/字号变化导致同章重排时，按比例保留阅读位置（双页模式落到该屏的屏首）
   createEffect(
     on(totalPages, (total, prevTotal) => {
       if (total <= 0 || prevTotal === undefined || prevTotal <= 0) return;
       const ratio = pageIdx() / prevTotal;
-      const next = Math.min(total - 1, Math.max(0, Math.round(ratio * (total - 1))));
+      const next = snapPage(ratio * (total - 1));
       if (next !== pageIdx()) setPageIdx(next);
     }),
   );
 
-  // 页码越界钳制
+  // 页码越界钳制（双页模式同样夹到屏首）
   createEffect(() => {
     const total = totalPages();
     const idx = pageIdx();
-    if (total > 0 && idx >= total) setPageIdx(total - 1);
+    if (total > 0 && idx >= total) setPageIdx(snapPage(total - 1));
   });
 
   // -------------------------------------------------------------------
@@ -2252,6 +2361,18 @@ export default function ReaderPage() {
       spans.push([start, cursor]);
     }
     return spans;
+  });
+
+  /**
+   * 当前屏可见正文的镜像文本区间：单页 = 该页，双页 = 左右两页之和（两页首尾相接）。
+   * 自绘选区的端点夹取、手柄显示与菜单避让都按这一屏算，不能只看左页。
+   */
+  const visibleSpan = createMemo<[number, number] | null>(() => {
+    const spans = pageSpans();
+    const first = snapPage(pageIdx());
+    if (spans.length === 0 || first < 0 || first >= spans.length) return null;
+    const last = Math.min(first + pageColumns() - 1, spans.length - 1);
+    return [spans[first][0], spans[last][1]];
   });
 
   /** 立即把挂起的阅读位置落库（去抖超时 / 退出阅读页 / 页面隐藏时调用） */
@@ -2332,10 +2453,13 @@ export default function ReaderPage() {
       const local = charOffsetInElement(anchor.el, node, off);
       return Math.min(mir.text.length, base + anchor.cstart + local);
     };
+    // 正文列在滚动容器里居中（宽窗口下正文列不再横跨整个内容区）：探针取正文列内的三点
+    const flow = flowWidth() || lay.textWidth;
+    const textLeft = rect.left + (rect.width - flow) / 2;
     const xs = [
-      rect.left + PAD_X + lay.textWidth * 0.5,
-      rect.left + PAD_X + lay.textWidth * 0.16,
-      rect.left + PAD_X + lay.textWidth * 0.84,
+      textLeft + flow * 0.5,
+      textLeft + flow * 0.16,
+      textLeft + flow * 0.84,
     ];
     for (let row = 0; row < 5; row++) {
       const y = rect.top + topPad() + lineH * (0.35 + row);
@@ -2413,7 +2537,7 @@ export default function ReaderPage() {
       const pg = paged();
       if (!pg) return; // 分页重排中，等下一个 tick
       const page = pageIndexOfChar(pg.pages, mir, target.char);
-      const next = page < 0 ? pg.pages.length - 1 : page;
+      const next = snapPage(page < 0 ? pg.pages.length - 1 : page);
       // 先落到目标页、再解除隐藏：正文首次可见即是恢复位置，不闪章节开头
       if (next !== pageIdx()) setPageIdx(next);
       setResumeTarget(null);
@@ -2474,13 +2598,6 @@ export default function ReaderPage() {
       window.removeEventListener("pagehide", onHide);
       window.removeEventListener("beforeunload", onHide);
     });
-  });
-
-  const pageFragments = createMemo<PageFragment[]>(() => {
-    if (!isPaged()) return [];
-    const pages = paged()?.pages;
-    if (!pages || pages.length === 0) return [];
-    return pages[Math.min(pageIdx(), pages.length - 1)] ?? [];
   });
 
   const chapterCount = () => book()?.chapters.length ?? 0;
@@ -2622,17 +2739,18 @@ export default function ReaderPage() {
     }
   }
 
-  /** 左右翻页（含章节边界衔接）；返回是否发生了位移 */
+  /** 左右翻页（含章节边界衔接）；双页模式一次翻一屏（两页）。返回是否发生了位移 */
   function turnPage(dir: 1 | -1): boolean {
     if (!isPaged()) return false;
     const total = totalPages();
-    const idx = pageIdx();
+    const idx = snapPage(pageIdx());
+    const step = pageColumns();
     if (dir > 0) {
-      if (idx + 1 < total) {
+      if (idx + step < total) {
         // 先解除跟读跟随再翻页：若翻页后才取消，朗读句的自动跟随仍可能
         // 在同一轮把页面拉回朗读句所在页，导致本次手动翻页“无效”（需翻两次）
         cancelFollowIfActive();
-        setPageIdx(idx + 1);
+        setPageIdx(idx + step);
         return true;
       }
       if (!isLastChapter()) {
@@ -2645,7 +2763,7 @@ export default function ReaderPage() {
     }
     if (idx > 0) {
       cancelFollowIfActive();
-      setPageIdx(idx - 1);
+      setPageIdx(idx - step);
       return true;
     }
     if (!isFirstChapter()) {
@@ -2684,19 +2802,19 @@ export default function ReaderPage() {
   let animTriggered = false;
 
   // -------------------------------------------------------------------
-  // 分页模式：自绘文本选区（拖选 + 跨页自动翻页续选）
+  // 分页模式：自绘文本选区（拖选 + 跨屏自动翻页续选）
   // 原生 text 选区在分页列被禁用（select-none），由本引擎接管：
   //   - 触屏：长按起选（拉丁词按整词 / 中文按单字），随后拖动扩选；
   //   - 鼠标/触控笔：按下后拖拽（≥6px）直接起选；
-  //   - 选区端拖出正文列上/下缘 → 指针在页缘外持续停留满判定时长后，
-  //     在本章内翻一页续选（每翻一页需先回页内再拖出），跨页连成一段
-  //     [lo, hi) 镜像区间，交给 复制 / 书签（可跨段落）/ 朗读 使用。
+  //   - 选区端拖出正文列上/下缘 → 指针在屏缘外持续停留满判定时长后，
+  //     在本章内翻一屏续选（双页模式一屏两页；每翻一屏需先回屏内再拖出），
+  //     跨屏连成一段 [lo, hi) 镜像区间，交给 复制 / 书签（可跨段落）/ 朗读 使用。
   // -------------------------------------------------------------------
   const SEL_LONG_PRESS_MS = 380;
   const SEL_DRAG_SLOP = 6;
-  // 拖出页缘的翻页判定时长：指针须在页缘外持续停留满该时长才翻页续选。
-  // 判定不足的短暂越界（快速划过页边、拖到页缘即抬手）不会误翻整页；
-  // 且每次拖出只翻一页，需回页内重新拖出才会再翻，避免连续跨过多个页面。
+  // 拖出屏缘的翻页判定时长：指针须在屏缘外持续停留满该时长才翻页续选。
+  // 判定不足的短暂越界（快速划过屏边、拖到屏缘即抬手）不会误翻整屏；
+  // 且每次拖出只翻一屏，需回屏内重新拖出才会再翻，避免连续跨过多个屏面。
   const SEL_FLIP_HOLD_MS = 400;
   // 选区手柄按钮半宽（24px 触控目标 / 2）：选区菜单避让手柄时的圆形半径
   const SEL_HANDLE_R = 12;
@@ -2718,13 +2836,13 @@ export default function ReaderPage() {
     pointerId: number;
     x: number;
     y: number;
-    /** 指针当前相对正文列的位置：0 页内 / 1 下缘外 / -1 上缘外 */
+    /** 指针当前相对正文列的位置：0 屏内 / 1 下缘外 / -1 上缘外 */
     edgeDir: 0 | 1 | -1;
-    /** 本次「拖出页缘」是否已翻过页：翻页后须回页内重置，才会再次判定翻页 */
+    /** 本次「拖出屏缘」是否已翻过屏：翻屏后须回屏内重置，才会再次判定翻屏 */
     edgeFlipped: boolean;
-    /** 「拖出页缘」翻页判定计时器（页缘外持续停留满 SEL_FLIP_HOLD_MS 触发） */
+    /** 「拖出屏缘」翻屏判定计时器（屏缘外持续停留满 SEL_FLIP_HOLD_MS 触发） */
     edgeTimer: number | undefined;
-    /** 翻页落地等待中：此期间忽略指针输入 */
+    /** 翻屏落地等待中：此期间忽略指针输入 */
     pending: boolean;
   }
   let selPress: SelPressState | null = null;
@@ -2757,11 +2875,12 @@ export default function ReaderPage() {
   }
 
   /**
-   * 分页自绘选区在本页可见端点的几何（相对阅读区容器坐标）。
+   * 分页自绘选区在本屏可见端点的几何（相对阅读区容器坐标）。
    * 手柄渲染与选区菜单避让共用同一份口径：
-   * - lo/hi：两端手柄圆心——真实端点落在本页内才给出（跨页连选时起点/终点在
-   *   其它页的那端不在本页显示，只留仍在本页内的拖动端手柄）；
-   * - top/bottom：选区在本页可见首/末行的行盒上/下缘（越界端点夹取到页界）。
+   * - lo/hi：两端手柄圆心——真实端点落在本屏内才给出（跨屏连选时起点/终点在
+   *   其它屏的那端不在本屏显示，只留仍在本屏内的拖动端手柄）；
+   * - top/bottom：选区在本屏可见首/末行的行盒上/下缘（越界端点夹取到屏界）。
+   * 双页模式下本屏 = 并排的两页，区间取两页之和（见 `visibleSpan`）。
    */
   function pageSelLayout(): {
     lo: { x: number; y: number } | null;
@@ -2774,10 +2893,9 @@ export default function ReaderPage() {
     const col = colRef;
     if (!span || !area || !col || !isPaged()) return null;
     const mir = mirror();
-    const cur = pageSpans();
-    const pi = pageIdx();
-    if (!mir || cur.length === 0 || pi < 0 || pi >= cur.length) return null;
-    const [ps, pe] = cur[pi];
+    const vis = visibleSpan();
+    if (!mir || !vis) return null;
+    const [ps, pe] = vis;
     const ovS = Math.max(span[0], ps);
     const ovE = Math.min(span[1], pe);
     if (ovE <= ovS) return null;
@@ -2831,22 +2949,22 @@ export default function ReaderPage() {
         bottom: top - areaRect.top + height,
       };
     };
-    // 纵向范围（zLoP/zHiP）：越界端点先夹取到页界，保证选区菜单的避让区间始终覆盖
-    // 本页可见的全部选中行（真实端点不在本页也适用）。
+    // 纵向范围（zLoP/zHiP）：越界端点先夹取到屏界，保证选区菜单的避让区间始终覆盖
+    // 本屏可见的全部选中行（真实端点不在本屏也适用）。
     const zLoP = loOffset < ovE ? pointAt(loOffset, true) : null;
     const zHiP = hiOffset > ovS ? pointAt(hiOffset, false) : null;
     if (!zLoP && !zHiP) return null;
     const zTop = zLoP && zHiP ? Math.min(zLoP.top, zHiP.top) : (zLoP ?? zHiP)!.top;
     const zBottom = zLoP && zHiP ? Math.max(zLoP.bottom, zHiP.bottom) : (zLoP ?? zHiP)!.bottom;
-    // 手柄只画「真实端点就在本页内」的那端：跨页连选自动翻到下一页时，起点/终点若落在
-    // 其它页，本页不显示那端的手柄——起点在上一页时，本页只保留仍在页内的拖动端手柄。
+    // 手柄只画「真实端点就在本屏内」的那端：跨屏连选自动翻到下一屏时，起点/终点若落在
+    // 其它屏，本屏不显示那端的手柄——起点在上一屏时，本屏只保留仍在屏内的拖动端手柄。
     // lo 端点含 offset 处字符（起点语义：段首选中时手柄须锚在段首，而非上一段末尾）；
     // hi 端点为排他终点（停在上一段末尾的语义不变）。
     const loP = span[0] >= ps ? pointAt(span[0], true) : null;
     const hiP = span[1] <= pe ? pointAt(span[1], false) : null;
     if (!loP && !hiP) {
-      // 整页都被选入、两端真实端点都在其它页（跨页连选正停留在被整页选中的中间页）：
-      // 本页没有可拖的手柄，仅保留整片可见选区的纵向避让范围
+      // 整屏都被选入、两端真实端点都在其它屏（跨屏连选正停留在被整屏选中的中间屏）：
+      // 本屏没有可拖的手柄，仅保留整片可见选区的纵向避让范围
       return { lo: null, hi: null, top: zTop, bottom: zBottom };
     }
     return {
@@ -2992,22 +3110,23 @@ export default function ReaderPage() {
     captureSelPointer(e.pointerId);
   }
 
-  /** 拖动端拖出正文列上下缘：把当前页整页纳入选区后翻页（仅本章内） */
+  /** 拖动端拖出正文列上下缘：把当前屏整屏纳入选区后翻页（仅本章内，双页模式翻一屏） */
   function selFlip(dir: 1 | -1): void {
     const cur = pageSpans();
-    const pi = pageIdx();
+    const pi = snapPage(pageIdx());
+    const step = pageColumns();
     const drag = selDrag;
     if (!drag || cur.length === 0) return;
-    if (dir > 0 ? pi + 1 >= cur.length : pi <= 0) return; // 本章首/末页边界
+    const last = Math.min(pi + step - 1, cur.length - 1);
+    if (dir > 0 ? last + 1 >= cur.length : pi <= 0) return; // 本章首/末屏边界
     const span = selSpan();
-    if (span && cur[pi]) {
-      const [ps, pe] = cur[pi];
-      setSelSpan([Math.min(span[0], ps), Math.max(span[1], pe)]);
+    if (span && cur[pi] && cur[last]) {
+      setSelSpan([Math.min(span[0], cur[pi][0]), Math.max(span[1], cur[last][1])]);
     }
     drag.pending = true;
-    setPageIdx(dir > 0 ? pi + 1 : pi - 1);
-    // 新页挂载后再按最近指针位置续选；若指针仍在页缘外，因本次拖出已翻过页
-    // （edgeFlipped），需回页内重新拖出才会进入下一次翻页判定，不会连翻多页
+    setPageIdx(dir > 0 ? pi + step : Math.max(0, pi - step));
+    // 新屏挂载后再按最近指针位置续选；若指针仍在屏缘外，因本次拖出已翻过屏
+    // （edgeFlipped），需回屏内重新拖出才会进入下一次翻屏判定，不会连翻多屏
     window.requestAnimationFrame(() => {
       if (selDrag === drag) {
         drag.pending = false;
@@ -3016,7 +3135,7 @@ export default function ReaderPage() {
     });
   }
 
-  /** 拖动中的一次更新：指针映射为字符并扩选/缩选；页缘触发自动翻页 */
+  /** 拖动中的一次更新：指针映射为字符并扩选/缩选；屏缘触发自动翻屏 */
   function selDragUpdate(x: number, y: number): void {
     const drag = selDrag;
     if (!drag || drag.pending) return;
@@ -3029,12 +3148,12 @@ export default function ReaderPage() {
     const below = rect ? y > rect.bottom + 8 : false;
     const above = rect ? y < rect.top - 8 : false;
     if (below || above) {
-      // 长按整词阶段直接拖出页缘：向下视为扩选终点、向上视为扩选起点
+      // 长按整词阶段直接拖出屏缘：向下视为扩选终点、向上视为扩选起点
       if (drag.anchor === null && span) {
         drag.anchor = below ? span[0] : span[1];
       }
       const dir = below ? 1 : -1;
-      // 拖出方向变化（含从页内新拖出）→ 重置本次拖出的翻页判定
+      // 拖出方向变化（含从屏内新拖出）→ 重置本次拖出的翻屏判定
       if (drag.edgeDir !== dir) {
         drag.edgeDir = dir;
         drag.edgeFlipped = false;
@@ -3043,14 +3162,14 @@ export default function ReaderPage() {
           drag.edgeTimer = undefined;
         }
       }
-      // 本次拖出已翻过页：需回页内重新拖出才再次判定，避免停留页缘外连翻多页
+      // 本次拖出已翻过屏：需回屏内重新拖出才再次判定，避免停留屏缘外连翻多屏
       if (drag.edgeFlipped) return;
-      // 判定计时：指针须在页缘外持续停留满 SEL_FLIP_HOLD_MS 才翻页续选，
-      // 短暂越界/未及判定就回页内（或抬手）都不会误翻整页
+      // 判定计时：指针须在屏缘外持续停留满 SEL_FLIP_HOLD_MS 才翻屏续选，
+      // 短暂越界/未及判定就回屏内（或抬手）都不会误翻整屏
       if (drag.edgeTimer === undefined) {
         drag.edgeTimer = window.setTimeout(() => {
           drag.edgeTimer = undefined;
-          // 判定期间指针回到页内 / 手势结束 / 正在翻页落地 → 放弃本次翻页
+          // 判定期间指针回到屏内 / 手势结束 / 正在翻屏落地 → 放弃本次翻屏
           if (selDrag !== drag || drag.pending || drag.edgeDir !== dir) return;
           drag.edgeFlipped = true;
           selFlip(dir);
@@ -3058,7 +3177,7 @@ export default function ReaderPage() {
       }
       return;
     }
-    // 指针回到页内：取消未决判定并重置拖出状态（下次拖出重新判定）
+    // 指针回到屏内：取消未决判定并重置拖出状态（下次拖出重新判定）
     if (drag.edgeDir !== 0 || drag.edgeFlipped || drag.edgeTimer !== undefined) {
       drag.edgeDir = 0;
       drag.edgeFlipped = false;
@@ -3124,7 +3243,7 @@ export default function ReaderPage() {
       setSelMenu(null);
       return;
     }
-    // 菜单避让数据：选区在本页的纵向范围 + 两端手柄圆心（与手柄渲染同口径）
+    // 菜单避让数据：选区在本屏的纵向范围 + 两端手柄圆心（与手柄渲染同口径）
     const geo = pageSelLayout();
     let avoid: SelectionCustom["avoid"];
     if (geo) {
@@ -3566,7 +3685,7 @@ export default function ReaderPage() {
     const current = chapter();
     const mode = isPaged();
     const pg = paged();
-    const pageNow = pageIdx();
+    const pageNow = snapPage(pageIdx());
     const root = areaRef;
     if (!current || !root) return;
     if (p.chapter !== chapterIdx()) return; // 章节切换尚未落地
@@ -3578,8 +3697,9 @@ export default function ReaderPage() {
         setPendingFlash(null);
         return;
       }
-      if (pageNow !== page) {
-        setPageIdx(page);
+      // 目标页不在本屏（双页模式右页也在本屏）时先翻到它所在的屏
+      if (page < pageNow || page >= pageNow + pageColumns()) {
+        setPageIdx(snapPage(page));
         return;
       }
     } else if (scrollRef && !scrollRef.querySelector(`[data-u="${p.unit}"]`)) {
@@ -3614,7 +3734,10 @@ export default function ReaderPage() {
   );
 
   return (
-    <div class="relative flex h-full min-h-0 flex-col overflow-hidden bg-bg">
+    <div
+      ref={frameRef}
+      class="relative flex h-full min-h-0 flex-col overflow-hidden bg-bg"
+    >
       {/* 门闩：进入阅读页后按需物化当前书全文（元数据不含正文）；缺失给「不存在」页 */}
       <Show
         when={book() && contentLoad() === "ready"}
@@ -3667,7 +3790,9 @@ export default function ReaderPage() {
               <Show
                 when={!isPaged()}
                 fallback={
-                  /* 分页模式：左右翻页视图（select-none：由自绘选区接管文本选取） */
+                  /* 分页模式：左右翻页视图（select-none：由自绘选区接管文本选取）。
+                     宽窗口下一屏并排两页（见 lib/readerLayout.ts）：块内按列宽排字，
+                     中缝由 flex 的 gap 给出，末屏只剩一页时居中。 */
                   <div
                     ref={pageAnimRef}
                     class="absolute inset-0 select-none overflow-hidden"
@@ -3677,62 +3802,94 @@ export default function ReaderPage() {
                     <div
                       class="mx-auto flex h-full flex-col"
                       style={{
-                        width: `${layout()!.textWidth}px`,
+                        width: `${blockWidth()}px`,
                         ...asCss(readingBaseStyle(layout()!)),
                       }}
                     >
                       <div style={{ height: `${topPad()}px`, "flex": "none" }} />
                       <div
                         ref={colRef}
-                        class="relative w-full overflow-hidden"
-                        style={{ height: `${layout()!.pageHeight}px` }}
+                        class="relative flex w-full flex-none overflow-hidden"
+                        style={{
+                          height: `${layout()!.pageHeight}px`,
+                          gap: `${geometry()!.gap}px`,
+                        }}
                       >
-                        <For each={pageFragments()}>
-                          {(fragment) => (
-                            <PagedFragment
-                              fragment={fragment}
-                              layout={layout()!}
-                              marks={renderMarks()}
-                              onImageRetry={retryReaderImage}
-                            />
+                        <For each={spreadPages()}>
+                          {(pageFragments) => (
+                            <div
+                              class="relative flex-none overflow-hidden"
+                              style={{ width: `${layout()!.textWidth}px` }}
+                            >
+                              <For each={pageFragments}>
+                                {(fragment) => (
+                                  <PagedFragment
+                                    fragment={fragment}
+                                    layout={layout()!}
+                                    marks={renderMarks()}
+                                    onImageRetry={retryReaderImage}
+                                  />
+                                )}
+                              </For>
+                            </div>
                           )}
                         </For>
+                        {/* 双页排版的中缝线（不占布局宽度）：末屏只剩一页时照样画 ——
+                            右页是空白页，线标出两页的边界。正文按页槽左对齐（见上），
+                            所以这条线永远落在中缝里，不会压在字上 */}
+                        <Show when={pageColumns() > 1}>
+                          <span
+                            class="pointer-events-none absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-border"
+                            aria-hidden="true"
+                          />
+                        </Show>
                       </div>
+                      {/* 页号按**实际显示的页**居中：末屏只剩左页时，页号落在左页下方而不是整块中间 */}
                       <div
-                        class="relative flex-none"
+                        class="relative flex flex-none"
                         style={{ height: `${bottomPadPaged()}px` }}
                       >
-                        <Show
-                          when={
-                            totalPages() > 1 &&
-                            !menuOpen() &&
-                            !jumpBackHint() &&
-                            !currentStatusBarEnabled()
-                          }
-                        >
-                          <span
-                            class="pointer-events-none absolute bottom-0 left-1/2 -translate-x-1/2 text-[10.5px] tracking-[0.08em] text-text-3 opacity-70 tabular-nums"
-                            aria-hidden="true"
+                        <div class="relative" style={{ width: `${spreadWidth()}px` }}>
+                          <Show
+                            when={
+                              totalPages() > 1 &&
+                              !menuOpen() &&
+                              !jumpBackHint() &&
+                              !currentStatusBarEnabled()
+                            }
                           >
-                            {pageIdx() + 1} / {totalPages()}
-                          </span>
-                        </Show>
+                            <span
+                              class="pointer-events-none absolute bottom-0 left-1/2 -translate-x-1/2 text-[10.5px] tracking-[0.08em] text-text-3 opacity-70 tabular-nums"
+                              aria-hidden="true"
+                            >
+                              {pageCounter().from}
+                              {pageCounter().spread ? `–${pageCounter().to}` : ""} /{" "}
+                              {pageCounter().total}
+                            </span>
+                          </Show>
+                        </div>
                       </div>
                     </div>
                   </div>
                 }
               >
-                {/* 滚动模式：整章上下滚动 */}
+                {/* 滚动模式：整章上下滚动（始终单栏；宽窗口下正文列居中限宽） */}
                 <div
                   ref={scrollRef}
                   onScroll={onScrollBody}
                   class="absolute inset-0 overflow-y-auto overscroll-contain scrollbar-none"
                   classList={{ invisible: resumeTarget() !== null }}
                   style={{
-                    padding: `${topPad()}px ${PAD_X}px ${bottomPadScroll()}px`,
+                    padding: `${topPad()}px ${READER_PAGE_PAD_X}px ${bottomPadScroll()}px`,
                   }}
                 >
-                  <div style={asCss(readingBaseStyle(layout()!))}>
+                  <div
+                    class="mx-auto"
+                    style={{
+                      width: `${flowWidth()}px`,
+                      ...asCss(readingBaseStyle(layout()!)),
+                    }}
+                  >
                     <TitleBlock
                       layout={layout()!}
                       title={chapter()!.title}
@@ -3996,11 +4153,10 @@ export default function ReaderPage() {
                     </Show>
                     <Show when={isPaged() && totalPages() > 1}>
                       <span>
-                        {t("reader.statusPageProgress", {
-                          page: pageIdx() + 1,
-                          total: totalPages(),
-                          count: totalPages(),
-                        })}
+                        {pageProgressText(
+                          "reader.statusPageProgress",
+                          "reader.statusPageRange",
+                        )}
                       </span>
                     </Show>
                   </span>
@@ -4325,11 +4481,7 @@ export default function ReaderPage() {
                       count: chapterCount(),
                     })}
                     {isPaged() && totalPages() > 0
-                      ? t("reader.menuPageProgress", {
-                          page: pageIdx() + 1,
-                          total: totalPages(),
-                          count: totalPages(),
-                        })
+                      ? pageProgressText("reader.menuPageProgress", "reader.menuPageRange")
                       : ""}
                   </span>
                 </button>

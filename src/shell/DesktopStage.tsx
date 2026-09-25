@@ -15,7 +15,8 @@
  * - 次级页面按路由推入 / 弹出，离场即卸载 —— 桌面端没有「返回栈动画」，
  *   但也因此不需要冻结离场快照。
  *
- * 阅读页（`/book/:id`）在宽窗口下由页面自己限宽居中（见页内样式），列表型页面则铺满内容区
+ * 阅读页（`/book/:id`）在宽窗口下由外壳给出**最大**宽度（够放并排两页），页面自己按可用宽度
+ * 决定并排几页并居中限宽（见 `lib/readerLayout.ts`）；列表型页面则铺满内容区
  * ——书架的封面是固定宽度，按内容区宽度自动排列成多列网格（见 `pages/Bookshelf.tsx` 的 ShelfGrid）。
  */
 import {
@@ -35,6 +36,7 @@ import { PageBody } from "../components/PageBody";
 import { SidebarCollapseIcon, SidebarExpandIcon } from "../components/icons";
 import { registerAppScrollEl } from "../lib/appScroll";
 import { isSidebarCollapsed, setSidebarCollapsed } from "../lib/store";
+import { READER_MAX_WIDTH } from "../lib/readerLayout";
 import { isFullHeightPath, isTabRoute, TAB_ROUTES } from "./routes";
 import { tabIcon } from "./tabIcons";
 import { t } from "../lib/i18n";
@@ -53,9 +55,6 @@ interface Pane {
   /** 瞬态页面创建时的路由出口内容 */
   children?: JSX.Element;
 }
-
-/** 阅读页在宽窗口下的单列限宽（与手机端 480px 一致的阅读节奏，只是两侧各多留白） */
-const READER_WIDTH = 680;
 
 /** 侧边栏展开宽度（与 `index.css` 里 `--sidebar-w` 的桌面默认值一致） */
 const SIDEBAR_WIDTH = 236;
@@ -192,10 +191,14 @@ export function DesktopStage(props: DesktopStageProps) {
     return isReader() ? "" : "pb-8";
   };
 
-  /** 阅读页在宽内容区里居中限宽；其余页面铺满（书架等列表页自己会分多列） */
+  /**
+   * 阅读页在宽内容区里居中限宽；其余页面铺满（书架等列表页自己会分多列）。
+   * 上限是「放得下并排两页」的宽度（见 `lib/readerLayout.ts`），够不够宽、并排几页由阅读页自己算；
+   * 窗口不够宽时按内容区宽度收窄，两侧始终留 48px。
+   */
   const paneInnerStyle = (panePath: string) => {
     if (!isReader() || panePath !== path()) return undefined;
-    const width = Math.min(READER_WIDTH, Math.max(0, stageWidth() - 96));
+    const width = Math.min(READER_MAX_WIDTH, Math.max(0, stageWidth() - 96));
     return width > 0 ? { width: `${width}px`, margin: "0 auto" } : undefined;
   };
 

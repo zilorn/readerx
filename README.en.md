@@ -39,7 +39,9 @@ of pages and the same local library.
   (follow system / Simplified Chinese / English); chapter-splitting rules live on their own
   subpage
 - **Reading** `/book/:id`: chapter reading, previous / next chapter, table-of-contents drawer,
-  reading progress synced across pages
+  reading progress synced across pages; on a wide desktop window the text is laid out as two
+  side-by-side pages (one page on phones and narrow windows; the column width adapts to the
+  available width)
 - **Text-to-speech**: tap the headphone icon on the reading page to listen. Two engines:
   **native speech** (Android system TTS, the default) and a **custom HTTP source** (your own TTS
   endpoint returning audio bytes). A floating ball controls pause / previous sentence / next
