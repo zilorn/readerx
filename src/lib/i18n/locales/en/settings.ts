@@ -96,6 +96,9 @@ export const settings = {
   // App logs (sheet)
   "settings.logs.title": "App logs",
   "settings.logs.close": "Close app logs",
+  /** Logs are split per day and per launch; this row is the file picker's label and the "being written now" mark */
+  "settings.logs.file": "File",
+  "settings.logs.runCurrent": "{moment} · current",
   "settings.logs.filterInfo": "Info",
   "settings.logs.filterWarn": "Warning",
   "settings.logs.filterError": "Error",

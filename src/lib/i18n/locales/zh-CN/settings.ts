@@ -93,6 +93,9 @@ export const settings = {
   // 应用日志（弹层）
   "settings.logs.title": "应用日志",
   "settings.logs.close": "关闭应用日志",
+  /** 日志按「天 + 本次启动」分文件，这一行是文件选择器的标签与「正在写的这一份」 */
+  "settings.logs.file": "文件",
+  "settings.logs.runCurrent": "本次 {moment}",
   "settings.logs.filterInfo": "信息",
   "settings.logs.filterWarn": "警告",
   "settings.logs.filterError": "错误",

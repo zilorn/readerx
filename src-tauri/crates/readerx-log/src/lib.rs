@@ -14,8 +14,15 @@
 //!
 //! ## 文件布局与轮转
 //!
-//! `<数据目录>/logs/<app>.log`，单文件超过 [`DEFAULT_MAX_BYTES`] 就轮转成
-//! `.log.1` / `.log.2` …，最多保留 [`DEFAULT_KEEP_FILES`] 份历史（见 [`file`]）。
+//! ```text
+//! <数据目录>/logs/2026-09-25/readerx-150405.log
+//!                            └── 当天 15:04:05 启动的那一次运行
+//! ```
+//!
+//! **一天一个目录、一次运行一个文件**（布局与命名见 [`layout`]，写入见 [`file`]）：
+//! 用户报问题时先要确定的是「哪天、哪一次启动」，路径本身就把这两件事说清楚了。
+//! 单文件超过 [`DEFAULT_MAX_BYTES`] 仍在本次运行内轮转（`.log.1` / `.log.2`…），
+//! 目录整体按 [`DEFAULT_KEEP_DAYS`] 天 + [`DEFAULT_MAX_TOTAL_BYTES`] 总量淘汰（见 [`retention`]）。
 //!
 //! ## 级别
 //!
@@ -30,13 +37,19 @@
 
 mod file;
 mod filter;
+mod layout;
+mod read;
 mod record;
+mod retention;
 
 mod android;
 
-pub use file::{DEFAULT_KEEP_FILES, DEFAULT_MAX_BYTES};
+pub use file::{
+    FileLimits, DEFAULT_KEEP_DAYS, DEFAULT_KEEP_FILES, DEFAULT_MAX_BYTES, DEFAULT_MAX_TOTAL_BYTES,
+};
 pub use filter::{level_name as level_filter_name, Filter};
 pub use record::{level_name, level_of_line, timestamp};
+pub use retention::LogRun;
 
 pub mod redact;
 
@@ -69,10 +82,8 @@ pub struct LogConfig {
     pub stderr: bool,
     /// 是否写 Android logcat（非 Android 平台无效果）
     pub logcat: bool,
-    /// 单文件体积上限
-    pub max_file_bytes: u64,
-    /// 历史文件保留份数
-    pub keep_files: usize,
+    /// 单文件体积、轮转份数、保留天数与总量上限
+    pub limits: FileLimits,
 }
 
 impl LogConfig {
@@ -84,8 +95,7 @@ impl LogConfig {
             dir: None,
             stderr: true,
             logcat: true,
-            max_file_bytes: DEFAULT_MAX_BYTES,
-            keep_files: DEFAULT_KEEP_FILES,
+            limits: FileLimits::default(),
         }
     }
 
@@ -149,6 +159,17 @@ struct Inner {
     file_disabled_reason: Option<String>,
 }
 
+impl Inner {
+    /// 是不是已经挂在这个「目录 + 应用名」上：是的话重复 init / 重复挂载都继续写同一份文件
+    /// （日志文件按启动时间分，每次 init 都换一份会把同一次运行的日志劈成两半）
+    fn attached_to(&self, dir: &Path, app: &str) -> bool {
+        self.sink
+            .as_ref()
+            .map(|sink| sink.root() == dir && sink.app() == layout::sanitize_app(app))
+            .unwrap_or(false)
+    }
+}
+
 impl Logger {
     fn new(config: &LogConfig) -> Self {
         let mut inner = Inner {
@@ -160,7 +181,7 @@ impl Logger {
             file_disabled_reason: None,
         };
         if let Some(dir) = &config.dir {
-            attach(&mut inner, dir, &config.app, config.max_file_bytes, config.keep_files);
+            attach(&mut inner, dir, &config.app, config.limits);
         }
         Self {
             app: config.app.clone(),
@@ -174,16 +195,8 @@ impl Logger {
         inner.stderr = config.stderr;
         inner.logcat = config.logcat;
         if let Some(dir) = &config.dir {
-            let wanted = dir.join(log_file_name(&config.app));
-            let current = inner.sink.as_ref().map(|sink| sink.path().to_path_buf());
-            if current.as_deref() != Some(wanted.as_path()) {
-                attach(
-                    &mut inner,
-                    dir,
-                    &config.app,
-                    config.max_file_bytes,
-                    config.keep_files,
-                );
+            if !inner.attached_to(dir, &config.app) {
+                attach(&mut inner, dir, &config.app, config.limits);
             }
         }
         let spec = effective_spec(&config.level);
@@ -199,18 +212,16 @@ impl Logger {
         &self.app
     }
 
-    /// 挂载（或切换）文件日志目录，返回日志文件完整路径
+    /// 挂载（或切换）文件日志目录，返回本次运行的日志文件完整路径。
+    ///
+    /// 已经挂在同一个目录上就直接返回当前文件，不会另开一份。
     pub fn attach_dir(&self, dir: impl Into<PathBuf>) -> Result<PathBuf, String> {
         let dir = dir.into();
         let mut inner = self.lock();
         let app = self.app.clone();
-        attach(
-            &mut inner,
-            &dir,
-            &app,
-            DEFAULT_MAX_BYTES,
-            DEFAULT_KEEP_FILES,
-        );
+        if !inner.attached_to(&dir, &app) {
+            attach(&mut inner, &dir, &app, FileLimits::default());
+        }
         inner
             .sink
             .as_ref()
@@ -240,27 +251,25 @@ impl Logger {
         self.lock().filter.spec()
     }
 
-    /// 记一条来自日志门面之外的文本（前端回传的日志、外部进程输出）
+    /// 记一条来自日志门面之外的文本（前端回传的日志、外部进程输出）。
+    ///
+    /// 格式与 `log` 门面的记录完全一致（同一份格式化代码），因此多行正文照样缩进成续行。
     pub fn write_line(&self, level: Level, target: &str, message: &str) {
         if !self.enabled_for(level, target) {
             return;
         }
-        let line = format!(
-            "{} {:<5} {}: {}",
-            timestamp(),
-            level_name(level),
-            target,
-            message
-        );
-        self.write_formatted(level, &line);
+        self.write_formatted(level, &record::format_line(level, target, message));
     }
 
-    /// 日志目录（未挂载文件目标时 `None`）
+    /// 日志目录（未挂载文件目标时 `None`）：日期目录都在它下面，跨天也不变
     pub fn dir(&self) -> Option<PathBuf> {
-        self.lock().sink.as_ref().map(|sink| sink.dir().to_path_buf())
+        self.lock()
+            .sink
+            .as_ref()
+            .map(|sink| sink.root().to_path_buf())
     }
 
-    /// 当前日志文件路径
+    /// 当前写入的日志文件路径（跨天后是新的那一份）
     pub fn file_path(&self) -> Option<PathBuf> {
         self.lock().sink.as_ref().map(|sink| sink.path().to_path_buf())
     }
@@ -275,11 +284,19 @@ impl Logger {
         self.lock().file_disabled_reason.clone()
     }
 
-    /// 读日志尾巴（跨轮转文件，从旧到新），只保留 `min_level` 以上的记录
+    /// 最近若干份日志（新 → 旧，含正在写的这一份）；文件日志不可用时为空
+    pub fn runs(&self, limit: usize) -> Vec<LogRun> {
+        match self.lock().sink.as_ref() {
+            Some(sink) => sink.runs(limit),
+            None => Vec::new(),
+        }
+    }
+
+    /// 读本次运行的日志尾巴（含它的轮转备份，从旧到新），只保留 `min_level` 以上的记录
     pub fn read_tail(&self, max_lines: usize, min_level: LevelFilter) -> Result<String, String> {
         let mut inner = self.lock();
         match inner.sink.as_mut() {
-            Some(sink) => Ok(sink.read_tail(max_lines.clamp(1, 20_000), min_level)),
+            Some(sink) => Ok(sink.read_current(max_lines.clamp(1, 20_000), min_level)),
             None => Err(inner
                 .file_disabled_reason
                 .clone()
@@ -287,7 +304,24 @@ impl Logger {
         }
     }
 
-    /// 清空日志（当前文件 + 历史文件）
+    /// 读指定的一次运行（[`Logger::runs`] 给出的路径）；路径不在本应用的日志目录下时报错
+    pub fn read_run(
+        &self,
+        path: impl AsRef<Path>,
+        max_lines: usize,
+        min_level: LevelFilter,
+    ) -> Result<String, String> {
+        let mut inner = self.lock();
+        match inner.sink.as_mut() {
+            Some(sink) => sink.read_run(path.as_ref(), max_lines.clamp(1, 20_000), min_level),
+            None => Err(inner
+                .file_disabled_reason
+                .clone()
+                .unwrap_or_else(|| "当前未启用文件日志".to_string())),
+        }
+    }
+
+    /// 清空日志（所有日期的文件 + 历史文件）
     pub fn clear(&self) -> Result<(), String> {
         let mut inner = self.lock();
         match inner.sink.as_mut() {
@@ -361,14 +395,8 @@ impl Log for Logger {
     }
 }
 
-fn attach(
-    inner: &mut Inner,
-    dir: &Path,
-    app: &str,
-    max_bytes: u64,
-    keep: usize,
-) {
-    match FileSink::open(dir, &log_file_name(app), max_bytes, keep) {
+fn attach(inner: &mut Inner, dir: &Path, app: &str, limits: FileLimits) {
+    match FileSink::open(dir, app, limits) {
         Ok(sink) => {
             inner.sink = Some(sink);
             inner.write_failures = 0;
@@ -380,21 +408,6 @@ fn attach(
             eprintln!("[readerx-log] 文件日志不可用：{error}");
         }
     }
-}
-
-/// 日志文件名：应用名里只留安全字符，避免拼出目录穿越的名字
-fn log_file_name(app: &str) -> String {
-    let safe: String = app
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    format!("{safe}.log")
 }
 
 /// 环境变量优先于传入规格（`READERX_LOG` 是排障时的最高优先级开关）
@@ -430,13 +443,6 @@ mod tests {
     }
 
     #[test]
-    fn file_name_is_sanitized() {
-        assert_eq!(log_file_name("readerx"), "readerx.log");
-        assert_eq!(log_file_name("readerx-source"), "readerx-source.log");
-        assert_eq!(log_file_name("../etc/passwd"), "---etc-passwd.log");
-    }
-
-    #[test]
     fn logger_writes_records_to_file_and_respects_level() {
         let dir = temp_dir("level");
         let logger = test_logger(&dir, "info");
@@ -454,15 +460,43 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// 日志落在「日期目录 / 以时刻命名的文件」里，目录与文件路径都能报给界面
     #[test]
-    fn attach_dir_reports_path_and_clear_empties_it() {
+    fn attach_dir_reports_a_dated_run_file_and_clear_empties_it() {
         let dir = temp_dir("attach");
         let logger = Logger::new(&LogConfig::new("readerx-attach").without_stderr());
         assert!(!logger.file_enabled());
         let path = logger.attach_dir(&dir).unwrap();
-        assert!(path.ends_with("readerx-attach.log"), "{}", path.display());
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        assert!(
+            name.starts_with("readerx-attach-") && name.ends_with(".log"),
+            "{}",
+            path.display()
+        );
+        // 日期目录名就是文件所在的上一级目录，且形如 2026-09-25
+        let day = path
+            .parent()
+            .and_then(|dir| dir.file_name())
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        assert!(layout::is_day_name(&day), "{day}");
+        assert_eq!(logger.dir().unwrap(), dir);
+        // 重复挂载同一个目录不该另开一份文件：同一次运行的日志不能被劈成两半
+        assert_eq!(logger.attach_dir(&dir).unwrap(), path);
         logger.write_line(Level::Error, "test", "先写一条");
         assert!(logger.read_tail(10, LevelFilter::Trace).unwrap().contains("先写一条"));
+        // 运行列表里能选中本次运行，并按它的路径读回同一份日志
+        let runs = logger.runs(10);
+        assert_eq!(runs.len(), 1);
+        assert!(runs[0].current);
+        assert_eq!(runs[0].path, path);
+        let text = logger.read_run(&runs[0].path, 10, LevelFilter::Trace).unwrap();
+        assert!(text.contains("先写一条"), "{text}");
+        assert!(
+            logger.read_run("/etc/passwd", 10, LevelFilter::Trace).is_err(),
+            "目录之外的路径不该被读取"
+        );
         logger.clear().unwrap();
         assert!(logger.read_tail(10, LevelFilter::Trace).unwrap().is_empty());
         let _ = fs::remove_dir_all(&dir);
@@ -473,5 +507,6 @@ mod tests {
         let logger = Logger::new(&LogConfig::new("readerx-nofile").without_stderr());
         let error = logger.read_tail(10, LevelFilter::Trace).unwrap_err();
         assert!(error.contains("文件日志"), "{error}");
+        assert!(logger.runs(10).is_empty());
     }
 }

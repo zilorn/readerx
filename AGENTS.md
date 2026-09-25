@@ -180,9 +180,10 @@
 - **只有一个出口**：Rust 用 `log` 门面的宏（`log::info!` / `log::warn!` …），前端用
   `src/lib/logger.ts` 的 `createLogger(scope)`。**不要在业务代码里写 `println!` / `console.*`**
   （CLI 的结果输出除外，那是给用户看的数据，不是日志）。
-- 设施在 `src-tauri/crates/readerx-log`（文件轮转 + 标准错误 + Android logcat + 脱敏），
-  App 侧接线在 `src-tauri/src/logging.rs`；日志文件是 `<应用数据目录>/logs/readerx.log`，
-  应用内「设置 → 调试 → 应用日志」可看、可复制、可切级别。完整说明见 `docs/logging.md`。
+- 设施在 `src-tauri/crates/readerx-log`（一天一个目录 / 一次启动一个文件 + 体积轮转 +
+  标准错误 + Android logcat + 脱敏），App 侧接线在 `src-tauri/src/logging.rs`；日志文件是
+  `<应用数据目录>/logs/<日期>/readerx-<时刻>.log`，应用内「设置 → 调试 → 应用日志」
+  可看（含切换历史文件）、可复制、可切级别。完整说明见 `docs/logging.md`。
 - 级别口径：`error` 不该发生的异常 / `warn` 可恢复的失败与降级 / `info` 用户可感知的完整动作 /
   `debug` 细节（逐章、逐请求）。循环里只记 `debug`，绝不在循环里记 `info`/`warn`。
 - **凭据永不进日志**：Cookie、token、密码、请求头取值、存储快照、书籍正文一律不写；

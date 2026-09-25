@@ -6,7 +6,7 @@
 //! 1. [`init_early`] 在 `run()` 最开头调用：先只打标准错误（Android 走 logcat），
 //!    此时若启动早期就崩，日志照样看得见；
 //! 2. [`attach_app_dir`] 在 Tauri `setup` 里调用：拿到应用数据目录后挂上文件目标
-//!    （`<数据目录>/logs/readerx.log`），并把用户设置里的日志级别应用上去。
+//!    （`<数据目录>/logs/<日期>/readerx-<时刻>.log`），并把用户设置里的日志级别应用上去。
 //!
 //! 级别、目录、轮转等实现细节都在 `readerx-log` crate：书源引擎与独立二进制
 //! 用的是同一份代码，这里只负责「App 的数据目录与用户偏好」这一段。
@@ -15,7 +15,7 @@ use crate::storage;
 use log::{Level, LevelFilter};
 use readerx_log::{LogConfig, Logger, LOG_DIR_NAME};
 use serde::Serialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager};
 
 /// 日志级别偏好的状态键（设置页可改，重启后仍生效）
@@ -27,6 +27,9 @@ pub const WEB_TARGET: &str = "web";
 
 /// 日志尾巴一次最多返回的行数
 const MAX_TAIL_LINES: usize = 20_000;
+
+/// 「应用日志」查看器里最多列出多少份历史日志（一次运行一份）
+const MAX_RUNS: usize = 30;
 
 fn config() -> LogConfig {
     LogConfig::new("readerx")
@@ -124,12 +127,30 @@ pub struct LogInfo {
     pub file_error: String,
 }
 
+/// 一次运行写下的日志（界面上「应用日志」的文件选择器按它列出）
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogRunInfo {
+    /// 本地日期 `2026-09-25`
+    pub date: String,
+    /// 这一份文件开始写的时刻 `150405`
+    pub time: String,
+    /// 该次运行的日志文件路径
+    pub path: String,
+    /// 是不是当前正在写的这一次运行
+    pub current: bool,
+}
+
 /// 一次日志读取的结果
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LogTail {
     /// 按时间从旧到新的日志文本（空串 = 还没有日志）
     pub text: String,
+    /// 最近若干次运行（新 → 旧），界面据此切换文件
+    pub runs: Vec<LogRunInfo>,
+    /// `text` 来自哪一次运行（它的文件路径）；没有日志时为空串
+    pub selected: String,
     #[serde(flatten)]
     pub info: LogInfo,
 }
@@ -146,13 +167,68 @@ fn log_info(logger: &Logger) -> LogInfo {
     }
 }
 
+fn run_infos(logger: &Logger) -> Vec<LogRunInfo> {
+    logger
+        .runs(MAX_RUNS)
+        .into_iter()
+        .map(|run| LogRunInfo {
+            date: run.day,
+            time: run.clock,
+            path: run.path.display().to_string(),
+            current: run.current,
+        })
+        .collect()
+}
+
 /// 读取日志尾巴；文件日志不可用时也返回正常结构（把原因放在 `fileError` 里），
 /// 让设置页能显示「为什么没有日志」，而不是抛一个用户看不懂的错误。
-fn tail_payload(max_lines: usize, min_level: Option<LevelFilter>) -> LogTail {
+///
+/// `run` 为 `None` 时读本次运行；给了路径就读那一次运行 —— 路径只在
+/// `readerx-log` 认得（本应用日志目录下的一次运行）时才作数，否则退回本次运行。
+fn tail_payload(max_lines: usize, min_level: Option<LevelFilter>, run: Option<&str>) -> LogTail {
     let logger = init_early();
     let mut info = log_info(logger);
-    let text = match logger.read_tail(max_lines, min_level.unwrap_or(LevelFilter::Trace)) {
-        Ok(text) => text,
+    let min_level = min_level.unwrap_or(LevelFilter::Trace);
+    let wanted = run.map(str::trim).filter(|path| !path.is_empty());
+    let mut selected = String::new();
+    let text = match wanted {
+        Some(path) => match logger.read_run(Path::new(path), max_lines, min_level) {
+            Ok(text) => {
+                selected = path.to_string();
+                text
+            }
+            // 选中的文件可能刚好被淘汰掉了：退回本次运行，别让界面卡在一个读不到的路径上
+            Err(error) => {
+                log::debug!("读取所选日志失败（{path}）：{error}，改读本次运行");
+                read_current(logger, max_lines, min_level, &mut info, &mut selected)
+            }
+        },
+        None => read_current(logger, max_lines, min_level, &mut info, &mut selected),
+    };
+    LogTail {
+        text,
+        runs: run_infos(logger),
+        selected,
+        info,
+    }
+}
+
+/// 读本次运行的日志，并把它的路径写进 `selected`
+fn read_current(
+    logger: &Logger,
+    max_lines: usize,
+    min_level: LevelFilter,
+    info: &mut LogInfo,
+    selected: &mut String,
+) -> String {
+    match logger.read_tail(max_lines, min_level) {
+        Ok(text) => {
+            *selected = logger
+                .file_path()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default();
+            text
+        }
         Err(error) => {
             info.file_enabled = false;
             if info.file_error.is_empty() {
@@ -160,8 +236,7 @@ fn tail_payload(max_lines: usize, min_level: Option<LevelFilter>) -> LogTail {
             }
             String::new()
         }
-    };
-    LogTail { text, info }
+    }
 }
 
 /// 前端回传的一条日志
@@ -204,11 +279,15 @@ pub async fn readerx_log_write(records: Vec<WebLogRecord>) -> Result<(), String>
     Ok(())
 }
 
-/// 读取日志尾巴；`min_level` 为 `info` / `warn` / `error` 时只返回该级别以上的记录
+/// 读取日志尾巴；`min_level` 为 `info` / `warn` / `error` 时只返回该级别以上的记录。
+///
+/// `path` 是「读哪一次运行」：不传读本次运行，传了就读那一份（界面上的文件选择器）；
+/// 它必须是 `readerx-log` 认得的本应用日志文件，别的路径一律退回本次运行。
 #[tauri::command]
 pub async fn readerx_log_tail(
     max_lines: Option<usize>,
     min_level: Option<String>,
+    path: Option<String>,
 ) -> Result<LogTail, String> {
     let min_level = match min_level.as_deref().map(str::trim) {
         None | Some("") => None,
@@ -221,10 +300,11 @@ pub async fn readerx_log_tail(
     Ok(tail_payload(
         max_lines.unwrap_or(2_000).min(MAX_TAIL_LINES),
         min_level,
+        path.as_deref(),
     ))
 }
 
-/// 清空日志文件（当前 + 历史）
+/// 清空日志文件（所有日期的文件 + 历史文件）
 #[tauri::command]
 pub async fn readerx_log_clear() -> Result<(), String> {
     init_early().clear()
@@ -251,8 +331,15 @@ mod tests {
     fn log_tail_wire_format_is_camel_case() {
         let value = serde_json::to_value(LogTail {
             text: "line".to_string(),
+            runs: vec![LogRunInfo {
+                date: "2026-09-25".to_string(),
+                time: "150405".to_string(),
+                path: "/tmp/2026-09-25/readerx-150405.log".to_string(),
+                current: true,
+            }],
+            selected: "/tmp/2026-09-25/readerx-150405.log".to_string(),
             info: LogInfo {
-                path: "/tmp/readerx.log".to_string(),
+                path: "/tmp/2026-09-25/readerx-150405.log".to_string(),
                 level: "info".to_string(),
                 file_enabled: true,
                 file_error: String::new(),
@@ -261,8 +348,12 @@ mod tests {
         .expect("序列化 LogTail 失败");
         assert_eq!(value["fileEnabled"], true);
         assert_eq!(value["fileError"], "");
-        assert_eq!(value["path"], "/tmp/readerx.log");
+        assert_eq!(value["path"], "/tmp/2026-09-25/readerx-150405.log");
         assert_eq!(value["level"], "info");
         assert_eq!(value["text"], "line");
+        assert_eq!(value["selected"], "/tmp/2026-09-25/readerx-150405.log");
+        assert_eq!(value["runs"][0]["date"], "2026-09-25");
+        assert_eq!(value["runs"][0]["time"], "150405");
+        assert_eq!(value["runs"][0]["current"], true);
     }
 }

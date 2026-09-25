@@ -62,7 +62,8 @@ fn dispatch(cli: Cli) -> Result<(), String> {
         .unwrap_or_else(readerx_source::default_data_root);
     readerx_source::store::init_data_root(&root);
 
-    // 拿到数据根后把文件目标挂上：`<数据目录>/logs/readerx-source.log`。
+    // 拿到数据根后把文件目标挂上：`<数据目录>/logs/<日期>/readerx-source-<时刻>.log`
+    // （一天一个目录、一次运行一份文件，详见 `docs/logging.md`）。
     // 重复 init 只会应用新配置（logger 是进程级单例），因此启动早期的那条也不丢。
     let level = if cli.verbose { "debug" } else { "info" };
     let logger = readerx_log::init(

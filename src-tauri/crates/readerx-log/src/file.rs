@@ -1,18 +1,20 @@
-//! 文件落盘：单文件按体积轮转 + 保留若干历史文件。
+//! 文件落盘：一次运行一个文件、一天一个目录，单文件写满体积上限后轮转。
 //!
-//! 布局（`<数据目录>/logs/`）：
+//! 布局与命名见 [`crate::layout`]，为什么这么分见那里的模块注释。这里只管三件事：
 //!
-//! ```text
-//! readerx.log      当前写入
-//! readerx.log.1    上一份（数字越大越旧）
-//! readerx.log.2
-//! ```
+//! - **开**：确定本次运行属于哪一天、文件名里的时刻是什么（日期取本地时间）；
+//! - **写**：追加一行；发现这一行的日期和当前文件不一致（跨天）就换目录换文件，
+//!   发现当前文件要超上限就轮转成 `.1` / `.2`；
+//! - **读 / 清**：读交给 [`crate::read`]，清空交给 [`crate::retention`]。
 //!
-//! 为什么自己写而不引依赖：需求只有「一行一行追加 + 超限改名 + 读尾巴 + 清空」，
-//! 几十行就能写完，且必须能在 Android / Windows / Linux 上一致工作；
-//! 引 `tracing-appender` 之类反而要把日志门面再包一层。
+//! 为什么自己写而不引依赖：需求只有「一行一行追加 + 跨天换文件 + 超限改名 + 读尾巴 + 清空」，
+//! 必须能在 Android / Windows / Linux 上一致工作；引 `tracing-appender` 之类反而要把日志门面
+//! 再包一层，而那些库也大多只做「按天」或「按体积」其中一件。
 
+use crate::layout;
+use crate::read;
 use crate::record;
+use crate::retention;
 use log::LevelFilter;
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Write};
@@ -20,52 +22,125 @@ use std::path::{Path, PathBuf};
 
 /// 单个日志文件默认上限（超出即轮转）
 pub const DEFAULT_MAX_BYTES: u64 = 2 * 1024 * 1024;
-/// 默认保留的历史文件份数（连同当前文件，最多占 `(keep + 1) * max_bytes`）
+/// 一次运行默认保留的轮转备份份数（连同主文件，最多占 `(keep + 1) * max_bytes`）
 pub const DEFAULT_KEEP_FILES: usize = 3;
+/// 默认保留最近多少天（含今天）
+pub const DEFAULT_KEEP_DAYS: usize = 7;
+/// 日志目录默认总量上限：按天保留挡不住详细日志的量，再加一道总量兜底
+pub const DEFAULT_MAX_TOTAL_BYTES: u64 = 32 * 1024 * 1024;
+
+/// 文件与保留策略
+#[derive(Debug, Clone, Copy)]
+pub struct FileLimits {
+    /// 单个文件体积上限
+    pub max_bytes: u64,
+    /// 一次运行内保留的轮转备份份数
+    pub keep_files: usize,
+    /// 保留最近多少天（含今天）
+    pub keep_days: usize,
+    /// 日志目录总量上限
+    pub max_total_bytes: u64,
+}
+
+impl Default for FileLimits {
+    fn default() -> Self {
+        Self {
+            max_bytes: DEFAULT_MAX_BYTES,
+            keep_files: DEFAULT_KEEP_FILES,
+            keep_days: DEFAULT_KEEP_DAYS,
+            max_total_bytes: DEFAULT_MAX_TOTAL_BYTES,
+        }
+    }
+}
+
+impl FileLimits {
+    /// 夹进安全区间：配置写错不该让日志把磁盘写满，也不该把保留天数抹成 0
+    /// （`keep_files` 下限是 1：0 会让轮转变成「删掉当前文件再新建」，等于白丢日志）
+    fn sanitized(self) -> Self {
+        let max_bytes = self.max_bytes.max(64 * 1024);
+        Self {
+            max_bytes,
+            keep_files: self.keep_files.clamp(1, 20),
+            keep_days: self.keep_days.clamp(1, 90),
+            max_total_bytes: self.max_total_bytes.max(max_bytes),
+        }
+    }
+}
 
 pub(crate) struct FileSink {
+    /// 日志根目录（`<数据目录>/logs`）：日期目录都在它下面
+    root: PathBuf,
+    /// 净化过的应用名（文件名前缀）
+    app: String,
+    /// 当前日期目录
     dir: PathBuf,
+    /// 当前写入的文件
     path: PathBuf,
     file: Option<File>,
     /// 当前文件已写入字节数（避免每次写前 `metadata()`，日志热路径只做加法）
     written: u64,
-    max_bytes: u64,
-    keep: usize,
+    limits: FileLimits,
+    /// 当前文件属于哪一天（`2026-09-25`），跨天时换文件
+    day: String,
 }
 
 impl FileSink {
-    /// 打开（必要时创建）日志文件；目录不可写时返回可读错误，由调用方降级为只打标准错误
-    pub(crate) fn open(
-        dir: &Path,
-        file_name: &str,
-        max_bytes: u64,
-        keep: usize,
-    ) -> Result<Self, String> {
-        fs::create_dir_all(dir).map_err(|e| format!("创建日志目录 {} 失败: {e}", dir.display()))?;
-        let path = dir.join(file_name);
+    /// 打开本次运行的日志文件；目录不可写时返回可读错误，由调用方降级为只打标准错误
+    pub(crate) fn open(root: &Path, app: &str, limits: FileLimits) -> Result<Self, String> {
+        let app = layout::sanitize_app(app);
+        let limits = limits.sanitized();
+        fs::create_dir_all(root).map_err(|e| format!("创建日志目录 {} 失败: {e}", root.display()))?;
+        // 顺序要紧：先淘汰过期日志，再迁移旧版扁平文件 ——
+        // 反过来会把刚搬进来、按修改时间算早已过期的历史日志在同一次启动里删掉
+        if let Err(error) = retention::prune(root, &app, &limits, None) {
+            eprintln!("[readerx-log] 清理过期日志失败：{error}");
+        }
+        retention::migrate_legacy(root, &app);
+
+        let (day, clock) = record::local_stamp();
+        let dir = root.join(&day);
+        let path = dir.join(layout::run_file_name(&app, &clock));
+        fs::create_dir_all(&dir)
+            .map_err(|e| format!("创建日志目录 {} 失败: {e}", dir.display()))?;
         let (file, written) = open_append(&path)?;
         Ok(Self {
-            dir: dir.to_path_buf(),
+            root: root.to_path_buf(),
+            app,
+            dir,
             path,
             file: Some(file),
             written,
-            max_bytes: max_bytes.max(64 * 1024),
-            keep: keep.min(20),
+            limits,
+            day,
         })
     }
 
-    pub(crate) fn dir(&self) -> &Path {
-        &self.dir
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
     }
 
+    pub(crate) fn app(&self) -> &str {
+        &self.app
+    }
+
+    /// 当前写入的文件（跨天后会变）
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }
 
     /// 追加一行（自动补换行）；写失败只报错不 panic —— 日志挂掉不能带崩业务
     pub(crate) fn write_line(&mut self, line: &str) -> Result<(), String> {
+        // 跨天：换日期目录、换一份新文件。日期直接读这一行的前缀（写入时间的本地日期），
+        // 不再取一次系统时钟，也就不会出现「记录写着 09-25、文件落在 09-26」的错位。
+        // 日期必须是日期形状：万一某行「看着像记录行」却不是（续行正好凑出同样的分隔符），
+        // 宁可不换文件，也不去建一个扫描与淘汰都认不出的目录
+        if let Some((day, clock)) = record::stamp_of_line(line) {
+            if day != self.day && layout::is_day_name(&day) {
+                self.start_day(&day, &clock)?;
+            }
+        }
         let bytes = line.len() as u64 + 1;
-        if self.written + bytes > self.max_bytes {
+        if self.written + bytes > self.limits.max_bytes {
             self.rotate()?;
         }
         let file = self.ensure_open()?;
@@ -83,92 +158,80 @@ impl FileSink {
         }
     }
 
-    /// 清空全部日志（当前文件截断 + 删除历史文件）
+    /// 清空全部日志（所有日期目录 + 历史文件），随后继续往当前这份写
     pub(crate) fn clear(&mut self) -> Result<(), String> {
         self.file = None;
-        for path in self.all_paths() {
-            match fs::remove_file(&path) {
-                Ok(()) => {}
-                Err(e) if e.kind() == ErrorKind::NotFound => {}
-                Err(e) => return Err(format!("删除日志文件 {} 失败: {e}", path.display())),
-            }
-        }
+        retention::clear(&self.root, &self.app)?;
+        // 清空会把空掉的日期目录一并删掉（包括当前这一天），重新建回来再打开当前文件
+        fs::create_dir_all(&self.dir)
+            .map_err(|e| format!("创建日志目录 {} 失败: {e}", self.dir.display()))?;
         let (file, written) = open_append(&self.path)?;
         self.file = Some(file);
         self.written = written;
         Ok(())
     }
 
-    /// 读取日志尾巴（跨轮转文件，按时间从旧到新）。
-    /// `min_level` 以上的记录才保留，续行跟随其上一条记录一起取舍。
-    pub(crate) fn read_tail(&mut self, max_lines: usize, min_level: LevelFilter) -> String {
+    /// 读取本次运行的日志（当前文件 + 它自己的轮转备份）
+    pub(crate) fn read_current(&mut self, max_lines: usize, min_level: LevelFilter) -> String {
         self.flush();
-        let mut collected: Vec<String> = Vec::new();
-        for path in self.all_paths() {
-            if collected.len() >= max_lines {
-                break;
-            }
-            let text = match fs::read_to_string(&path) {
-                Ok(text) => text,
-                Err(e) if e.kind() == ErrorKind::NotFound => continue,
-                Err(_) => continue,
-            };
-            let mut pending: Vec<&str> = Vec::new();
-            for line in text.lines().rev() {
-                match record::level_of_line(line) {
-                    Some(level) => {
-                        let keep = level_allowed(level, min_level);
-                        if keep {
-                            collected.push(line.to_string());
-                            // 反向遍历先遇到续行，这里翻回去再压入，保持行序
-                            for continuation in pending.drain(..).rev() {
-                                collected.push(continuation.to_string());
-                            }
-                        } else {
-                            pending.clear();
-                        }
-                    }
-                    // 续行 / 表头：属于「正向看的下一条记录」，先存着等它出现
-                    None => pending.push(line),
-                }
-                if collected.len() >= max_lines {
-                    break;
-                }
-            }
-        }
-        collected.reverse();
-        collected.join("\n")
+        read::read_run(&self.path, self.limits.keep_files, max_lines, min_level)
     }
 
-    /// 当前文件 + 全部历史文件（新 → 旧）
-    fn all_paths(&self) -> Vec<PathBuf> {
-        let mut paths = vec![self.path.clone()];
-        for index in 1..=self.keep {
-            paths.push(backup_path(&self.path, index));
+    /// 读取指定的一次运行；路径不属于本应用的日志目录时报错（读取入口不接受任意路径）
+    pub(crate) fn read_run(
+        &self,
+        path: &Path,
+        max_lines: usize,
+        min_level: LevelFilter,
+    ) -> Result<String, String> {
+        if !retention::is_run_path(&self.root, &self.app, path) {
+            return Err(format!("不是本应用的日志文件: {}", path.display()));
         }
-        paths
+        Ok(read::read_run(
+            path,
+            self.limits.keep_files,
+            max_lines,
+            min_level,
+        ))
     }
 
-    /// 轮转：`log` → `log.1` → `log.2` …，最旧的一份丢弃
+    /// 最近若干份日志（新 → 旧，含本次运行）
+    pub(crate) fn runs(&self, limit: usize) -> Vec<retention::LogRun> {
+        retention::list_runs(&self.root, &self.app, Some(&self.path), limit)
+    }
+
+    /// 换到新的一天：新日期目录 + 以当前时刻命名的新文件，并顺手清理过期日志
+    fn start_day(&mut self, day: &str, clock: &str) -> Result<(), String> {
+        self.flush();
+        self.file = None;
+        let dir = self.root.join(day);
+        fs::create_dir_all(&dir)
+            .map_err(|e| format!("创建日志目录 {} 失败: {e}", dir.display()))?;
+        self.dir = dir;
+        self.path = self.dir.join(layout::run_file_name(&self.app, clock));
+        self.day = day.to_string();
+        let (file, written) = open_append(&self.path)?;
+        self.file = Some(file);
+        self.written = written;
+        if let Err(error) = retention::prune(&self.root, &self.app, &self.limits, Some(&self.path)) {
+            eprintln!("[readerx-log] 清理过期日志失败：{error}");
+        }
+        Ok(())
+    }
+
+    /// 当前文件写满：`log` → `log.1` → `log.2` …，最旧的一份丢弃
     fn rotate(&mut self) -> Result<(), String> {
         self.flush();
         self.file = None;
-        let oldest = backup_path(&self.path, self.keep);
-        let _ = fs::remove_file(&oldest);
-        for index in (1..self.keep).rev() {
-            let from = backup_path(&self.path, index);
-            let to = backup_path(&self.path, index + 1);
-            match fs::rename(&from, &to) {
-                Ok(()) => {}
-                Err(e) if e.kind() == ErrorKind::NotFound => {}
-                Err(e) => return Err(format!("轮转日志文件失败: {e}")),
-            }
+        let keep = self.limits.keep_files;
+        let _ = fs::remove_file(layout::rotated_path(&self.path, keep));
+        for index in (1..keep).rev() {
+            rename(
+                &layout::rotated_path(&self.path, index),
+                &layout::rotated_path(&self.path, index + 1),
+            )?;
         }
-        match fs::rename(&self.path, backup_path(&self.path, 1)) {
-            Ok(()) => {}
-            Err(e) if e.kind() == ErrorKind::NotFound => {}
-            Err(e) => return Err(format!("轮转日志文件失败: {e}")),
-        }
+        rename(&self.path, &layout::rotated_path(&self.path, 1))?;
         let (file, written) = open_append(&self.path)?;
         self.file = Some(file);
         self.written = written;
@@ -187,15 +250,26 @@ impl FileSink {
     }
 }
 
-/// `log` → `log.1`
-fn backup_path(path: &Path, index: usize) -> PathBuf {
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(format!(".{index}"));
-    path.with_file_name(name)
+/// 以追加方式打开，并返回当前体积。
+///
+/// 目录不在时建一次再试：日期目录可能刚被另一个进程当作空目录清掉（清理过期日志会删空目录），
+/// 此时这一次写入不该白白丢掉。
+fn open_append(path: &Path) -> Result<(File, u64), String> {
+    match append(path) {
+        Ok(opened) => Ok(opened),
+        Err(first) => {
+            let Some(dir) = path.parent() else {
+                return Err(first);
+            };
+            if fs::create_dir_all(dir).is_err() {
+                return Err(first);
+            }
+            append(path).map_err(|_| first)
+        }
+    }
 }
 
-/// 以追加方式打开，并返回当前体积
-fn open_append(path: &Path) -> Result<(File, u64), String> {
+fn append(path: &Path) -> Result<(File, u64), String> {
     let file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -205,13 +279,19 @@ fn open_append(path: &Path) -> Result<(File, u64), String> {
     Ok((file, written))
 }
 
-fn level_allowed(level: log::Level, min: LevelFilter) -> bool {
-    min >= level.to_level_filter()
+/// 改名；源文件不存在不算失败（轮转链本来就可能缺几份）
+fn rename(from: &Path, to: &Path) -> Result<(), String> {
+    match fs::rename(from, to) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("轮转日志文件失败: {e}")),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     /// 每个用例一个独立临时目录（不引 tempfile：只是拼个唯一名字）
@@ -227,76 +307,185 @@ mod tests {
         dir
     }
 
-    fn info_line(message: &str) -> String {
-        format!("2026-01-02 03:04:05.006 INFO  test: {message}")
+    fn limits(max_bytes: u64, keep_files: usize) -> FileLimits {
+        FileLimits {
+            max_bytes: max_bytes.max(64 * 1024),
+            keep_files,
+            ..FileLimits::default()
+        }
+    }
+
+    /// 指定日期的记录行（跨天用例要能伪造日期，不能只靠系统时钟）
+    fn line_on(day: &str, message: &str) -> String {
+        format!("{day} 03:04:05.006 INFO  test: {message}")
+    }
+
+    fn line(message: &str) -> String {
+        line_on(&record::local_stamp().0, message)
     }
 
     #[test]
-    fn writes_appends_and_reads_back() {
-        let dir = temp_dir("append");
-        let mut sink = FileSink::open(&dir, "readerx.log", DEFAULT_MAX_BYTES, 2).unwrap();
-        sink.write_line(&info_line("one")).unwrap();
-        sink.write_line(&info_line("two")).unwrap();
-        let tail = sink.read_tail(10, LevelFilter::Trace);
+    fn writes_into_a_day_directory_named_after_the_record() {
+        let root = temp_dir("append");
+        let mut sink = FileSink::open(&root, "readerx", FileLimits::default()).unwrap();
+        let (day, clock) = record::local_stamp();
+        assert_eq!(
+            sink.path(),
+            root.join(&day).join(format!("readerx-{clock}.log"))
+        );
+        sink.write_line(&line("one")).unwrap();
+        sink.write_line(&line("two")).unwrap();
+        let tail = sink.read_current(10, LevelFilter::Trace);
         assert!(tail.contains("one") && tail.contains("two"), "{tail}");
-        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&root);
     }
 
+    /// 跨天：新的一天用新目录 + 新文件，两边内容各归各的
+    #[test]
+    fn crossing_midnight_opens_a_file_in_the_new_day() {
+        let root = temp_dir("midnight");
+        let mut sink = FileSink::open(&root, "readerx", FileLimits::default()).unwrap();
+        let today = record::local_stamp().0;
+        let yesterday = record::day_before(1);
+        sink.write_line(&line_on(&yesterday, "昨天的")).unwrap();
+        sink.write_line(&line_on(&today, "今天的")).unwrap();
+        assert_eq!(
+            sink.path().parent(),
+            Some(root.join(&today).as_path()),
+            "换天后当前文件应落在新的一天"
+        );
+        let yesterday_text =
+            fs::read_to_string(root.join(&yesterday).join("readerx-030405.log")).unwrap();
+        assert!(yesterday_text.contains("昨天的"), "{yesterday_text}");
+        assert!(
+            sink.read_current(10, LevelFilter::Trace).contains("今天的"),
+            "跨天前的记录不该混进新文件"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 轮转仍按体积在同一份日志内进行，历史文件可读回
     #[test]
     fn rotates_when_exceeding_max_bytes_and_keeps_history() {
-        let dir = temp_dir("rotate");
-        // 下限 64 KiB 会把过小的上限抬回去，这里用合法的小上限
-        let mut sink = FileSink::open(&dir, "readerx.log", 64 * 1024, 2).unwrap();
+        let root = temp_dir("rotate");
+        let mut sink = FileSink::open(&root, "readerx", limits(64 * 1024, 2)).unwrap();
         // 每行 ~200 字节：写满 400 行必然跨过 64 KiB
         for index in 0..400 {
             let padding = "x".repeat(150);
-            sink.write_line(&info_line(&format!("line-{index} {padding}")))
-                .unwrap();
+            sink.write_line(&line(&format!("line-{index} {padding}"))).unwrap();
         }
         sink.flush();
-        assert!(backup_path(sink.path(), 1).exists(), "应产生第 1 份历史日志");
-        let tail = sink.read_tail(5, LevelFilter::Trace);
+        assert!(
+            layout::rotated_path(sink.path(), 1).exists(),
+            "应产生第 1 份历史日志"
+        );
+        let tail = sink.read_current(5, LevelFilter::Trace);
         assert!(tail.contains("line-399"), "{tail}");
         // 历史文件里能找到更早的记录，说明轮转没有直接丢掉
-        let tail_all = sink.read_tail(2000, LevelFilter::Trace);
+        let tail_all = sink.read_current(2000, LevelFilter::Trace);
         assert!(tail_all.contains("line-0 "), "历史记录应可从备份文件读回");
-        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
-    fn level_filter_drops_lower_records_and_keeps_continuations() {
-        let dir = temp_dir("filter");
-        let mut sink = FileSink::open(&dir, "readerx.log", DEFAULT_MAX_BYTES, 1).unwrap();
-        sink.write_line(&info_line("忽略我")).unwrap();
-        sink.write_line("2026-01-02 03:04:05.007 ERROR test: 保留我\n    续行")
-            .unwrap();
-        let tail = sink.read_tail(50, LevelFilter::Warn);
-        assert!(!tail.contains("忽略我"), "{tail}");
-        assert!(tail.contains("保留我") && tail.contains("续行"), "{tail}");
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn clear_removes_current_and_backups() {
-        let dir = temp_dir("clear");
-        let mut sink = FileSink::open(&dir, "readerx.log", DEFAULT_MAX_BYTES, 3).unwrap();
-        sink.write_line(&info_line("gone")).unwrap();
-        fs::write(backup_path(sink.path(), 1), "old").unwrap();
+    fn clear_removes_every_day_and_keeps_writing() {
+        let root = temp_dir("clear");
+        let mut sink = FileSink::open(&root, "readerx", FileLimits::default()).unwrap();
+        sink.write_line(&line("gone")).unwrap();
+        let yesterday = record::day_before(1);
+        fs::create_dir_all(root.join(&yesterday)).unwrap();
+        fs::write(root.join(&yesterday).join("readerx-080000.log"), "old day").unwrap();
         sink.clear().unwrap();
-        assert!(!backup_path(sink.path(), 1).exists(), "备份文件应被删除");
-        assert!(sink.read_tail(10, LevelFilter::Trace).is_empty());
+        assert!(!root.join(&yesterday).exists(), "其它日期的日志应被清掉");
+        assert!(sink.read_current(10, LevelFilter::Trace).is_empty());
         // 清空后仍可继续写入
-        sink.write_line(&info_line("after")).unwrap();
-        assert!(sink.read_tail(10, LevelFilter::Trace).contains("after"));
-        let _ = fs::remove_dir_all(&dir);
+        sink.write_line(&line("after")).unwrap();
+        assert!(sink.read_current(10, LevelFilter::Trace).contains("after"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn legacy_flat_log_is_migrated_on_open() {
+        let root = temp_dir("legacy");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("readerx.log"), line("升级前的日志")).unwrap();
+        let sink = FileSink::open(&root, "readerx", FileLimits::default()).unwrap();
+        drop(sink);
+        assert!(!root.join("readerx.log").exists(), "旧文件应被搬进日期目录");
+        // 迁移的目标名按修改时间取：与本次运行同一秒时会并进本次的文件，
+        // 因此这里断言的是「扫描到的日志里能找到旧内容」，而不是具体落在哪个文件
+        let merged: String = retention::scan(&root, "readerx")
+            .iter()
+            .map(|file| fs::read_to_string(&file.path).unwrap_or_default())
+            .collect();
+        assert!(merged.contains("升级前的日志"), "{merged}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn read_run_rejects_paths_outside_the_log_directory() {
+        let root = temp_dir("reject");
+        let sink = FileSink::open(&root, "readerx", FileLimits::default()).unwrap();
+        let error = sink
+            .read_run(Path::new("/etc/passwd"), 10, LevelFilter::Trace)
+            .unwrap_err();
+        assert!(error.contains("/etc/passwd"), "{error}");
+        let own = sink.path().to_path_buf();
+        assert!(sink.read_run(&own, 10, LevelFilter::Trace).is_ok());
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn missing_directory_is_created_on_open() {
-        let dir = temp_dir("mkdir").join("nested").join("logs");
-        assert!(!dir.exists());
-        let _sink = FileSink::open(&dir, "readerx.log", DEFAULT_MAX_BYTES, 1).unwrap();
-        assert!(dir.is_dir());
-        let _ = fs::remove_dir_all(dir.parent().unwrap().parent().unwrap());
+        let root = temp_dir("mkdir").join("nested").join("logs");
+        assert!(!root.exists());
+        let sink = FileSink::open(&root, "readerx", FileLimits::default()).unwrap();
+        assert!(sink.path().parent().unwrap().is_dir());
+        let _ = fs::remove_dir_all(root.parent().unwrap().parent().unwrap());
+    }
+
+    /// 目录在两次写入之间被删掉（清理空目录 / 用户手动删）：这一次打开要能把目录建回来
+    #[test]
+    fn opening_recreates_a_missing_day_directory_once() {
+        let root = temp_dir("reopen").join("2026-09-25");
+        let path = root.join("readerx-150405.log");
+        assert!(!root.exists());
+        let (_file, written) = open_append(&path).unwrap();
+        assert_eq!(written, 0);
+        assert!(path.is_file());
+        let _ = fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    /// 续行凑巧凑出记录行的分隔符、日期却不是日期：不换目录，也不留下扫描不认的怪目录
+    #[test]
+    fn a_line_with_a_non_date_prefix_does_not_switch_days() {
+        let root = temp_dir("junk-day");
+        let mut sink = FileSink::open(&root, "readerx", FileLimits::default()).unwrap();
+        let before = sink.path().to_path_buf();
+        sink.write_line("    -12345 67:89012.中中").unwrap();
+        assert_eq!(sink.path(), before, "不该为一个怪行换文件");
+        let days: Vec<String> = fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(days.len(), 1, "{days:?}");
+        assert!(layout::is_day_name(&days[0]), "{days:?}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn limits_are_clamped_to_safe_values() {
+        let limits = FileLimits {
+            max_bytes: 1,
+            keep_files: 0,
+            keep_days: 0,
+            max_total_bytes: 0,
+        }
+        .sanitized();
+        assert_eq!(limits.keep_files, 1, "0 份备份会让轮转变成截断，夹到 1");
+        assert_eq!(limits.keep_days, 1);
+        assert!(limits.max_bytes >= 64 * 1024, "{}", limits.max_bytes);
+        assert_eq!(limits.max_total_bytes, limits.max_bytes);
     }
 }

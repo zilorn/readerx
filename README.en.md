@@ -141,11 +141,12 @@ shared by both — there is no second implementation.
 ## Logging & Troubleshooting
 
 Frontend and backend share one logging pipeline: on the Rust side `readerx-log` writes everything
-to `<app data dir>/logs/readerx.log` (2 MB rotation per file, 3 historical files kept), and the
+to `<app data dir>/logs/<date>/readerx-<start time>.log` (one directory per day, one file per
+launch; 2 MB rotation per file, each app keeping the last 7 days up to 32 MB in total), and the
 book-source engine, the standalone binary and the frontend inside the WebView all log into the
-same file. **Settings → Debug → App log** lets you filter by level, copy and clear, and switch
-between "normal" and "verbose" (`READERX_LOG` can override temporarily, e.g.
-`READERX_LOG=info,readerx_source=debug`). Details and troubleshooting steps are in
+same file. **Settings → Debug → App log** lets you filter by level, switch between log files,
+copy and clear, and switch between "normal" and "verbose" (`READERX_LOG` can override temporarily,
+e.g. `READERX_LOG=info,readerx_source=debug`). Details and troubleshooting steps are in
 [docs/logging.md](./docs/logging.md).
 
 ## Development

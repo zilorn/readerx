@@ -1,15 +1,17 @@
 /**
  * 「设置 → 调试 → 应用日志」查看器。
  *
- * 日志本体是 Rust 写的 `<应用数据目录>/logs/readerx.log`（见 src-tauri/crates/readerx-log）。
- * 为什么要在应用里看而不是让用户去翻文件：Android 上应用数据目录对用户是不可见的，
- * 出了问题没有这个入口就只能靠连电脑抓 logcat —— 而绝大多数反馈发生在手机上。
+ * 日志本体是 Rust 写的 `<应用数据目录>/logs/<日期>/readerx-<时刻>.log`
+ * （见 src-tauri/crates/readerx-log）。为什么要在应用里看而不是让用户去翻文件：
+ * Android 上应用数据目录对用户是不可见的，出了问题没有这个入口就只能靠连电脑抓 logcat
+ * —— 而绝大多数反馈发生在手机上。
  *
- * 三个动作：按级别筛（全部 / 信息 / 警告 / 错误）、刷新、清空（连点两次确认）。
+ * 日志按「天 + 这一次启动」分文件，所以这里有四个动作：选文件（默认本次运行，可切到
+ * 上一次启动或更早）、按级别筛（全部 / 信息 / 警告 / 错误）、刷新、清空（连点两次确认）。
  * 级别「详细」会把用户偏好写成 debug 并立即生效（前后端一起放开），
  * 排障时让用户复现一次，日志里就能看到每一步。
  */
-import { Show, createEffect, createSignal, onCleanup } from "solid-js";
+import { For, Show, createEffect, createSignal, onCleanup, untrack } from "solid-js";
 import { CloseIcon, CopyIcon, RefreshIcon, TerminalIcon, TrashIcon } from "./icons";
 import { ScrollArea } from "./ScrollArea";
 import { showToast } from "../lib/toast";
@@ -19,6 +21,7 @@ import {
   readLogTail,
   setLogLevel,
   type LogFilter,
+  type LogRun,
   type LogTail,
 } from "../lib/logs";
 import type { LogLevel } from "../lib/logger";
@@ -44,6 +47,13 @@ function levelMode(spec: string): "info" | "debug" {
     : "info";
 }
 
+/** 一份日志的短标签：`09-25 15:04:05`（当前正在写的这一份额外注明） */
+function runLabel(run: LogRun): string {
+  const time = `${run.time.slice(0, 2)}:${run.time.slice(2, 4)}:${run.time.slice(4, 6)}`;
+  const moment = `${run.date.slice(5)} ${time}`;
+  return run.current ? t("settings.logs.runCurrent", { moment }) : moment;
+}
+
 export interface LogSheetProps {
   open: boolean;
   onClose: () => void;
@@ -53,32 +63,49 @@ export function LogSheet(props: LogSheetProps) {
   const [tail, setTail] = createSignal<LogTail | null>(null);
   const [loading, setLoading] = createSignal(false);
   const [filter, setFilter] = createSignal<LogFilter>(null);
+  const [runs, setRuns] = createSignal<LogRun[]>([]);
+  const [selected, setSelected] = createSignal("");
   const [detail, setDetail] = createSignal(false);
   const [confirming, setConfirming] = createSignal(false);
   let scrollEl: HTMLDivElement | undefined;
   let confirmTimer: number | undefined;
+  /** 读取请求序号：连点文件名时，先发的请求可能后回来，旧结果不能盖掉新选择 */
+  let readSeq = 0;
 
   onCleanup(() => window.clearTimeout(confirmTimer));
 
-  async function reload(selectFilter: LogFilter = filter()): Promise<void> {
+  async function reload(selectFilter: LogFilter = filter(), runPath = selected()): Promise<void> {
+    const seq = ++readSeq;
     setLoading(true);
     try {
-      const next = await readLogTail(TAIL_LINES, selectFilter);
+      const next = await readLogTail(TAIL_LINES, selectFilter, runPath);
+      if (seq !== readSeq) return;
       setTail(next);
+      setRuns(next.runs);
+      // 选中的文件可能已经被淘汰：以返回的为准，界面不会停在一个读不到的路径上
+      setSelected(next.selected);
       setDetail(levelMode(next.level) === "debug");
       // 最新一条在末尾：打开就落在末尾，不必手动往下滚
       queueMicrotask(() => {
         if (scrollEl) scrollEl.scrollTop = scrollEl.scrollHeight;
       });
     } finally {
-      setLoading(false);
+      if (seq === readSeq) setLoading(false);
     }
   }
 
-  // 打开时读一次；打开期间切换筛选也重读（级别过滤在后端做，前端只有这一份尾巴）
+  // 打开时读一次；打开期间切换筛选也重读（级别过滤在后端做，前端只有这一份尾巴）。
+  // 选文件走 onClick 里的显式调用，不由这个 effect 驱动，免得来回触发两次读取
   createEffect(() => {
-    if (props.open) void reload(filter());
+    const selectFilter = filter();
+    if (props.open) void reload(selectFilter, untrack(selected));
   });
+
+  function selectRun(runPath: string): void {
+    if (runPath === selected()) return;
+    setSelected(runPath);
+    void reload(filter(), runPath);
+  }
 
   async function copyAll(): Promise<void> {
     const text = tail()?.text ?? "";
@@ -143,7 +170,7 @@ export function LogSheet(props: LogSheetProps) {
             <div class="flex min-w-0 flex-1 flex-col">
               <h1 class="text-[16px] font-bold leading-tight tracking-[0.02em]">{t("settings.logs.title")}</h1>
               <span class="truncate text-[11px] text-text-3">
-                {tail()?.path || tail()?.fileError || t("common.loadingDots")}
+                {tail()?.selected || tail()?.fileError || t("common.loadingDots")}
               </span>
             </div>
             <button
@@ -155,6 +182,26 @@ export function LogSheet(props: LogSheetProps) {
               <CloseIcon />
             </button>
           </header>
+
+          {/* 日志按「天 + 本次启动」分文件：只有一次运行时这一行没有意义，直接不出现 */}
+          <Show when={runs().length > 1}>
+            <div class="scrollbar-none flex flex-none items-center gap-1.5 overflow-x-auto border-b border-border px-[18px] py-2">
+              <span class="flex-none text-[11.5px] text-text-3">
+                {t("settings.logs.file")}
+              </span>
+              <For each={runs()}>
+                {(run) => (
+                  <button
+                    class={`flex-none ${chipClass(selected() === run.path)}`}
+                    type="button"
+                    onClick={() => selectRun(run.path)}
+                  >
+                    {runLabel(run)}
+                  </button>
+                )}
+              </For>
+            </div>
+          </Show>
 
           <div class="flex flex-none items-center gap-1.5 border-b border-border px-[18px] py-2.5">
             {FILTERS.map((item) => (
