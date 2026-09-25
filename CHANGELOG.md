@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **桌面端单实例**：此前重复启动（再点一次图标 / 双击快捷方式）会开出第二个进程，两个实例
+  同时读写同一份书库、设置与听书缓存，后落盘的一方会覆盖另一方 —— 现在接上
+  `tauri-plugin-single-instance`，同一时刻只保留一个实例：后启动的进程把命令行交给已在运行的
+  实例后自行退出，已有窗口会从最小化 / 隐藏状态还原并聚焦，用户点一下图标就能回到界面
+  （`src-tauri/src/single_instance.rs`）。插件必须作为**第一个**插件注册；Android / iOS 由系统
+  保证单实例，依赖与代码都按桌面平台条件编译，移动端构建不受影响。
+
 ### Fixed
 
 - **Linux 桌面端构建中断在 speech-dispatcher 头文件**：听书的系统语音后端在 Linux 上走

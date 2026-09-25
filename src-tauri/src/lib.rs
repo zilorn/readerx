@@ -3,6 +3,9 @@ mod chapter_runs;
 mod commands;
 mod logging;
 mod models;
+// 桌面端单实例：重复启动只聚焦已有窗口，不开第二个进程（移动端由系统保证）
+#[cfg(desktop)]
+mod single_instance;
 mod storage;
 mod webview_login;
 
@@ -63,7 +66,16 @@ pub fn run() {
     // 先只打标准错误 / logcat，文件目标在 setup 里挂上（见 logging::attach_app_dir）。
     logging::init_early();
     install_panic_hook();
-    let result = tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+
+    // 单实例必须第一个注册：插件按注册顺序初始化，先拿到单实例名字的进程才是「主实例」，
+    // 后启动的进程在这里交出命令行后自行退出（见 single_instance 模块）。
+    #[cfg(desktop)]
+    {
+        builder = builder.plugin(single_instance::plugin());
+    }
+
+    let result = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_fs::init())

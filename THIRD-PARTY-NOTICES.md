@@ -63,6 +63,10 @@ tauri-plugin-tts（MIT）
     系统语音合成（听书）
     https://github.com/brenogonzaga/tauri-plugin-tts
 
+tauri-plugin-single-instance（Apache-2.0 OR MIT）
+    桌面端单实例：重复启动时聚焦已有窗口
+    https://github.com/tauri-apps/plugins-workspace
+
 serde（MIT OR Apache-2.0）
     数据结构序列化 / 反序列化
     https://github.com/serde-rs/serde

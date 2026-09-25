@@ -53,6 +53,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
 
+# 桌面端单实例：重复启动不再开出第二个进程，而是聚焦已在运行的那个窗口
+# （两个实例会同时写同一份书库与设置）。插件不支持移动端，那边由系统保证单实例，
+# 因此写进 target 段，Android / iOS 构建根本不编译它。
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-single-instance = "2"
+
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]
