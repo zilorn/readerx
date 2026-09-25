@@ -3,7 +3,9 @@
  * 由「设置」页的阅读区块与阅读器「阅读设置」面板共用，
  * 两处展示与改动只需维护这一份，避免重复操作。
  * 状态存于全局 store（src/lib/store.ts）与 lib/hanConvert.ts，改动实时联动阅读页排版。
+ * 简繁转换只对中文界面有意义（英文界面不显示该行，偏好仍保留）。
  */
+import { Show } from "solid-js";
 import {
   FONT_MAX,
   FONT_MIN,
@@ -18,7 +20,7 @@ import {
   setParaSpacing,
   type PageMode,
 } from "../lib/store";
-import { t, type MessageKey } from "../lib/i18n";
+import { currentLocale, t, type MessageKey } from "../lib/i18n";
 import { currentHanMode, setHanMode, type HanMode } from "../lib/hanConvert";
 
 const PAGE_MODE_OPTIONS: { value: PageMode; labelKey: MessageKey }[] = [
@@ -156,14 +158,16 @@ function HanModeRow() {
   );
 }
 
-/** 阅读设置四行（需放入带 divide-y 的卡片容器内使用） */
+/** 阅读设置四行（需放入带 divide-y 的卡片容器内使用；简繁转换仅中文界面可见） */
 export function ReadingSettingsRows() {
   return (
     <>
       <FontSizeRow />
       <ParaSpacingRow />
       <PageModeRow />
-      <HanModeRow />
+      <Show when={currentLocale() === "zh-CN"}>
+        <HanModeRow />
+      </Show>
     </>
   );
 }
