@@ -8,6 +8,11 @@
  * 只放与解码/上下文相关的薄封装，播放调度/换句逻辑留在 ttsPlayer.ts。
  */
 
+import { sniffAudioFormat } from "./ttsDecodeGuide";
+import { createLogger } from "./logger";
+
+const log = createLogger("web-audio");
+
 let context: AudioContext | null = null;
 
 /** 全局单例上下文（应用生命周期内复用，避免每次开声重建） */
@@ -21,7 +26,21 @@ export function getAudioContext(): AudioContext {
 /** 把音频字节解码成 AudioBuffer（decodeAudioData 会转移 ArrayBuffer，先拷贝一份） */
 export async function decodeAudio(bytes: Uint8Array): Promise<AudioBuffer> {
   const copy = bytes.slice().buffer as ArrayBuffer;
-  return getAudioContext().decodeAudioData(copy);
+  try {
+    return await getAudioContext().decodeAudioData(copy);
+  } catch (err) {
+    // 解不开的原因系统不会细说（WebView 统一抛 EncodingError）。这里补上真正有用的两条：
+    // 字节到底是什么格式、多大 —— Linux 上多半是缺 GStreamer 的 MP3 解码器，
+    // 光看「解码失败」无从判断是源返回错了东西，还是系统缺插件。
+    // 音频内容绝不进日志，只记格式与体积；用户可见提示由调用方（ttsPlayer）负责。
+    log.warn(
+      "音频解码失败",
+      `format=${sniffAudioFormat(bytes) ?? "未知"}`,
+      `bytes=${bytes.byteLength}`,
+      err,
+    );
+    throw err;
+  }
 }
 
 /** 新建一个已连接好、设置好倍速但尚未 start 的节点（由调用方决定何时发声/换句） */

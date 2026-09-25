@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **自定义源解码失败的修复指南**：Linux 桌面端听书走 WebKitGTK，音频解码交给 GStreamer，
+  而多数发行版出于 MP3 专利许可默认不带 MP3 解码器 —— 自定义源返回 mp3 时只剩一句
+  「音频解码失败」，用户无从下手。现在这种失败会当场弹出修复指南（不必等连续失败 5 句
+  才报错，每次朗读会话只弹一次，重试或重新起播后重新武装）：说明缺的是什么、按发行版
+  给出 apt / dnf（含 RPM Fusion）/ pacman / zypper 的安装命令（点一下整条复制，
+  应用不代为执行）、`gst-inspect-1.0 | grep -i mp3` 验证方法与重启应用、查看应用日志、
+  改用 wav/ogg 等补充说明；解码失败时还会把字节的真实格式（MP3 / WAV / Ogg…）与体积
+  记进日志，便于区分「系统缺解码器」与「源返回了非音频内容」。
+
 - **统一日志系统**：此前诊断信息散落在 `println!` / `console.error` 里，Android 上用户根本拿不到
   —— 出问题只能靠连电脑抓 `chrome://inspect`。现在前后端共用一个出口：
   - 新增独立 crate `readerx-log`（App、书源引擎、独立二进制共用）：`log` 门面 + 级别过滤

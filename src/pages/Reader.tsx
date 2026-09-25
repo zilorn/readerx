@@ -68,6 +68,7 @@ import { OnlineTocOverwriteDialog } from "../components/OnlineTocOverwriteDialog
 import { ReloadChapterRiskDialog } from "../components/ReloadChapterRiskDialog";
 import { SelectionMenu, type SelectionCustom } from "../components/SelectionMenu";
 import { TtsBubble } from "../components/TtsBubble";
+import { TtsDecodeGuideDialog } from "../components/TtsDecodeGuideDialog";
 import { TtsSheet } from "../components/TtsSheet";
 import {
   BookmarkIcon,
@@ -1665,8 +1666,12 @@ export default function ReaderPage() {
     followEnabled,
     readingOffset: ttsReadingOffset,
     notify: (message, isError) => showToast(message, !!isError),
+    // 解码失败（Linux 桌面端多为系统缺 MP3 解码插件）：弹出修复指南，
+    // 只把「弹指南」这件事交给界面，判定与「只弹一次」的口径留在播放器里
+    onDecodeFailure: () => setTtsDecodeGuideOpen(true),
   });
   const [ttsSettingsOpen, setTtsSettingsOpen] = createSignal(false);
+  const [ttsDecodeGuideOpen, setTtsDecodeGuideOpen] = createSignal(false);
   const [prewarmText, setPrewarmText] = createSignal<string | null>(null);
 
   /**
@@ -4436,6 +4441,12 @@ export default function ReaderPage() {
               onPrewarmBook={() => void runPrewarmBook()}
               onStop={() => ttsPlayer.stop()}
               onClose={() => setTtsSettingsOpen(false)}
+            />
+
+            {/* 自定义源音频解码失败（Linux 多为缺少 GStreamer 解码插件）时的修复指南 */}
+            <TtsDecodeGuideDialog
+              open={ttsDecodeGuideOpen()}
+              onClose={() => setTtsDecodeGuideOpen(false)}
             />
 
             {/* 阅读设置（底部状态栏显示与进度口径） */}

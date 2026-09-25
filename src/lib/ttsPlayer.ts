@@ -58,6 +58,7 @@ import {
   resumeAudioContext,
   stopSourceNode,
 } from "./webAudio";
+import { isLinuxDesktop } from "./ttsDecodeGuide";
 import { buildChapterSpeechItems, type ChapterSpeechItem } from "./ttsSegment";
 import { createLogger } from "./logger";
 
@@ -96,6 +97,12 @@ export interface TtsPlayerCtx {
   readingOffset: () => number | null;
   /** 轻提示 */
   notify?: (message: string, isError?: boolean) => void;
+  /**
+   * 音频解码失败（HTTP 源返回的字节解不开）。**每次朗读会话只在首次失败时通知一次**
+   * （成功起播、手动重试或切句后重新武装）：用于弹出「缺少解码器」修复指南，
+   * 既不该在逐句跳过时反复弹，也不能因为「连续失败达上限才报错」而永远看不到。
+   */
+  onDecodeFailure?: () => void;
 }
 
 /** 一次朗读会话的可用状态 */
@@ -154,6 +161,16 @@ const WARM_CONCURRENCY = 8;
 /** 连续朗读失败上限：达到该次数后停止朗读并报错（此前逐句跳过继续读） */
 const FAILURE_STREAK_LIMIT = 5;
 
+/**
+ * Linux 桌面端解码失败文案：这里多半不是源的问题，而是系统缺 MP3 解码器
+ * （WebKitGTK 的音频解码走 GStreamer，多数发行版默认不带 mp3 插件）。
+ * 说成「源要返回可解码音频」会把用户引到错误的方向上。
+ */
+const DECODE_FAILED_HINT = isLinuxDesktop()
+  ? "音频解码失败：系统缺少该格式的解码器（常见于 Linux 缺少 MP3 插件），修复方法见弹出的指南"
+  : "音频解码失败：自定义源需返回可解码的音频（mp3 / wav / ogg）";
+
+
 interface ActiveSource {
   node: AudioBufferSourceNode;
   my: number;
@@ -195,6 +212,8 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
   let lastSynthError: string | null = null;
   /** 连续朗读失败的句数（成功出声或手动操作后清零） */
   let failureStreak = 0;
+  /** 本次重试尝试是否已就「解码失败」通知过界面（每次重新起播/重试只弹一次指南） */
+  let decodeHelpShown = false;
 
   const isNativeMode = (): boolean => currentTtsEngine() === "native";
   const bump = (): number => ++seq;
@@ -369,6 +388,7 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
   /** 用户手动起播/重试/切句时清零计数，让新尝试从第 1 次失败重新累计 */
   function resetFailureStreak(): void {
     failureStreak = 0;
+    decodeHelpShown = false;
   }
 
   /**
@@ -501,7 +521,13 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
     try {
       buffer = await decodeAudio(audio.bytes);
     } catch {
-      onSentenceFailure("音频解码失败：自定义源需返回可解码的音频（mp3 / wav / ogg）");
+      // 解码失败大多是系统缺解码器（Linux 缺 MP3 插件），当场把修复指南弹给用户：
+      // 等「连续失败达上限」再报错的话，用户要先看四句无声跳过，才知道出了什么事
+      if (!decodeHelpShown) {
+        decodeHelpShown = true;
+        ctx.onDecodeFailure?.();
+      }
+      onSentenceFailure(DECODE_FAILED_HINT);
       return;
     }
     if (disposed || my !== seq) return;
