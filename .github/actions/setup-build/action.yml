@@ -1,6 +1,6 @@
 # 各工作流共用的构建环境准备
 #
-# 抽出来的理由：三条工作流（CI / 桌面构建 / 发版）都要「pnpm + Node + Rust + 缓存 + 依赖安装」，
+# 抽出来的理由：三条工作流（Android 构建 / 桌面构建 / 发版）都要「pnpm + Node + Rust + 缓存 + 依赖安装」，
 # 其中 Linux 还要额外装 WebKitGTK / GTK 开发包（Tauri 在 Linux 上必须有它才能编译，
 # 桌面端新增的 tauri-plugin-dialog 也会链到 GTK）。各写一遍迟早走偏，版本也难统一。
 #

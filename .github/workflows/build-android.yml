@@ -76,13 +76,14 @@ jobs:
         run: pnpm tauri android build --apk --debug --ci
         timeout-minutes: 90
 
-      - name: Verify APK output
-        run: |
-          find src-tauri/gen/android/app/build/outputs/apk -name '*.apk' -exec ls -lh {} \;
+      # 统一改名成 readerx-<版本>-android-<ABI>-debug.apk（见 scripts/collect-artifacts.mjs），
+      # 从下载到的 artifact 里一眼看出这是哪个平台的包
+      - name: Collect debug APK
+        run: node scripts/collect-artifacts.mjs android --debug --out "$RUNNER_TEMP/artifacts"
 
       - name: Upload APK artifacts
         uses: actions/upload-artifact@v4
         with:
           name: readerx-android-debug
-          path: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+          path: ${{ runner.temp }}/artifacts/*.apk
           if-no-files-found: error

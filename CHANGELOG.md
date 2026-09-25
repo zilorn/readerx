@@ -16,6 +16,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   （`src-tauri/src/single_instance.rs`）。插件必须作为**第一个**插件注册；Android / iOS 由系统
   保证单实例，依赖与代码都按桌面平台条件编译，移动端构建不受影响。
 
+### Changed
+
+- **构建产物文件名标明平台与架构**：Release 的下载列表里一直只有 Tauri 的默认命名 —— 仅带架构、
+  不带平台（`readerx_0.2.0_amd64.AppImage`、`readerx_0.2.0_x64-setup.exe`、
+  `readerx-0.2.0-arm64-v8a.apk`），用户看不出哪份是 Linux、哪份是 Windows，Windows 的
+  `x64` / `arm64` 与 Linux 的 `amd64` 也不是同一套架构名。现在统一为
+  `readerx-<版本>-<平台>-<架构>…`：`readerx-0.2.0-linux-x86_64.AppImage` / `.deb` / `.rpm`、
+  `readerx-0.2.0-windows-x86_64-setup.exe`、`readerx-0.2.0-windows-aarch64-setup.exe`、
+  `readerx-0.2.0-android-arm64-v8a.apk`（debug 包为 `…-android-universal-debug.apk`）。
+  收集与改名集中在 `scripts/collect-artifacts.mjs`，三条工作流共用：收不到产物、release APK
+  未签名、产物重名都会当场失败；发布步骤也不必再靠 artifact 目录名猜架构，重名时不再静默
+  加后缀，而是直接报错。
+
 ### Fixed
 
 - **Linux 桌面端构建中断在 speech-dispatcher 头文件**：听书的系统语音后端在 Linux 上走

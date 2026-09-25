@@ -105,6 +105,9 @@ pnpm tauri android dev    # Android 真机/模拟器
 `build-desktop.yml`（手动触发，只出 artifact 不发布）、
 `release.yml`（打 `v*` tag 触发，一次发布 Android APK + Linux x86_64 包 +
 Windows x86_64 / aarch64 安装包到同一个 Release；桌面按 ABI 分开出包）。
+产物文件名统一为 `readerx-<版本>-<平台>-<架构>…`（如 `readerx-0.2.0-linux-x86_64.AppImage`、
+`readerx-0.2.0-windows-aarch64-setup.exe`），collect/改名口径集中在
+`scripts/collect-artifacts.mjs`，三条工作流共用；下载说明见 `scripts/tip.md`。
 质量门槛（`pnpm exec tsc --noEmit` / `pnpm build` / `cargo test`）在本地按需跑。
 
 详见 [AGENTS.md](./AGENTS.md)（仓库协作与代码约定）。

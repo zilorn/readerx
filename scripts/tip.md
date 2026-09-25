@@ -1,8 +1,10 @@
 ## 下载与安装
 
-本页产物按平台与 CPU 架构拆分，选择与你的设备匹配的一个下载即可。
+本页产物按平台与 CPU 架构拆分，文件名形如 `readerx-<版本>-<平台>-<架构>...`，选择与你的设备匹配的一个下载即可。
 
 ### Android（APK，按 ABI 拆分）
+
+产物为 `readerx-<版本>-android-<ABI>.apk`：
 
 - **arm64-v8a**：近几年的主流手机 / 平板（64 位），绝大多数设备选这个
 - **armeabi-v7a**：仅支持 32 位应用的老设备
@@ -12,15 +14,18 @@
 
 ### Linux（x86_64）
 
+产物为 `readerx-<版本>-linux-x86_64.AppImage` / `.deb` / `.rpm`：
+
 - **AppImage**：下载后 `chmod +x` 再运行，免安装；
-- **deb**：Debian / Ubuntu 系，`sudo apt install ./readerx_*.deb`；
-- **rpm**：Fedora / openSUSE 系，`sudo dnf install ./readerx-*.rpm`。
+- **deb**：Debian / Ubuntu 系，`sudo apt install ./readerx-<版本>-linux-x86_64.deb`；
+- **rpm**：Fedora / openSUSE 系，`sudo dnf install ./readerx-<版本>-linux-x86_64.rpm`。
 
 需要系统已装 WebKitGTK 4.1 与 GTK3（主流桌面发行版通常自带）。
 
 ### Windows（x86_64 / aarch64）
 
-安装包文件名里的架构要与设备匹配：**x64** 用于 Intel / AMD 处理器，**arm64** 用于骁龙 X 等 ARM 笔记本。
+产物为 `readerx-<版本>-windows-x86_64-setup.exe` 与 `readerx-<版本>-windows-aarch64-setup.exe`：
+**x86_64** 用于 Intel / AMD 处理器，**aarch64** 用于骁龙 X 等 ARM 笔记本。
 WebView2 运行时由 Windows 10/11 自带，无需另外安装。
 
 ### 关于签名

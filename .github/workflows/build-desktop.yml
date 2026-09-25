@@ -66,24 +66,17 @@ jobs:
         run: pnpm tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
         timeout-minutes: 70
 
-      # 产物在 target/<目标三平台名>/release/bundle/ 下，各架构互不覆盖
-      - name: Verify bundle output
+      # 产物在 target/<目标三平台名>/release/bundle/ 下，各架构互不覆盖；
+      # 收集时统一改名成「平台-架构」口径（见 scripts/collect-artifacts.mjs），
+      # 顺带筛掉 unpacked/ 之类中间产物、并在收不到产物时失败
+      - name: Collect bundles
         shell: bash
-        run: |
-          set -euo pipefail
-          find "src-tauri/target/${{ matrix.target }}/release/bundle" -maxdepth 2 -type f \
-            \( -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' -o -name '*-setup.exe' \) \
-            -exec ls -lh {} \;
+        run: node scripts/collect-artifacts.mjs desktop --target ${{ matrix.target }} --out "${{ runner.temp }}/artifacts"
 
       - name: Upload bundles
         uses: actions/upload-artifact@v4
         with:
           name: readerx-${{ matrix.name }}
-          # 只收最终安装包，不要把整个 bundle 目录（含 unpacked/ 中间产物）塞进 artifact
-          path: |
-            src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.AppImage
-            src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb
-            src-tauri/target/${{ matrix.target }}/release/bundle/rpm/*.rpm
-            src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*-setup.exe
+          path: ${{ runner.temp }}/artifacts/*
           if-no-files-found: error
           retention-days: 14
