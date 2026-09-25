@@ -4320,6 +4320,7 @@ export default function ReaderPage() {
               open={bmPanelOpen()}
               bookmarks={bookBookmarks()}
               currentCid={chapter()?.cid}
+              currentIndex={chapterIdx()}
               onClose={() => setBmPanelOpen(false)}
               onJump={jumpToBookmark}
               onDelete={(bookmark) => removeBookmark(bookmark.id)}

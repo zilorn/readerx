@@ -2,8 +2,9 @@
  * 书签列表面板（底部抽屉）：列出某本书的全部书签。
  * 书签按章节分组为一张张卡片（卡片按章节顺序排列），
  * 卡片内书签按正文文本顺序排列；点击跳转到精确位置，可逐条删除。
+ * 打开时自动定位到当前章节的卡片（本章没有书签则定位到最近的一章）。
  */
-import { For, Show, createMemo } from "solid-js";
+import { For, Show, createEffect, createMemo, on } from "solid-js";
 import type { Bookmark } from "../lib/bookmarks";
 import { BookmarkIcon, CloseIcon, TrashIcon } from "./icons";
 import { ScrollArea } from "./ScrollArea";
@@ -13,12 +14,16 @@ export interface BookmarkPanelProps {
   bookmarks: Bookmark[];
   /** 当前章节 cid（标识“本章”卡片用） */
   currentCid?: string;
+  /** 当前章节序号（本章没有书签时，据此定位到最近的一章） */
+  currentIndex: number;
   onClose: () => void;
   onJump: (bookmark: Bookmark) => void;
   onDelete: (bookmark: Bookmark) => void;
 }
 
 const MAX_PREVIEW = 64;
+/** 目标卡片放不下时顶对齐留出的上边距（px） */
+const FOCUS_TOP_GAP = 8;
 
 /** 无记录章节标题时兜底为「第 N 章」 */
 function chapterLabel(bookmark: Bookmark): string {
@@ -26,8 +31,10 @@ function chapterLabel(bookmark: Bookmark): string {
 }
 
 interface BookmarkGroup {
-  /** 章节身份（cid；“本章”标识依赖它） */
+  /** 章节身份（cid；“本章”标识与定位依赖它） */
   chapterCid: string;
+  /** 章节序号（卡片顺序与“最近章节”判定用） */
+  chapterIndex: number;
   label: string;
   items: Bookmark[];
 }
@@ -53,6 +60,7 @@ function groupBookmarks(bookmarks: Bookmark[]): BookmarkGroup[] {
     if (!group) {
       group = {
         chapterCid: bookmark.chapterCid,
+        chapterIndex: bookmark.chapterIndex,
         label: chapterLabel(bookmark),
         items: [],
       };
@@ -64,8 +72,69 @@ function groupBookmarks(bookmarks: Bookmark[]): BookmarkGroup[] {
   return groups;
 }
 
+/**
+ * 打开面板时要定位到的卡片：
+ * 1) 当前章有书签 → 本章卡片；
+ * 2) 当前章没有书签 → 章节序号离当前章最近的卡片（同样近时取靠后的一章，
+ *    顺着阅读方向先看还没读到的那条）。
+ * 无书签返回 undefined。
+ */
+function focusGroup(
+  groups: BookmarkGroup[],
+  currentCid: string | undefined,
+  currentIndex: number,
+): BookmarkGroup | undefined {
+  if (groups.length === 0) return undefined;
+  const sameChapter = currentCid
+    ? groups.find((group) => group.chapterCid === currentCid)
+    : undefined;
+  if (sameChapter) return sameChapter;
+  let best = groups[0];
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (const group of groups) {
+    const distance = Math.abs(group.chapterIndex - currentIndex);
+    if (distance <= bestDistance) {
+      bestDistance = distance;
+      best = group;
+    }
+  }
+  return best;
+}
+
 export function BookmarkPanel(props: BookmarkPanelProps) {
   const groups = createMemo(() => groupBookmarks(props.bookmarks));
+  /** 面板自己的滚动元素（ScrollArea 内层） */
+  let scrollEl: HTMLDivElement | undefined;
+  /** 已挂载的章节卡片（cid → 卡片元素），供打开时定位 */
+  const groupEls = new Map<string, HTMLElement>();
+
+  /**
+   * 打开时把目标卡片滚进面板可视区（本章没有书签时即最近的一章）。
+   * 卡片放得下就居中，书签太多放不下则顶对齐 —— 保证卡片标题与开头几条能看见。
+   * 只改面板自己的 scrollTop：正文那层滚动位置不受影响，背后的阅读进度不动。
+   * 卡片由 <Show> 随 open 重新挂载，ref 先于本效果执行，因此打开时一定已就位。
+   */
+  createEffect(
+    on(
+      () => props.open,
+      (open) => {
+        if (!open) {
+          groupEls.clear();
+          return;
+        }
+        const target = focusGroup(groups(), props.currentCid, props.currentIndex);
+        const card = target ? groupEls.get(target.chapterCid) : undefined;
+        if (!card || !scrollEl) return;
+        const offset = card.getBoundingClientRect().top - scrollEl.getBoundingClientRect().top;
+        const viewport = scrollEl.clientHeight;
+        const cardHeight = card.offsetHeight;
+        scrollEl.scrollTop +=
+          cardHeight <= viewport - FOCUS_TOP_GAP * 2
+            ? offset - (viewport - cardHeight) / 2
+            : offset - FOCUS_TOP_GAP;
+      },
+    ),
+  );
 
   return (
     <Show when={props.open}>
@@ -109,13 +178,24 @@ export function BookmarkPanel(props: BookmarkPanelProps) {
             </div>
           }
         >
-          <ScrollArea class="min-h-0 flex-1" contentClass="px-3 pb-4 pt-2.5">
+          <ScrollArea
+            class="min-h-0 flex-1"
+            contentClass="px-3 pb-4 pt-2.5"
+            onEl={(el) => {
+              scrollEl = el;
+            }}
+          >
             <div class="flex flex-col gap-2.5">
               <For each={groups()}>
                 {(group) => {
                   const isCurrent = group.chapterCid === props.currentCid;
                   return (
-                    <section class="overflow-hidden rounded-[14px] border border-border bg-bg">
+                    <section
+                      ref={(el) => {
+                        groupEls.set(group.chapterCid, el);
+                      }}
+                      class="overflow-hidden rounded-[14px] border border-border bg-bg"
+                    >
                       <header class="flex items-center gap-2 border-b border-border px-3.5 py-2.5">
                         <BookmarkIcon
                           size={15}
