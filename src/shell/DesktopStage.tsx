@@ -250,11 +250,11 @@ function SideNav(props: SideNavProps) {
       class="flex flex-none flex-col gap-1 overflow-hidden border-r border-border bg-surface px-3 py-4 transition-[width] duration-200"
       classList={{ "w-[236px]": !props.collapsed, "w-[64px]": props.collapsed }}
     >
-      {/* 标题行：品牌靠左，收起 / 展开按钮贴在这一行的**最右**（展开与收起两种形态下
-          都在侧边栏右上角，位置不跳） */}
+      {/* 标题行：展开时品牌靠左、收起 / 展开按钮贴这一行的最右（侧边栏右上角）；
+          收起成图标栏后这一行只剩按钮本身，改为与下方主 Tab 图标同轴居中 */}
       <div
         class="mb-3 flex items-center gap-2.5"
-        classList={{ "pl-2": !props.collapsed, "justify-end": props.collapsed }}
+        classList={{ "pl-2": !props.collapsed, "justify-center": props.collapsed }}
       >
         <Show when={!props.collapsed}>
           <span class="flex min-w-0 flex-1 items-center gap-2.5">
@@ -289,7 +289,8 @@ function SideNav(props: SideNavProps) {
   );
 }
 
-/** 收起 / 展开侧边栏：常驻标题行最右端（收起后同样在右上角，位置不跳） */
+/** 收起 / 展开侧边栏：展开时常驻标题行最右端（品牌右侧）；收起后标题行只剩它一个，
+ *  与主 Tab 图标一样居中在图标栏中线上 */
 function SidebarToggle(props: SideNavProps) {
   const label = () => (props.collapsed ? "展开侧边栏" : "收起侧边栏");
   return (

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-25
+
 ### Added
 
 - **自定义源解码失败的修复指南**：Linux 桌面端听书走 WebKitGTK，音频解码交给 GStreamer，
@@ -74,7 +76,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   注册表两端**共用一份**，没有为桌面复制页面；切换页面在桌面端不做横向滑动动画，直接换内容区。
   **侧边栏只在三个主 Tab（书架 / 发现 / 设置）显示** —— 阅读页、书源管理、书籍详情等其余页面
   整条不显示、内容区铺满（与手机端「次级页不显示底部 Tab」同一套口径）；主 Tab 里还能用标题行
-  右端的按钮把侧边栏**收起成图标栏**（再点展开，形态由 `readerx.sidebarCollapsed` 记住），
+  右端的按钮把侧边栏**收起成图标栏**（收起后这一行只剩按钮本身，与三个主 Tab 图标一样居中在
+  图标栏中线上；再点展开，形态由 `readerx.sidebarCollapsed` 记住），
   侧边栏的实际占位写进 `--sidebar-w`。
   挂在 `body` 上的底部抽屉 / 操作条改用 `--app-column` 变量（跟随侧边栏的显示与收展），
   桌面端不会横跨整个窗口。
