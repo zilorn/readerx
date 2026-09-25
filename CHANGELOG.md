@@ -7,8 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-25
+
 ### Added
 
+- **README 英文版**：新增 `README.en.md`，与中文 `README.md` 内容一一对应（功能、书源、平台形态、
+  日志、开发与发版口径齐全），两份 README 顶部互相加语言切换链接。`docs/` 下的文档仍是中文，
+  英文 README 里的链接保持同一路径，未另做英文副本。
 - **界面多语言（简体中文 / English）**：界面文案此前散在组件里写死，只可能是中文。现在统一抽到
   `src/lib/i18n/locales/{zh-CN,en}/`（一个业务模块一个文件，`t("shelf.title")` 取用），
   新增一种语言只需加一份词典与一条 `LOADERS`。默认**跟随系统语言**（系统首选语言是中文就用

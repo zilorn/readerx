@@ -12,6 +12,10 @@
   <a href="./LICENSE"><img src="https://img.shields.io/github/license/zilorn/readerx?label=license&color=blue" alt="License" /></a>
 </p>
 
+<p align="center">
+  <b>简体中文</b> | <a href="./README.en.md">English</a>
+</p>
+
 # ReaderX
 
 基于 **Tauri 2 + SolidJS + TypeScript** 的电子书阅读器：手机（Android）上是一个单手可用的
