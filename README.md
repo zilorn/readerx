@@ -2,6 +2,16 @@
   <img src="./public/favicon.svg" alt="ReaderX" width="96" height="96" />
 </p>
 
+<p align="center">
+  <a href="https://github.com/zilorn/readerx/releases/latest"><img src="https://img.shields.io/github/v/release/zilorn/readerx?label=release&color=4f8ef7&logo=github" alt="Release" /></a>
+  <img src="https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&logoColor=white" alt="Tauri 2" />
+  <img src="https://img.shields.io/badge/SolidJS-1.9-2C4F7C?logo=solid&logoColor=white" alt="SolidJS" />
+  <img src="https://img.shields.io/badge/TypeScript-6.0-3178C6?logo=typescript&logoColor=white" alt="TypeScript" />
+  <img src="https://img.shields.io/badge/Rust-2021-000000?logo=rust&logoColor=white" alt="Rust" />
+  <img src="https://img.shields.io/badge/platform-Android%20%7C%20Linux%20%7C%20Windows-3DDC84?logo=android&logoColor=white" alt="Platform" />
+  <a href="./LICENSE"><img src="https://img.shields.io/github/license/zilorn/readerx?label=license&color=blue" alt="License" /></a>
+</p>
+
 # ReaderX
 
 基于 **Tauri 2 + SolidJS + TypeScript** 的电子书阅读器：手机（Android）上是一个单手可用的
