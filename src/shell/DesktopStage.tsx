@@ -15,9 +15,10 @@
  * - 次级页面按路由推入 / 弹出，离场即卸载 —— 桌面端没有「返回栈动画」，
  *   但也因此不需要冻结离场快照。
  *
- * 阅读页（`/book/:id`）在宽窗口下由外壳给出**最大**宽度（够放并排两页），页面自己按可用宽度
- * 决定并排几页并居中限宽（见 `lib/readerLayout.ts`）；列表型页面则铺满内容区
- * ——书架的封面是固定宽度，按内容区宽度自动排列成多列网格（见 `pages/Bookshelf.tsx` 的 ShelfGrid）。
+ * 阅读页（`/book/:id`）与列表型页面一样**铺满内容区**：外壳不做任何限宽，阅读页的顶栏 / 底栏 /
+ * 状态栏与背景因此通栏铺满窗口，正文块自己按可用宽度决定并排几页并居中限宽
+ * （见 `lib/readerLayout.ts`）——书架同样铺满，封面是固定宽度，按内容区宽度自动排列成多列网格
+ * （见 `pages/Bookshelf.tsx` 的 ShelfGrid）。
  */
 import {
   createEffect,
@@ -36,7 +37,6 @@ import { PageBody } from "../components/PageBody";
 import { SidebarCollapseIcon, SidebarExpandIcon } from "../components/icons";
 import { registerAppScrollEl } from "../lib/appScroll";
 import { isSidebarCollapsed, setSidebarCollapsed } from "../lib/store";
-import { READER_MAX_WIDTH } from "../lib/readerLayout";
 import { isFullHeightPath, isTabRoute, TAB_ROUTES } from "./routes";
 import { tabIcon } from "./tabIcons";
 import { t } from "../lib/i18n";
@@ -65,7 +65,6 @@ export function DesktopStage(props: DesktopStageProps) {
   const location = useLocation();
   const navigate = useNavigate();
   const path = createMemo(() => location.pathname);
-  const isReader = createMemo(() => path().startsWith("/book/"));
 
   /**
    * 侧边栏只属于主 Tab：离开书架 / 发现 / 设置后整条不显示（阅读页要的是整屏正文，
@@ -101,18 +100,6 @@ export function DesktopStage(props: DesktopStageProps) {
 
   const scrollById = new Map<number, HTMLDivElement>();
   let targetPaneId = initialPane.id;
-
-  /** 内容区可用宽度（阅读页据此限宽居中） */
-  const [stageWidth, setStageWidth] = createSignal(0);
-  let stageEl: HTMLDivElement | undefined;
-
-  onMount(() => {
-    if (!stageEl) return;
-    const observer = new ResizeObserver(() => setStageWidth(stageEl?.clientWidth ?? 0));
-    observer.observe(stageEl);
-    setStageWidth(stageEl.clientWidth);
-    onCleanup(() => observer.disconnect());
-  });
 
   /** 让 appScrollEl 指向当前页面的滚动容器（页面内「回到顶部」等逻辑依赖它） */
   function registerTopScroll(): void {
@@ -185,22 +172,9 @@ export function DesktopStage(props: DesktopStageProps) {
     onCleanup(() => window.removeEventListener("keydown", onKey));
   });
 
-  /** 页面内容区的底部留白与限宽：自管整页高度的页面（阅读页 / 书源编辑页）自己处理 */
-  const contentClass = (panePath: string): string => {
-    if (isFullHeightPath(panePath)) return "";
-    return isReader() ? "" : "pb-8";
-  };
-
-  /**
-   * 阅读页在宽内容区里居中限宽；其余页面铺满（书架等列表页自己会分多列）。
-   * 上限是「放得下并排两页」的宽度（见 `lib/readerLayout.ts`），够不够宽、并排几页由阅读页自己算；
-   * 窗口不够宽时按内容区宽度收窄，两侧始终留 48px。
-   */
-  const paneInnerStyle = (panePath: string) => {
-    if (!isReader() || panePath !== path()) return undefined;
-    const width = Math.min(READER_MAX_WIDTH, Math.max(0, stageWidth() - 96));
-    return width > 0 ? { width: `${width}px`, margin: "0 auto" } : undefined;
-  };
+  /** 页面内容区的底部留白：自管整页高度的页面（阅读页 / 书源编辑页）自己处理 */
+  const contentClass = (panePath: string): string =>
+    isFullHeightPath(panePath) ? "" : "pb-8";
 
   return (
     <div class="relative flex min-h-0 flex-1 overflow-hidden">
@@ -208,7 +182,6 @@ export function DesktopStage(props: DesktopStageProps) {
         <SideNav collapsed={isSidebarCollapsed()} />
       </Show>
       <div
-        ref={stageEl}
         class="relative min-h-0 min-w-0 flex-1 overflow-hidden"
         style={{ background: "var(--bg)" }}
       >
@@ -218,19 +191,17 @@ export function DesktopStage(props: DesktopStageProps) {
               class="absolute inset-0 flex flex-col overflow-hidden"
               style={{ display: pane.id === currentId() ? undefined : "none" }}
             >
-              <div class="flex min-h-0 flex-1 flex-col" style={paneInnerStyle(pane.path)}>
-                <PageBody
-                  component={pane.component}
-                  renderChildren={pane.id === currentId()}
-                  contentClass={contentClass(pane.path)}
-                  onScrollEl={(el) => {
-                    scrollById.set(pane.id, el);
-                    if (pane.id === targetPaneId) registerAppScrollEl(el);
-                  }}
-                >
-                  {pane.children}
-                </PageBody>
-              </div>
+              <PageBody
+                component={pane.component}
+                renderChildren={pane.id === currentId()}
+                contentClass={contentClass(pane.path)}
+                onScrollEl={(el) => {
+                  scrollById.set(pane.id, el);
+                  if (pane.id === targetPaneId) registerAppScrollEl(el);
+                }}
+              >
+                {pane.children}
+              </PageBody>
             </div>
           )}
         </For>

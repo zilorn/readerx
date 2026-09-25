@@ -149,6 +149,7 @@ import { isDesktopShell } from "../lib/platform";
 import { progressContextAt, readingPercent, resolveReadingTarget } from "../lib/progress";
 import {
   READER_PAGE_PAD_X,
+  readerContentWidth,
   resolveReaderGeometry,
   spreadStart,
   type ReaderGeometry,
@@ -1452,8 +1453,9 @@ export default function ReaderPage() {
   // 这里读的是渲染窗口：书库正文回写换了对象引用不再重跑（否则每次回写都会
   // setArea 一个新对象 → layout 失效 → 当前章整章重新分页 = 下载时高频闪烁）。
   //
-  // 量的是**可用空间**（frameRef，外壳给阅读页的整块区域）：正文块自己按它决定单页/双页
-  // 与列宽，再居中放进这块区域，所以不能再拿正文块（areaRef）的宽度当输入（会自相缠绕）。
+  // 量的是**可用空间**（frameRef，外壳给阅读页的整块区域）：外壳不做限宽（顶栏 / 底栏 /
+  // 状态栏与背景通栏铺满窗口），正文块自己按它决定单页/双页与列宽，再居中放进这块区域，
+  // 所以不能再拿正文块（areaRef）的宽度当输入（会自相缠绕）。
   const [area, setArea] = createSignal({ w: 0, h: 0 });
   let areaRef: HTMLDivElement | undefined;
   let frameRef: HTMLDivElement | undefined;
@@ -1487,10 +1489,15 @@ export default function ReaderPage() {
 
   /**
    * 阅读页几何（单页 / 双页、列宽、正文块宽度）：只由可用宽度与上下留白决定。
+   * 可用宽度先过 [`readerContentWidth`]：外壳给的是整块内容区，正文块自己限宽
+   * （上限「放得下并排两页」，桌面端两侧另留余量），手机列与原先完全一致。
    * 手机列与桌面窄窗口恒为一页；桌面宽窗口并排两页，见 `lib/readerLayout.ts`。
    */
   const geometry = createMemo<ReaderGeometry | null>(() =>
-    resolveReaderGeometry(area(), { top: topPad(), bottom: bottomPadPaged() }),
+    resolveReaderGeometry(
+      { w: readerContentWidth(area().w, isDesktopShell()), h: area().h },
+      { top: topPad(), bottom: bottomPadPaged() },
+    ),
   );
 
   /** 一屏并排的页数（宽窗口 2，其余 1） */
@@ -3461,8 +3468,14 @@ export default function ReaderPage() {
     }
     if (moved >= 12) return; // 纵向拖动等：不处理
 
-    const x = e.clientX - rect.left;
-    const inMiddle = x >= rect.width / 3 && x <= (rect.width * 2) / 3;
+    // 点按左 / 中 / 右的分区取**正文块**的矩形（分页模式下就是并排的那几页）：
+    // 桌面外壳不再给阅读页限宽，宽窗口里正文块居中、两侧是大片留白，按整块阅读区
+    // 分 thirds 会让点在左右页中间的那一下落进「呼出菜单」区（本该翻页）。
+    // 滚动模式只有一列、点中间就是呼出菜单，照旧按整块阅读区算（留白也算中间）。
+    const zone = isPaged() ? colRef?.getBoundingClientRect() : null;
+    const bounds = zone && zone.width > 0 ? zone : rect;
+    const x = e.clientX - bounds.left;
+    const inMiddle = x >= bounds.width / 3 && x <= (bounds.width * 2) / 3;
     if (!isPaged()) {
       if (inMiddle) setMenuOpen(true);
       return;
@@ -3472,7 +3485,7 @@ export default function ReaderPage() {
     } else if (!contentPending) {
       // 左右区域翻页。正文就绪（正在获取章节正文 / 分页排版中）前不翻页 ——
       // 覆盖层不再吞手势后由这里守住原门闩语义，但仍允许点中间呼出菜单
-      userFlip(x < rect.width / 3 ? -1 : 1);
+      userFlip(x < bounds.width / 3 ? -1 : 1);
     }
   }
 

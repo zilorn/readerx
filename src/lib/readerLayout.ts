@@ -24,9 +24,27 @@ export const READER_COLUMN_MIN = 440;
 
 /**
  * 阅读页最大宽度（px，含页面左右留白）：正好放得下并排的两页最大列宽。
- * 桌面外壳据此给阅读页留位（见 `shell/DesktopStage.tsx`），再宽也只是两侧留白。
+ * 正文块据此限宽（见 [`readerContentWidth`]），再宽也只是两侧留白。
  */
 export const READER_MAX_WIDTH = READER_COLUMN_MAX * 2 + READER_PAGE_GAP + READER_PAGE_PAD_X * 2;
+
+/**
+ * 桌面端正文块两侧的最小余量（px，单侧）。桌面外壳把**整块内容区**交给阅读页
+ * （顶栏 / 底栏 / 状态栏与背景因此通栏铺满窗口），正文块自己限宽：窗口不够宽时靠这条
+ * 余量收窄，免得「并排两页」的判定正好卡在窗口临界宽度上、挤出两条窄列。
+ */
+export const READER_STAGE_GUTTER = 48;
+
+/**
+ * 阅读页可用的排版宽度：外壳交给阅读页的可用宽度 → 正文块真正拿来排版的宽度。
+ * - 上限是 [`READER_MAX_WIDTH`]（放得下并排两页），再宽也只是两侧留白；
+ * - 桌面端两侧各留 [`READER_STAGE_GUTTER`]，窄窗口保住单页的舒适列宽；
+ * - 手机列（≤480px）本来就窄：不加余量也够不到上限，排版与原先完全一致。
+ */
+export function readerContentWidth(available: number, desktop: boolean): number {
+  if (!desktop) return Math.max(0, available);
+  return Math.max(0, Math.min(available - READER_STAGE_GUTTER * 2, READER_MAX_WIDTH));
+}
 
 /** 可用面积小于该值时视为还没量出尺寸 / 窗口不可用，不做排版 */
 const MIN_AREA_WIDTH = 100;
