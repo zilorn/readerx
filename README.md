@@ -7,7 +7,6 @@
   <img src="https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&logoColor=white" alt="Tauri 2" />
   <img src="https://img.shields.io/badge/SolidJS-1.9-2C4F7C?logo=solid&logoColor=white" alt="SolidJS" />
   <img src="https://img.shields.io/badge/TypeScript-6.0-3178C6?logo=typescript&logoColor=white" alt="TypeScript" />
-  <img src="https://img.shields.io/badge/Rust-2021-000000?logo=rust&logoColor=white" alt="Rust" />
   <img src="https://img.shields.io/badge/platform-Android%20%7C%20Linux%20%7C%20Windows-3DDC84?logo=android&logoColor=white" alt="Platform" />
   <a href="./LICENSE"><img src="https://img.shields.io/github/license/zilorn/readerx?label=license&color=blue" alt="License" /></a>
 </p>
@@ -85,11 +84,11 @@ PDF 导入优先读文字层并还原成段落（页眉 / 页脚按「跨页重�
 
 ## 形态与平台
 
-| 平台 | 外壳 | 说明 |
-| --- | --- | --- |
-| Android | 手机列 + 底部 Tab | 主目标平台，`input[type=file]`（SAF）导入本地书 |
-| Linux / Windows 桌面 | 侧边导航 + 内容区（≥900px 宽时） | 窗口拉窄到 900px 以下自动回到手机外壳 |
-| 浏览器（`pnpm dev`） | 同上（按窗口宽度） | 无 Rust 后端的降级模式，仅用于调界面 |
+| 平台                 | 外壳                             | 说明                                            |
+| -------------------- | -------------------------------- | ----------------------------------------------- |
+| Android              | 手机列 + 底部 Tab                | 主目标平台，`input[type=file]`（SAF）导入本地书 |
+| Linux / Windows 桌面 | 侧边导航 + 内容区（≥900px 宽时） | 窗口拉窄到 900px 以下自动回到手机外壳           |
+| 浏览器（`pnpm dev`） | 同上（按窗口宽度）               | 无 Rust 后端的降级模式，仅用于调界面            |
 
 桌面端的差异只在外壳与系统集成上：窗口尺寸/最小尺寸约束、原生文件选择导入、Esc 返回、
 设置页的「开发者工具」入口（release 包也能打开检查器）、阅读页已经是左右方向键翻页、

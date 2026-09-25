@@ -7,7 +7,6 @@
   <img src="https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&logoColor=white" alt="Tauri 2" />
   <img src="https://img.shields.io/badge/SolidJS-1.9-2C4F7C?logo=solid&logoColor=white" alt="SolidJS" />
   <img src="https://img.shields.io/badge/TypeScript-6.0-3178C6?logo=typescript&logoColor=white" alt="TypeScript" />
-  <img src="https://img.shields.io/badge/Rust-2021-000000?logo=rust&logoColor=white" alt="Rust" />
   <img src="https://img.shields.io/badge/platform-Android%20%7C%20Linux%20%7C%20Windows-3DDC84?logo=android&logoColor=white" alt="Platform" />
   <a href="./LICENSE"><img src="https://img.shields.io/github/license/zilorn/readerx?label=license&color=blue" alt="License" /></a>
 </p>
@@ -54,7 +53,7 @@ chapters, prologue / preface / epilogue, `Chapter` and more, and custom regexes 
 the chapter-rules page.
 
 PDF import reads the text layer first and reconstructs paragraphs (headers / footers are removed
-when they repeat across pages *and* sit outside the text block); chapters follow the PDF's own
+when they repeat across pages _and_ sit outside the text block); chapters follow the PDF's own
 bookmarks and fall back to splitting by character count when there are no usable bookmarks.
 Scanned pages without a text layer (plus covers / facsimile inserts) are rendered whole-page as
 images: the images are written to the app data directory and the book JSON only keeps references.
@@ -126,11 +125,11 @@ category discovery reflect the latest source list and enable / capability switch
 
 ## Form Factors & Platforms
 
-| Platform | Shell | Notes |
-| --- | --- | --- |
-| Android | Phone column + bottom tabs | The primary target; local books are imported via `input[type=file]` (SAF) |
+| Platform                | Shell                                           | Notes                                                                        |
+| ----------------------- | ----------------------------------------------- | ---------------------------------------------------------------------------- |
+| Android                 | Phone column + bottom tabs                      | The primary target; local books are imported via `input[type=file]` (SAF)    |
 | Linux / Windows desktop | Side navigation + content area (at ≥900px wide) | Narrowing the window below 900px falls back to the phone shell automatically |
-| Browser (`pnpm dev`) | Same as above (by window width) | A degraded mode without the Rust backend, for UI work only |
+| Browser (`pnpm dev`)    | Same as above (by window width)                 | A degraded mode without the Rust backend, for UI work only                   |
 
 Desktop differences are confined to the shell and system integration: window size / minimum size
 constraints, native file-picker import, Esc to go back, the "Developer tools" entry in Settings
