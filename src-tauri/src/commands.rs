@@ -6,11 +6,13 @@
 //! 意外异常只让这次调用失败，用户能看到原因，而不是应用直接闪退。
 
 use crate::book_images;
+use crate::chapter_runs;
 use crate::engine;
 use crate::host;
 use crate::models::{
     BookChapterPatch, BookImageFile, BookImageInfo, BookItem, BookMeta, BookSource,
-    BookSourceSummary, CachedAudio, ChapterContentResult, ChapterItem, FetchedImage, LocalBook,
+    BookSourceSummary, CachedAudio, ChapterContentResult, ChapterItem, ChapterPromoteResult,
+    ChapterRunSummary, ChapterTaskEvent, ChapterTaskItem, FetchedImage, LocalBook,
     SourceCallResult, TtsCacheOverview,
 };
 use crate::panic_guard;
@@ -19,6 +21,7 @@ use crate::webview_login;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use serde_json::Value;
+use tauri::ipc::Channel;
 use tauri::AppHandle;
 use tauri::Manager;
 use tauri::Webview;
@@ -402,7 +405,9 @@ pub async fn readerx_source_call(
     .await
 }
 
-/// 批量拉取正文（按用户“书源并发”设置控制单源内部并行请求数）
+/// 批量拉取正文（少量章节用：单章重载 / 读到界外章节时的即时取一章）。
+/// 大批量的窗口预取与整本下载走 [`readerx_source_fetch_contents_stream`]：那里逐章交付、
+/// 可停止、可插队。两者共用引擎里的同一条「逐章任务」流水线，只是这里的并发控制更简单。
 #[tauri::command]
 pub async fn readerx_source_fetch_contents(
     app: AppHandle,
@@ -411,24 +416,7 @@ pub async fn readerx_source_fetch_contents(
     chapters: Vec<ChapterItem>,
 ) -> Result<Vec<ChapterContentResult>, String> {
     blocking("书源正文拉取", move || -> Result<Vec<ChapterContentResult>, String> {
-        let source = storage::get_book_source(&app, &source_id)?
-            .ok_or_else(|| "书源不存在".to_string())?;
-        if !source.enabled {
-            return Err("书源已禁用".to_string());
-        }
-        if !source.capabilities.content {
-            return Err(format!("书源「{}」已禁用正文能力", source.name));
-        }
-        host::prepare_source(&source)?;
-        // 重启后把该书源已保存的登录 Cookie 注入会话（进程内幂等）
-        let _ = webview_login::seed_source_session(&source.id);
-        // 全局用户设置：readerx.onlineConcurrency（一次运行多少书源/并行请求），1-8，默认 3
-        let concurrency = storage::read_state(&app, "readerx.onlineConcurrency")
-            .ok()
-            .flatten()
-            .and_then(|v| v.as_u64())
-            .unwrap_or(3)
-            .clamp(1, 8) as usize;
+        let (source, concurrency) = content_session(&app, &source_id)?;
         engine::fetch_chapter_contents(
             &source.id,
             &source.js,
@@ -439,6 +427,107 @@ pub async fn readerx_source_fetch_contents(
         )
     })
     .await
+}
+
+/// 逐章拉取正文（**每章一个任务**）：引擎起若干 worker 线程逐章领取，取回一章立刻经
+/// `on_task` 回传一条结果 —— 不按 20 章打包，也不等整批回来：慢章 / 失败章不拖住别的章节，
+/// 前端可以逐章落盘、逐章推进度。
+///
+/// `run_id` 是这一轮运行的标识，配合 [`readerx_source_chapter_run_cancel`]（用户停止）与
+/// [`readerx_source_chapter_run_promote`]（把正在读的那一章插到队首）使用。
+/// 命令返回时该运行已从注册表注销，返回的汇总里带本次的成功 / 失败 / 是否被取消。
+#[tauri::command]
+pub async fn readerx_source_fetch_contents_stream(
+    app: AppHandle,
+    source_id: String,
+    book: BookItem,
+    tasks: Vec<ChapterTaskItem>,
+    run_id: u64,
+    on_task: Channel<ChapterTaskEvent>,
+) -> Result<ChapterRunSummary, String> {
+    // 任务数记进日志：正文一个字都不写
+    let requested = tasks.len();
+    blocking("书源逐章正文拉取", move || -> Result<ChapterRunSummary, String> {
+        let outcome = (|| -> Result<ChapterRunSummary, String> {
+            let (source, concurrency) = content_session(&app, &source_id)?;
+            let run = chapter_runs::begin(run_id, tasks)?;
+            // 运行期间持有：命令无论怎么结束都会注销这次运行
+            let _guard = chapter_runs::RunGuard::new(run_id);
+            log::debug!(
+                "逐章正文拉取开始 source={} requested={requested} concurrency={concurrency}",
+                source.id
+            );
+            let events = on_task.clone();
+            engine::run_chapter_tasks(
+                &source.id,
+                &source.js,
+                &book,
+                run,
+                concurrency,
+                engine::DEFAULT_CHAPTER_BUDGET_MS,
+                move |result| {
+                    // 前端已离开 / WebView 已销毁：只记一条 debug，不打断还在跑的章节
+                    if let Err(error) = events.send(ChapterTaskEvent::Chapter(result)) {
+                        log::debug!("章节结果回传失败（前端可能已关闭）: {error}");
+                    }
+                },
+            )
+        })();
+        // 收尾标记：无论成功失败都发一条，前端据此确认「逐章结果已全部到齐」
+        // （通道消息可能晚于命令返回，见 models::ChapterTaskEvent）
+        if let Err(error) = on_task.send(ChapterTaskEvent::Done) {
+            log::debug!("逐章结果收尾标记回传失败（前端可能已关闭）: {error}");
+        }
+        outcome
+    })
+    .await
+}
+
+/// 停止一轮逐章正文拉取（下载面板「停止下载」/ 离开阅读页）：
+/// 引擎侧立刻不再领取新章节，已取回的结果照常交付。
+#[tauri::command]
+pub async fn readerx_source_chapter_run_cancel(run_id: u64) -> Result<bool, String> {
+    blocking("停止逐章正文拉取", move || {
+        Ok(chapter_runs::cancel(run_id))
+    })
+    .await
+}
+
+/// 把正在读的那一章提到队首（用户操作优先）：已经在取的任务不重复插队，
+/// 不在本次运行队列里的章节返回全 0，由前端决定是否为它单独发一次请求。
+#[tauri::command]
+pub async fn readerx_source_chapter_run_promote(
+    run_id: u64,
+    urls: Vec<String>,
+) -> Result<ChapterPromoteResult, String> {
+    blocking("章节插队", move || {
+        Ok(chapter_runs::promote(run_id, &urls))
+    })
+    .await
+}
+
+/// 正文拉取共用的会话准备：书源存在 / 已启用 / 有正文能力 + 宿主会话就绪，
+/// 并读出用户「书源并发」设置（即单源内部并行请求数，1-8，默认 3）。
+fn content_session(app: &AppHandle, source_id: &str) -> Result<(BookSource, usize), String> {
+    let source = storage::get_book_source(app, source_id)?
+        .ok_or_else(|| "书源不存在".to_string())?;
+    if !source.enabled {
+        return Err("书源已禁用".to_string());
+    }
+    if !source.capabilities.content {
+        return Err(format!("书源「{}」已禁用正文能力", source.name));
+    }
+    host::prepare_source(&source)?;
+    // 重启后把该书源已保存的登录 Cookie 注入会话（进程内幂等）
+    let _ = webview_login::seed_source_session(&source.id);
+    // 全局用户设置：readerx.onlineConcurrency（一次运行多少书源/并行请求），1-8，默认 3
+    let concurrency = storage::read_state(app, "readerx.onlineConcurrency")
+        .ok()
+        .flatten()
+        .and_then(|v| v.as_u64())
+        .unwrap_or(3)
+        .clamp(1, 8) as usize;
+    Ok((source, concurrency))
 }
 
 /// 用书源会话下载一张**章节插图**并落盘，只回传本地引用与尺寸（不回传图片字节）。

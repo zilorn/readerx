@@ -167,6 +167,91 @@ pub struct ChapterContentResult {
     pub error: String,
 }
 
+impl ChapterContentResult {
+    /// 转成逐章任务的结果（同一份内容，带上调用方给的章节序号）
+    pub fn into_task_result(self, index: usize) -> ChapterTaskResult {
+        ChapterTaskResult {
+            index,
+            chapter_name: self.chapter_name,
+            ok: self.ok,
+            text: self.text,
+            error: self.error,
+        }
+    }
+}
+
+/// 逐章拉正文时提交的**单个章节任务**：`index` 是调用方给的章节序号（书内下标）。
+/// 队列里的最小单位就是一章 —— 不打包、不等整批（见 `engine::run_chapter_tasks`）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChapterTaskItem {
+    pub index: usize,
+    pub chapter: ChapterItem,
+}
+
+/// 单个章节任务的**完成结果**：取回一章立刻回传一条
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChapterTaskResult {
+    /// 对应提交时给的章节序号
+    pub index: usize,
+    pub chapter_name: String,
+    pub ok: bool,
+    /// 正文（原始文本；前端统一做段落规范化）
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub error: String,
+}
+
+impl ChapterTaskResult {
+    /// 失败结果（章节缺少地址 / 引擎起不来 / worker 异常兜底用）
+    pub fn failed(index: usize, chapter_name: impl Into<String>, error: impl Into<String>) -> Self {
+        Self {
+            index,
+            chapter_name: chapter_name.into(),
+            ok: false,
+            text: String::new(),
+            error: error.into(),
+        }
+    }
+
+    /// 转回批量拉取的单章结果（批量入口复用同一条流水线）
+    pub fn into_content_result(self) -> ChapterContentResult {
+        ChapterContentResult {
+            ok: self.ok,
+            chapter_name: self.chapter_name,
+            text: self.text,
+            error: self.error,
+        }
+    }
+}
+
+/// 一次「逐章拉正文」运行的汇总（每个任务都恰好交付一条结果）
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChapterRunSummary {
+    /// 本次提交的任务数
+    pub requested: usize,
+    pub ok: usize,
+    pub failed: usize,
+    /// 用户停止：剩余任务不再领取（已取回的照常交付）
+    pub cancelled: bool,
+    /// 被 worker 领取过、却没能交付结果的任务数（引擎异常时才会非 0）
+    pub missing: usize,
+    pub elapsed_ms: u64,
+}
+
+/// 「把这一章插到队首」的结果：两者都为 0 说明这一章不在本次运行的队列里
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChapterPromoteResult {
+    /// 从待取队列提到队首的任务数
+    pub promoted: usize,
+    /// 已被 worker 领取（正在取）的任务数
+    pub running: usize,
+}
+
 /// 经书源会话下载一张正文插图的结果（正文图片可能带防盗链，必须走该书源的
 /// cookie / 默认头 / UA，因此放到 Rust 侧用与 bookContent 相同的会话请求）。
 #[derive(Debug, Clone, Serialize, Deserialize)]

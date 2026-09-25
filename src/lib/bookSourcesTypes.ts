@@ -88,6 +88,54 @@ export interface ChapterContentResult {
   error: string;
 }
 
+/**
+ * 逐章拉正文提交的**单个章节任务**：`index` 是书内章节下标（结果按它回带）。
+ * 引擎队列里的最小单位就是一章 —— 不打包、不等整批。
+ */
+export interface ChapterTaskItem {
+  index: number;
+  chapter: ChapterItem;
+}
+
+/** 单个章节任务的完成结果：取回一章立刻回传一条 */
+export interface ChapterTaskResult {
+  /** 对应提交时给的章节下标 */
+  index: number;
+  chapterName: string;
+  ok: boolean;
+  /** 正文原始文本（未做段落规范化） */
+  text: string;
+  error: string;
+}
+
+/**
+ * 逐章拉取经 IPC 通道回传的消息：一章的结果，或「本轮结果已全部发出」的收尾标记。
+ *
+ * 为什么需要收尾标记：通道消息与命令返回值是两条独立通路（超过 8KB 的正文还会走一次
+ * 异步 fetch），命令 resolve 时最后几条逐章结果可能还在路上；前端以 done 为准确认「到齐了」。
+ */
+export type ChapterTaskEvent = ({ kind: "chapter" } & ChapterTaskResult) | { kind: "done" };
+
+/** 一轮逐章拉正文的汇总（每个任务都恰好交付一条结果） */
+export interface ChapterRunSummary {
+  requested: number;
+  ok: number;
+  failed: number;
+  /** 用户停止：剩余任务没有领取（已取回的照常交付） */
+  cancelled: boolean;
+  /** 引擎异常时才会非 0：领取过但没能交付结果的任务数 */
+  missing: number;
+  elapsedMs: number;
+}
+
+/** 「把这一章插到队首」的结果：两者都为 0 说明这一章不在该轮运行的队列里 */
+export interface ChapterPromoteResult {
+  /** 从待取队列提到队首的任务数 */
+  promoted: number;
+  /** 已被 worker 领取（正在取）的任务数 */
+  running: number;
+}
+
 /** 经书源会话下载一张图片（书源封面用）的结果：图片可能带防盗链，必须走书源 Cookie/头 */
 export interface FetchedImage {
   ok: boolean;

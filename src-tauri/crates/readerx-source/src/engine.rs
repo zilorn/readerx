@@ -6,16 +6,21 @@
 //! - 支持 `async/await` 风格规则：入口调用包在 `async IIFE` 里，驱动循环反复 `run_jobs()`
 //!   处理微任务直至 settle 或超时；宿主 `http` 为同步阻塞（在引擎线程内执行真实请求），
 //!   因此规则里的 `await http.get(...)` 也能正常按序推进；
-//! - 并发由「多个引擎线程各自串行执行」实现：批量拉正文时按配置并发起若干 worker。
+//! - 并发由「多个引擎线程各自串行执行」实现：拉正文时按配置并发起若干 worker，
+//!   队列里的最小单位是**一章**（见 [`run_chapter_tasks`]），完成一章立刻交付。
 
 use crate::host;
-use crate::models::{BookItem, ChapterContentResult, ChapterItem, SourceCallResult};
+use crate::models::{
+    BookItem, ChapterContentResult, ChapterItem, ChapterPromoteResult, ChapterRunSummary,
+    ChapterTaskItem, ChapterTaskResult, SourceCallResult,
+};
 use crate::panic_guard;
 use boa_engine::{Context, JsResult, JsString, JsValue, NativeFunction, Source};
 use serde_json::{json, Value};
 use std::cell::RefCell;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -769,29 +774,285 @@ pub fn call_source_function(
 }
 
 // ---------------------------------------------------------------------------
-// 对外入口二：批量拉取正文（多 worker 线程，并发可配置）
+// 对外入口二：逐章拉取正文（每章一个任务，完成一章立刻交付）
+//
+// 队列里的最小单位是**一章**：不再按 20 章打包，也不用等一整批回来才交付 ——
+// 慢章 / 失败章不会拖住同一批里的其它章节，前端可以逐章落盘、逐章推进度。
+//   - 用户操作优先：`promote` 把「正在读的那一章」提到队首，`cancel` 立刻停止领取新章节；
+//   - 并发由 concurrency 个 worker 线程提供（每个 worker 一份 Boa 上下文，串行取自己领到的章）。
 // ---------------------------------------------------------------------------
 
-pub fn fetch_chapter_contents(
+/// 逐章取正文的一次运行：任务队列 + 取消标志。
+///
+/// 生命周期：由调用方（App 的命令层）按运行 id 登记，运行结束后注销；
+/// worker 线程通过 `ChapterRun::take` 领取任务，因此队列是三者（领取 / 插队 / 停止）唯一的交汇点。
+pub struct ChapterRun {
+    cancel: AtomicBool,
+    queue: Mutex<RunQueue>,
+    total: usize,
+}
+
+struct RunQueue {
+    /// 全部任务（按提交顺序；位置即任务序号，结果里回带 task.index）
+    tasks: Vec<ChapterTaskItem>,
+    /// 章节地址 → 任务序号（插队按地址定位；同一地址可能有多个任务）
+    by_url: HashMap<String, Vec<usize>>,
+    /// 待领取的任务序号（队首优先）
+    pending: VecDeque<usize>,
+    /// 已领取、正在取的任务序号（插队时据此回答「这一章是不是已经在取了」）
+    running: HashSet<usize>,
+}
+
+impl ChapterRun {
+    pub fn new(tasks: Vec<ChapterTaskItem>) -> Arc<Self> {
+        let mut by_url: HashMap<String, Vec<usize>> = HashMap::new();
+        for (index, task) in tasks.iter().enumerate() {
+            by_url
+                .entry(task.chapter.chapter_url.clone())
+                .or_default()
+                .push(index);
+        }
+        let pending = (0..tasks.len()).collect();
+        let total = tasks.len();
+        Arc::new(Self {
+            cancel: AtomicBool::new(false),
+            queue: Mutex::new(RunQueue {
+                tasks,
+                by_url,
+                pending,
+                running: HashSet::new(),
+            }),
+            total,
+        })
+    }
+
+    /// 本次运行的任务总数
+    pub fn total(&self) -> usize {
+        self.total
+    }
+
+    /// 用户停止：不再领取新任务（已取回的照常交付；在飞的那一章取完即止）
+    pub fn cancel(&self) {
+        self.cancel.store(true, Ordering::SeqCst);
+        if let Ok(mut queue) = self.queue.lock() {
+            queue.pending.clear();
+        }
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.load(Ordering::SeqCst)
+    }
+
+    /// 还没取回的任务数（待领取 + 在飞）
+    pub fn remaining(&self) -> usize {
+        self.queue
+            .lock()
+            .map(|queue| queue.pending.len() + queue.running.len())
+            .unwrap_or(0)
+    }
+
+    /// 把给定章节地址的任务提到队首（读到哪一章就先取哪一章）。
+    /// 返回「已插队 / 已在取」的数量：两者都为 0 说明这一章不在本次运行的队列里
+    /// （调用方据此决定要不要为它单独发一次请求）。
+    pub fn promote(&self, urls: &[String]) -> ChapterPromoteResult {
+        let Ok(mut queue) = self.queue.lock() else {
+            return ChapterPromoteResult::default();
+        };
+        let mut promoted: Vec<usize> = Vec::new();
+        let mut running = 0usize;
+        for url in urls {
+            let Some(indexes) = queue.by_url.get(url) else {
+                continue;
+            };
+            for &index in indexes {
+                if queue.running.contains(&index) {
+                    running += 1;
+                    continue;
+                }
+                if queue.pending.contains(&index) && !promoted.contains(&index) {
+                    promoted.push(index);
+                }
+            }
+        }
+        if !promoted.is_empty() {
+            let moved: HashSet<usize> = promoted.iter().copied().collect();
+            queue.pending.retain(|index| !moved.contains(index));
+            // 保持调用方给的先后顺序（入参里靠前的章节更先取）
+            for index in promoted.iter().rev() {
+                queue.pending.push_front(*index);
+            }
+        }
+        ChapterPromoteResult {
+            promoted: promoted.len(),
+            running,
+        }
+    }
+
+    /// 领取下一个任务（已取消 / 已取空 → None），并标记为在飞
+    fn take(&self) -> Option<ChapterTaskItem> {
+        if self.is_cancelled() {
+            return None;
+        }
+        let mut queue = self.queue.lock().ok()?;
+        let index = queue.pending.pop_front()?;
+        queue.running.insert(index);
+        Some(queue.tasks[index].clone())
+    }
+
+    /// 被 worker 领取过的任务（按提交顺序）：收尾时给「领了却没交付」的章节兜底。
+    /// 取消后没被领取的任务不在其中 —— 它们根本没试过，不该记成失败。
+    fn claimed_tasks(&self) -> Vec<ChapterTaskItem> {
+        let Ok(queue) = self.queue.lock() else {
+            return Vec::new();
+        };
+        queue
+            .tasks
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| queue.running.contains(index))
+            .map(|(_, task)| task.clone())
+            .collect()
+    }
+}
+
+/// 一次运行的交付统计：结果计数 + 「哪些任务已经交付过」（收尾兜底时用）
+#[derive(Default)]
+struct RunDelivery {
+    ok: AtomicUsize,
+    failed: AtomicUsize,
+    delivered: Mutex<HashSet<usize>>,
+}
+
+impl RunDelivery {
+    /// 交付一条结果：每个任务只交付一次（重复交付直接丢弃）
+    fn deliver<F>(&self, on_task: &F, result: ChapterTaskResult) -> bool
+    where
+        F: Fn(ChapterTaskResult),
+    {
+        let fresh = self
+            .delivered
+            .lock()
+            .map(|mut set| set.insert(result.index))
+            .unwrap_or(false);
+        if !fresh {
+            return false;
+        }
+        if result.ok {
+            self.ok.fetch_add(1, Ordering::SeqCst);
+        } else {
+            self.failed.fetch_add(1, Ordering::SeqCst);
+        }
+        on_task(result);
+        true
+    }
+}
+
+/// 取一章正文（在给定上下文里调用 bookContent）。
+/// 单章失败只反映在这一章上：同一 worker 的后续章节照常继续。
+fn fetch_one_chapter(
+    context: &mut Context,
+    source_id: &str,
+    book: &BookItem,
+    chapter: &ChapterItem,
+    budget: Duration,
+) -> ChapterContentResult {
+    // 用 to_value 而不是 json!：json! 对表达式内部会 unwrap，这里显式把编码失败变成该章的错误
+    let args = match serde_json::to_value((chapter, book)) {
+        Ok(value) => value,
+        Err(error) => {
+            let error = format!("参数编码失败: {error}");
+            log::warn!(
+                "章节正文拉取失败 source={source_id} chapter={} reason={error}",
+                chapter.chapter_name
+            );
+            return ChapterContentResult {
+                ok: false,
+                chapter_name: chapter.chapter_name.clone(),
+                text: String::new(),
+                error,
+            };
+        }
+    };
+    let args_json = match serde_json::to_string(&args) {
+        Ok(text) => text,
+        Err(error) => {
+            let error = format!("参数编码失败: {error}");
+            log::warn!(
+                "章节正文拉取失败 source={source_id} chapter={} reason={error}",
+                chapter.chapter_name
+            );
+            return ChapterContentResult {
+                ok: false,
+                chapter_name: chapter.chapter_name.clone(),
+                text: String::new(),
+                error,
+            };
+        }
+    };
+    match try_call(context, "bookContent", &args_json, budget) {
+        Ok(settled) => {
+            // 期望返回纯文本字符串
+            let value: Value = serde_json::from_str(&settled).unwrap_or(Value::String(settled));
+            let text = match &value {
+                Value::String(s) => s.clone(),
+                Value::Null => String::new(),
+                _ => value.to_string(),
+            };
+            ChapterContentResult {
+                ok: true,
+                chapter_name: chapter.chapter_name.clone(),
+                text,
+                error: String::new(),
+            }
+        }
+        Err(error) => {
+            // 单章失败不拖垮整轮：记章节标题与原因（正文本身绝不进日志）
+            log::warn!(
+                "章节正文拉取失败 source={source_id} chapter={} reason={error}",
+                chapter.chapter_name
+            );
+            ChapterContentResult {
+                ok: false,
+                chapter_name: chapter.chapter_name.clone(),
+                text: String::new(),
+                error,
+            }
+        }
+    }
+}
+
+/// 逐章拉取正文：`concurrency` 个 worker 各自领取章节任务，**每完成一章立刻 `on_task` 交付一条结果**
+/// （不打包、不等整批）。运行结束（或 `cancel` 之后队列清空）时返回汇总。
+///
+/// 交付保证：每个被领取的任务都会恰好交付一条结果 —— worker 因引擎异常退出时，
+/// 收尾会给「领了却没交付」的章节补一条失败结果，调用方不会漏章、也不会永远等下去。
+pub fn run_chapter_tasks<F>(
     source_id: &str,
     js: &str,
     book: &BookItem,
-    chapters: &[ChapterItem],
+    run: Arc<ChapterRun>,
     concurrency: usize,
     budget_ms: u64,
-) -> Result<Vec<ChapterContentResult>, String> {
-    if chapters.is_empty() {
-        return Ok(Vec::new());
-    }
+    on_task: F,
+) -> Result<ChapterRunSummary, String>
+where
+    F: Fn(ChapterTaskResult) + Send + Sync + 'static,
+{
     let started = Instant::now();
-    let workers = concurrency.clamp(1, host::CONCURRENCY_CAP).min(chapters.len());
+    let requested = run.total();
+    if requested == 0 {
+        return Ok(ChapterRunSummary {
+            requested: 0,
+            ..ChapterRunSummary::default()
+        });
+    }
+    let workers = concurrency.clamp(1, host::CONCURRENCY_CAP).min(requested);
     let source_id = source_id.to_string();
     let js = js.to_string();
     let book = book.clone();
-    let next = Arc::new(AtomicUsize::new(0));
-    let slots: Arc<Vec<Mutex<Option<ChapterContentResult>>>> =
-        Arc::new((0..chapters.len()).map(|_| Mutex::new(None)).collect());
-    // worker 异常退出时记录原因：末尾给「没人领取 / 没写回」的章节一个可读解释
+    let on_task = Arc::new(on_task);
+    let delivery = Arc::new(RunDelivery::default());
+    // worker 异常退出时记录原因：收尾给「没交付」的章节一个可读解释
     let panic_note: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
     let mut handles = Vec::new();
@@ -799,95 +1060,43 @@ pub fn fetch_chapter_contents(
         let source_id = source_id.clone();
         let js = js.clone();
         let book = book.clone();
-        let next = next.clone();
-        let slots = slots.clone();
+        let run = run.clone();
+        let on_task = on_task.clone();
+        let delivery = delivery.clone();
         let panic_note = panic_note.clone();
-        let chapters = chapters.to_vec();
         handles.push(
             std::thread::Builder::new()
-                .name("booksource-content".to_string())
+                .name("booksource-chapter".to_string())
                 .spawn(move || {
-                    // 每个 worker 的整段执行都做 panic 兜底：单个 worker 因意外异常
-                    // 退出时，未领取的章节仍会被其它 worker 处理，已取回的结果也不会丢。
+                    // 每个 worker 的整段执行都做 panic 兜底：单个 worker 因意外异常退出时，
+                    // 它没领到的章节仍会被其它 worker 处理，已取回的结果也不会丢。
                     let outcome = panic_guard::catch_result("书源正文引擎", || -> Result<(), String> {
                         install_call_ctx(&source_id);
                         let mut context = match build_context(&js) {
                             Ok(context) => context,
                             Err(build_error) => {
-                                // 解析失败：把本 worker 尚未领取的章节全部标记错误，避免静默缺失
+                                // 引擎起不来：把还能领到的任务逐个标失败（每个任务都要有一条结果）
                                 log::warn!(
-                                    "书源正文引擎初始化失败 source={source_id} chapters={} reason={build_error}",
-                                    chapters.len()
+                                    "书源正文引擎初始化失败 source={source_id} reason={build_error}"
                                 );
-                                loop {
-                                    let idx = next.fetch_add(1, Ordering::SeqCst);
-                                    if idx >= chapters.len() {
-                                        break;
-                                    }
-                                    if let Some(slot) = slots.get(idx) {
-                                        if let Ok(mut guard) = slot.lock() {
-                                            *guard = Some(ChapterContentResult {
-                                                ok: false,
-                                                chapter_name: chapters[idx].chapter_name.clone(),
-                                                text: String::new(),
-                                                error: build_error.clone(),
-                                            });
-                                        }
-                                    }
+                                while let Some(task) = run.take() {
+                                    delivery.deliver(
+                                        &*on_task,
+                                        ChapterTaskResult::failed(
+                                            task.index,
+                                            task.chapter.chapter_name,
+                                            build_error.clone(),
+                                        ),
+                                    );
                                 }
                                 return Ok(());
                             }
                         };
                         let budget = Duration::from_millis(budget_ms.max(1_000));
-                        loop {
-                            let idx = next.fetch_add(1, Ordering::SeqCst);
-                            if idx >= chapters.len() {
-                                break;
-                            }
-                            let chapter = &chapters[idx];
-                            // 用 to_value 而不是 json!：json! 对表达式内部会 unwrap，
-                            // 这里显式把编码失败变成该章的 error 文本
-                            let args = serde_json::to_value((chapter, &book))
-                                .map_err(|e| format!("参数编码失败: {e}"))?;
-                            let args_json =
-                                serde_json::to_string(&args).map_err(|e| format!("参数编码失败: {e}"))?;
-                            let outcome = try_call(&mut context, "bookContent", &args_json, budget);
-                            let result = match outcome {
-                                Ok(settled) => {
-                                    // 期望返回纯文本字符串
-                                    let value: Value =
-                                        serde_json::from_str(&settled).unwrap_or(Value::String(settled));
-                                    let text = match &value {
-                                        Value::String(s) => s.clone(),
-                                        Value::Null => String::new(),
-                                        _ => value.to_string(),
-                                    };
-                                    ChapterContentResult {
-                                        ok: true,
-                                        chapter_name: chapter.chapter_name.clone(),
-                                        text,
-                                        error: String::new(),
-                                    }
-                                }
-                                Err(error) => {
-                                    // 单章失败不拖垮整批：记章节标题与原因（正文本身绝不进日志）
-                                    log::warn!(
-                                        "章节正文拉取失败 source={source_id} chapter={} reason={error}",
-                                        chapter.chapter_name
-                                    );
-                                    ChapterContentResult {
-                                        ok: false,
-                                        chapter_name: chapter.chapter_name.clone(),
-                                        text: String::new(),
-                                        error,
-                                    }
-                                }
-                            };
-                            if let Some(slot) = slots.get(idx) {
-                                if let Ok(mut guard) = slot.lock() {
-                                    *guard = Some(result);
-                                }
-                            }
+                        while let Some(task) = run.take() {
+                            let result =
+                                fetch_one_chapter(&mut context, &source_id, &book, &task.chapter, budget);
+                            delivery.deliver(&*on_task, result.into_task_result(task.index));
                         }
                         Ok(())
                     });
@@ -908,30 +1117,98 @@ pub fn fetch_chapter_contents(
         let _ = handle.join();
     }
 
-    // 没有任何 worker 写回结果的章节：用实际原因（异常原因 / 通用兜底）说明
+    // 领了却没交付的章节（worker 异常）：补一条失败结果，保证一章不漏
     let fallback = panic_note
         .lock()
         .ok()
         .and_then(|note| note.clone())
         .unwrap_or_else(|| "该书源未返回本章内容".to_string());
+    let mut missing = 0usize;
+    for task in run.claimed_tasks() {
+        if delivery.deliver(
+            &*on_task,
+            ChapterTaskResult::failed(task.index, task.chapter.chapter_name, fallback.clone()),
+        ) {
+            missing += 1;
+        }
+    }
+    if missing > 0 {
+        log::warn!(
+            "逐章正文拉取有章节未交付 source={source_id} missing={missing} reason={fallback}"
+        );
+    }
+
+    let summary = ChapterRunSummary {
+        requested,
+        ok: delivery.ok.load(Ordering::SeqCst),
+        failed: delivery.failed.load(Ordering::SeqCst),
+        cancelled: run.is_cancelled(),
+        missing,
+        elapsed_ms: started.elapsed().as_millis() as u64,
+    };
+    // 一次运行一条 info：任务数与耗时是判断「站点变慢 / 规则失效」的第一手线索
+    log::info!(
+        "逐章正文拉取结束 source={source_id} requested={} ok={} failed={} workers={workers} cancelled={} ms={}",
+        summary.requested,
+        summary.ok,
+        summary.failed,
+        summary.cancelled,
+        summary.elapsed_ms
+    );
+    Ok(summary)
+}
+
+/// 批量拉取正文（CLI / 少量章节用）：内部就是「逐章任务 + 收集结果」，
+/// 与 App 的逐章流式入口共用同一条流水线，只是把结果按章节序号收集起来一次返回。
+pub fn fetch_chapter_contents(
+    source_id: &str,
+    js: &str,
+    book: &BookItem,
+    chapters: &[ChapterItem],
+    concurrency: usize,
+    budget_ms: u64,
+) -> Result<Vec<ChapterContentResult>, String> {
+    if chapters.is_empty() {
+        return Ok(Vec::new());
+    }
+    let tasks: Vec<ChapterTaskItem> = chapters
+        .iter()
+        .enumerate()
+        .map(|(index, chapter)| ChapterTaskItem {
+            index,
+            chapter: chapter.clone(),
+        })
+        .collect();
+    let slots: Arc<Vec<Mutex<Option<ChapterTaskResult>>>> =
+        Arc::new((0..chapters.len()).map(|_| Mutex::new(None)).collect());
+    let write_slots = slots.clone();
+    run_chapter_tasks(
+        source_id,
+        js,
+        book,
+        ChapterRun::new(tasks),
+        concurrency,
+        budget_ms,
+        move |result| {
+            if let Some(slot) = write_slots.get(result.index) {
+                if let Ok(mut guard) = slot.lock() {
+                    *guard = Some(result);
+                }
+            }
+        },
+    )?;
     let mut results = Vec::with_capacity(chapters.len());
     for slot in slots.iter() {
         let guard = slot.lock().map_err(|_| "结果锁异常".to_string())?;
-        results.push(guard.clone().unwrap_or_else(|| ChapterContentResult {
-            ok: false,
-            chapter_name: String::new(),
-            text: String::new(),
-            error: fallback.clone(),
-        }));
+        results.push(
+            guard
+                .clone()
+                .unwrap_or_else(|| {
+                    ChapterTaskResult::failed(0, "", "该书源未返回本章内容")
+                })
+                .into_content_result(),
+        );
     }
-    // 整批一条 info：章节数与耗时是判断「站点变慢 / 规则失效」的第一手线索
-    let succeeded = results.iter().filter(|item| item.ok).count();
-    log::info!(
-        "批量正文拉取结束 source={source_id} requested={} ok={succeeded} failed={} workers={workers} ms={}",
-        results.len(),
-        results.len() - succeeded,
-        started.elapsed().as_millis()
-    );
     Ok(results)
 }
 
@@ -1275,6 +1552,204 @@ mod tests {
         assert!(results[1].error.contains("该章解析失败"));
         assert!(results[2].ok);
         assert_eq!(results[2].chapter_name, "好章2");
+    }
+
+    /// 逐章任务：每个任务恰好交付一条结果（按提交时给的章节序号回带），
+    /// 且**完成一章就交付一章** —— 慢章不挡快章，取回顺序不必等于提交顺序。
+    #[test]
+    fn chapter_tasks_deliver_each_chapter_as_soon_as_it_is_ready() {
+        let js = r#"
+        function bookContent(chapter, book) {
+          // 第一章故意慢：它必须最后才交付，不能拖住后面的章节
+          if (chapter.chapterName === "慢章") {
+            let spin = 0;
+            for (let i = 0; i < 5000000; i++) { spin += i; }
+            if (spin < 0) throw new Error("unreachable");
+          }
+          return "正文：" + chapter.chapterName;
+        }
+        "#;
+        let book: BookItem =
+            serde_json::from_value(json!({ "bookName": "测试书", "bookUrl": "https://example.com/b" }))
+                .unwrap();
+        let tasks: Vec<ChapterTaskItem> = ["慢章", "快章1", "快章2"]
+            .iter()
+            .enumerate()
+            .map(|(index, name)| ChapterTaskItem {
+                index: index * 10,
+                chapter: ChapterItem {
+                    chapter_name: (*name).to_string(),
+                    chapter_url: format!("https://example.com/{index}"),
+                },
+            })
+            .collect();
+        let delivered: Arc<Mutex<Vec<ChapterTaskResult>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = delivered.clone();
+        let summary = run_chapter_tasks(
+            "test-source",
+            js,
+            &book,
+            ChapterRun::new(tasks),
+            2,
+            5_000,
+            move |result| sink.lock().unwrap().push(result),
+        )
+        .expect("逐章拉取本身不应返回 Err");
+        let results = delivered.lock().unwrap().clone();
+        assert_eq!(results.len(), 3, "每个任务都要有一条结果");
+        assert_eq!(summary.ok, 3);
+        assert_eq!(summary.failed, 0);
+        assert_eq!(summary.missing, 0);
+        // 序号按提交时的 index 回带（不是队列位置）
+        let mut indexes: Vec<usize> = results.iter().map(|item| item.index).collect();
+        indexes.sort_unstable();
+        assert_eq!(indexes, vec![0, 10, 20]);
+        // 快章先交付：慢章排在最后
+        assert_eq!(results[2].chapter_name, "慢章");
+    }
+
+    /// 插队：`promote` 把指定章节地址的任务提到队首（用户读到哪一章就先取哪一章），
+    /// 已在取的任务不重复插队（调用方据此不再另发请求）。
+    #[test]
+    fn chapter_run_promote_moves_task_to_front() {
+        let tasks: Vec<ChapterTaskItem> = (0..4)
+            .map(|index| ChapterTaskItem {
+                index,
+                chapter: ChapterItem {
+                    chapter_name: format!("第{index}章"),
+                    chapter_url: format!("https://example.com/{index}"),
+                },
+            })
+            .collect();
+        let run = ChapterRun::new(tasks);
+        assert_eq!(run.total(), 4);
+
+        let promoted = run.promote(&["https://example.com/3".to_string()]);
+        assert_eq!(promoted.promoted, 1);
+        assert_eq!(promoted.running, 0);
+        assert_eq!(run.take().map(|task| task.index), Some(3), "插队的章节必须最先领取");
+        // 已领取（在飞）的任务：只回答「正在取」，不再插队
+        let running = run.promote(&["https://example.com/3".to_string()]);
+        assert_eq!(running.promoted, 0);
+        assert_eq!(running.running, 1);
+        // 不在队列里的地址：两者都是 0
+        let absent = run.promote(&["https://example.com/404".to_string()]);
+        assert_eq!((absent.promoted, absent.running), (0, 0));
+        // 其余任务按提交顺序领取
+        let mut rest: Vec<usize> = Vec::new();
+        while let Some(task) = run.take() {
+            rest.push(task.index);
+        }
+        assert_eq!(rest, vec![0, 1, 2]);
+    }
+
+    /// 并发：concurrency 个 worker 同时领取各自的任务（每章都在 JS 里空转一会儿）。
+    /// 同一批章节在并发 4 下必须明显快过串行 —— 否则「多线程并发」就名存实亡。
+    #[test]
+    fn chapter_tasks_run_with_configured_concurrency() {
+        let js = r#"
+        function bookContent(chapter, book) {
+          let spin = 0;
+          for (let i = 0; i < 1000000; i++) { spin += i; }
+          return "正文：" + chapter.chapterName + spin;
+        }
+        "#;
+        let book: BookItem =
+            serde_json::from_value(json!({ "bookName": "测试书", "bookUrl": "https://example.com/b" }))
+                .unwrap();
+        let tasks = || -> Vec<ChapterTaskItem> {
+            (0..4)
+                .map(|index| ChapterTaskItem {
+                    index,
+                    chapter: ChapterItem {
+                        chapter_name: format!("第{index}章"),
+                        chapter_url: format!("https://example.com/{index}"),
+                    },
+                })
+                .collect()
+        };
+        let delivered: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+        let elapsed = |concurrency: usize| -> f64 {
+            let sink = delivered.clone();
+            let started = Instant::now();
+            let summary = run_chapter_tasks(
+                "test-source",
+                js,
+                &book,
+                ChapterRun::new(tasks()),
+                concurrency,
+                30_000,
+                move |result| {
+                    assert!(result.ok, "{:?}", result);
+                    *sink.lock().unwrap() += 1;
+                },
+            )
+            .unwrap();
+            assert_eq!(summary.ok, 4);
+            started.elapsed().as_secs_f64()
+        };
+        let serial = elapsed(1);
+        let parallel = elapsed(4);
+        assert_eq!(*delivered.lock().unwrap(), 8);
+        assert!(
+            parallel * 2.0 < serial,
+            "并发 4（{parallel:.2}s）应明显快过串行（{serial:.2}s）"
+        );
+    }
+
+    /// 停止：`cancel` 之后不再领取新任务（已取回的照常交付，未领取的不算失败）。
+    #[test]
+    fn chapter_run_cancel_stops_taking_new_tasks() {
+        let tasks: Vec<ChapterTaskItem> = (0..3)
+            .map(|index| ChapterTaskItem {
+                index,
+                chapter: ChapterItem {
+                    chapter_name: format!("第{index}章"),
+                    chapter_url: format!("https://example.com/{index}"),
+                },
+            })
+            .collect();
+        let run = ChapterRun::new(tasks);
+        run.cancel();
+        assert!(run.is_cancelled());
+        assert!(run.take().is_none());
+        assert_eq!(run.remaining(), 0);
+
+        // 取消后跑一轮：一条结果都不该交付（没试过的章节不能记成失败）
+        let js = "function bookContent(chapter) { return chapter.chapterName; }";
+        let book: BookItem =
+            serde_json::from_value(json!({ "bookName": "测试书", "bookUrl": "https://example.com/b" }))
+                .unwrap();
+        let tasks: Vec<ChapterTaskItem> = (0..2)
+            .map(|index| ChapterTaskItem {
+                index,
+                chapter: ChapterItem {
+                    chapter_name: format!("第{index}章"),
+                    chapter_url: format!("https://example.com/{index}"),
+                },
+            })
+            .collect();
+        let delivered: Arc<Mutex<Vec<ChapterTaskResult>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = delivered.clone();
+        let summary = run_chapter_tasks(
+            "test-source",
+            js,
+            &book,
+            {
+                let run = ChapterRun::new(tasks);
+                run.cancel();
+                run
+            },
+            2,
+            5_000,
+            move |result| sink.lock().unwrap().push(result),
+        )
+        .unwrap();
+        assert_eq!(summary.requested, 2);
+        assert_eq!(summary.ok, 0);
+        assert_eq!(summary.failed, 0);
+        assert!(summary.cancelled);
+        assert!(delivered.lock().unwrap().is_empty());
     }
 }
 

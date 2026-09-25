@@ -3,7 +3,7 @@
  * - Tauri 环境：通过 invoke 读写 Rust 管理的 JSON 文件；
  * - 纯浏览器开发环境：只使用内存 Map 降级，不写任何 WebView 持久化存储。
  */
-import { invoke, isTauri } from "@tauri-apps/api/core";
+import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
 import { bookToMeta, type BookMeta, type LocalBook, type LocalBookChapter } from "./booksTypes";
 import { reportFailure } from "./errorReport";
 import { createLogger } from "./logger";
@@ -15,6 +15,11 @@ import type {
   BookSourceSummary,
   ChapterContentResult,
   ChapterItem,
+  ChapterPromoteResult,
+  ChapterRunSummary,
+  ChapterTaskEvent,
+  ChapterTaskItem,
+  ChapterTaskResult,
   FetchedImage,
   SourceCallResult,
   SourceLoginResult,
@@ -97,7 +102,7 @@ export async function saveRemoteBook(book: LocalBook): Promise<void> {
 }
 
 /**
- * 只回写一本书的若干章节（按下标）——在线书逐批下载正文用。
+ * 只回写一本书的若干章节（按下标）——在线书逐章下载正文用（写盘按小批合并）。
  * 相比每次整本 JSON 经 IPC 传一遍（图片章节会把整本 data URL 反复拷贝，
  * 大书会明显卡 UI 甚至内存暴涨闪退），这里只传本次真正变动的章节；
  * Rust 侧读回书文件、原位替换后再落盘（I/O 在 blocking 线程池）。
@@ -287,6 +292,112 @@ export async function fetchRemoteChapterContents(
   } catch (err) {
     reportFailure("拉取章节正文失败", err);
     return [];
+  }
+}
+
+/** 逐章拉取的返回：summary 为空表示这次调用本身失败了（原因见 error） */
+export interface ChapterTaskRunOutcome {
+  summary: ChapterRunSummary | null;
+  error: string;
+}
+
+/** 收尾标记最多等这么久（毫秒）：命令已经返回，通道消息只可能「还在路上」 */
+const CHANNEL_SETTLE_TIMEOUT_MS = 5_000;
+
+/** 等「本轮结果已全部发出」的收尾标记；超时也放行，绝不把下载卡死在这里 */
+async function waitChannelSettled(settled: Promise<void>): Promise<void> {
+  await Promise.race([
+    settled,
+    new Promise<void>((resolve) => window.setTimeout(resolve, CHANNEL_SETTLE_TIMEOUT_MS)),
+  ]);
+}
+
+/**
+ * 逐章拉取正文（**每章一个任务**）：把整批章节交给引擎，引擎按「书源并发」起若干 worker
+ * 逐章领取，**取回一章立刻经 onTask 回传一条** —— 不打包、不等整批回来。
+ *
+ * - `runId`：本轮运行的标识，配合 [`cancelRemoteChapterRun`]（停止）与
+ *   [`promoteRemoteChapterRun`]（把正在读的那一章插到队首）使用；
+ * - `onTask` 在 WebView 主线程上按到达顺序同步回调，耗时工作请自行排队 / 让出主线程；
+ * - 返回时本轮运行**所有逐章结果都已回调完毕**（全部取完 / 用户停止 / 出错），
+ *   summary 里带成功失败计数。
+ */
+export async function fetchRemoteChapterTasks(
+  sourceId: string,
+  book: BookItem,
+  tasks: ChapterTaskItem[],
+  runId: number,
+  onTask: (result: ChapterTaskResult) => void,
+): Promise<ChapterTaskRunOutcome> {
+  if (!tauri) return { summary: null, error: "书源功能仅在应用内可用" };
+  if (tasks.length === 0) {
+    return {
+      summary: {
+        requested: 0,
+        ok: 0,
+        failed: 0,
+        cancelled: false,
+        missing: 0,
+        elapsedMs: 0,
+      },
+      error: "",
+    };
+  }
+  let markSettled: () => void = () => {};
+  const settled = new Promise<void>((resolve) => {
+    markSettled = resolve;
+  });
+  const channel = new Channel<ChapterTaskEvent>();
+  channel.onmessage = (event) => {
+    if (event.kind === "done") {
+      markSettled();
+      return;
+    }
+    onTask(event);
+  };
+  try {
+    const summary = await invoke<ChapterRunSummary>("readerx_source_fetch_contents_stream", {
+      sourceId,
+      book,
+      tasks,
+      runId,
+      onTask: channel,
+    });
+    // 命令返回 ≠ 结果都到了：等收尾标记，保证调用方收尾时「逐章结果已全部落定」
+    await waitChannelSettled(settled);
+    return { summary, error: "" };
+  } catch (err) {
+    // 失败以结果对象交给调用方（逐章记失败 / 展示），这里只留一条日志
+    log.warn("逐章拉取正文失败", `sourceId=${sourceId}`, `tasks=${tasks.length}`, err);
+    return { summary: null, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** 停止一轮逐章拉取（引擎侧立刻不再领取新章节；已取回的照常交付） */
+export async function cancelRemoteChapterRun(runId: number): Promise<void> {
+  if (!tauri || runId <= 0) return;
+  try {
+    await invoke<boolean>("readerx_source_chapter_run_cancel", { runId });
+  } catch (err) {
+    // 停止失败不影响用户看到的「已停止」：那只说明这一轮已经跑完了
+    log.debug("停止逐章拉取失败", `runId=${runId}`, err);
+  }
+}
+
+/** 把章节地址对应的任务提到队首（读到哪一章就先取哪一章）；不在队列里返回全 0 */
+export async function promoteRemoteChapterRun(
+  runId: number,
+  urls: string[],
+): Promise<ChapterPromoteResult> {
+  if (!tauri || runId <= 0 || urls.length === 0) return { promoted: 0, running: 0 };
+  try {
+    return await invoke<ChapterPromoteResult>("readerx_source_chapter_run_promote", {
+      runId,
+      urls,
+    });
+  } catch (err) {
+    log.debug("章节插队失败", `runId=${runId}`, err);
+    return { promoted: 0, running: 0 };
   }
 }
 

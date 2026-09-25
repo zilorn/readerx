@@ -36,7 +36,8 @@ pub mod profile;
 
 pub use models::{
     BookItem, BookSource, BookSourceCapabilities, BookSourceSummary, ChapterContentResult,
-    ChapterItem, FetchedImage, SourceCallResult,
+    ChapterItem, ChapterPromoteResult, ChapterRunSummary, ChapterTaskItem, ChapterTaskResult,
+    FetchedImage, SourceCallResult,
 };
 
 /// 默认数据目录：`$READERX_SOURCE_HOME` > `$XDG_DATA_HOME/readerx-source` > `~/.local/share/readerx-source`。

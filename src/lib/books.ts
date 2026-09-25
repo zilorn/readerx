@@ -722,7 +722,7 @@ export async function commitBookContentUpdate(book: LocalBook): Promise<void> {
 }
 
 /**
- * 在线书「只回写部分章节」的内容更新（逐批 / 逐章下载正文用）：
+ * 在线书「只回写部分章节」的内容更新（逐章下载正文用；写盘按小批合并）：
  * - 后端只接收本次变动的章节（saveRemoteBookChapters），不再整本 JSON 过 IPC；
  * - 写入在本书写队列内执行：以排队时刻的**最新缓存**为基底套用补丁，不会用调用方
  *   手里的旧快照覆盖并发任务刚写好的章节（元数据同样按该最新基底合并发布）；

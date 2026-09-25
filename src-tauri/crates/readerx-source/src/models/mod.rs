@@ -8,5 +8,6 @@ pub mod book_source;
 
 pub use book_source::{
     BookItem, BookSource, BookSourceCapabilities, BookSourceSummary, ChapterContentResult,
-    ChapterItem, FetchedImage, SourceCallResult,
+    ChapterItem, ChapterPromoteResult, ChapterRunSummary, ChapterTaskItem, ChapterTaskResult,
+    FetchedImage, SourceCallResult,
 };

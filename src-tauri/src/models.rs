@@ -5,11 +5,25 @@
 //! 迁到 `readerx-source` crate，这里原样再导出，App 内 `crate::models::X` 的写法不变。
 
 pub use readerx_source::models::{
-    BookItem, BookSource, BookSourceSummary, ChapterContentResult, ChapterItem, FetchedImage,
-    SourceCallResult,
+    BookItem, BookSource, BookSourceSummary, ChapterContentResult, ChapterItem, ChapterPromoteResult,
+    ChapterRunSummary, ChapterTaskItem, ChapterTaskResult, FetchedImage, SourceCallResult,
 };
 
 use serde::{Deserialize, Serialize};
+
+/// 逐章拉正文时经 IPC 通道回传的消息（命令层与前端约定的载荷）。
+///
+/// 为什么要一条收尾标记：通道消息与命令返回值是**两条独立的通路**（超过 8KB 的正文还会
+/// 走一次异步 fetch），命令 resolve 时最后几条逐章结果可能还在路上；前端以 `Done` 为准，
+/// 确认「本轮所有逐章结果都已回调完毕」，再去落盘收尾 / 进入图片阶段。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ChapterTaskEvent {
+    /// 一章的结果（取回 / 失败）
+    Chapter(ChapterTaskResult),
+    /// 本次运行的所有章节结果都已发出
+    Done,
+}
 
 /// 图片引用：块级插图（`ChapterBlock` 上的 src/alt/remote/local）与段内插图
 /// （`ChapterBlock::imgs` 锚点）共用同一组字段，语义完全一致。
@@ -361,6 +375,29 @@ pub struct BookImageInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 逐章通道载荷的线格式（与 `src/lib/bookSourcesTypes.ts` 的 ChapterTaskEvent 对齐）：
+    /// 逐章结果带 `kind: "chapter"` 与逐章字段，收尾标记是 `kind: "done"`。
+    #[test]
+    fn chapter_task_event_wire_format() {
+        let chapter = serde_json::to_value(ChapterTaskEvent::Chapter(ChapterTaskResult {
+            index: 7,
+            chapter_name: "第七章".into(),
+            ok: true,
+            text: "正文".into(),
+            error: String::new(),
+        }))
+        .unwrap();
+        assert_eq!(chapter["kind"], "chapter");
+        assert_eq!(chapter["index"], 7);
+        assert_eq!(chapter["chapterName"], "第七章");
+        assert_eq!(chapter["ok"], true);
+        assert_eq!(chapter["text"], "正文");
+
+        let done = serde_json::to_value(ChapterTaskEvent::Done).unwrap();
+        assert_eq!(done["kind"], "done");
+        assert_eq!(done.as_object().map(|map| map.len()), Some(1));
+    }
 
     /// 测试基线：一本带简介 / 封面 / 分组 / 标签 / 书源标签的在线书
     fn test_book() -> LocalBook {

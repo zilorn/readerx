@@ -1,4 +1,5 @@
 mod book_images;
+mod chapter_runs;
 mod commands;
 mod logging;
 mod models;
@@ -124,6 +125,9 @@ pub fn run() {
             commands::readerx_source_group_clear,
             commands::readerx_source_call,
             commands::readerx_source_fetch_contents,
+            commands::readerx_source_fetch_contents_stream,
+            commands::readerx_source_chapter_run_cancel,
+            commands::readerx_source_chapter_run_promote,
             commands::readerx_source_fetch_image,
             commands::readerx_book_image_fetch,
             commands::readerx_book_image_info,
