@@ -124,6 +124,11 @@ function persist(): void {
   writeQueue = writeQueue.then(() => writeState(STORAGE_KEY, snapshot));
 }
 
+/** 书签所属章节的展示名（章节无标题时兜底为「第 N 章」） */
+export function bookmarkChapterLabel(bookmark: Bookmark): string {
+  return bookmark.chapterTitle || `第 ${bookmark.chapterIndex + 1} 章`;
+}
+
 /** 某本书的全部书签（响应式，无序） */
 export function bookmarksFor(bookId: string): Bookmark[] {
   return bookmarkMap()[bookId] ?? [];
@@ -412,7 +417,7 @@ export async function previewChapterBookmarkReplacement(
     if (samples.length < 3) {
       const snippet = bm.text.slice(0, 48);
       samples.push({
-        chapterTitle: bm.chapterTitle || `第 ${bm.chapterIndex + 1} 章`,
+        chapterTitle: bookmarkChapterLabel(bm),
         text: snippet.length < bm.text.length ? `${snippet}…` : snippet,
       });
     }
@@ -452,7 +457,7 @@ export async function previewBookmarkInheritance(
     if (samples.length < 3) {
       const snippet = bm.text.slice(0, 48);
       samples.push({
-        chapterTitle: bm.chapterTitle || `第 ${bm.chapterIndex + 1} 章`,
+        chapterTitle: bookmarkChapterLabel(bm),
         text: snippet.length < bm.text.length ? `${snippet}…` : snippet,
       });
     }

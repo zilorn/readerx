@@ -14,13 +14,13 @@ import {
   onCleanup,
 } from "solid-js";
 import { CloseIcon, SearchIcon } from "./icons";
+import { HighlightText } from "./HighlightText";
 import { ScrollArea } from "./ScrollArea";
 import type { LocalBook } from "../lib/booksTypes";
 import {
   searchBookText,
   type BookSearchHit,
   type BookSearchScope,
-  type SearchMark,
 } from "../lib/bookSearch";
 
 /** 点击某条结果卡片时传给阅读页的信息（含整份命中列表，用于进入搜索模式逐条切换） */
@@ -41,47 +41,6 @@ export interface BookSearchPanelProps {
   focusInput?: boolean;
   onClose: () => void;
   onOpenResult: (target: BookSearchOpenTarget) => void;
-}
-
-interface TextSeg {
-  text: string;
-  hit: boolean;
-}
-
-/** 把文本按命中区间切成片段（合并/跳过重叠或乱序标记） */
-function segmentText(text: string, marks: SearchMark[]): TextSeg[] {
-  const segs: TextSeg[] = [];
-  let cursor = 0;
-  const sorted = marks.slice().sort((a, b) => a.from - b.from);
-  for (const mark of sorted) {
-    if (mark.to <= cursor || mark.from < cursor) continue;
-    if (mark.from > cursor) segs.push({ text: text.slice(cursor, mark.from), hit: false });
-    segs.push({ text: text.slice(mark.from, mark.to), hit: true });
-    cursor = mark.to;
-  }
-  if (cursor < text.length) segs.push({ text: text.slice(cursor), hit: false });
-  if (segs.length === 0) segs.push({ text, hit: false });
-  return segs;
-}
-
-/** 高亮渲染：命中片段着强调色 */
-function HighlightText(props: { text: string; marks: SearchMark[] }) {
-  const segs = createMemo(() => segmentText(props.text, props.marks));
-  return (
-    <>
-      <For each={segs()}>
-        {(seg) =>
-          seg.hit ? (
-            <span class="rounded-[3px] bg-accent-weak font-semibold text-accent">
-              {seg.text}
-            </span>
-          ) : (
-            seg.text
-          )
-        }
-      </For>
-    </>
-  );
 }
 
 const SCOPE_OPTIONS: { value: BookSearchScope; label: string }[] = [

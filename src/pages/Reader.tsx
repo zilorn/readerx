@@ -3351,6 +3351,7 @@ export default function ReaderPage() {
       if (
         menuOpen() ||
         tocOpen() ||
+        bmPanelOpen() ||
         bookSearchOpen() ||
         readerSettingsOpen() ||
         replaceSheetOpen() ||
