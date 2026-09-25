@@ -2770,18 +2770,19 @@ export default function ReaderPage() {
       if (!caret) return null;
       const cr = caret.getBoundingClientRect();
       if (!cr) return null;
-      // 折叠 caret 的 rect 语义各引擎/设备字体不一致（top 有的指行盒顶、有的指字形内容盒
-      // 顶、高度甚至为 0），若直接用其 top 会把手柄相对文字上下带偏；横向落点（left）则是
-      // 引擎统一的字符边界，保留用它。纵向改锚定到贴着边界的一个实际字符排版框（与画出来的
-      // 字一致，跨引擎/跨设备稳定），手柄圆心放字形框下方，呈“手柄在文字下方”的观感。
-      const x = cr.left - areaRect.left;
+      // 手柄落点一律锚定到「贴着边界的一个实际字符」的排版框，折叠 caret 的 rect 只当兜底：
+      // caret 的 rect 在**软换行处**（段中每一行的行首）会被算到上一行的行尾去，横向拿它当
+      // 落点会让手柄甩到上一行末尾（纵向因已锚定字形框、仍在正确一行，看着就是「手柄横着
+      // 飞了」）；纵向语义（行盒顶 / 字形内容盒顶 / 高度甚至为 0）各引擎也不一致。字形框是
+      // 实际画出来的那个字，横纵都稳：起点（lo）取首个选中字的左缘、终点（hi）取末个选中字
+      // 的右缘，与 caret 在正常（非换行处）情形下的落点一致。
       const glyph = glyphRangeAtGlobalOffset(col, mir.unitStart, off, fromStart);
       const gr = glyph ? glyph.getBoundingClientRect() : null;
       if (gr && gr.width > 0 && gr.height > 0) {
         // 圆心贴字形框底往下挪一截：避开字又不至于坠进下一行的字
         const below = Math.max(4, Math.round((layout()?.fontSize ?? 24) * 0.3));
         return {
-          x,
+          x: (fromStart ? gr.left : gr.right) - areaRect.left,
           y: gr.bottom - areaRect.top + below,
           top: gr.top - areaRect.top,
           bottom: gr.bottom - areaRect.top,
@@ -2801,7 +2802,7 @@ export default function ReaderPage() {
         top = cr.top;
       }
       return {
-        x,
+        x: cr.left - areaRect.left,
         y: top - areaRect.top + height * 0.75,
         top: top - areaRect.top,
         bottom: top - areaRect.top + height,

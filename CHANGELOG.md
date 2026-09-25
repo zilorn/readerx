@@ -31,6 +31,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **分页模式拖选时，段中每一行行首的手柄不再「横着飞」到上一行末尾**：选区端点的横向落点此前取自
+  折叠 caret 的 rect（`range.getBoundingClientRect()`），而 caret 停在**软换行处**（段中第 2 行起的
+  行首，以及恰好停在一行行尾的终点）时，引擎把它算作上一行的行尾 —— 于是手柄纵向（早已锚定到实际
+  字符的排版框）还在正确一行、横向却甩到上一行末尾，起选端点看起来就是「手柄飘在上一行右边」。
+  现在横纵都锚定到贴着边界的那个实际字符：起点取首个选中字的左缘、终点取末个选中字的右缘，手柄
+  与选区底色边界对齐；行中起选、段首（含 2em 首行缩进）起选等原本正确的落点分毫不变，字形框取不到
+  时仍退回原来的 caret 口径。
 - **Linux 桌面端构建中断在 speech-dispatcher 头文件**：听书的系统语音后端在 Linux 上走
   `tts -> speech-dispatcher -> speech-dispatcher-sys`，而该 sys crate 用 bindgen 在**构建期**解析
   `speech-dispatcher/libspeechd.h`；构建环境此前只把它当普通系统库、没装开发包，于是 Linux x86_64
