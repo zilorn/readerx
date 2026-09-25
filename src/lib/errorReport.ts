@@ -9,6 +9,7 @@
  * 相同文案短时间内只提示一次：批量下载 / 逐章落盘这类循环失败时不会刷屏。
  */
 import { isTauri } from "@tauri-apps/api/core";
+import { t } from "./i18n";
 import { createLogger, type LogLevel } from "./logger";
 import { showToast } from "./toast";
 
@@ -30,7 +31,7 @@ const recent = new Map<string, { at: number; count: number }>();
 export function describeError(error: unknown): string {
   if (error == null) return "";
   if (typeof error === "string") return error.trim();
-  if (error instanceof Error) return (error.message || error.name || "未知错误").trim();
+  if (error instanceof Error) return (error.message || error.name || t("common.unknownError")).trim();
   if (typeof error === "object") {
     try {
       const text = JSON.stringify(error);
@@ -58,7 +59,8 @@ export function reportFailure(
   if (level === "error") log.error(what, error);
   else log.warn(what, error);
   const reason = describeError(error);
-  const text = (reason ? `${what}：${reason}` : what).slice(0, MAX_TEXT_LEN);
+  const separator = t("common.failureSeparator");
+  const text = (reason ? `${what}${separator}${reason}` : what).slice(0, MAX_TEXT_LEN);
   const now = Date.now();
   const previous = recent.get(text);
   if (previous) {
@@ -78,11 +80,11 @@ export function installGlobalErrorReporting(): void {
   window.addEventListener("error", (event) => {
     // 图片等资源加载失败由各自组件兜底（占位 / 重试），这里只处理脚本异常
     if (event.error || event.message) {
-      reportFailure("发生未预期的错误", event.error ?? event.message, 4_200, "error");
+      reportFailure(t("misc.error.unexpected"), event.error ?? event.message, 4_200, "error");
     }
   });
   window.addEventListener("unhandledrejection", (event) => {
-    reportFailure("操作未能完成", event.reason, 4_200, "error");
+    reportFailure(t("misc.error.incomplete"), event.reason, 4_200, "error");
   });
 }
 
@@ -96,7 +98,7 @@ export async function listenBackendErrors(): Promise<void> {
     const { listen } = await import("@tauri-apps/api/event");
     await listen<string>(BACKEND_ERROR_EVENT, (event) => {
       // 无法补救的内部异常：按 error 记日志，提示也停留久一点，确保用户看得到
-      reportFailure("应用内部异常", event.payload, 8_000, "error");
+      reportFailure(t("misc.error.internal"), event.payload, 8_000, "error");
     });
   } catch (error) {
     // 订阅本身失败也不该再抛：退化成一条 error 日志（此时也没有别的出口了）

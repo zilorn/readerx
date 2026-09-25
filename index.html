@@ -13,7 +13,8 @@
   </head>
 
   <body>
-    <noscript>ReaderX 需要启用 JavaScript 才能运行。</noscript>
+    <!-- 脚本不可用时的兜底提示：此时没有 i18n 运行时，中英并列 -->
+    <noscript>ReaderX 需要启用 JavaScript 才能运行。 / ReaderX requires JavaScript.</noscript>
     <div id="root"></div>
 
     <script src="/src/index.tsx" type="module"></script>

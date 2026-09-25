@@ -12,6 +12,7 @@ import {
   groupAssignBookId,
 } from "./lib/groups";
 import { isDesktopShell } from "./lib/platform";
+import { t } from "./lib/i18n";
 
 // ---- 路由页面全部走代码分割 + 懒加载（配合页面栈内 Suspense） ----
 const BookshelfPage = lazy(() => import("./pages/Bookshelf"));
@@ -103,6 +104,11 @@ function App() {
       void import("./pages/Settings");
     }, 1500);
     onCleanup(() => window.clearTimeout(warmupTimer));
+  });
+
+  // 文档标题跟随界面语言（`html[lang]` 由 i18n 内核在切换时设置）
+  createEffect(() => {
+    document.title = t("app.title");
   });
 
   return (

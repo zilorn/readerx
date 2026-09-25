@@ -1,5 +1,6 @@
 import { Show, type JSX } from "solid-js";
 import { ChevronLeftIcon } from "./icons";
+import { t } from "../lib/i18n";
 
 interface PageHeaderProps {
   title: string;
@@ -23,7 +24,7 @@ export function PageHeader(props: PageHeaderProps) {
           <button
             class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
             type="button"
-            aria-label={props.backLabel ?? "返回"}
+            aria-label={props.backLabel ?? t("common.back")}
             onClick={props.onBack}
           >
             <ChevronLeftIcon />

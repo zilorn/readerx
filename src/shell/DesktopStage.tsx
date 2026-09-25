@@ -37,6 +37,7 @@ import { registerAppScrollEl } from "../lib/appScroll";
 import { isSidebarCollapsed, setSidebarCollapsed } from "../lib/store";
 import { isFullHeightPath, isTabRoute, TAB_ROUTES } from "./routes";
 import { tabIcon } from "./tabIcons";
+import { t } from "../lib/i18n";
 
 export interface DesktopStageProps {
   children?: JSX.Element;
@@ -261,7 +262,7 @@ function SideNav(props: SideNavProps) {
             <BrandMark />
             <span class="flex min-w-0 flex-col leading-tight">
               <span class="text-[15px] font-bold tracking-[0.01em]">ReaderX</span>
-              <span class="text-[10.5px] text-text-3">本地书管理</span>
+              <span class="text-[10.5px] text-text-3">{t("shell.sidebar.tagline")}</span>
             </span>
           </span>
         </Show>
@@ -271,8 +272,8 @@ function SideNav(props: SideNavProps) {
         {(item) => (
           <A
             href={item.path}
-            title={props.collapsed ? item.label : undefined}
-            aria-label={props.collapsed ? item.label : undefined}
+            title={props.collapsed ? t(item.labelKey) : undefined}
+            aria-label={props.collapsed ? t(item.labelKey) : undefined}
             class="flex items-center gap-3 rounded-[10px] px-2.5 py-2 text-[13.5px] font-medium transition-colors duration-150"
             classList={{
               "justify-center px-0": props.collapsed,
@@ -281,7 +282,7 @@ function SideNav(props: SideNavProps) {
             }}
           >
             {tabIcon(item.path, 18)}
-            <Show when={!props.collapsed}>{item.label}</Show>
+            <Show when={!props.collapsed}>{t(item.labelKey)}</Show>
           </A>
         )}
       </For>
@@ -292,7 +293,8 @@ function SideNav(props: SideNavProps) {
 /** 收起 / 展开侧边栏：展开时常驻标题行最右端（品牌右侧）；收起后标题行只剩它一个，
  *  与主 Tab 图标一样居中在图标栏中线上 */
 function SidebarToggle(props: SideNavProps) {
-  const label = () => (props.collapsed ? "展开侧边栏" : "收起侧边栏");
+  const label = () =>
+    props.collapsed ? t("shell.sidebar.expand") : t("shell.sidebar.collapse");
   return (
     <button
       type="button"

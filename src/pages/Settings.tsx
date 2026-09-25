@@ -35,6 +35,7 @@ import {
 } from "../lib/store";
 import { appVersion, loadAppVersion } from "../lib/version";
 import { ReadingSettingsRows } from "../components/ReadingSettingsRows";
+import { LanguageRow } from "../components/LanguageRow";
 
 const THEME_OPTIONS: { value: ThemeMode; label: string }[] = [
   { value: "light", label: "浅色" },
@@ -162,12 +163,14 @@ export default function SettingsPage() {
           </div>
         </section>
 
+        {/* 语言 */}
+        <LanguageRow />
+
         {/* 阅读 */}
         <section class="mb-6">
           <h2 class="mx-1 mb-2 text-[12.5px] font-medium tracking-[0.04em] text-text-3">
             阅读
-          </h2>
-          <div class="divide-y divide-border overflow-hidden rounded-[14px] border border-border bg-surface">
+          </h2>          <div class="divide-y divide-border overflow-hidden rounded-[14px] border border-border bg-surface">
             <ReadingSettingsRows />
           </div>
         </section>

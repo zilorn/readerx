@@ -4,13 +4,17 @@
  * 手机外壳（底部 Tab + 页面栈动画）与桌面外壳（侧边导航 + 内容区）都要按同一份名单
  * 决定导航高亮、是否给内容区留底部空白，因此集中在这里，避免两边各写一份而走偏。
  */
+import { t, type MessageKey } from "../lib/i18n";
 
-/** 主 Tab 路由（手机端显示底部导航；桌面端在侧边栏里高亮） */
+/**
+ * 主 Tab 路由（手机端显示底部导航；桌面端在侧边栏里高亮）。
+ * 这里存文案 key 而不是成品文本：路由表在模块顶层求值，写死的文本会停在启动时的语言上。
+ */
 export const TAB_ROUTES = [
-  { path: "/", label: "书架" },
-  { path: "/discover", label: "发现" },
-  { path: "/settings", label: "设置" },
-] as const;
+  { path: "/", labelKey: "shell.tab.shelf" },
+  { path: "/discover", labelKey: "shell.tab.discover" },
+  { path: "/settings", labelKey: "shell.tab.settings" },
+] as const satisfies readonly { path: string; labelKey: MessageKey }[];
 
 const TAB_PATHS = new Set<string>(TAB_ROUTES.map((item) => item.path));
 
@@ -28,7 +32,8 @@ const FULL_HEIGHT_ROUTES = new Set(["/source-editor"]);
 export const isFullHeightPath = (path: string): boolean =>
   isReaderPath(path) || FULL_HEIGHT_ROUTES.has(path);
 
-/** 页面标题（桌面端窗口标题 / 侧边栏以外的地方用得到） */
+/** 页面标题（桌面端窗口标题 / 侧边栏以外的地方用得到）；按当前语言返回 */
 export function pageLabel(path: string): string | undefined {
-  return TAB_ROUTES.find((item) => item.path === path)?.label;
+  const route = TAB_ROUTES.find((item) => item.path === path);
+  return route ? t(route.labelKey) : undefined;
 }

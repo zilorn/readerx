@@ -9,6 +9,7 @@ import { Suspense, type Component, type JSX } from "solid-js";
 import { Dynamic } from "solid-js/web";
 import { ScrollArea } from "./ScrollArea";
 import { LoadingScreen } from "./LoadingScreen";
+import { t } from "../lib/i18n";
 
 export interface PageBodyProps {
   /** 常驻（保活）页面组件；与 children 互斥 */
@@ -29,7 +30,7 @@ export function PageBody(props: PageBodyProps) {
       <Suspense
         fallback={
           <div class="h-full" data-stage-loading="true">
-            <LoadingScreen label="页面加载中…" />
+            <LoadingScreen label={t("shell.loading.page")} />
           </div>
         }
       >

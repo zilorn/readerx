@@ -9,7 +9,8 @@
     "build": "vite build",
     "serve": "vite preview",
     "tauri": "tauri",
-    "bump": "node scripts/bump-version.mjs"
+    "bump": "node scripts/bump-version.mjs",
+    "i18n:check": "node scripts/i18n-check.mjs"
   },
   "license": "MIT",
   "dependencies": {

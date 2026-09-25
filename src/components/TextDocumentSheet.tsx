@@ -6,6 +6,7 @@
 import { Show, createEffect, createSignal, type JSX } from "solid-js";
 import { CloseIcon } from "./icons";
 import { ScrollArea } from "./ScrollArea";
+import { t } from "../lib/i18n";
 
 export interface TextDocumentSheetProps {
   open: boolean;
@@ -69,7 +70,7 @@ export function TextDocumentSheet(props: TextDocumentSheetProps) {
               when={text() !== null}
               fallback={
                 <div class="grid h-full place-items-center text-[12.5px] text-text-3">
-                  {failed() ? props.errorText : "加载中…"}
+                  {failed() ? props.errorText : t("common.loading")}
                 </div>
               }
             >
