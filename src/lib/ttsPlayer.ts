@@ -60,6 +60,7 @@ import {
 } from "./webAudio";
 import { isLinuxDesktop } from "./ttsDecodeGuide";
 import { buildChapterSpeechItems, type ChapterSpeechItem } from "./ttsSegment";
+import { t } from "./i18n";
 import { createLogger } from "./logger";
 
 /** 听书播放器的日志出口：只记书 / 章 / 句序号与原因，句子的文字内容绝不进日志 */
@@ -166,9 +167,11 @@ const FAILURE_STREAK_LIMIT = 5;
  * （WebKitGTK 的音频解码走 GStreamer，多数发行版默认不带 mp3 插件）。
  * 说成「源要返回可解码音频」会把用户引到错误的方向上。
  */
-const DECODE_FAILED_HINT = isLinuxDesktop()
-  ? "音频解码失败：系统缺少该格式的解码器（常见于 Linux 缺少 MP3 插件），修复方法见弹出的指南"
-  : "音频解码失败：自定义源需返回可解码的音频（mp3 / wav / ogg）";
+function decodeFailedHint(): string {
+  return isLinuxDesktop()
+    ? t("tts.error.decodeFailedLinux")
+    : t("tts.error.decodeFailedHttp");
+}
 
 
 interface ActiveSource {
@@ -245,7 +248,9 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
         if (ev.type === "error") {
           if (!nativeWaiting) return;
           clearNativeWait();
-          const msg = ev.error ? `语音朗读出错：${ev.error}` : "系统语音出错，请稍后重试";
+          const msg = ev.error
+            ? t("tts.error.speech", { reason: ev.error })
+            : t("tts.error.speechGeneric");
           onSentenceFailure(msg);
           return;
         }
@@ -419,18 +424,18 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
     if (timerMode() === "chapter") {
       setTimerMode("off");
       setTimerRemainSec(null);
-      ctx.notify?.("定时：本章朗读结束");
+      ctx.notify?.(t("tts.notify.chapterTimerEnd"));
       stop();
       return;
     }
     if (chapterIdxEngine + 1 >= ctx.chapterCount()) {
-      ctx.notify?.("本书已朗读完毕");
+      ctx.notify?.(t("tts.notify.bookFinished"));
       stop();
       return;
     }
     const target = contentChapter(chapterIdxEngine + 1, 1);
     if (target < 0) {
-      ctx.notify?.("本书已朗读完毕");
+      ctx.notify?.(t("tts.notify.bookFinished"));
       stop();
       return;
     }
@@ -466,12 +471,12 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
     const item = items[focus()?.index ?? -1];
     if (!item) return;
     if (!isNativeTtsAvailable()) {
-      reportError("原生语音需在 Tauri 应用内运行（Android 真机），当前环境不可用");
+      reportError(t("tts.error.nativeUnavailable"));
       return;
     }
     setStatus("loading");
     if (!(await ensureNativeListeners())) {
-      reportError("系统语音插件不可用，请确认已在安卓设备上运行");
+      reportError(t("tts.error.nativePlugin"));
       return;
     }
     if (disposed || my !== seq) return;
@@ -510,7 +515,7 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
     const audio = await ensureAudioBytes(item, my);
     if (disposed || my !== seq) return;
     if (!audio) {
-      onSentenceFailure(lastSynthError ?? "语音合成失败，请检查自定义源配置与网络");
+      onSentenceFailure(lastSynthError ?? t("tts.error.synthFallback"));
       return;
     }
     if (pausedRequested) {
@@ -527,7 +532,7 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
         decodeHelpShown = true;
         ctx.onDecodeFailure?.();
       }
-      onSentenceFailure(DECODE_FAILED_HINT);
+      onSentenceFailure(decodeFailedHint());
       return;
     }
     if (disposed || my !== seq) return;
@@ -558,7 +563,7 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
       node.start();
     } catch {
       stopActiveSource();
-      onSentenceFailure("音频播放失败");
+      onSentenceFailure(t("tts.error.playFailed"));
       return;
     }
     setStatus("playing");
@@ -618,7 +623,7 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
       if (next > target) {
         jumpChapter(next, pref);
       } else {
-        ctx.notify?.("后续章节暂无内容，已停止朗读", true);
+        ctx.notify?.(t("tts.notify.noMoreContent"), true);
         stop();
       }
       return;
@@ -659,10 +664,10 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
         const ch = ctx.chapterAt(vi);
         ctx.notify?.(
           auto
-            ? "后面的章节没有可朗读的文字"
+            ? t("tts.notify.laterNoText")
             : ch
-              ? `「${ch.title}」没有可朗读的文字`
-              : "本章没有可朗读的文字",
+              ? t("tts.notify.chapterNoTextTitle", { title: ch.title })
+              : t("tts.notify.chapterNoText"),
           true,
         );
         stop();
@@ -698,7 +703,7 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
           ctx.navigateChapter(target);
           noteViewChapter();
         } else {
-          ctx.notify?.("本章没有可朗读的文字", true);
+          ctx.notify?.(t("tts.notify.chapterNoText"), true);
         }
         return;
       }
@@ -873,7 +878,7 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
         setTimerMode("off");
         setTimerMinutes(0);
         setTimerRemainSec(null);
-        ctx.notify?.("定时结束，已停止朗读");
+        ctx.notify?.(t("tts.notify.timerEnd"));
         stop();
       }
     };
@@ -1051,7 +1056,7 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
     if (isNativeMode()) {
       return nativeVoiceName(currentTtsVoice());
     }
-    return "自定义源";
+    return t("tts.engine.http");
   }
 
   return {

@@ -8,6 +8,7 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { createLogger, flushLogs, setLogMinLevel, type LogLevel } from "./logger";
 import { readState } from "./backend";
+import { t } from "./i18n";
 
 const log = createLogger("logs");
 
@@ -35,14 +36,19 @@ export interface LogTail extends LogInfo {
 /** 界面上的级别筛选项：`null` = 全部 */
 export type LogFilter = "info" | "warn" | "error" | null;
 
-/** 纯浏览器开发环境没有后端日志，明确告知而不是显示空列表 */
-const NO_BACKEND: LogTail = {
-  text: "",
-  path: "",
-  level: "info",
-  fileEnabled: false,
-  fileError: "日志查看仅在应用内可用（浏览器开发环境没有后端日志）",
-};
+/**
+ * 纯浏览器开发环境没有后端日志，明确告知而不是显示空列表。
+ * 文案要等词典载入后才知道，所以每次调用时取（不能放模块顶层常量）。
+ */
+function noBackend(): LogTail {
+  return {
+    text: "",
+    path: "",
+    level: "info",
+    fileEnabled: false,
+    fileError: t("settings.logs.browserOnly"),
+  };
+}
 
 /**
  * 读取日志尾巴。`maxLines` 默认 2000 行，`minLevel` 为 `null` 时不过滤级别
@@ -52,7 +58,7 @@ export async function readLogTail(
   maxLines = 2_000,
   minLevel: LogFilter = null,
 ): Promise<LogTail> {
-  if (!isTauri()) return NO_BACKEND;
+  if (!isTauri()) return noBackend();
   // 先把前端攒着的那批送出去：否则刚发生的事（日志里最该看到的那几条）还在待发队列里
   await flushLogs();
   try {
@@ -62,20 +68,23 @@ export async function readLogTail(
     });
   } catch (error) {
     log.warn("读取日志失败", error);
-    return { ...NO_BACKEND, fileError: `读取日志失败：${String(error)}` };
+    return {
+      ...noBackend(),
+      fileError: t("settings.logs.readFailed", { reason: String(error) }),
+    };
   }
 }
 
 /** 清空日志文件（当前 + 历史）；失败抛出可读原因，由界面提示 */
 export async function clearLogs(): Promise<void> {
-  if (!isTauri()) throw new Error("日志查看仅在应用内可用");
+  if (!isTauri()) throw new Error(t("settings.logs.inAppOnly"));
   await invoke("readerx_log_clear");
   log.info("日志已清空");
 }
 
 /** 切换日志级别（`info` = 常规，`debug` = 详细）并记住，返回最新的设施状态 */
 export async function setLogLevel(level: LogLevel): Promise<LogInfo> {
-  if (!isTauri()) throw new Error("日志级别仅在应用内可调");
+  if (!isTauri()) throw new Error(t("settings.logs.levelInAppOnly"));
   const info = await invoke<LogInfo>("readerx_log_set_level", { level });
   // 前端也要跟着放开：否则切到「详细」后，WebView 侧的 debug 记录根本不会回传
   setLogMinLevel(level);

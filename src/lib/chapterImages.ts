@@ -18,6 +18,7 @@
  */
 import { createSignal } from "solid-js";
 import { fetchRemoteChapterImageFile } from "./backend";
+import { t } from "./i18n";
 import { cachedImageSize, invalidateImageAsset, rememberImageSize } from "./imageAssets";
 import { currentSourceParallel } from "./store";
 import { createLogger } from "./logger";
@@ -216,7 +217,7 @@ function loadChapterImage(options: LoadImageOptions): Promise<ChapterImageFile |
         return { local: result.local, width: result.width, height: result.height };
       }
       entry.phase = "failed";
-      entry.error = result.error || "图片下载失败";
+      entry.error = result.error || t("readerChrome.image.downloadFailed");
       entry.failedBy = purpose;
       entry.failedAt = Date.now();
       log.debug(

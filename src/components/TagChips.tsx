@@ -4,6 +4,7 @@
  * - 传入 onRemove 时每枚标签带移除按钮（编辑表单内使用）。
  */
 import { For } from "solid-js";
+import { t } from "../lib/i18n";
 import { CloseIcon } from "./icons";
 
 interface TagChipsProps {
@@ -24,7 +25,7 @@ export function TagChips(props: TagChipsProps) {
               <span class="truncate">{tag}</span>
               <button
                 type="button"
-                aria-label={`移除标签 ${tag}`}
+                aria-label={t("shelf.tag.removeAria", { tag })}
                 class="grid h-[18px] w-[18px] flex-none place-items-center rounded-full text-accent/70 transition-[background-color,scale] duration-150 active:scale-90 active:bg-accent/15"
                 onClick={() => props.onRemove?.(tag)}
               >

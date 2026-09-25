@@ -8,6 +8,7 @@
  */
 import { Show, createSignal, onMount } from "solid-js";
 import { ClipboardIcon, CloseIcon, DownloadIcon } from "./icons";
+import { t } from "../lib/i18n";
 
 export interface PasteImportResult {
   ok: boolean;
@@ -48,7 +49,7 @@ export function SourcePasteImportSheet(props: SourcePasteImportSheetProps) {
       setError("");
       return;
     }
-    if (!silent) setError("剪贴板里没有可导入的内容，可直接粘贴或输入 JSON");
+    if (!silent) setError(t("sourceEditor.paste.emptyClipboard"));
   }
 
   /**
@@ -68,7 +69,7 @@ export function SourcePasteImportSheet(props: SourcePasteImportSheetProps) {
     try {
       const result = await props.onSubmit(value);
       if (result.ok) props.onClose();
-      else setError(result.message ?? "导入失败");
+      else setError(result.message ?? t("sourceEditor.paste.failed"));
     } finally {
       setBusy(false);
     }
@@ -77,7 +78,7 @@ export function SourcePasteImportSheet(props: SourcePasteImportSheetProps) {
   const isUrl = () => props.detectUrl(text());
 
   return (
-    <div class="fixed inset-0 z-50" role="dialog" aria-label="粘贴导入书源">
+    <div class="fixed inset-0 z-50" role="dialog" aria-label={t("sourceEditor.paste.ariaLabel")}>
       <div
         class="absolute inset-0 animate-sheet-fade bg-black/45 backdrop-blur-[2px]"
         onClick={() => {
@@ -86,11 +87,11 @@ export function SourcePasteImportSheet(props: SourcePasteImportSheetProps) {
       />
       <div class="absolute inset-x-0 bottom-0 z-[51] flex max-h-[88%] animate-sheet-up flex-col overflow-hidden rounded-t-[16px] bg-surface shadow-[0_-10px_34px_rgb(0_0_0/0.22)]">
         <div class="flex flex-none items-center gap-2.5 border-b border-border px-4 py-3">
-          <span class="text-[15px] font-bold">粘贴导入</span>
-          <span class="flex-1 text-xs text-text-3">书源 JSON 或 JSON 网址</span>
+          <span class="text-[15px] font-bold">{t("sourceEditor.paste.title")}</span>
+          <span class="flex-1 text-xs text-text-3">{t("sourceEditor.paste.subtitle")}</span>
           <button
             class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-            aria-label="关闭"
+            aria-label={t("common.close")}
             onClick={props.onClose}
           >
             <CloseIcon />
@@ -104,7 +105,7 @@ export function SourcePasteImportSheet(props: SourcePasteImportSheetProps) {
             spellcheck={false}
             autocapitalize="off"
             autocomplete="off"
-            placeholder={'[{"name": "书源名", "bookSourceUrl": "https://…"}]'}
+            placeholder={t("sourceEditor.paste.placeholder")}
             class="min-h-[132px] w-full flex-1 resize-none rounded-[12px] border border-border bg-bg px-3 py-2.5 font-mono text-[12px] leading-[1.6] text-text outline-none transition-colors placeholder:text-text-3 focus:border-accent"
             value={text()}
             onInput={(e) => {
@@ -119,11 +120,13 @@ export function SourcePasteImportSheet(props: SourcePasteImportSheetProps) {
               onClick={() => void readClipboard(false)}
             >
               <ClipboardIcon size={15} />
-              {reading() ? "读取中…" : "读剪贴板"}
+              {reading() ? t("common.loadingDots") : t("sourceEditor.paste.readClipboard")}
             </button>
             <Show when={text().length > 0}>
               <span class="min-w-0 flex-1 truncate text-right text-[11px] text-text-3">
-                {isUrl() ? "网址" : `${text().length} 字符`}
+                {isUrl()
+                  ? t("sourceEditor.paste.url")
+                  : t("sourceEditor.paste.charCount", { count: text().length })}
               </span>
             </Show>
           </div>
@@ -140,7 +143,7 @@ export function SourcePasteImportSheet(props: SourcePasteImportSheetProps) {
               disabled={busy()}
               onClick={props.onClose}
             >
-              取消
+              {t("common.cancel")}
             </button>
             <button
               class="inline-flex flex-1 items-center justify-center gap-1.5 rounded-xl bg-accent px-4 py-2.5 text-[13.5px] font-semibold text-on-accent disabled:pointer-events-none disabled:opacity-50"
@@ -148,7 +151,11 @@ export function SourcePasteImportSheet(props: SourcePasteImportSheetProps) {
               onClick={() => void submit()}
             >
               <DownloadIcon size={16} />
-              {busy() ? "处理中…" : isUrl() ? "拉取并导入" : "解析并导入"}
+              {busy()
+                ? t("sourceEditor.paste.processing")
+                : isUrl()
+                  ? t("sourceEditor.paste.fetch")
+                  : t("sourceEditor.paste.parse")}
             </button>
           </div>
         </div>

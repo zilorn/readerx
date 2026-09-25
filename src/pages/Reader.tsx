@@ -70,6 +70,7 @@ import { SelectionMenu, type SelectionCustom } from "../components/SelectionMenu
 import { TtsBubble } from "../components/TtsBubble";
 import { TtsDecodeGuideDialog } from "../components/TtsDecodeGuideDialog";
 import { TtsSheet } from "../components/TtsSheet";
+import { bookDisplayTitle, isFallbackBookAuthor } from "../lib/bookDisplay";
 import {
   BookmarkIcon,
   ChevronLeftIcon,
@@ -92,6 +93,7 @@ import {
 } from "../lib/books";
 import { withDisplayReplacements } from "../lib/textReplacements";
 import { withHanBook } from "../lib/hanDisplay";
+import { t } from "../lib/i18n";
 import {
   BOOKMARK_MAX_LEN,
   addBookmark,
@@ -318,7 +320,9 @@ function sameChapterToc(a: Pick<LocalBook, "chapters">, b: Pick<LocalBook, "chap
 
 /** 章节范围文案：单章「第 5 章」、跨章「第 3–9 章」（入参为目录下标） */
 function chapterRangeLabel(from: number, to: number): string {
-  return from === to ? `第 ${from + 1} 章` : `第 ${from + 1}–${to + 1} 章`;
+  return from === to
+    ? t("reader.chapterOrdinal", { index: from + 1 })
+    : t("reader.chapterRange", { from: from + 1, to: to + 1 });
 }
 
 // ---------------------------------------------------------------------------
@@ -553,13 +557,15 @@ function ImageBlock(props: {
                 />
               }
             >
-              <span class="min-w-0 max-w-full truncate">{props.alt || "图片缺失"}</span>
+              <span class="min-w-0 max-w-full truncate">
+                {props.alt || t("reader.imageMissing")}
+              </span>
               <Show when={canRetry()}>
                 <button
                   type="button"
                   data-reader-ui
                   class="inline-flex shrink-0 items-center gap-1 rounded-lg bg-surface px-2.5 py-1 text-[11.5px] font-semibold text-text-2 transition-[scale,opacity] duration-100 active:scale-[0.96]"
-                  aria-label="重新加载图片"
+                  aria-label={t("reader.reloadImage")}
                   onClick={() => {
                     const url = remoteUrl();
                     if (!url) return;
@@ -568,7 +574,7 @@ function ImageBlock(props: {
                   }}
                 >
                   <RefreshIcon size={13} />
-                  重试
+                  {t("common.retry")}
                 </button>
               </Show>
             </Show>
@@ -650,12 +656,15 @@ function InlineImageBlock(props: {
             when={failed()}
             fallback={<RefreshIcon size={12} class="animate-spin [animation-duration:1.2s]" />}
           >
-            <Show when={canRetry()} fallback={<span class="truncate">{props.alt || "图"}</span>}>
+            <Show
+              when={canRetry()}
+              fallback={<span class="truncate">{props.alt || t("reader.imageShort")}</span>}
+            >
               <button
                 type="button"
                 data-reader-ui
                 class="inline-flex shrink-0 items-center gap-0.5 rounded bg-surface px-1 py-0.5 text-[10.5px] font-semibold text-text-2 transition-[scale,opacity] duration-100 active:scale-[0.96]"
-                aria-label="重新加载图片"
+                aria-label={t("reader.reloadImage")}
                 onClick={() => {
                   const url = remoteUrl();
                   if (!url) return;
@@ -664,7 +673,7 @@ function InlineImageBlock(props: {
                 }}
               >
                 <RefreshIcon size={11} />
-                重试
+                {t("common.retry")}
               </button>
             </Show>
           </Show>
@@ -1063,7 +1072,7 @@ export default function ReaderPage() {
 
   /** 端点按钮文案：「第 12 章 · 章节标题」 */
   const endpointLabel = (index: number): string => {
-    const ordinal = `第 ${index + 1} 章`;
+    const ordinal = t("reader.chapterOrdinal", { index: index + 1 });
     const title = book()?.chapters[index]?.title;
     return title ? `${ordinal} · ${title}` : ordinal;
   };
@@ -1084,7 +1093,8 @@ export default function ReaderPage() {
   const remoteGateFailed = createMemo(() => onlineChapterFailure(bookId(), chapterIdx()) !== null);
   /** 覆盖层失败详情文本 */
   const remoteGateFailedText = createMemo(
-    () => onlineChapterFailure(bookId(), chapterIdx()) ?? "未知错误",
+    () =>
+      onlineChapterFailure(bookId(), chapterIdx()) ?? t("common.unknownError"),
   );
 
   /**
@@ -1146,14 +1156,14 @@ export default function ReaderPage() {
       });
       if (outcome.cancelled) return; // 用户放弃：正文与书签均未改动
       if (!outcome.applied) {
-        const error = outcome.error ?? "未知错误";
+        const error = outcome.error ?? t("common.unknownError");
         // 重载已放弃，正文仍是原来的：把视口退回重载前的位置，不让阅读进度跟着漂
         if (snapshot && chapterIdx() === targetIndex && chapter()?.cid === snapshot.cid) {
           setPageIdx(snapshot.page);
           setViewOffset(snapshot.char);
           if (snapshot.char > 0) setResumeTarget({ cid: snapshot.cid, char: snapshot.char });
         }
-        showToast(`重新加载失败，已回到原进度：${error}`, true);
+        showToast(t("reader.reloadFailedBackToProgress", { error }), true);
         return;
       }
       // 重载后回到本章开头（旧正文的偏移/页码已无意义）
@@ -1163,7 +1173,11 @@ export default function ReaderPage() {
         setViewOffset(0);
         if (scrollRef) scrollRef.scrollTop = 0;
       }
-      showToast(`已重新加载「${current.chapters[targetIndex]?.title ?? "本章"}」`);
+      showToast(
+        t("reader.reloadedChapter", {
+          title: current.chapters[targetIndex]?.title ?? t("reader.thisChapter"),
+        }),
+      );
     } finally {
       setReloadingChapter(false);
     }
@@ -1201,7 +1215,7 @@ export default function ReaderPage() {
       const latest = localBookById(current.id) ?? current;
       const diff = diffOnlineBookToc(latest, fresh);
       if (diff.kind === "none") {
-        showToast("目录已是最新，暂无更新");
+        showToast(t("reader.tocUpToDate"));
         return;
       }
       if (diff.kind === "append") {
@@ -1209,7 +1223,11 @@ export default function ReaderPage() {
         // 收掉设置面板，让用户直接看到更新后的目录/正文
         setReaderSettingsOpen(false);
         setMenuOpen(false);
-        showToast(added > 0 ? `已更新 ${added} 个章节` : "目录已是最新，暂无更新");
+        showToast(
+          added > 0
+            ? t("reader.tocAppended", { count: added })
+            : t("reader.tocUpToDate"),
+        );
         return;
       }
       setUpdateConflict({
@@ -1220,7 +1238,7 @@ export default function ReaderPage() {
       });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      showToast(`检查更新失败：${msg}`, true);
+      showToast(t("reader.updateCheckFailed", { error: msg }), true);
     } finally {
       setCheckingUpdate(false);
     }
@@ -1240,10 +1258,10 @@ export default function ReaderPage() {
       setUpdateConflict(null);
       setReaderSettingsOpen(false);
       setMenuOpen(false);
-      showToast(`目录已覆盖更新，共 ${total} 章`);
+      showToast(t("reader.tocOverwritten", { count: total }));
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      showToast(`覆盖更新失败：${msg}`, true);
+      showToast(t("reader.overwriteFailed", { error: msg }), true);
     } finally {
       setOverwriteBusy(false);
     }
@@ -1383,7 +1401,12 @@ export default function ReaderPage() {
         setImageLayoutTick((tick) => tick + 1);
         return;
       }
-      showToast(`图片重新加载失败：${chapterImageError(url) || "未知错误"}`, true);
+      showToast(
+        t("reader.imageReloadFailed", {
+          error: chapterImageError(url) || t("common.unknownError"),
+        }),
+        true,
+      );
     });
   }
 
@@ -1722,12 +1745,12 @@ export default function ReaderPage() {
   /** 批量预热整本书（HTTP 源）：逐句合成写入按书籍的磁盘缓存 */
   async function runPrewarmBook(): Promise<void> {
     if (prewarmText() !== null) return; // 已在预热
-    setPrewarmText("准备中…");
+    setPrewarmText(t("reader.prewarmPreparing"));
     const done = await ttsPlayer.warmBook((d, total) => {
       setPrewarmText(`${d} / ${total}`);
     });
     setPrewarmText(null);
-    if (done > 0) showToast(`预热完成：${done} 句已写入缓存`);
+    if (done > 0) showToast(t("reader.prewarmDone", { count: done }));
   }
 
   // 预热：仅开始听书后（起播 / 打开听书面板，见 armTtsWarmup）才做 —— HTTP 自定义源下，
@@ -3372,7 +3395,7 @@ export default function ReaderPage() {
 
   async function handleCopyText(text: string): Promise<void> {
     const ok = await copyPlainText(text);
-    showToast(ok ? "已复制" : "复制失败", !ok);
+    showToast(ok ? t("common.copied") : t("reader.copyFailed"), !ok);
   }
 
   /** 一个 Range 端点 → 镜像全局偏移；端点在章节标题等无 data-u 内容上时返回 null */
@@ -3416,28 +3439,28 @@ export default function ReaderPage() {
     const ch = chapter();
     const mir = mirror();
     if (!b || !ch || !mir || mir.text.length === 0) {
-      showToast("当前内容无法添加书签", true);
+      showToast(t("reader.bookmarkNoContent"), true);
       return;
     }
     const charStart = Math.max(0, Math.min(rawLo, mir.text.length));
     const charEnd = Math.max(charStart, Math.min(rawHi, mir.text.length));
     if (charEnd <= charStart) {
-      showToast("请选择要标记的文字", true);
+      showToast(t("reader.bookmarkSelectText"), true);
       return;
     }
     const existed = bookmarkAtExactRange(b.id, ch.cid, charStart, charEnd);
     if (existed) {
       clearVisibleSelection();
       removeBookmark(existed.id);
-      showToast("已移除书签");
+      showToast(t("reader.bookmarkRemoved"));
       return;
     }
     if (bookmarkOverlappingRange(b.id, ch.cid, charStart, charEnd)) {
-      showToast("所选文字与已有书签重叠，无法添加书签", true);
+      showToast(t("reader.bookmarkOverlap"), true);
       return;
     }
     if (charEnd - charStart > BOOKMARK_MAX_LEN) {
-      showToast("所选文字过长，无法添加书签", true);
+      showToast(t("reader.bookmarkTooLong"), true);
       return;
     }
     const startUnit = unitAtGlobalOffset(mir, charStart)?.unit ?? -1;
@@ -3451,19 +3474,19 @@ export default function ReaderPage() {
       mir,
     );
     if (!bookmark) {
-      showToast("无法添加书签", true);
+      showToast(t("reader.bookmarkFailed"), true);
       return;
     }
     clearVisibleSelection();
     addBookmark(bookmark);
-    showToast("已添加书签");
+    showToast(t("reader.bookmarkAdded"));
   }
 
   /** 原生选区「书签」入口 */
   function handleBookmarkRange(range: Range): void {
     const span = spanOfRange(range);
     if (!span) {
-      showToast("书签需在正文段落内选取", true);
+      showToast(t("reader.bookmarkNeedParagraph"), true);
       return;
     }
     toggleBookmarkAtSpan(span[0], span[1]);
@@ -3518,7 +3541,7 @@ export default function ReaderPage() {
     if (!b) return;
     const resolved = resolveBookmarkTarget(b, bookmark);
     if (!resolved) {
-      showToast("未能定位该书签", true);
+      showToast(t("reader.bookmarkNotFound"), true);
       return;
     }
     setBmPanelOpen(false);
@@ -3577,7 +3600,7 @@ export default function ReaderPage() {
   createEffect(() => {
     if (hintShown || !book()) return;
     hintShown = true;
-    showToast("点屏幕中间唤出菜单");
+    showToast(t("reader.tapCenterHint"));
   });
 
   // 目录抽屉打开后滚动定位当前章节
@@ -3598,16 +3621,16 @@ export default function ReaderPage() {
         fallback={
           contentLoad() === "missing" ? (
             <div class="flex flex-1 flex-col items-center justify-center gap-4 text-sm text-text-2">
-              <p>本地书籍不存在或已被删除</p>
+              <p>{t("reader.bookMissing")}</p>
               <button
                 class="inline-flex items-center justify-center gap-1.5 rounded-xl bg-accent px-[22px] py-[11px] text-sm font-semibold text-on-accent shadow-lg shadow-accent/30 transition-[scale,opacity] duration-100 active:scale-[0.97] active:opacity-90"
                 onClick={goBack}
               >
-                返回书架
+                {t("reader.backToShelf")}
               </button>
             </div>
           ) : (
-            <LoadingScreen label="加载书籍…" />
+            <LoadingScreen label={t("reader.loadingBook")} />
           )
         }
       >
@@ -3615,12 +3638,12 @@ export default function ReaderPage() {
           when={book()}
           fallback={
             <div class="flex flex-1 flex-col items-center justify-center gap-4 text-sm text-text-2">
-              <p>本地书籍不存在或已被删除</p>
+              <p>{t("reader.bookMissing")}</p>
               <button
                 class="inline-flex items-center justify-center gap-1.5 rounded-xl bg-accent px-[22px] py-[11px] text-sm font-semibold text-on-accent shadow-lg shadow-accent/30 transition-[scale,opacity] duration-100 active:scale-[0.97] active:opacity-90"
                 onClick={goBack}
               >
-                返回书架
+                {t("reader.backToShelf")}
               </button>
             </div>
           }
@@ -3635,7 +3658,11 @@ export default function ReaderPage() {
             {/* 正文（分页 / 滚动） */}
             <Show
               when={layout() && chapter()}
-              fallback={<LoadingScreen label={isPaged() ? "排版中…" : "加载书籍…"} />}
+              fallback={
+                <LoadingScreen
+                  label={isPaged() ? t("reader.typesetting") : t("reader.loadingBook")}
+                />
+              }
             >
               <Show
                 when={!isPaged()}
@@ -3710,9 +3737,9 @@ export default function ReaderPage() {
                       layout={layout()!}
                       title={chapter()!.title}
                       author={
-                        book()!.author && book()!.author !== "佚名"
-                          ? `${book()!.author} 著`
-                          : null
+                        isFallbackBookAuthor(book()!.author)
+                          ? null
+                          : t("reader.authorSuffix", { author: book()!.author })
                       }
                     />
                     <For each={units().slice(0, scrollShown())}>
@@ -3745,8 +3772,11 @@ export default function ReaderPage() {
                 <LoadingScreen
                   label={
                     imageWaitProgress()
-                      ? `正在获取图片 ${imageWaitProgress()!.settled} / ${imageWaitProgress()!.total}`
-                      : "正在加载…"
+                      ? t("reader.fetchingImages", {
+                          settled: imageWaitProgress()!.settled,
+                          total: imageWaitProgress()!.total,
+                        })
+                      : t("reader.loading")
                   }
                 />
               </div>
@@ -3768,20 +3798,26 @@ export default function ReaderPage() {
                         <span class="grid h-11 w-11 place-items-center rounded-full bg-surface-2 text-accent">
                           <RefreshIcon size={22} class="animate-spin [animation-duration:1.2s]" />
                         </span>
-                        <p class="text-[14px] font-semibold text-text-2">正在获取章节正文…</p>
+                        <p class="text-[14px] font-semibold text-text-2">
+                          {t("reader.fetchingChapter")}
+                        </p>
                         <p class="text-[12px] leading-[1.6] text-text-3">
                           <Show when={remoteRun().total > 0}>
-                            {remoteRun().phase === "download" ? "批量下载" : "窗口预取"}{" "}
+                            {remoteRun().phase === "download"
+                              ? t("reader.phaseDownload")
+                              : t("reader.phaseWindow")}{" "}
                             {remoteRun().done} / {remoteRun().total}
                             <br />
                           </Show>
-                          已缓存的章节仍可正常阅读
+                          {t("reader.cachedChaptersReadable")}
                         </p>
                       </>
                     }
                   >
                     <p class="text-[14px] font-semibold text-text-2">
-                      {remoteRun().cancelled ? "获取已取消" : "章节获取失败"}
+                      {remoteRun().cancelled
+                        ? t("reader.fetchCancelled")
+                        : t("reader.fetchFailed")}
                     </p>
                     <p class="max-h-24 w-full overflow-y-auto break-all rounded-[10px] bg-danger-weak px-3 py-2 text-[11.5px] leading-[1.5] text-danger">
                       {remoteGateFailedText()}
@@ -3794,7 +3830,7 @@ export default function ReaderPage() {
                           goBack();
                         }}
                       >
-                        返回书架
+                        {t("reader.backToShelf")}
                       </button>
                       <button
                         class="rounded-xl bg-accent px-4 py-2.5 text-[13px] font-semibold text-on-accent active:scale-[0.97]"
@@ -3802,7 +3838,7 @@ export default function ReaderPage() {
                           void ensureReadingWindow(bookId(), chapterIdx());
                         }}
                       >
-                        重试获取
+                        {t("reader.retryFetch")}
                       </button>
                     </div>
                   </Show>
@@ -3821,9 +3857,11 @@ export default function ReaderPage() {
                   <span class="grid h-11 w-11 place-items-center rounded-full bg-surface-2 text-text-3">
                     <FileTextIcon size={22} />
                   </span>
-                  <p class="text-[14px] font-semibold text-text-2">本章正文为空</p>
+                  <p class="text-[14px] font-semibold text-text-2">
+                    {t("reader.chapterEmpty")}
+                  </p>
                   <p class="text-[12px] leading-[1.6] text-text-3">
-                    已从书源获取，但没有解析出正文，可能章节本身为空或需刷新重取
+                    {t("reader.chapterEmptyHint")}
                   </p>
                   <div class="mt-1 flex w-full items-center justify-center gap-3">
                     <Show
@@ -3836,7 +3874,7 @@ export default function ReaderPage() {
                             goBack();
                           }}
                         >
-                          返回书架
+                          {t("reader.backToShelf")}
                         </button>
                       }
                     >
@@ -3847,7 +3885,7 @@ export default function ReaderPage() {
                           cancelFollowIfActive();
                         }}
                       >
-                        下一章
+                        {t("reader.nextChapter")}
                       </button>
                     </Show>
                     <button
@@ -3857,7 +3895,9 @@ export default function ReaderPage() {
                         void reloadCurrentChapter();
                       }}
                     >
-                      {remoteReloading() ? "重新加载中…" : "重新加载本章"}
+                      {remoteReloading()
+                        ? t("reader.reloadingChapter")
+                        : t("reader.reloadChapter")}
                     </button>
                   </div>
                 </div>
@@ -3878,9 +3918,11 @@ export default function ReaderPage() {
                   <RefreshIcon size={22} class="animate-spin [animation-duration:1.2s]" />
                 </span>
                 <div class="flex flex-col gap-1.5">
-                  <p class="text-[14px] font-semibold text-text-2">正在重新加载本章…</p>
+                  <p class="text-[14px] font-semibold text-text-2">
+                    {t("reader.reloadingChapterOverlay")}
+                  </p>
                   <p class="text-[12px] leading-[1.6] text-text-3">
-                    已从书源重新获取正文，完成后会覆盖本章
+                    {t("reader.reloadChapterHint")}
                   </p>
                 </div>
                 <button
@@ -3888,7 +3930,7 @@ export default function ReaderPage() {
                   class="rounded-xl bg-surface-2 px-4 py-2.5 text-[13px] font-semibold text-text-2 active:scale-[0.97]"
                   onClick={() => cancelChapterReload(bookId())}
                 >
-                  取消
+                  {t("common.cancel")}
                 </button>
               </div>
             </Show>
@@ -3902,7 +3944,7 @@ export default function ReaderPage() {
                       type="button"
                       tabIndex={-1}
                       data-reader-ui
-                      aria-label="调整选区起点"
+                      aria-label={t("reader.adjustSelectionStart")}
                       class="pointer-events-auto absolute grid h-6 w-6 cursor-pointer -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full"
                       style={{ top: `${p().y}px`, left: `${p().x}px`, "touch-action": "none" }}
                       onPointerDown={(e) => {
@@ -3921,7 +3963,7 @@ export default function ReaderPage() {
                       type="button"
                       tabIndex={-1}
                       data-reader-ui
-                      aria-label="调整选区终点"
+                      aria-label={t("reader.adjustSelectionEnd")}
                       class="pointer-events-auto absolute grid h-6 w-6 cursor-pointer -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full"
                       style={{ top: `${p().y}px`, left: `${p().x}px`, "touch-action": "none" }}
                       onPointerDown={(e) => {
@@ -3953,7 +3995,13 @@ export default function ReaderPage() {
                       <span>{statusPercent()}%</span>
                     </Show>
                     <Show when={isPaged() && totalPages() > 1}>
-                      <span> · {pageIdx() + 1} / {totalPages()} 页</span>
+                      <span>
+                        {t("reader.statusPageProgress", {
+                          page: pageIdx() + 1,
+                          total: totalPages(),
+                          count: totalPages(),
+                        })}
+                      </span>
                     </Show>
                   </span>
                 </div>
@@ -3973,16 +4021,16 @@ export default function ReaderPage() {
                   <button
                     type="button"
                     class="flex min-w-0 items-center gap-1.5 py-2 pl-4 pr-2.5 text-[13px] font-semibold text-text-2 transition-[opacity] duration-100 active:opacity-75"
-                    aria-label="返回原进度"
+                    aria-label={t("reader.restoreProgress")}
                     onClick={restoreJumpOrigin}
                   >
                     <RestoreBackIcon size={15} class="flex-none text-accent" />
-                    <span class="truncate">返回原进度</span>
+                    <span class="truncate">{t("reader.restoreProgress")}</span>
                   </button>
                   <button
                     type="button"
                     class="grid h-9 w-9 flex-none place-items-center rounded-full text-text-3 transition-[background-color,color] duration-100 active:bg-surface-2 active:text-text-2"
-                    aria-label="关闭返回提示"
+                    aria-label={t("reader.closeRestoreHint")}
                     onClick={dismissJumpBack}
                   >
                     <CloseIcon size={14} />
@@ -4014,12 +4062,14 @@ export default function ReaderPage() {
                       <div class="h-10 w-10 flex-none" />
                       <button
                         type="button"
-                        aria-label="返回搜索结果列表"
+                        aria-label={t("reader.backToSearchResults")}
                         class="flex min-w-0 flex-1 flex-col items-center gap-[1px]"
                         onClick={returnToSearchResults}
                       >
                         <span class="max-w-full truncate text-[10.5px] text-text-3">
-                          {`「${searchSession()?.term ?? ""}」搜索中`}
+                          {t("reader.searchingTerm", {
+                            term: searchSession()?.term ?? "",
+                          })}
                         </span>
                         <span class="flex max-w-full items-center gap-1 text-[14.5px] font-semibold text-accent">
                           <span class="min-w-0 truncate">
@@ -4037,14 +4087,14 @@ export default function ReaderPage() {
                 >
                 <button
                   class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-                  aria-label="返回"
+                  aria-label={t("common.back")}
                   onClick={goBack}
                 >
                   <ChevronLeftIcon />
                 </button>
                 <div class="flex min-w-0 flex-1 flex-col items-center gap-[1px]">
                   <span class="max-w-full truncate text-[14.5px] font-semibold" onClick={toBookDetailPage}>
-                    {book()!.title}
+                    {bookDisplayTitle(book()!.title)}
                   </span>
                   <span class="max-w-full truncate text-[10.5px] text-text-3">
                     {chapter() ? `${chapter()!.cid} · ${chapter()!.title}` : ""}
@@ -4054,7 +4104,7 @@ export default function ReaderPage() {
                   <Show when={isRemoteBook()}>
                     <button
                       class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-                      aria-label="下载正文"
+                      aria-label={t("reader.downloadTitle")}
                       onClick={() => {
                         // 上一次选过的范围不带进这一次（下载进行中则保留，与进度显示一致）
                         if (!remoteDownloading()) setDownloadRange(null);
@@ -4072,7 +4122,7 @@ export default function ReaderPage() {
                       "text-accent": bmPanelOpen(),
                       "text-text-2": !bmPanelOpen(),
                     }}
-                    aria-label="书签"
+                    aria-label={t("reader.bookmarks")}
                     aria-pressed={bmPanelOpen()}
                     onClick={() => setBmPanelOpen((open) => !open)}
                   >
@@ -4087,7 +4137,11 @@ export default function ReaderPage() {
                       "text-accent": ttsPlayer.status() !== "stopped",
                       "text-text-2": ttsPlayer.status() === "stopped",
                     }}
-                    aria-label={ttsPlayer.status() === "stopped" ? "听书" : "停止听书"}
+                    aria-label={
+                      ttsPlayer.status() === "stopped"
+                        ? t("reader.ttsListen")
+                        : t("reader.ttsStop")
+                    }
                     aria-pressed={ttsPlayer.status() !== "stopped"}
                     onClick={() => {
                       if (ttsPlayer.status() === "stopped") {
@@ -4108,7 +4162,7 @@ export default function ReaderPage() {
                       "text-accent": readerSettingsOpen(),
                       "text-text-2": !readerSettingsOpen(),
                     }}
-                    aria-label="阅读设置"
+                    aria-label={t("reader.readingSettings")}
                     aria-pressed={readerSettingsOpen()}
                     onClick={() => setReaderSettingsOpen(true)}
                   >
@@ -4143,11 +4197,11 @@ export default function ReaderPage() {
                     <button
                       data-reader-ui
                       class="flex flex-none cursor-pointer items-center gap-1.5 rounded-full border border-accent/50 bg-accent-weak py-[7px] pl-3 pr-3.5 text-[12px] font-semibold text-accent transition-[scale] duration-100 active:scale-[0.96]"
-                      aria-label="返回跟读"
+                      aria-label={t("reader.resumeFollow")}
                       onClick={resumeFollow}
                     >
                       <FollowBackIcon size={15} />
-                      返回跟读
+                      {t("reader.resumeFollow")}
                     </button>
                   </Show>
                   <div class="flex min-w-0 flex-1 justify-end">
@@ -4202,7 +4256,7 @@ export default function ReaderPage() {
                       <div class="flex w-full items-center gap-1">
                         <button
                           class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-                          aria-label="返回搜索前进度"
+                          aria-label={t("reader.restorePreSearchPosition")}
                           onClick={restorePreSearch}
                         >
                           <RestoreBackIcon size={19} />
@@ -4210,29 +4264,29 @@ export default function ReaderPage() {
                         <div class="flex min-w-0 flex-1 items-center justify-center gap-1">
                           <button
                             class="inline-flex h-10 flex-none items-center justify-center gap-1 rounded-[10px] border border-border bg-bg px-2 text-[12.5px] text-text-2 transition-[scale,opacity] duration-100 active:scale-[0.97] disabled:pointer-events-none disabled:opacity-30"
-                            aria-label="上一个结果"
+                            aria-label={t("reader.prevResult")}
                             disabled={searchHitIndex() <= 0}
                             onClick={() => stepSearchHit(-1)}
                           >
                             <ChevronLeftIcon size={15} />
-                            上一个
+                            {t("reader.prev")}
                           </button>
                           <span class="w-[3.6em] flex-none text-center text-[12.5px] font-semibold tabular-nums text-accent">
                             {searchHitIndex() + 1}/{searchHitTotal()}
                           </span>
                           <button
                             class="inline-flex h-10 flex-none items-center justify-center gap-1 rounded-[10px] border border-border bg-bg px-2 text-[12.5px] text-text-2 transition-[scale,opacity] duration-100 active:scale-[0.97] disabled:pointer-events-none disabled:opacity-30"
-                            aria-label="下一个结果"
+                            aria-label={t("reader.nextResult")}
                             disabled={searchHitIndex() + 1 >= searchHitTotal()}
                             onClick={() => stepSearchHit(1)}
                           >
-                            下一个
+                            {t("reader.next")}
                             <ChevronRightIcon size={15} />
                           </button>
                         </div>
                         <button
                           class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-                          aria-label="关闭搜索模式"
+                          aria-label={t("reader.exitSearchMode")}
                           onClick={exitSearchMode}
                         >
                           <CloseIcon size={20} />
@@ -4257,7 +4311,7 @@ export default function ReaderPage() {
                   }}
                 >
                   <ChevronLeftIcon size={16} />
-                  上一章
+                  {t("reader.prevChapter")}
                 </button>
                 <button
                   class="inline-flex flex-[1.7] items-center justify-center gap-1.5 rounded-[10px] border border-transparent bg-accent px-0.5 py-[9px] text-[12.5px] font-semibold tabular-nums text-on-accent"
@@ -4265,9 +4319,17 @@ export default function ReaderPage() {
                 >
                   <ListIcon size={17} />
                   <span class="truncate">
-                    {chapterIdx() + 1}/{chapterCount()}章
+                    {t("reader.menuChapterProgress", {
+                      index: chapterIdx() + 1,
+                      total: chapterCount(),
+                      count: chapterCount(),
+                    })}
                     {isPaged() && totalPages() > 0
-                      ? ` · ${pageIdx() + 1}/${totalPages()}页`
+                      ? t("reader.menuPageProgress", {
+                          page: pageIdx() + 1,
+                          total: totalPages(),
+                          count: totalPages(),
+                        })
                       : ""}
                   </span>
                 </button>
@@ -4285,7 +4347,7 @@ export default function ReaderPage() {
                     cancelFollowIfActive();
                   }}
                 >
-                  下一章
+                  {t("reader.nextChapter")}
                   <ChevronRightIcon size={16} />
                 </button>
                 </Show>
@@ -4304,16 +4366,16 @@ export default function ReaderPage() {
                 data-reader-ui
                 class="absolute inset-x-0 bottom-0 z-[41] flex max-h-[72%] select-none animate-sheet-up flex-col overflow-hidden rounded-t-[16px] bg-surface shadow-[0_-10px_34px_rgb(0_0_0/0.22)]"
                 role="dialog"
-                aria-label="目录"
+                aria-label={t("reader.toc")}
               >
                 <div class="flex flex-none items-center gap-2.5 border-b border-border px-4 py-3">
-                  <span class="text-[15px] font-bold">目录</span>
+                  <span class="text-[15px] font-bold">{t("reader.toc")}</span>
                   <span class="flex-1 text-xs text-text-3">
-                    共 {chapterCount()} 章
+                    {t("reader.chapterCount", { count: chapterCount() })}
                   </span>
                   <button
                     class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-                    aria-label="全书搜索"
+                    aria-label={t("reader.searchBook")}
                     onClick={() => {
                       setTocOpen(false);
                       setMenuOpen(false);
@@ -4324,7 +4386,7 @@ export default function ReaderPage() {
                   </button>
                   <button
                     class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-                    aria-label="关闭目录"
+                    aria-label={t("reader.closeToc")}
                     onClick={() => setTocOpen(false)}
                   >
                     <CloseIcon />
@@ -4365,17 +4427,17 @@ export default function ReaderPage() {
                           <span class="flex flex-none items-center gap-1.5">
                             <Show when={downloading}>
                               <span class="flex-none rounded-full border border-accent/50 px-2 py-0.5 text-[10px] text-accent">
-                                下载中
+                                {t("reader.badgeDownloading")}
                               </span>
                             </Show>
                             <Show when={needsDownload}>
                               <span class="flex-none rounded-full bg-surface-2 px-2 py-0.5 text-[10px] text-text-3">
-                                下载
+                                {t("reader.badgeDownload")}
                               </span>
                             </Show>
                             <Show when={active}>
                               <span class="rounded-full bg-accent px-2 py-0.5 text-[10px] text-on-accent">
-                                当前
+                                {t("reader.badgeCurrent")}
                               </span>
                             </Show>
                           </span>
@@ -4484,7 +4546,7 @@ export default function ReaderPage() {
             <Show when={reloadRisk()}>
               {(risk) => (
                 <ReloadChapterRiskDialog
-                  chapterTitle={chapter()?.title ?? "当前章节"}
+                  chapterTitle={chapter()?.title ?? t("reader.currentChapter")}
                   preview={risk()}
                   onCancel={() => settleReloadRisk(false)}
                   onProceed={() => settleReloadRisk(true)}
@@ -4496,7 +4558,7 @@ export default function ReaderPage() {
             <Show when={updateConflict()}>
               {(conflict) => (
                 <OnlineTocOverwriteDialog
-                  bookTitle={book()?.title ?? ""}
+                  bookTitle={bookDisplayTitle(book()?.title)}
                   oldCount={conflict().oldCount}
                   newCount={conflict().newCount}
                   busy={overwriteBusy()}
@@ -4512,7 +4574,7 @@ export default function ReaderPage() {
               <ReplaceRulesSheet
                 open
                 bookId={bookId()}
-                bookTitle={book()?.title}
+                bookTitle={bookDisplayTitle(book()?.title)}
                 seedFind={replaceSeed()}
                 onClose={() => {
                   setReplaceSheetOpen(false);
@@ -4530,17 +4592,20 @@ export default function ReaderPage() {
               <div
                 class="fixed inset-x-0 bottom-0 z-[41] mx-auto flex max-h-[70%] max-w-[var(--app-column)] animate-sheet-up flex-col overflow-hidden rounded-t-[16px] bg-surface shadow-[0_-10px_34px_rgb(0_0_0/0.22)]"
                 role="dialog"
-                aria-label="下载正文"
+                aria-label={t("reader.downloadTitle")}
               >
                 <div class="flex flex-none items-center gap-2.5 border-b border-border px-4 py-3">
-                  <span class="text-[15px] font-bold">下载正文</span>
+                  <span class="text-[15px] font-bold">{t("reader.downloadTitle")}</span>
                   <span class="flex-1 text-xs text-text-3">
-                    {book()!.chapters.length} 章 · 已下载{" "}
-                    {book()!.chapters.filter((c) => chapterHasContent(c)).length} 章
+                    {t("reader.downloadSummary", {
+                      total: book()!.chapters.length,
+                      done: book()!.chapters.filter((c) => chapterHasContent(c)).length,
+                      count: book()!.chapters.length,
+                    })}
                   </span>
                   <button
                     class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-                    aria-label="关闭"
+                    aria-label={t("common.close")}
                     onClick={() => setDownloadOpen(false)}
                   >
                     <CloseIcon />
@@ -4548,13 +4613,15 @@ export default function ReaderPage() {
                 </div>
                 <ScrollArea class="min-h-0 flex-1" contentClass="space-y-3 px-4 py-4">
                   <p class="text-[12px] leading-[1.7] text-text-3">
-                    平时阅读只按需缓存当前章与前后各 {LAZY_WINDOW} 章（顺序阅读不断章）；这里可把所选范围的正文批量下载到本机，之后断网也能读。
-                    请求并行度跟随全局「书源并发」设置（设置 → 书源）。
+                    {t("reader.downloadHint", { window: LAZY_WINDOW })}{" "}
+                    {t("reader.downloadConcurrencyHint")}
                   </p>
                   {/* 下载范围：默认全书，可只下第 x–y 章 */}
                   <div class="rounded-[12px] bg-surface-2 px-3.5 py-3">
                     <div class="flex items-center gap-2">
-                      <span class="flex-1 text-[12px] font-semibold text-text-2">下载范围</span>
+                      <span class="flex-1 text-[12px] font-semibold text-text-2">
+                        {t("reader.downloadRangeLabel")}
+                      </span>
                       <button
                         class="flex-none rounded-full px-2.5 py-1 text-[11.5px] transition-colors active:bg-surface disabled:opacity-40"
                         classList={{
@@ -4564,7 +4631,7 @@ export default function ReaderPage() {
                         disabled={remoteDownloading()}
                         onClick={() => setDownloadRange(null)}
                       >
-                        全书
+                        {t("reader.wholeBook")}
                       </button>
                     </div>
                     <div class="mt-2 flex items-center gap-2">
@@ -4573,40 +4640,45 @@ export default function ReaderPage() {
                         disabled={remoteDownloading()}
                         onClick={() => setRangePick("start")}
                       >
-                        <span class="block text-[10.5px] text-text-3">起始章</span>
+                        <span class="block text-[10.5px] text-text-3">
+                          {t("reader.startChapter")}
+                        </span>
                         <span class="block truncate text-[12.5px] text-text-2">
                           {endpointLabel(downloadBounds().start)}
                         </span>
                       </button>
-                      <span class="flex-none text-[11px] text-text-3">至</span>
+                      <span class="flex-none text-[11px] text-text-3">
+                        {t("reader.rangeTo")}
+                      </span>
                       <button
                         class="min-w-0 flex-1 rounded-[10px] bg-bg px-3 py-2 text-left transition-colors active:bg-surface disabled:opacity-50"
                         disabled={remoteDownloading()}
                         onClick={() => setRangePick("end")}
                       >
-                        <span class="block text-[10.5px] text-text-3">结束章</span>
+                        <span class="block text-[10.5px] text-text-3">
+                          {t("reader.endChapter")}
+                        </span>
                         <span class="block truncate text-[12.5px] text-text-2">
                           {endpointLabel(downloadBounds().end)}
                         </span>
                       </button>
                     </div>
                     <p class="mt-2 text-[11px] text-text-3">
-                      范围内 {downloadPendingInRange()} 章待下载
+                      {t("reader.pendingInRange", { count: downloadPendingInRange() })}
                     </p>
                   </div>
                   <p class="text-[11.5px] leading-[1.6] text-text-3">
-                    含图片的章节（漫画 / 图文）在正文下完后单独再过一遍图片（阅读时读到的章节也会随手缓存），
-                    占用空间随图片数量明显增大。
+                    {t("reader.imageDownloadHint")}
                   </p>
                   <Show when={remoteFetching()}>
                     <div class="rounded-[12px] bg-surface-2 px-3.5 py-3">
                       <div class="flex items-center justify-between text-[12px]">
                         <span class="font-semibold text-text-2">
                           {remoteRun().phase === "window"
-                            ? "窗口预取中…"
+                            ? t("reader.phaseWindowBusy")
                             : remoteRun().phase === "images"
-                              ? "图片下载中…"
-                              : "批量下载中…"}
+                              ? t("reader.phaseImages")
+                              : t("reader.phaseDownloading")}
                         </span>
                         <span class="tabular-nums text-text-3">
                           {remoteRun().phase === "images"
@@ -4635,12 +4707,16 @@ export default function ReaderPage() {
                       </div>
                       <Show when={remoteRun().failed.length > 0}>
                         <p class="mt-1.5 text-[11px] text-danger">
-                          {remoteRun().failed.length} 章失败
+                          {t("reader.chaptersFailed", {
+                            count: remoteRun().failed.length,
+                          })}
                         </p>
                       </Show>
                       <Show when={remoteRun().images.failed > 0}>
                         <p class="mt-1.5 text-[11px] text-danger">
-                          {remoteRun().images.failed} 张图片失败（阅读时可在图片上重试）
+                          {t("reader.imagesFailedRetry", {
+                            count: remoteRun().images.failed,
+                          })}
                         </p>
                       </Show>
                     </div>
@@ -4653,13 +4729,17 @@ export default function ReaderPage() {
                   >
                     <p class="rounded-[10px] bg-danger-weak px-3 py-2 text-[11.5px] leading-[1.5] text-danger">
                       <Show when={remoteRun().failed.length > 0}>
-                        上次有 {remoteRun().failed.length} 章未下载成功
+                        {t("reader.chaptersNotDownloaded", {
+                          count: remoteRun().failed.length,
+                        })}
                       </Show>
                       <Show when={remoteRun().failed.length > 0 && remoteRun().images.failed > 0}>
-                        、
+                        {t("reader.listSeparator")}
                       </Show>
                       <Show when={remoteRun().images.failed > 0}>
-                        {remoteRun().images.failed} 张图片未下载成功（阅读时可在图片上重试）
+                        {t("reader.imagesNotDownloaded", {
+                          count: remoteRun().images.failed,
+                        })}
                       </Show>
                     </p>
                   </Show>
@@ -4672,7 +4752,7 @@ export default function ReaderPage() {
                           stopRemoteFetch();
                         }}
                       >
-                        停止下载
+                        {t("reader.stopDownload")}
                       </button>
                     </Show>
                     <button
@@ -4685,42 +4765,65 @@ export default function ReaderPage() {
                           const range = downloadRange() === null ? undefined : downloadBounds();
                           const summary = await downloadRemainingChapters(bookId(), range);
                           if (!summary || summary.cancelled) return;
-                          const chapters = `${summary.done} 章正文`;
-                          const images =
+                          const items = [
+                            t("reader.textChapterCount", { count: summary.done }),
                             summary.images.total > 0
-                              ? `、${summary.images.done - summary.images.failed} 张图片`
-                              : "";
+                              ? t("reader.imageCount", {
+                                  count: summary.images.done - summary.images.failed,
+                                })
+                              : "",
+                          ]
+                            .filter(Boolean)
+                            .join(t("reader.listSeparator"));
                           if (summary.done === 0 && summary.images.total === 0) {
                             showToast(
                               range
-                                ? `${chapterRangeLabel(range.start, range.end)}正文均已下载`
-                                : "全书正文均已下载",
+                                ? t("reader.downloadRangeDone", {
+                                    range: chapterRangeLabel(range.start, range.end),
+                                  })
+                                : t("reader.downloadAllDone"),
                             );
                             return;
                           }
                           if (summary.failedChapters > 0 || summary.images.failed > 0) {
                             const failed = [
-                              summary.failedChapters > 0 ? `${summary.failedChapters} 章` : "",
-                              summary.images.failed > 0 ? `${summary.images.failed} 张图片` : "",
+                              summary.failedChapters > 0
+                                ? t("reader.chapterCountShort", {
+                                    count: summary.failedChapters,
+                                  })
+                                : "",
+                              summary.images.failed > 0
+                                ? t("reader.imageCount", {
+                                    count: summary.images.failed,
+                                  })
+                                : "",
                             ]
                               .filter(Boolean)
-                              .join("、");
-                            showToast(`下载完成：${chapters}${images}；${failed}失败`, true);
+                              .join(t("reader.listSeparator"));
+                            showToast(
+                              t("reader.downloadDoneFailed", { items, failed }),
+                              true,
+                            );
                             return;
                           }
-                          showToast(`下载完成：${chapters}${images} 已缓存`);
+                          showToast(t("reader.downloadDoneCached", { items }));
                         })();
                       }}
                     >
                       {remoteDownloading()
-                        ? "下载中…"
+                        ? t("reader.downloading")
                         : downloadRange() === null
-                          ? "下载剩余全部"
-                          : `下载${chapterRangeLabel(downloadBounds().start, downloadBounds().end)}`}
+                          ? t("reader.downloadRemaining")
+                          : t("reader.downloadRangeButton", {
+                              range: chapterRangeLabel(
+                                downloadBounds().start,
+                                downloadBounds().end,
+                              ),
+                            })}
                     </button>
                   </div>
                   <p class="pb-1 text-center text-[11px] text-text-3">
-                    下载内容同样保存在本机书库，删除书籍时一并清除
+                    {t("reader.downloadStorageNote")}
                   </p>
                 </ScrollArea>
               </div>
@@ -4730,7 +4833,7 @@ export default function ReaderPage() {
                 {(bound) => (
                   <ChapterRangeSheet
                     open
-                    title={bound() === "start" ? "起始章" : "结束章"}
+                    title={bound() === "start" ? t("reader.startChapter") : t("reader.endChapter")}
                     chapters={book()!.chapters}
                     value={bound() === "start" ? downloadBounds().start : downloadBounds().end}
                     min={bound() === "start" ? 0 : downloadBounds().start}

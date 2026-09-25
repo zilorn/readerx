@@ -17,6 +17,7 @@ import {
   type BookmarkInheritPreview,
 } from "../lib/bookmarks";
 import { showToast } from "../lib/toast";
+import { t } from "../lib/i18n";
 import { BookmarkRiskDialog } from "./BookmarkRiskDialog";
 import { closeOnRouteChange } from "../lib/keptPage";
 import { ChevronRightIcon, CloseIcon, FileTextIcon, ServerIcon } from "./icons";
@@ -72,7 +73,7 @@ export function ImportButton(props: ImportButtonProps) {
     if (!file || busy() || conflict() || risk()) return;
     setBusy(true);
     try {
-      showToast("正在导入…");
+      showToast(t("shelf.import.importing"));
       await ensureLocalBooksLoaded();
       const draft = await parseBookFile(file);
       // 书架已存在同名书：交由用户选择“重新导入 / 作为新书 / 取消”
@@ -82,10 +83,13 @@ export function ImportButton(props: ImportButtonProps) {
         return;
       }
       const book = await importLocalDraftAsNew(draft);
-      showToast(`已导入《${book.title}》`);
+      showToast(t("shelf.import.imported", { title: book.title }));
       props.onImported?.(book);
     } catch (err) {
-      showToast(err instanceof Error ? err.message : "导入失败，请检查文件", true);
+      showToast(
+        err instanceof Error ? err.message : t("shelf.import.failedCheckFile"),
+        true,
+      );
     } finally {
       setBusy(false);
     }
@@ -105,10 +109,13 @@ export function ImportButton(props: ImportButtonProps) {
         return;
       }
       const book = await replaceBookContent(c.existing, c.draft);
-      showToast(`已重新导入《${book.title}》`);
+      showToast(t("shelf.import.reimported", { title: book.title }));
       props.onImported?.(book);
     } catch (err) {
-      showToast(err instanceof Error ? err.message : "重新导入失败", true);
+      showToast(
+        err instanceof Error ? err.message : t("shelf.import.reimportFailed"),
+        true,
+      );
     } finally {
       setConflictBusy(false);
     }
@@ -122,10 +129,10 @@ export function ImportButton(props: ImportButtonProps) {
     try {
       const book = await importLocalDraftAsNew(c.draft);
       setConflict(null);
-      showToast(`已新增《${book.title}》`);
+      showToast(t("shelf.import.added", { title: book.title }));
       props.onImported?.(book);
     } catch (err) {
-      showToast(err instanceof Error ? err.message : "导入失败", true);
+      showToast(err instanceof Error ? err.message : t("shelf.import.failed"), true);
     } finally {
       setConflictBusy(false);
     }
@@ -139,10 +146,13 @@ export function ImportButton(props: ImportButtonProps) {
     try {
       const book = await replaceBookContent(r.existing, r.draft);
       setRisk(null);
-      showToast(`已重新导入《${book.title}》`);
+      showToast(t("shelf.import.reimported", { title: book.title }));
       props.onImported?.(book);
     } catch (err) {
-      showToast(err instanceof Error ? err.message : "重新导入失败", true);
+      showToast(
+        err instanceof Error ? err.message : t("shelf.import.reimportFailed"),
+        true,
+      );
     } finally {
       setRiskBusy(false);
     }
@@ -170,7 +180,10 @@ export function ImportButton(props: ImportButtonProps) {
       const file = new File([base64ToBytes(picked.dataBase64)], picked.fileName);
       await handleFile(file);
     } catch (err) {
-      showToast(err instanceof Error ? err.message : "读取所选文件失败", true);
+      showToast(
+        err instanceof Error ? err.message : t("shelf.import.readFailed"),
+        true,
+      );
     }
   }
 
@@ -206,17 +219,23 @@ export function ImportButton(props: ImportButtonProps) {
 
       <Show when={open()}>
         <Portal>
-          <div class="fixed inset-0 z-[60]" role="dialog" aria-label="导入书籍">
+          <div
+            class="fixed inset-0 z-[60]"
+            role="dialog"
+            aria-label={t("shelf.import.title")}
+          >
             <div
               class="absolute inset-0 animate-sheet-fade bg-black/45 backdrop-blur-[2px]"
               onClick={() => setOpen(false)}
             />
             <div class="absolute inset-x-0 bottom-0 z-[61] flex animate-sheet-up flex-col overflow-hidden rounded-t-[16px] bg-surface shadow-[0_-10px_34px_rgb(0_0_0/0.22)]">
               <div class="flex flex-none items-center gap-2.5 border-b border-border px-4 py-3">
-                <span class="flex-1 text-[15px] font-bold">导入书籍</span>
+                <span class="flex-1 text-[15px] font-bold">
+                  {t("shelf.import.title")}
+                </span>
                 <button
                   class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-                  aria-label="关闭"
+                  aria-label={t("common.close")}
                   onClick={() => setOpen(false)}
                 >
                   <CloseIcon />
@@ -225,14 +244,14 @@ export function ImportButton(props: ImportButtonProps) {
               <div class="flex flex-col px-0 py-1.5 pb-2.5">
                 <MenuRow
                   icon={<FileTextIcon size={19} />}
-                  label="导入本地书"
-                  desc="从设备选择 TXT / EPUB / PDF"
+                  label={t("shelf.import.local")}
+                  desc={t("shelf.import.localDesc")}
                   onClick={openLocalPicker}
                 />
                 <MenuRow
                   icon={<ServerIcon size={19} />}
-                  label="从 WebDAV 导入"
-                  desc="浏览 WebDAV 云盘书库"
+                  label={t("shelf.import.webdav")}
+                  desc={t("shelf.import.webdavDesc")}
                   onClick={openWebDav}
                 />
               </div>
@@ -249,7 +268,9 @@ export function ImportButton(props: ImportButtonProps) {
               class="fixed inset-0 z-[80] grid place-items-center px-8"
               role="dialog"
               aria-modal="true"
-              aria-label={`《${c().existing.title}》已在书架中`}
+              aria-label={t("shelf.import.conflictTitle", {
+                title: c().existing.title,
+              })}
             >
               <div
                 class="absolute inset-0 animate-sheet-fade bg-black/45 backdrop-blur-[2px]"
@@ -257,11 +278,12 @@ export function ImportButton(props: ImportButtonProps) {
               />
               <div class="relative w-full max-w-[340px] animate-pop-in overflow-hidden rounded-[18px] border border-border bg-surface p-4 shadow-[0_18px_50px_rgb(0_0_0/0.3)]">
                 <p class="text-[15px] font-bold leading-snug">
-                  《{c().existing.title}》已在书架中
+                  {t("shelf.import.conflictTitle", {
+                    title: c().existing.title,
+                  })}
                 </p>
                 <p class="mt-2 text-[12.5px] leading-[1.7] text-text-2">
-                  重新导入会用所选文件替换这本书的内容，阅读进度、分组与书签会尝试继承；
-                  也可以保留原书，把所选文件作为一本新书加入书架。
+                  {t("shelf.import.conflictDesc")}
                 </p>
                 <div class="mt-4 flex flex-col gap-2">
                   <button
@@ -272,13 +294,13 @@ export function ImportButton(props: ImportButtonProps) {
                   >
                     <Show
                       when={conflictBusy()}
-                      fallback="重新导入"
+                      fallback={t("shelf.import.reimport")}
                     >
                       <span
                         class="size-3.5 flex-none animate-spin rounded-full border-2 border-on-accent/40 border-t-on-accent"
                         aria-hidden="true"
                       />
-                      正在检查书签…
+                      {t("shelf.import.checkingBookmarks")}
                     </Show>
                   </button>
                   <button
@@ -287,7 +309,7 @@ export function ImportButton(props: ImportButtonProps) {
                     disabled={conflictBusy()}
                     onClick={() => void confirmImportAsNew()}
                   >
-                    作为新书加入书架
+                    {t("shelf.import.addAsNew")}
                   </button>
                   <button
                     class="w-full rounded-xl px-4 py-[8px] text-[13px] text-text-3 transition-colors active:bg-surface-2"
@@ -295,7 +317,7 @@ export function ImportButton(props: ImportButtonProps) {
                     disabled={conflictBusy()}
                     onClick={() => setConflict(null)}
                   >
-                    取消
+                    {t("common.cancel")}
                   </button>
                 </div>
               </div>
@@ -313,7 +335,7 @@ export function ImportButton(props: ImportButtonProps) {
             busy={riskBusy()}
             onCancel={() => {
               setRisk(null);
-              showToast("已取消重新导入");
+              showToast(t("shelf.import.reimportCancelled"));
             }}
             onProceed={() => void confirmProceedWithRisk()}
           />

@@ -27,6 +27,7 @@ import {
   currentTtsVoice,
   setTtsVoice,
 } from "./ttsSettings";
+import { t } from "./i18n";
 
 export type NativeVoice = Voice;
 
@@ -125,7 +126,7 @@ export async function ensureNativeVoiceSelected(): Promise<string> {
 
 /** 语音在界面上的展示名（未选中/未知时给一个兜底文案） */
 export function nativeVoiceName(id: string): string {
-  if (!id) return "系统默认音色";
+  if (!id) return t("tts.voice.default");
   return voicesSignal().find((v) => v.id === id)?.name ?? id;
 }
 
@@ -191,7 +192,7 @@ export async function subscribeNativeSpeechEvents(
 }
 
 /** 把插件抛出的错误对象整理成一句可读文案 */
-export function describeNativeError(err: unknown, fallback = "系统语音不可用，请检查系统语音设置"): string {
+export function describeNativeError(err: unknown, fallback = t("tts.error.nativeFallback")): string {
   if (err && typeof err === "object") {
     const o = err as { code?: unknown; message?: unknown; toString?: () => string };
     const msg = typeof o.message === "string" && o.message ? o.message : "";

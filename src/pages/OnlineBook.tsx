@@ -13,6 +13,8 @@ import {
 } from "../lib/online";
 import { notifyAddedToShelf } from "../lib/groups";
 import { showToast } from "../lib/toast";
+import { t } from "../lib/i18n";
+import { bookDisplayAuthor } from "../lib/bookDisplay";
 
 /** 在线书预览：仅展示搜索结果已有信息；点「加入书架」时才获取一次目录 */
 export default function OnlineBookPage() {
@@ -56,7 +58,7 @@ export default function OnlineBookPage() {
         // 入架成功：提示条右侧的「加入分组」按钮直接拉起移入分组抽屉
         notifyAddedToShelf(book.id);
       } else {
-        showToast("已在书架中");
+        showToast(t("discover.sheet.alreadyInShelf"));
       }
       if (bookId && openReader) navigate(`/book/${bookId}`);
       else navigate("/");
@@ -81,7 +83,7 @@ export default function OnlineBookPage() {
   return (
     <div class="page">
       <PageHeader
-        title="在线书"
+        title={t("discover.online.title")}
         subtitle={pick() ? pick()!.source.name : undefined}
         onBack={() => {
           if (window.history.length > 1) navigate(-1);
@@ -93,8 +95,10 @@ export default function OnlineBookPage() {
         fallback={
           <div class="flex flex-col items-center gap-2 px-6 py-16 text-center text-text-3">
             <SourceIcon size={44} />
-            <p class="text-[14px] font-semibold text-text-2">这本书已失效</p>
-            <p class="text-[12px]">请回到「发现」页重新搜索</p>
+            <p class="text-[14px] font-semibold text-text-2">
+              {t("discover.online.expired")}
+            </p>
+            <p class="text-[12px]">{t("discover.online.expiredHint")}</p>
           </div>
         }
       >
@@ -111,18 +115,22 @@ export default function OnlineBookPage() {
             <div class="flex min-w-0 flex-1 flex-col justify-center gap-1">
               <h2 class="text-[17px] font-bold leading-snug">{meta().name}</h2>
               <p class="truncate text-[12.5px] text-text-3">
-                {meta().author || "佚名"}
+                {bookDisplayAuthor(meta().author)}
               </p>
               <Show when={meta().latest}>
-                <p class="truncate text-[12px] text-accent">最新：{meta().latest}</p>
+                <p class="truncate text-[12px] text-accent">
+                  {t("discover.online.latest", { value: meta().latest })}
+                </p>
               </Show>
               <Show when={meta().updateTime}>
-                <p class="text-[11px] text-text-3">更新：{meta().updateTime}</p>
+                <p class="text-[11px] text-text-3">
+                  {t("discover.online.updateTime", { value: meta().updateTime })}
+                </p>
               </Show>
               <Show when={alreadyOnShelf()}>
                 <p class="mt-1 inline-flex w-fit items-center gap-1 rounded-full bg-accent-weak px-2 py-0.5 text-[11px] font-semibold text-accent">
                   <BookIcon size={12} />
-                  已在书架
+                  {t("discover.online.inShelf")}
                 </p>
               </Show>
             </div>
@@ -149,10 +157,14 @@ export default function OnlineBookPage() {
               <Show when={adding()} fallback={<BookIcon size={17} />}>
                 <RefreshIcon size={17} class="animate-spin" />
               </Show>
-              {adding() ? "正在获取目录…" : alreadyOnShelf() ? "去书架阅读" : "加入书架并阅读"}
+              {adding()
+                ? t("discover.online.tocFetching")
+                : alreadyOnShelf()
+                  ? t("discover.online.readOnShelf")
+                  : t("discover.online.addAndRead")}
             </button>
             <p class="text-center text-[11px] leading-[1.6] text-text-3">
-              加入书架只保存章节列表；正文在阅读时按需缓存「当前章与前后各 {LAZY_WINDOW} 章」，阅读页也可按章节范围批量下载用于离线
+              {t("discover.online.addNote", { window: LAZY_WINDOW })}
             </p>
           </div>
         </div>

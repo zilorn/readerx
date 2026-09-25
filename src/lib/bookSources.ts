@@ -6,6 +6,7 @@
  */
 import { createSignal } from "solid-js";
 import { httpFetch } from "./http";
+import { t } from "./i18n";
 import { createLogger } from "./logger";
 import {
   deleteRemoteSource,
@@ -334,15 +335,15 @@ function readGroupName(r: Record<string, unknown>): string {
 
 function normalizeEntry(raw: unknown): { entry: ImportEntry | null; issue?: string } {
   if (!raw || typeof raw !== "object") {
-    return { entry: null, issue: "不是对象" };
+    return { entry: null, issue: t("sources.import.issue.notObject") };
   }
   const r = raw as Record<string, unknown>;
   const name = typeof r.name === "string" ? r.name.trim() : "";
   const bookSourceUrl = typeof r.bookSourceUrl === "string" ? r.bookSourceUrl.trim() : "";
   const js = typeof r.js === "string" ? r.js : "";
-  if (!name) return { entry: null, issue: "缺少名称 name" };
-  if (!bookSourceUrl) return { entry: null, issue: "缺少站点地址 bookSourceUrl" };
-  if (!js.trim()) return { entry: null, issue: "缺少 JS 代码 js" };
+  if (!name) return { entry: null, issue: t("sources.import.issue.missingName") };
+  if (!bookSourceUrl) return { entry: null, issue: t("sources.import.issue.missingUrl") };
+  if (!js.trim()) return { entry: null, issue: t("sources.import.issue.missingJs") };
   const capsRaw =
     r.capabilities && typeof r.capabilities === "object"
       ? (r.capabilities as Record<string, unknown>)
@@ -390,7 +391,7 @@ export function planBookSourceImport(text: string): ImportPlan {
   try {
     parsed = JSON.parse(text);
   } catch {
-    return { ...plan, issues: [{ index: 0, message: "JSON 解析失败" }] };
+    return { ...plan, issues: [{ index: 0, message: t("sources.import.issue.badJson") }] };
   }
   const list = Array.isArray(parsed) ? parsed : [parsed];
   const existing = bookSourceList();
@@ -398,7 +399,10 @@ export function planBookSourceImport(text: string): ImportPlan {
   list.forEach((raw, index) => {
     const { entry, issue } = normalizeEntry(raw);
     if (issue || !entry) {
-      plan.issues.push({ index: index + 1, message: issue ?? "无法解析" });
+      plan.issues.push({
+        index: index + 1,
+        message: issue ?? t("sources.import.issue.unparsable"),
+      });
       return;
     }
     const { source } = entry;
@@ -478,7 +482,7 @@ const URL_PREFIX_RE = /^https?:\/\//i;
 export async function planBookSourceNetworkImport(url: string): Promise<ImportPlan> {
   const target = url.trim();
   if (!URL_PREFIX_RE.test(target)) {
-    throw new Error("请输入以 http(s):// 开头的书源网址");
+    throw new Error(t("sources.url.invalid"));
   }
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), 30000);
@@ -488,20 +492,22 @@ export async function planBookSourceNetworkImport(url: string): Promise<ImportPl
       signal: controller.signal,
     });
     if (!res.ok) {
-      throw new Error(`拉取失败：HTTP ${res.status}`);
+      throw new Error(t("sources.url.httpFailed", { status: res.status }));
     }
     const body = await res.text();
     const text = body.replace(/^\uFEFF/, "").trim();
-    if (!text) throw new Error("该网址没有返回可导入的内容");
+    if (!text) throw new Error(t("sources.url.empty"));
     // 分组名要对着本机分组清单解析（已有同名分组直接复用）
     await ensureSourceGroupsLoaded();
     return planBookSourceImport(text);
   } catch (err) {
     if (controller.signal.aborted) {
-      throw new Error("请求超时（30 秒），请检查网址与网络后重试");
+      throw new Error(t("sources.url.timeout"));
     }
     throw new Error(
-      `无法访问该网址：${err instanceof Error ? err.message : String(err)}`,
+      t("sources.url.unreachable", {
+        reason: err instanceof Error ? err.message : String(err),
+      }),
     );
   } finally {
     window.clearTimeout(timer);

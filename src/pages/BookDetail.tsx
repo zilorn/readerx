@@ -21,12 +21,14 @@ import {
   type BookMeta,
 } from "../lib/booksTypes";
 import { withHanMeta } from "../lib/hanDisplay";
+import { t } from "../lib/i18n";
 import { refreshOnlineBookInfo } from "../lib/online";
 import { showToast } from "../lib/toast";
-import { groupName } from "../lib/groups";
+import { groupDisplayName } from "../lib/groups";
+import { bookDisplayAuthor, bookDisplayTitle, isFallbackBookAuthor } from "../lib/bookDisplay";
 
 function formatName(format: BookFormat): string {
-  if (format === "online") return "在线书";
+  if (format === "online") return t("book.detail.online");
   if (format === "epub") return "EPUB";
   if (format === "pdf") return "PDF";
   if (format === "txt") return "TXT";
@@ -36,10 +38,10 @@ function formatName(format: BookFormat): string {
 function sourceName(book: BookMeta): string {
   const source = bookSourceOf(book);
   return source === "online"
-    ? "在线书"
+    ? t("book.detail.online")
     : source === "webdav"
-      ? "WebDAV 导入"
-      : "本地导入";
+      ? t("book.detail.webdavImport")
+      : t("book.detail.localImport");
 }
 
 function formatImportedAt(ts: number): string {
@@ -58,19 +60,27 @@ interface MetaRow {
 function bookMetaRows(book: BookMeta): MetaRow[] {
   const chars = book.chapters.reduce((sum, chapter) => sum + (chapter.chars || 0), 0);
   const rows: MetaRow[] = [
-    { label: "书名", value: book.title },
-    { label: "作者", value: book.author || "佚名" },
-    { label: "格式", value: formatName(book.format) },
-    { label: "来源", value: sourceName(book) },
+    { label: t("book.field.title"), value: bookDisplayTitle(book.title) },
+    { label: t("book.field.author"), value: bookDisplayAuthor(book.author) },
+    { label: t("book.field.format"), value: formatName(book.format) },
+    { label: t("book.field.source"), value: sourceName(book) },
     ...(book.format === "online" && book.bookUrl
-      ? [{ label: "书源地址", value: book.bookUrl, url: book.bookUrl }]
+      ? [{ label: t("book.field.bookUrl"), value: book.bookUrl, url: book.bookUrl }]
       : []),
-    { label: "章节", value: `${book.chapters.length} 章` },
-    ...(chars > 0 ? [{ label: "字数", value: `${chars} 字` }] : []),
-    ...(book.size > 0 ? [{ label: "大小", value: formatFileSize(book.size) }] : []),
-    { label: "文件", value: book.fileName },
-    { label: "分组", value: groupName(book.groupId) || "未分组" },
-    { label: "导入时间", value: formatImportedAt(book.importedAt) },
+    {
+      label: t("book.field.chapters"),
+      value: t("book.detail.chapterCount", { count: book.chapters.length }),
+    },
+    ...(chars > 0
+      ? [{ label: t("book.field.chars"), value: t("book.detail.charCount", { count: chars }) }]
+      : []),
+    ...(book.size > 0 ? [{ label: t("book.field.size"), value: formatFileSize(book.size) }] : []),
+    { label: t("book.field.file"), value: book.fileName },
+    {
+      label: t("book.field.group"),
+      value: groupDisplayName(book.groupId) || t("common.ungrouped"),
+    },
+    { label: t("book.field.importedAt"), value: formatImportedAt(book.importedAt) },
   ];
   return rows;
 }
@@ -95,7 +105,7 @@ function MetaRowItem(props: { row: MetaRow }) {
         <button
           type="button"
           class="flex w-full items-start gap-4 px-4 py-[10px] text-left transition-[background-color] duration-150 active:bg-surface-2"
-          aria-label={`在浏览器打开${label()}`}
+          aria-label={t("book.detail.openInBrowser", { name: label() })}
           onClick={() => void openExternal(url())}
         >
           <span class="w-[64px] flex-none text-[12.5px] text-text-3">{label()}</span>
@@ -144,16 +154,23 @@ export default function BookDetailPage() {
     try {
       const result = await refreshOnlineBookInfo(id);
       const updated: string[] = [];
-      if (result.introUpdated) updated.push("简介");
-      if (result.coverUpdated) updated.push("封面");
-      if (result.tagsUpdated) updated.push("标签");
+      if (result.introUpdated) updated.push(t("book.field.intro"));
+      if (result.coverUpdated) updated.push(t("book.field.cover"));
+      if (result.tagsUpdated) updated.push(t("book.field.tags"));
       showToast(
         updated.length > 0
-          ? `${updated.join("、")}已更新`
-          : "书籍信息已是最新",
+          ? t("book.detail.updated", {
+              fields: updated.join(t("book.detail.fieldSeparator")),
+            })
+          : t("book.detail.upToDate"),
       );
     } catch (e) {
-      showToast(`重新拉取失败：${e instanceof Error ? e.message : String(e)}`, true);
+      showToast(
+        t("book.detail.refreshFailed", {
+          reason: e instanceof Error ? e.message : String(e),
+        }),
+        true,
+      );
     } finally {
       setRefreshing(false);
     }
@@ -172,7 +189,11 @@ export default function BookDetailPage() {
   }
 
   /** 展示用作者名（空作者不显示为可搜索，避免搜「佚名」） */
-  const authorName = createMemo(() => displayBook()?.author?.trim() ?? "");
+  // 展示层：落库兜底作者（佚名）当成「没有作者」，既不显示成中文也不拿它去搜索
+  const authorName = createMemo(() => {
+    const author = displayBook()?.author;
+    return isFallbackBookAuthor(author) ? "" : (author?.trim() ?? "");
+  });
 
   const rows = createMemo(() => {
     const current = displayBook();
@@ -182,7 +203,7 @@ export default function BookDetailPage() {
   return (
     <div class="page">
       <PageHeader
-        title="书籍详情"
+        title={t("book.detail.title")}
         onBack={goBack}
         right={
           <Show when={book()}>
@@ -190,7 +211,7 @@ export default function BookDetailPage() {
               <Show when={refreshable()}>
                 <button
                   class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2 disabled:pointer-events-none disabled:opacity-60"
-                  aria-label="重新拉取书籍信息（简介、封面与标签）"
+                  aria-label={t("book.detail.refresh")}
                   disabled={refreshing()}
                   onClick={() => void refreshBookInfo()}
                 >
@@ -201,7 +222,7 @@ export default function BookDetailPage() {
               </Show>
               <button
                 class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-                aria-label="编辑书籍信息"
+                aria-label={t("book.meta.title")}
                 onClick={() => setEditOpen(true)}
               >
                 <EditIcon size={20} />
@@ -213,18 +234,18 @@ export default function BookDetailPage() {
 
       <Show
         when={bookMetasReady()}
-        fallback={<LoadingScreen label="加载本地书库…" />}
+        fallback={<LoadingScreen label={t("book.detail.loading")} />}
       >
         <Show
           when={book()}
           fallback={
             <div class="flex flex-col items-center gap-4 px-6 py-24 text-center text-sm text-text-2">
-              <p>书籍不存在</p>
+              <p>{t("book.detail.notFound")}</p>
               <button
                 class="inline-flex items-center justify-center gap-1.5 rounded-xl bg-accent px-5.5 py-2.75 text-sm font-semibold text-on-accent shadow-lg shadow-accent/30 transition-[scale,opacity] duration-100 active:scale-[0.97] active:opacity-90"
                 onClick={goBack}
               >
-                返回
+                {t("common.back")}
               </button>
             </div>
           }
@@ -239,18 +260,21 @@ export default function BookDetailPage() {
                 <h2 class="text-[18px] font-bold leading-snug">
                   <QuickSearchText
                     text={displayBook()!.title}
-                    action="搜索书名"
+                    action={t("book.detail.searchTitle")}
                     iconSize={14}
                     iconClass="mt-[5px]"
                     onSearch={quickSearch}
                   />
                 </h2>
                 <p class="text-[13px] leading-snug text-text-3">
-                  <Show when={authorName()} fallback={<span>佚名</span>}>
+                  <Show
+                    when={authorName()}
+                    fallback={<span>{t("common.anonymousAuthor")}</span>}
+                  >
                     {(author) => (
                       <QuickSearchText
                         text={author()}
-                        action="搜索作者"
+                        action={t("book.detail.searchAuthor")}
                         iconSize={12}
                         iconClass="mt-[3px]"
                         onSearch={quickSearch}
@@ -272,13 +296,13 @@ export default function BookDetailPage() {
             {/* 标签 */}
             <section>
               <h3 class="mb-2 text-[12.5px] font-medium tracking-[0.04em] text-text-3">
-                标签
+                {t("book.field.tags")}
               </h3>
               <Show
                 when={(displayBook()!.tags?.length ?? 0) > 0}
                 fallback={
                   <div class="flex min-h-[44px] items-center justify-center rounded-[14px] border border-dashed border-border bg-surface px-4 text-center text-[12.5px] leading-[1.7] text-text-3">
-                    暂无标签，点击右上角「编辑」添加
+                    {t("book.detail.tagsEmpty")}
                   </div>
                 }
               >
@@ -294,13 +318,13 @@ export default function BookDetailPage() {
             {/* 简介 */}
             <section>
               <h3 class="mb-2 text-[12.5px] font-medium tracking-[0.04em] text-text-3">
-                简介
+                {t("book.field.intro")}
               </h3>
               <Show
                 when={displayBook()!.intro}
                 fallback={
                   <div class="flex min-h-[72px] items-center justify-center rounded-[14px] border border-dashed border-border bg-surface px-4 text-center text-[12.5px] leading-[1.7] text-text-3">
-                    暂无简介，点击右上角「编辑」补充
+                    {t("book.detail.introEmpty")}
                   </div>
                 }
               >
@@ -313,7 +337,7 @@ export default function BookDetailPage() {
             {/* 其它元信息 */}
             <section>
               <h3 class="mb-2 text-[12.5px] font-medium tracking-[0.04em] text-text-3">
-                详情
+                {t("common.details")}
               </h3>
               <div class="divide-y divide-border overflow-hidden rounded-[14px] border border-border bg-surface">
                 <For each={rows()}>

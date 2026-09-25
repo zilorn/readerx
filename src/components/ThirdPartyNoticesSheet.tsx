@@ -3,6 +3,7 @@
  * （第三方开源库、各自许可与在 ReaderX 中的用途）。
  */
 import { readThirdPartyNotices } from "../lib/backend";
+import { t } from "../lib/i18n";
 import { PackageIcon } from "./icons";
 import { TextDocumentSheet } from "./TextDocumentSheet";
 
@@ -16,12 +17,12 @@ export function ThirdPartyNoticesSheet(props: ThirdPartyNoticesSheetProps) {
     <TextDocumentSheet
       open={props.open}
       onClose={props.onClose}
-      title="开源库声明"
-      subtitle="ReaderX 使用的第三方开源库"
+      title={t("settings.notices.title")}
+      subtitle={t("settings.notices.subtitle")}
       icon={<PackageIcon size={18} />}
-      closeLabel="关闭开源库声明"
+      closeLabel={t("settings.notices.close")}
       load={readThirdPartyNotices}
-      errorText="无法读取开源库声明"
+      errorText={t("settings.notices.error")}
     />
   );
 }

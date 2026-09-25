@@ -10,6 +10,7 @@ import { CloseIcon, FolderIcon } from "./icons";
 import { ScrollArea } from "./ScrollArea";
 import { ToggleSwitch } from "./ToggleSwitch";
 import type { ImportPlan } from "../lib/bookSources";
+import { t } from "../lib/i18n";
 
 interface SourceImportConfirmSheetProps {
   plan: ImportPlan;
@@ -39,20 +40,23 @@ export function SourceImportConfirmSheet(props: SourceImportConfirmSheetProps) {
     props.plan.create.length + activeOverwriteCount() > 0;
 
   return (
-    <div class="fixed inset-0 z-50" role="dialog" aria-label="导入书源">
+    <div class="fixed inset-0 z-50" role="dialog" aria-label={t("sourceEditor.import.ariaLabel")}>
       <div
         class="absolute inset-0 animate-sheet-fade bg-black/45 backdrop-blur-[2px]"
         onClick={props.onClose}
       />
       <div class="absolute inset-x-0 bottom-0 z-[51] flex max-h-[78%] animate-sheet-up flex-col overflow-hidden rounded-t-[16px] bg-surface shadow-[0_-10px_34px_rgb(0_0_0/0.22)]">
         <div class="flex flex-none items-center gap-2 border-b border-border px-4 py-3">
-          <span class="text-[15px] font-bold">导入书源</span>
+          <span class="text-[15px] font-bold">{t("sourceEditor.import.title")}</span>
           <span class="flex-1 text-xs text-text-3">
-            {props.plan.create.length} 新增 · {activeOverwriteCount()} 覆盖
+            {t("sourceEditor.import.summary", {
+              create: props.plan.create.length,
+              overwrite: activeOverwriteCount(),
+            })}
           </span>
           <button
             class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-            aria-label="关闭"
+            aria-label={t("common.close")}
             onClick={props.onClose}
           >
             <CloseIcon />
@@ -60,23 +64,24 @@ export function SourceImportConfirmSheet(props: SourceImportConfirmSheetProps) {
         </div>
         <ScrollArea class="min-h-0 flex-1" contentClass="space-y-2.5 px-4 py-4">
           <p class="rounded-[12px] bg-surface-2 px-3.5 py-3 text-[12px] leading-[1.7] text-text-2">
-            社区/第三方制作的书源与 ReaderX 及其作者无关，作者未参与任何书源制作。书源 JS
-            会在本地沙箱执行，但作者无法保证其安全性——仅导入可信来源。
+            {t("sourceEditor.import.disclaimer")}
           </p>
           <Show when={props.plan.issues.length > 0}>
             <p class="rounded-[10px] bg-danger-weak px-3 py-2 text-[11.5px] leading-[1.5] text-danger">
-              跳过 {props.plan.issues.length} 条无法解析的条目：
-              {props.plan.issues
-                .slice(0, 3)
-                .map((i) => `#${i.index} ${i.message}`)
-                .join("；")}
+              {t("sourceEditor.import.skipped", {
+                count: props.plan.issues.length,
+                items: props.plan.issues
+                  .slice(0, 3)
+                  .map((i) => `#${i.index} ${i.message}`)
+                  .join(t("sourceEditor.import.issueSeparator")),
+              })}
             </p>
           </Show>
           {/* 与本机重复（同名 + 同站点）的书源：可逐条关闭覆盖，保留本机版本 */}
           <Show when={props.plan.overwrite.length > 0}>
             <div class="overflow-hidden rounded-[12px] border border-border bg-bg">
               <p class="border-b border-border bg-surface-2/60 px-3.5 py-2 text-[11.5px] font-semibold text-text-3">
-                与本机重复的书源（同名 · 同站点），默认用导入内容覆盖
+                {t("sourceEditor.import.duplicateTitle")}
               </p>
               <div class="divide-y divide-border">
                 <For each={props.plan.overwrite}>
@@ -92,11 +97,15 @@ export function SourceImportConfirmSheet(props: SourceImportConfirmSheetProps) {
                       </span>
                       <span class="flex flex-none items-center gap-2">
                         <span class="text-[11px] font-semibold tabular-nums text-text-3">
-                          {props.skipped.has(index()) ? "跳过" : "覆盖"}
+                          {props.skipped.has(index())
+                            ? t("sourceEditor.import.skip")
+                            : t("sourceEditor.import.overwrite")}
                         </span>
                         <ToggleSwitch
                           on={!props.skipped.has(index())}
-                          label={`覆盖书源 ${item.entry.source.name}`}
+                          label={t("sourceEditor.import.overwriteAria", {
+                            name: item.entry.source.name,
+                          })}
                           onChange={() => props.onToggleOverwrite(index())}
                         />
                       </span>
@@ -111,14 +120,16 @@ export function SourceImportConfirmSheet(props: SourceImportConfirmSheetProps) {
             <div class="overflow-hidden rounded-[12px] border border-border bg-bg">
               <div class="flex items-center gap-2 border-b border-border bg-surface-2/60 px-3.5 py-2">
                 <span class="flex-1 text-[11.5px] font-semibold text-text-3">
-                  导入内容里的分组
+                  {t("sourceEditor.import.groupsTitle")}
                 </span>
                 <span class="text-[11px] font-semibold tabular-nums text-text-3">
-                  {props.importGroups ? "归入分组" : "未分组"}
+                  {props.importGroups
+                    ? t("sourceEditor.import.grouped")
+                    : t("common.ungrouped")}
                 </span>
                 <ToggleSwitch
                   on={props.importGroups}
-                  label="按分组名导入分组"
+                  label={t("sourceEditor.import.groupToggleAria")}
                   onChange={props.onToggleImportGroups}
                 />
               </div>
@@ -131,7 +142,12 @@ export function SourceImportConfirmSheet(props: SourceImportConfirmSheetProps) {
                         {group.name}
                       </span>
                       <span class="flex-none text-[11px] tabular-nums text-text-3">
-                        {group.count} 个 · {group.existing ? "已有" : "新建"}
+                        {t("sourceEditor.import.groupCount", {
+                          count: group.count,
+                          state: group.existing
+                            ? t("sourceEditor.import.groupExisting")
+                            : t("sourceEditor.import.groupNew"),
+                        })}
                       </span>
                     </div>
                   )}
@@ -144,14 +160,14 @@ export function SourceImportConfirmSheet(props: SourceImportConfirmSheetProps) {
             disabled={!willImport()}
             onClick={props.onApply}
           >
-            仍要导入
+            {t("sourceEditor.import.apply")}
           </button>
           <Show when={props.onPasteImport}>
             <button
               class="inline-flex w-full items-center justify-center rounded-xl bg-surface-2 px-4 py-2.5 text-[13px] font-semibold text-text-2 active:scale-[0.98]"
               onClick={props.onPasteImport}
             >
-              继续粘贴导入
+              {t("sourceEditor.import.pasteMore")}
             </button>
           </Show>
         </ScrollArea>

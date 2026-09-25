@@ -7,6 +7,7 @@ import {
   TrashIcon,
 } from "./icons";
 import { CAPABILITY_LABELS, type BookSourceSummary } from "../lib/bookSourcesTypes";
+import { t } from "../lib/i18n";
 import { sourceGroupName } from "../lib/sourceGroups";
 
 /** 长按多久进入多选（与书架卡片一致） */
@@ -103,9 +104,9 @@ export function BookSourceRow(props: BookSourceRowProps) {
         aria-label={
           props.selectMode
             ? props.selected
-              ? `取消选中书源《${props.summary.name}》`
-              : `选中书源《${props.summary.name}》`
-            : `编辑书源《${props.summary.name}》`
+              ? t("sources.row.deselect", { name: props.summary.name })
+              : t("sources.row.select", { name: props.summary.name })
+            : t("sources.row.edit", { name: props.summary.name })
         }
         onClick={(e) => {
           // 交给整行统一处理，避免点击被行与按钮各算一次
@@ -131,7 +132,7 @@ export function BookSourceRow(props: BookSourceRowProps) {
             .filter((key) => props.summary.capabilities[key])
             .map((key) => (
               <i class="not-italic rounded-full bg-surface-2 px-1.5 py-0.5 text-[9.5px] font-semibold text-text-3">
-                {CAPABILITY_LABELS[key]}
+                {t(CAPABILITY_LABELS[key])}
               </i>
             ))}
           <span class="text-[10px] text-text-3/80">JS {props.summary.jsLength}</span>
@@ -148,7 +149,11 @@ export function BookSourceRow(props: BookSourceRowProps) {
               class={`relative h-6 w-11 flex-none rounded-full transition-colors duration-150 ${
                 props.summary.enabled ? "bg-accent" : "bg-surface-2"
               }`}
-              aria-label={`${props.summary.enabled ? "停用" : "启用"}书源《${props.summary.name}》`}
+              aria-label={
+                props.summary.enabled
+                  ? t("sources.row.disable", { name: props.summary.name })
+                  : t("sources.row.enable", { name: props.summary.name })
+              }
               onClick={() => props.onToggleEnabled(props.summary.id, !props.summary.enabled)}
             >
               <span
@@ -161,21 +166,21 @@ export function BookSourceRow(props: BookSourceRowProps) {
               <button
                 class="grid h-7 w-7 place-items-center rounded-lg text-text-3 active:bg-surface-2"
                 classList={{ "text-accent": !!sourceGroupName(props.summary.groupId) }}
-                aria-label={`归入分组：${props.summary.name}`}
+                aria-label={t("sources.row.assignGroup", { name: props.summary.name })}
                 onClick={() => props.onAssignGroup(props.summary.id)}
               >
                 <FolderIcon size={15} />
               </button>
               <button
                 class="grid h-7 w-7 place-items-center rounded-lg text-text-3 active:bg-surface-2"
-                aria-label={`复制导出 JSON：${props.summary.name}`}
+                aria-label={t("sources.row.copyExport", { name: props.summary.name })}
                 onClick={() => props.onCopyExport(props.summary.id)}
               >
                 <FileTextIcon size={15} />
               </button>
               <button
                 class="grid h-7 w-7 place-items-center rounded-lg text-text-3 active:bg-surface-2"
-                aria-label={`删除书源：${props.summary.name}`}
+                aria-label={t("sources.row.delete", { name: props.summary.name })}
                 onClick={() => props.onDelete(props.summary.id)}
               >
                 <TrashIcon size={15} />

@@ -1,5 +1,6 @@
 import { For, Show, createSignal, type JSX } from "solid-js";
 import { CheckIcon, CloseIcon, EditIcon, FolderIcon, PlusIcon, TrashIcon } from "./icons";
+import { t } from "../lib/i18n";
 import {
   createSourceGroup,
   deleteSourceGroup,
@@ -48,7 +49,13 @@ export function SourceGroupManagerSheet(props: { onClose: () => void }) {
     setBusy(true);
     try {
       const changed = await setBookSourcesEnabled(ids, next);
-      if (changed > 0) showToast(`已${next ? "启用" : "停用"} ${changed} 个书源`);
+      if (changed > 0) {
+        showToast(
+          t(next ? "sources.batch.enableDone" : "sources.batch.disableDone", {
+            count: changed,
+          }),
+        );
+      }
     } catch (err) {
       showToast(String(err), true);
     }
@@ -61,7 +68,7 @@ export function SourceGroupManagerSheet(props: { onClose: () => void }) {
     const duplicate = sourceGroupList().some((group) => group.name === name);
     createSourceGroup(name);
     setNewName("");
-    if (duplicate) showToast("已有同名分组", true);
+    if (duplicate) showToast(t("sourceGroups.duplicate"), true);
   }
 
   function startEdit(id: string, name: string): void {
@@ -73,7 +80,7 @@ export function SourceGroupManagerSheet(props: { onClose: () => void }) {
     const name = editName().trim();
     setEditingId(null);
     if (!name || name === previous) return;
-    if (!renameSourceGroup(id, name)) showToast("已有同名分组", true);
+    if (!renameSourceGroup(id, name)) showToast(t("sourceGroups.duplicate"), true);
   }
 
   async function handleDelete(id: string): Promise<void> {
@@ -86,14 +93,18 @@ export function SourceGroupManagerSheet(props: { onClose: () => void }) {
     try {
       const cleared = await deleteSourceGroup(id);
       await refreshBookSources();
-      showToast(cleared > 0 ? `分组已删除，${cleared} 个书源退回未分组` : "分组已删除");
+      showToast(
+        cleared > 0
+          ? t("sourceGroups.deletedWithSources", { count: cleared })
+          : t("sourceGroups.deleted"),
+      );
     } catch (err) {
       showToast(String(err), true);
     }
   }
 
   return (
-    <div class="fixed inset-0 z-50" role="dialog" aria-label="书源分组管理">
+    <div class="fixed inset-0 z-50" role="dialog" aria-label={t("sourceGroups.manage.aria")}>
       <div
         class="absolute inset-0 animate-sheet-fade bg-black/45 backdrop-blur-[2px]"
         onClick={props.onClose}
@@ -104,12 +115,14 @@ export function SourceGroupManagerSheet(props: { onClose: () => void }) {
             <FolderIcon size={18} />
           </span>
           <span class="flex min-w-0 flex-1 flex-col">
-            <span class="text-[15px] font-bold leading-tight">书源分组</span>
-            <span class="text-[11px] text-text-3">新建、重命名、删除；开关整组书源</span>
+            <span class="text-[15px] font-bold leading-tight">
+              {t("sourceGroups.manager.title")}
+            </span>
+            <span class="text-[11px] text-text-3">{t("sourceGroups.manager.subtitle")}</span>
           </span>
           <button
             class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-            aria-label="关闭书源分组管理"
+            aria-label={t("sourceGroups.manager.close")}
             onClick={props.onClose}
           >
             <CloseIcon />
@@ -120,7 +133,7 @@ export function SourceGroupManagerSheet(props: { onClose: () => void }) {
           <div class="divide-y divide-border">
             {/* 未分组：只提供整组启停（不能改名 / 删除） */}
             <GroupRow
-              label="未分组"
+              label={t("common.ungrouped")}
               total={ungrouped().total}
               enabled={ungrouped().enabled}
               busy={busy()}
@@ -143,7 +156,7 @@ export function SourceGroupManagerSheet(props: { onClose: () => void }) {
                         <>
                           <button
                             class="grid h-8 w-8 flex-none place-items-center rounded-lg text-text-2 transition-colors active:bg-surface-2"
-                            aria-label={`重命名分组《${group.name}》`}
+                            aria-label={t("sourceGroups.row.rename", { name: group.name })}
                             onClick={() => startEdit(group.id, group.name)}
                           >
                             <EditIcon size={16} />
@@ -153,8 +166,8 @@ export function SourceGroupManagerSheet(props: { onClose: () => void }) {
                             classList={{ "text-danger": confirmDelete() === group.id }}
                             aria-label={
                               confirmDelete() === group.id
-                                ? `确认删除分组《${group.name}》`
-                                : `删除分组《${group.name}》`
+                                ? t("sourceGroups.row.confirmDelete", { name: group.name })
+                                : t("sourceGroups.row.delete", { name: group.name })
                             }
                             onClick={() => void handleDelete(group.id)}
                           >
@@ -178,7 +191,7 @@ export function SourceGroupManagerSheet(props: { onClose: () => void }) {
                       />
                       <button
                         class="grid h-8 w-8 flex-none place-items-center rounded-lg text-accent transition-colors active:bg-surface-2"
-                        aria-label="保存分组名"
+                        aria-label={t("sourceGroups.row.saveName")}
                         onClick={() => commitEdit(group.id, group.name)}
                       >
                         <CheckIcon size={17} />
@@ -190,7 +203,7 @@ export function SourceGroupManagerSheet(props: { onClose: () => void }) {
             </For>
             <Show when={sourceGroupList().length === 0}>
               <p class="px-4 py-4 text-center text-[12.5px] text-text-3">
-                还没有书源分组，在下方创建一个。
+                {t("sourceGroups.manager.empty")}
               </p>
             </Show>
           </div>
@@ -201,7 +214,7 @@ export function SourceGroupManagerSheet(props: { onClose: () => void }) {
           <input
             value={newName()}
             onInput={(e) => setNewName(e.currentTarget.value)}
-            placeholder="新建分组"
+            placeholder={t("sourceGroups.create.placeholder")}
             class="min-w-0 flex-1 rounded-[10px] border border-border bg-bg px-3 py-[8px] text-[13.5px] text-text outline-none transition-colors placeholder:text-text-3 focus:border-accent"
             onKeyDown={(e) => {
               if (e.key === "Enter") handleCreate();
@@ -212,7 +225,7 @@ export function SourceGroupManagerSheet(props: { onClose: () => void }) {
             onClick={handleCreate}
           >
             <PlusIcon size={15} />
-            添加
+            {t("common.add")}
           </button>
         </div>
       </div>
@@ -238,7 +251,10 @@ function GroupRow(props: {
       <span class="flex min-w-0 flex-1 flex-col gap-[1px]">
         <span class="min-w-0 truncate text-[14px] font-medium">{props.label}</span>
         <span class="text-[11px] text-text-3">
-          {props.enabled} / {props.total} 启用
+          {t("sourceGroups.row.enabledCount", {
+            enabled: props.enabled,
+            total: props.total,
+          })}
         </span>
       </span>
       <span
@@ -247,7 +263,7 @@ function GroupRow(props: {
       >
         <ToggleSwitch
           on={allEnabled()}
-          label={`整组启停：${props.label}`}
+          label={t("sourceGroups.row.toggleAll", { name: props.label })}
           onChange={() => props.onToggle(!allEnabled())}
         />
       </span>

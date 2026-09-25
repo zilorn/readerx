@@ -4,6 +4,7 @@
  */
 import { Show } from "solid-js";
 import type { TtsStatus } from "../lib/ttsPlayer";
+import { t } from "../lib/i18n";
 import {
   PauseIcon,
   PlayIcon,
@@ -37,7 +38,7 @@ export function TtsBubble(props: TtsBubbleProps) {
       <div class="flex items-center rounded-full border border-border bg-surface py-1 pl-1 pr-1 shadow-[0_6px_22px_rgb(0_0_0/0.22)] backdrop-blur-md">
         <button
           class="grid h-9 w-9 cursor-pointer place-items-center rounded-full text-text-2 transition-[background-color,scale] duration-100 active:scale-90 active:bg-surface-2"
-          aria-label="上一句"
+          aria-label={t("tts.bubble.prev")}
           onClick={(e) => {
             e.stopPropagation();
             props.onPrev();
@@ -48,7 +49,7 @@ export function TtsBubble(props: TtsBubbleProps) {
 
         <button
           class="mx-0.5 grid h-11 w-11 cursor-pointer place-items-center rounded-full bg-accent text-on-accent shadow-md transition-[scale] duration-100 active:scale-90"
-          aria-label={active() ? "暂停" : "播放"}
+          aria-label={active() ? t("tts.bubble.pause") : t("tts.bubble.play")}
           aria-pressed={!active()}
           onClick={(e) => {
             e.stopPropagation();
@@ -71,7 +72,7 @@ export function TtsBubble(props: TtsBubbleProps) {
 
         <button
           class="grid h-9 w-9 cursor-pointer place-items-center rounded-full text-text-2 transition-[background-color,scale] duration-100 active:scale-90 active:bg-surface-2"
-          aria-label="下一句"
+          aria-label={t("tts.bubble.next")}
           onClick={(e) => {
             e.stopPropagation();
             props.onNext();
@@ -84,7 +85,7 @@ export function TtsBubble(props: TtsBubbleProps) {
 
         <button
           class="grid h-9 w-9 cursor-pointer place-items-center rounded-full text-text-2 transition-[background-color,scale] duration-100 active:scale-90 active:bg-surface-2"
-          aria-label="听书设置"
+          aria-label={t("tts.sheet.title")}
           onClick={(e) => {
             e.stopPropagation();
             props.onOpenSettings();

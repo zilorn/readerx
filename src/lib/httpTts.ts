@@ -30,6 +30,7 @@ import {
 } from "./ttsSettings";
 import { readTtsAudioCache, writeTtsAudioCache } from "./audioCache";
 import { describeError } from "./errorReport";
+import { t } from "./i18n";
 import { createLogger } from "./logger";
 
 /** 自定义源合成细节用 debug 记（失败原因由调用方 ttsPlayer 带书 / 章 / 句序号记 warn） */
@@ -140,9 +141,9 @@ export async function synthesizeHttpAudio(text: string, bookId?: string): Promis
   const method: HttpTtsMethod = httpTtsMethod();
   const urlTemplate = httpTtsUrl();
   if (!urlTemplate.trim()) {
-    throw new Error("请先填写自定义源地址（听书设置 → 自定义源）");
+    throw new Error(t("tts.error.noUrl"));
   }
-  if (!text.trim()) throw new Error("没有可朗读的文本");
+  if (!text.trim()) throw new Error(t("tts.error.noText"));
 
   const started = performance.now();
   // 1) 磁盘缓存命中 → 直接用缓存字节，不再请求服务端
@@ -192,7 +193,7 @@ export async function synthesizeHttpAudio(text: string, bookId?: string): Promis
   } catch (err) {
     if (err instanceof DOMException && err.name === "AbortError") {
       log.debug("自定义源请求超时", `book=${book || "（无）"}`, `ms=${Math.round(performance.now() - started)}`);
-      throw new Error("自定义源请求超时（45 秒），请检查地址与网络");
+      throw new Error(t("tts.error.timeout"));
     }
     log.debug(
       "自定义源请求异常",
@@ -200,7 +201,7 @@ export async function synthesizeHttpAudio(text: string, bookId?: string): Promis
       `ms=${Math.round(performance.now() - started)}`,
       err,
     );
-    throw new Error(`自定义源请求失败：${describeError(err)}`);
+    throw new Error(t("tts.error.requestFailed", { reason: describeError(err) }));
   }
 
   if (!res.ok) {
@@ -210,7 +211,7 @@ export async function synthesizeHttpAudio(text: string, bookId?: string): Promis
       `status=${res.status}`,
       `ms=${Math.round(performance.now() - started)}`,
     );
-    throw new Error(`自定义源返回错误：HTTP ${res.status}`);
+    throw new Error(t("tts.error.httpStatus", { status: res.status }));
   }
   const ct = res.headers.get("content-type") ?? "";
   if (ct && !ct.toLowerCase().startsWith("audio/")) {
@@ -220,12 +221,14 @@ export async function synthesizeHttpAudio(text: string, bookId?: string): Promis
       `contentType=${ct || "未知"}`,
       `ms=${Math.round(performance.now() - started)}`,
     );
-    throw new Error(`自定义源未返回音频（Content-Type: ${ct || "未知"}）`);
+    throw new Error(
+      t("tts.error.notAudio", { contentType: ct || t("common.unknown") }),
+    );
   }
   const buf = await res.arrayBuffer();
   if (!buf || buf.byteLength === 0) {
     log.debug("自定义源返回了空音频", `book=${book || "（无）"}`);
-    throw new Error("自定义源返回了空音频");
+    throw new Error(t("tts.error.emptyAudio"));
   }
   const mime = ct || "audio/mpeg";
   const bytes = new Uint8Array(buf);

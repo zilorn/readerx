@@ -34,13 +34,14 @@ import {
   type ThemeMode,
 } from "../lib/store";
 import { appVersion, loadAppVersion } from "../lib/version";
+import { t, type MessageKey } from "../lib/i18n";
 import { ReadingSettingsRows } from "../components/ReadingSettingsRows";
 import { LanguageRow } from "../components/LanguageRow";
 
-const THEME_OPTIONS: { value: ThemeMode; label: string }[] = [
-  { value: "light", label: "浅色" },
-  { value: "dark", label: "深色" },
-  { value: "sepia", label: "护眼" },
+const THEME_OPTIONS: { value: ThemeMode; labelKey: MessageKey }[] = [
+  { value: "light", labelKey: "settings.theme.light" },
+  { value: "dark", labelKey: "settings.theme.dark" },
+  { value: "sepia", labelKey: "settings.theme.sepia" },
 ];
 
 const GITHUB_URL = "https://github.com/zilorn/readerx";
@@ -115,23 +116,23 @@ export default function SettingsPage() {
 
   return (
     <div class="page">
-      <PageHeader title="设置" />
+      <PageHeader title={t("shell.tab.settings")} />
 
       <div class="px-[18px] pb-[calc(36px+env(safe-area-inset-bottom))] pt-2">
         {/* 外观 */}
         <section class="mb-6">
           <h2 class="mx-1 mb-2 text-[12.5px] font-medium tracking-[0.04em] text-text-3">
-            外观
+            {t("settings.section.appearance")}
           </h2>
           <div class="overflow-hidden rounded-[14px] border border-border bg-surface">
             <div class="flex w-full cursor-default items-center gap-3 px-4 py-[13px] text-left">
               <span class="flex min-w-0 flex-1 flex-col gap-0.5">
-                <span class="text-[14.5px] font-medium">主题</span>
+                <span class="text-[14.5px] font-medium">{t("settings.theme.title")}</span>
               </span>
               <div
                 class="flex flex-none gap-0.5 rounded-[10px] bg-surface-2 p-[3px]"
                 role="radiogroup"
-                aria-label="主题"
+                aria-label={t("settings.theme.title")}
               >
                 {THEME_OPTIONS.map((opt) => (
                   <button
@@ -155,7 +156,7 @@ export default function SettingsPage() {
                               : "var(--dot-sepia)",
                       }}
                     />
-                    {opt.label}
+                    {t(opt.labelKey)}
                   </button>
                 ))}
               </div>
@@ -169,7 +170,7 @@ export default function SettingsPage() {
         {/* 阅读 */}
         <section class="mb-6">
           <h2 class="mx-1 mb-2 text-[12.5px] font-medium tracking-[0.04em] text-text-3">
-            阅读
+            {t("settings.section.reading")}
           </h2>          <div class="divide-y divide-border overflow-hidden rounded-[14px] border border-border bg-surface">
             <ReadingSettingsRows />
           </div>
@@ -178,26 +179,26 @@ export default function SettingsPage() {
         {/* 书源 */}
         <section class="mb-6">
           <h2 class="mx-1 mb-2 text-[12.5px] font-medium tracking-[0.04em] text-text-3">
-            书源
+            {t("settings.section.sources")}
           </h2>
           <div class="divide-y divide-border overflow-hidden rounded-[14px] border border-border bg-surface">
             <Row
               icon={<SourceIcon size={18} />}
-              label="书源管理"
-              desc="管理在线书来源与书源功能开关"
+              label={t("settings.sources.manage")}
+              desc={t("settings.sources.manageDesc")}
               onClick={() => navigate("/sources")}
             >
               <ChevronRightIcon size={18} class="flex-none text-text-3" />
             </Row>
             <div class="flex w-full cursor-default items-center gap-3 px-4 py-[13px] text-left">
               <span class="flex min-w-0 flex-1 flex-col gap-0.5">
-                <span class="text-[14.5px] font-medium">书源并发</span>
-                <span class="text-[11.5px] text-text-3">一次搜索同时运行多少个书源</span>
+                <span class="text-[14.5px] font-medium">{t("settings.sources.parallel")}</span>
+                <span class="text-[11.5px] text-text-3">{t("settings.sources.parallelDesc")}</span>
               </span>
               <div class="flex flex-none items-center gap-1">
                 <button
                   class="grid h-8 w-8 place-items-center rounded-lg border border-border text-[13px] font-bold text-text-2 disabled:opacity-35"
-                  aria-label="减小书源并发"
+                  aria-label={t("settings.sources.parallelDecrease")}
                   disabled={currentSourceParallel() <= SOURCE_PARALLEL_MIN}
                   onClick={() => setSourceParallel(currentSourceParallel() - 1)}
                 >
@@ -208,7 +209,7 @@ export default function SettingsPage() {
                 </span>
                 <button
                   class="grid h-8 w-8 place-items-center rounded-lg border border-border text-[13px] font-bold text-text-2 disabled:opacity-35"
-                  aria-label="增大书源并发"
+                  aria-label={t("settings.sources.parallelIncrease")}
                   disabled={currentSourceParallel() >= SOURCE_PARALLEL_MAX}
                   onClick={() => setSourceParallel(currentSourceParallel() + 1)}
                 >
@@ -222,13 +223,13 @@ export default function SettingsPage() {
         {/* 导入 */}
         <section class="mb-6">
           <h2 class="mx-1 mb-2 text-[12.5px] font-medium tracking-[0.04em] text-text-3">
-            导入
+            {t("settings.section.import")}
           </h2>
           <div class="overflow-hidden rounded-[14px] border border-border bg-surface">
             <Row
               icon={<RegexIcon size={18} />}
-              label="分章规则"
-              desc="管理导入 TXT 时的自动分章"
+              label={t("settings.chapterRules.title")}
+              desc={t("settings.chapterRules.desc")}
               onClick={() => navigate("/chapter-rules")}
             >
               <ChevronRightIcon size={18} class="flex-none text-text-3" />
@@ -239,7 +240,7 @@ export default function SettingsPage() {
         {/* 书架 */}
         <section class="mb-6">
           <h2 class="mx-1 mb-2 text-[12.5px] font-medium tracking-[0.04em] text-text-3">
-            书架
+            {t("shell.tab.shelf")}
           </h2>
           <div class="divide-y divide-border overflow-hidden rounded-[14px] border border-border bg-surface">
             <div class="flex w-full items-center gap-3 px-4 py-[13px] text-left">
@@ -250,14 +251,14 @@ export default function SettingsPage() {
                 <LibraryIcon size={18} />
               </span>
               <span class="flex min-w-0 flex-1 flex-col gap-0.5">
-                <span class="text-[14.5px] font-medium">来源筛选</span>
+                <span class="text-[14.5px] font-medium">{t("settings.shelf.sourceFilter")}</span>
                 <span class="text-[11.5px] text-text-3">
-                  在书架顶部显示「本地 / WebDAV / 在线」筛选
+                  {t("settings.shelf.sourceFilterDesc")}
                 </span>
               </span>
               <ToggleSwitch
                 on={shelfSourceFilterEnabled()}
-                label="书架来源筛选"
+                label={t("settings.shelf.sourceFilterToggle")}
                 onChange={() =>
                   setShelfSourceFilterEnabled(!shelfSourceFilterEnabled())
                 }
@@ -269,21 +270,25 @@ export default function SettingsPage() {
         {/* 数据 */}
         <section class="mb-6">
           <h2 class="mx-1 mb-2 text-[12.5px] font-medium tracking-[0.04em] text-text-3">
-            数据
+            {t("settings.section.data")}
           </h2>
           <div class="divide-y divide-border overflow-hidden rounded-[14px] border border-border bg-surface">
             <Row
               icon={<HeadphonesIcon size={18} />}
-              label="管理听书缓存"
-              desc="查看并删除各书籍的合成音频缓存"
+              label={t("settings.data.ttsCache")}
+              desc={t("settings.data.ttsCacheDesc")}
               onClick={() => navigate("/tts-cache")}
             >
               <ChevronRightIcon size={18} class="flex-none text-text-3" />
             </Row>
             <Row
               icon={<TrashIcon size={18} />}
-              label={resetConfirming() ? "再点一次确认重置" : "重置全部阅读进度"}
-              desc="所有书籍回到第 1 章，本地书籍文件不会删除"
+              label={
+                resetConfirming()
+                  ? t("settings.data.resetConfirm")
+                  : t("settings.data.resetProgress")
+              }
+              desc={t("settings.data.resetProgressDesc")}
               danger
               onClick={onResetProgress}
             />
@@ -294,13 +299,13 @@ export default function SettingsPage() {
             开发者工具仅桌面端（Android 的 WebView 不提供该 API） */}
         <section class="mb-6">
           <h2 class="mx-1 mb-2 text-[12.5px] font-medium tracking-[0.04em] text-text-3">
-            调试
+            {t("settings.section.debug")}
           </h2>
           <div class="divide-y divide-border overflow-hidden rounded-[14px] border border-border bg-surface">
             <Row
               icon={<TerminalIcon size={18} />}
-              label="应用日志"
-              desc="查看最近的后端与界面日志，可复制或清空"
+              label={t("settings.logs.title")}
+              desc={t("settings.debug.logsDesc")}
               onClick={() => setLogOpen(true)}
             >
               <ChevronRightIcon size={18} class="flex-none text-text-3" />
@@ -308,8 +313,8 @@ export default function SettingsPage() {
             <Show when={isDesktopPlatform()}>
               <Row
                 icon={<TerminalIcon size={18} />}
-                label="开发者工具"
-                desc="打开 WebView 开发者工具"
+                label={t("settings.debug.devTools")}
+                desc={t("settings.debug.devToolsDesc")}
                 onClick={() => void openDevTools()}
               >
                 <ChevronRightIcon size={18} class="flex-none text-text-3" />
@@ -321,7 +326,7 @@ export default function SettingsPage() {
         {/* 关于 */}
         <section class="mb-6">
           <h2 class="mx-1 mb-2 text-[12.5px] font-medium tracking-[0.04em] text-text-3">
-            关于
+            {t("settings.section.about")}
           </h2>
           <div class="divide-y divide-border overflow-hidden rounded-[14px] border border-border bg-surface">
             <div class="flex items-center gap-[13px] p-4">
@@ -330,21 +335,21 @@ export default function SettingsPage() {
               </span>
               <span class="flex flex-col gap-0.5">
                 <strong class="text-[16px] font-bold tracking-[0.03em]">ReaderX</strong>
-                <span class="text-[11.5px] text-text-3">本地电子书阅读器</span>
+                <span class="text-[11.5px] text-text-3">{t("settings.about.tagline")}</span>
               </span>
               <span class="ml-auto text-xs text-text-3">v{appVersion()}</span>
             </div>
             <Row
               icon={<GitHubIcon size={18} />}
-              label="GitHub 主页"
-              desc="查看源码与发布动态"
+              label={t("settings.about.github")}
+              desc={t("settings.about.githubDesc")}
               onClick={() => void openGitHub()}
             >
               <ChevronRightIcon size={18} class="flex-none text-text-3" />
             </Row>
             <Row
               icon={<FileTextIcon size={18} />}
-              label="开源许可"
+              label={t("settings.license.title")}
               desc="MIT License"
               onClick={() => setLicenseOpen(true)}
             >
@@ -352,8 +357,8 @@ export default function SettingsPage() {
             </Row>
             <Row
               icon={<PackageIcon size={18} />}
-              label="开源库声明"
-              desc="第三方开源库与其许可、用途"
+              label={t("settings.notices.title")}
+              desc={t("settings.notices.desc")}
               onClick={() => setNoticesOpen(true)}
             >
               <ChevronRightIcon size={18} class="flex-none text-text-3" />
@@ -369,7 +374,7 @@ export default function SettingsPage() {
         <LogSheet open={logOpen()} onClose={() => setLogOpen(false)} />
 
         <p class="-mt-2 mb-2.5 text-center text-[11px] text-text-3">
-          ReaderX {appVersion()} · 基于 Tauri 2 构建
+          {t("settings.about.builtWith", { version: appVersion() })}
         </p>
       </div>
     </div>

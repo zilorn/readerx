@@ -14,6 +14,7 @@
  * 测量与渲染共用本模块导出的版式构造器（inline style），保证两者排版一致。
  */
 import { normalizeInlineImages, type LocalBookChapter } from "./booksTypes";
+import { t } from "./i18n";
 import { createLogger } from "./logger";
 
 /** 分页排版的日志出口：只在排版异常退回未分页时留一条 warn */
@@ -716,7 +717,9 @@ export function* paginateChapterSteps(
 
     // 章节标题块（内容高含作者行；外框自带 1.05em 尾部间距）
     const authorDisplay =
-      author && author !== "佚名" ? `${author} 著` : null;
+      author && author !== "佚名"
+        ? t("readerChrome.page.authorBy", { author })
+        : null;
     const titleHeight = measurer.heightTitle(chapter.title, authorDisplay);
     pushAtomic(
       { kind: "title", title: chapter.title, author: authorDisplay },

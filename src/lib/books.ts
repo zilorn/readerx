@@ -50,6 +50,7 @@ import { ensureShelfEntry } from "./store";
 import { clearAllBookmarks, removeBookmarksForBook } from "./bookmarks";
 import { invalidateBookLengths } from "./progress";
 import { createLogger } from "./logger";
+import { t } from "./i18n";
 
 /** 本地书库的日志出口：导入 / 删除 / 清空 / 按需取正文都要能从日志还原 */
 const log = createLogger("books");
@@ -433,7 +434,7 @@ function toDraft(
   // 只有图片（无正文文字）的章节同样算「有内容」：段内图与整行图都认
   const hasImage = chapters.some((chapter) => chapterHasImages(chapter));
   if (totalChars === 0 && !hasImage) {
-    throw new Error("没有读取到可阅读的正文内容");
+    throw new Error(t("shelf.import.errorNoContent"));
   }
   const trimmedIntro = intro?.trim();
   return {
@@ -470,7 +471,7 @@ export async function parseTxtFile(
   );
   const bytes = new Uint8Array(await file.arrayBuffer());
   const text = decodeTxtBytes(bytes);
-  if (!text.trim()) throw new Error("TXT 文件内容为空，无法导入");
+  if (!text.trim()) throw new Error(t("shelf.import.errorEmptyTxt"));
 
   const result: TextSplitResult =
     choice.kind === "chars"
@@ -905,7 +906,7 @@ export async function parseBookFile(file: File): Promise<BookDraft> {
     `format=${format ?? "不支持"}`,
   );
   try {
-    if (!format) throw new Error("仅支持导入 .txt / .epub / .pdf 文件");
+    if (!format) throw new Error(t("shelf.import.errorUnsupported"));
     if (format === "txt") return await parseTxtFile(file, { kind: "auto" });
     if (format === "pdf") return await parsePdfFileDraft(file);
     return await parseEpubFileDraft(file);

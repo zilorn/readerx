@@ -13,6 +13,7 @@
  */
 import { createEffect, createMemo, type JSX } from "solid-js";
 import { highlightJsHtml, jsLineCount } from "../lib/jsHighlight";
+import { t } from "../lib/i18n";
 
 export interface JsCodeEditorProps {
   /** 受控值：仅在外部改动（如「填入模板」）时回写输入框，不打断用户输入与输入法组合 */
@@ -106,7 +107,7 @@ export function JsCodeEditor(props: JsCodeEditorProps): JSX.Element {
           autocomplete="off"
           autocapitalize="off"
           autocorrect="off"
-          aria-label={props.label ?? "JS 代码"}
+          aria-label={props.label ?? t("sourceEditor.js.fallbackLabel")}
           onInput={(e) => {
             props.onInput(e.currentTarget.value);
             syncScroll();

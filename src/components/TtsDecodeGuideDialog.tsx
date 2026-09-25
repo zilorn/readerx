@@ -11,6 +11,7 @@
 import { For, Show, createSignal, onCleanup } from "solid-js";
 import { Portal } from "solid-js/web";
 import { TTS_DECODE_GUIDE, type TtsGuideCommand } from "../lib/ttsDecodeGuide";
+import { t } from "../lib/i18n";
 import { CopyIcon, CheckIcon, CloseIcon, HeadphonesIcon } from "./icons";
 
 export interface TtsDecodeGuideDialogProps {
@@ -41,7 +42,7 @@ function CommandRow(props: { command: TtsGuideCommand }) {
       <button
         type="button"
         class="flex w-full cursor-pointer items-start gap-2 rounded-[10px] border border-border bg-bg px-2.5 py-2 text-left transition-colors active:bg-surface-2"
-        aria-label={`复制命令：${props.command.cmd}`}
+        aria-label={t("tts.guide.copyCommand", { cmd: props.command.cmd })}
         onClick={() => void copy()}
       >
         <code class="min-w-0 flex-1 whitespace-pre-wrap break-all font-mono text-[11.5px] leading-[1.6] text-text">
@@ -53,8 +54,10 @@ function CommandRow(props: { command: TtsGuideCommand }) {
           </Show>
         </span>
       </button>
-      <Show when={props.command.note}>
-        <p class="px-1 text-[11px] leading-[1.65] text-text-3">{props.command.note}</p>
+      <Show when={props.command.noteKey}>
+        {(noteKey) => (
+          <p class="px-1 text-[11px] leading-[1.65] text-text-3">{t(noteKey())}</p>
+        )}
       </Show>
     </div>
   );
@@ -70,7 +73,7 @@ export function TtsDecodeGuideDialog(props: TtsDecodeGuideDialogProps) {
           class="fixed inset-0 z-[85] grid place-items-center px-5 py-6"
           role="dialog"
           aria-modal="true"
-          aria-label="音频解码失败修复指南"
+          aria-label={t("tts.guide.aria")}
         >
           <div
             class="absolute inset-0 animate-sheet-fade bg-black/45 backdrop-blur-[2px]"
@@ -79,11 +82,11 @@ export function TtsDecodeGuideDialog(props: TtsDecodeGuideDialogProps) {
           <div class="relative flex max-h-full w-full max-w-[420px] animate-pop-in flex-col overflow-hidden rounded-[18px] border border-border bg-surface shadow-[0_18px_50px_rgb(0_0_0/0.3)]">
             <div class="flex flex-none items-center gap-2.5 border-b border-border px-4 py-3">
               <HeadphonesIcon size={18} class="flex-none text-accent" />
-              <span class="flex-1 text-[15px] font-bold">{guide.heading}</span>
+              <span class="flex-1 text-[15px] font-bold">{t(guide.headingKey)}</span>
               <button
                 class="grid h-9 w-9 flex-none cursor-pointer place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
                 type="button"
-                aria-label="关闭修复指南"
+                aria-label={t("tts.guide.close")}
                 onClick={props.onClose}
               >
                 <CloseIcon size={18} />
@@ -91,18 +94,22 @@ export function TtsDecodeGuideDialog(props: TtsDecodeGuideDialogProps) {
             </div>
 
             <div class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-3">
-              <p class="text-[12.5px] leading-[1.75] text-text-2">{guide.cause}</p>
+              <p class="text-[12.5px] leading-[1.75] text-text-2">{t(guide.causeKey)}</p>
 
-              <p class="mt-3 text-[13px] font-semibold text-text">{guide.solutionLead}</p>
+              <p class="mt-3 text-[13px] font-semibold text-text">{t(guide.solutionLeadKey)}</p>
               <div class="mt-2 flex flex-col gap-3">
                 <For each={guide.distros}>
                   {(distro) => (
                     <div class="rounded-[12px] border border-border bg-surface-2 p-2.5">
                       <p class="text-[12px] font-semibold leading-snug text-text-2">
-                        {distro.name}
+                        {t(distro.nameKey)}
                       </p>
-                      <Show when={distro.note}>
-                        <p class="mt-0.5 text-[11px] leading-[1.65] text-text-3">{distro.note}</p>
+                      <Show when={distro.noteKey}>
+                        {(noteKey) => (
+                          <p class="mt-0.5 text-[11px] leading-[1.65] text-text-3">
+                            {t(noteKey())}
+                          </p>
+                        )}
                       </Show>
                       <div class="mt-1.5 flex flex-col gap-2">
                         <For each={distro.commands}>{(command) => <CommandRow command={command} />}</For>
@@ -112,21 +119,21 @@ export function TtsDecodeGuideDialog(props: TtsDecodeGuideDialogProps) {
                 </For>
               </div>
 
-              <p class="mt-3 text-[13px] font-semibold text-text">验证插件是否装好</p>
-              <p class="mt-1 text-[11.5px] leading-[1.7] text-text-3">{guide.verify.lead}</p>
+              <p class="mt-3 text-[13px] font-semibold text-text">{t("tts.guide.verifyHeading")}</p>
+              <p class="mt-1 text-[11.5px] leading-[1.7] text-text-3">{t(guide.verify.leadKey)}</p>
               <div class="mt-1.5">
-                <CommandRow command={{ cmd: guide.verify.cmd, note: "" }} />
+                <CommandRow command={{ cmd: guide.verify.cmd }} />
               </div>
               <p class="mt-1.5 px-1 text-[11px] leading-[1.65] text-text-3">
-                {guide.verify.expect}
+                {t(guide.verify.expectKey)}
               </p>
 
               <ul class="mt-3 space-y-1.5 border-t border-border pt-3">
                 <For each={guide.extras}>
-                  {(extra) => (
+                  {(extraKey) => (
                     <li class="flex gap-1.5 text-[11.5px] leading-[1.7] text-text-3">
                       <span class="flex-none text-text-3">·</span>
-                      <span>{extra}</span>
+                      <span>{t(extraKey)}</span>
                     </li>
                   )}
                 </For>
@@ -139,7 +146,7 @@ export function TtsDecodeGuideDialog(props: TtsDecodeGuideDialogProps) {
                 type="button"
                 onClick={props.onClose}
               >
-                知道了
+                {t("tts.guide.ok")}
               </button>
             </div>
           </div>

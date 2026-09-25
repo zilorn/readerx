@@ -50,6 +50,7 @@ import { BookmarkRiskDialog } from "../components/BookmarkRiskDialog";
 import { showToast } from "../lib/toast";
 import { closeOnRouteChange } from "../lib/keptPage";
 import { createLogger } from "../lib/logger";
+import { t } from "../lib/i18n";
 
 const log = createLogger("webdav");
 
@@ -87,8 +88,8 @@ function SelectableBookRow(props: {
         class="flex min-w-0 flex-1 items-center gap-3 px-3.5 py-3 text-left"
         aria-label={
           props.selected
-            ? `取消选择《${props.entry.name}》`
-            : `选择《${props.entry.name}》`
+            ? t("webdav.entry.deselect", { name: props.entry.name })
+            : t("webdav.entry.select", { name: props.entry.name })
         }
         onClick={() => props.onToggle(props.entry.path)}
       >
@@ -164,7 +165,7 @@ function ImportedBookRow(props: {
     <button
       type="button"
       class="flex w-full select-none items-center gap-3 px-3.5 py-3 text-left transition-colors active:bg-surface-2 touch-manipulation"
-      aria-label={`打开《${props.entry.name}》阅读（已导入，长按可重新导入）`}
+      aria-label={t("webdav.entry.openImported", { name: props.entry.name })}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={cancelLongPress}
@@ -182,7 +183,7 @@ function ImportedBookRow(props: {
         </Show>
       </span>
       <span class="flex-none rounded-full bg-accent-weak px-2 py-[3px] text-[10.5px] font-semibold text-accent">
-        已导入
+        {t("webdav.entry.imported")}
       </span>
     </button>
   );
@@ -253,7 +254,7 @@ export default function WebdavImportPage() {
     } catch (err) {
       if (seq !== reloadSeq) return;
       setDirList(null);
-      setError(err instanceof Error ? err.message : "读取目录失败");
+      setError(err instanceof Error ? err.message : t("webdav.error.listFailed"));
     } finally {
       if (seq === reloadSeq) setLoading(false);
     }
@@ -389,10 +390,10 @@ export default function WebdavImportPage() {
     }
     setImporting(false);
     setSelected({});
-    if (failed === 0) showToast(`已导入 ${ok} 本书`);
+    if (failed === 0) showToast(t("webdav.toast.importedCount", { count: ok }));
     else if (ok === 0)
-      showToast(`导入失败 ${failed} 本，请检查文件与网络`, true);
-    else showToast(`导入 ${ok} 本，失败 ${failed} 本`, true);
+      showToast(t("webdav.toast.importAllFailed", { count: failed }), true);
+    else showToast(t("webdav.toast.importPartial", { ok, failed }), true);
   }
 
   /** 点击已导入的行：直接打开本地副本阅读（本页常驻，返回时目录、勾选与滚动位置原样还在） */
@@ -416,7 +417,7 @@ export default function WebdavImportPage() {
       const existing = importedByPath()[entry.path];
       if (!existing) {
         setReimportEntry(null);
-        showToast("未找到本地对应的书籍，请刷新目录后重试", true);
+        showToast(t("webdav.toast.reimportMissing"), true);
         return;
       }
       const draft = await fetchDavBookDraft(srv, entry.path);
@@ -428,10 +429,13 @@ export default function WebdavImportPage() {
         return;
       }
       const book = await replaceBookContent(existing, draft);
-      showToast(`已重新导入《${book.title}》`);
+      showToast(t("webdav.toast.reimported", { title: book.title }));
     } catch (err) {
       setReimportEntry(null);
-      showToast(err instanceof Error ? err.message : "重新导入失败", true);
+      showToast(
+        err instanceof Error ? err.message : t("webdav.error.reimportFailed"),
+        true,
+      );
     } finally {
       setReimporting(false);
     }
@@ -445,10 +449,13 @@ export default function WebdavImportPage() {
     try {
       const book = await replaceBookContent(pending.existing, pending.draft);
       setBookmarkRisk(null);
-      showToast(`已重新导入《${book.title}》`);
+      showToast(t("webdav.toast.reimported", { title: book.title }));
     } catch (err) {
       setBookmarkRisk(null);
-      showToast(err instanceof Error ? err.message : "重新导入失败", true);
+      showToast(
+        err instanceof Error ? err.message : t("webdav.error.reimportFailed"),
+        true,
+      );
     } finally {
       setRiskImporting(false);
     }
@@ -469,13 +476,13 @@ export default function WebdavImportPage() {
   return (
     <div class="page">
       <PageHeader
-        title="WebDAV 导入"
+        title={t("webdav.page.title")}
         onBack={goBack}
-        backLabel="返回书架"
+        backLabel={t("webdav.page.backToShelf")}
         right={
           <button
             class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-            aria-label="配置 WebDAV 服务器"
+            aria-label={t("webdav.page.configureServer")}
             onClick={() => setConfigOpen(true)}
           >
             <SettingsIcon />
@@ -489,7 +496,7 @@ export default function WebdavImportPage() {
             <div class="flex items-center gap-2">
               <button
                 class="grid h-9 w-9 flex-none place-items-center rounded-[10px] text-text-2 transition-colors disabled:opacity-35 active:bg-surface-2"
-                aria-label="返回上级目录"
+                aria-label={t("webdav.dir.up")}
                 disabled={!path()}
                 onClick={goUp}
               >
@@ -503,7 +510,7 @@ export default function WebdavImportPage() {
               </div>
               <button
                 class="grid h-9 w-9 flex-none place-items-center rounded-[10px] text-text-2 transition-colors active:bg-surface-2"
-                aria-label="刷新当前目录"
+                aria-label={t("webdav.dir.refresh")}
                 onClick={() => void loadDir({ force: true })}
               >
                 <RefreshIcon size={17} class={loading() ? "animate-spin" : undefined} />
@@ -516,8 +523,8 @@ export default function WebdavImportPage() {
               <input
                 class="min-w-0 flex-1 bg-transparent py-[8px] text-[14px] text-text outline-none placeholder:text-text-3"
                 type="text"
-                placeholder="搜索本目录"
-                aria-label="搜索当前目录中的文件夹与书籍"
+                placeholder={t("webdav.dir.searchPlaceholder")}
+                aria-label={t("webdav.dir.searchLabel")}
                 value={keyword()}
                 onInput={(e) => setKeyword(e.currentTarget.value)}
               />
@@ -525,7 +532,7 @@ export default function WebdavImportPage() {
                 <button
                   class="grid h-6 w-6 flex-none place-items-center rounded-full text-text-3 transition-colors active:bg-surface-2"
                   type="button"
-                  aria-label="清空搜索词"
+                  aria-label={t("webdav.dir.clearKeyword")}
                   onClick={() => setKeyword("")}
                 >
                   <CloseIcon size={15} />
@@ -537,9 +544,9 @@ export default function WebdavImportPage() {
             <Show when={files().length > 0}>
               <div class="flex items-center justify-between px-0.5">
                 <span class="text-[12px] text-text-3">
-                  {importableFiles().length} 本可导入
+                  {t("webdav.dir.importableCount", { count: importableFiles().length })}
                   <Show when={importedFiles().length > 0}>
-                    <span>，已导入 {importedFiles().length} 本</span>
+                    <span>{t("webdav.dir.importedCount", { count: importedFiles().length })}</span>
                   </Show>
                 </span>
                 <Show when={importableFiles().length > 0}>
@@ -547,7 +554,7 @@ export default function WebdavImportPage() {
                     class="text-[12.5px] font-medium text-accent"
                     onClick={toggleSelectAll}
                   >
-                    {allFilesSelected() ? "取消全选" : "全选本目录"}
+                    {allFilesSelected() ? t("common.deselectAll") : t("webdav.dir.selectAll")}
                   </button>
                 </Show>
               </div>
@@ -563,24 +570,24 @@ export default function WebdavImportPage() {
           "pb-[calc(28px+env(safe-area-inset-bottom))]": !showBar(),
         }}
       >
-        <Show when={davReady()} fallback={<LoadingScreen label="读取配置…" />}>
+        <Show when={davReady()} fallback={<LoadingScreen label={t("webdav.loading.config")} />}>
           <Show
             when={server()}
             fallback={
               <div class="flex flex-col items-center gap-1 px-6 py-14 text-center text-text-3">
                 <CloudIcon size={54} class="mb-2.5" />
                 <p class="text-[15.5px] font-semibold text-text-2">
-                  尚未激活 WebDAV 服务器
+                  {t("webdav.empty.noServerTitle")}
                 </p>
                 <p class="mb-[18px] mt-0.5 text-[12.5px] leading-[1.6]">
-                  先配置并激活一台服务器，即可浏览远程书库导入
+                  {t("webdav.empty.noServerDesc")}
                 </p>
                 <button
                   class="inline-flex items-center justify-center gap-1.5 rounded-xl bg-accent px-[22px] py-[11px] text-sm font-semibold text-on-accent shadow-lg shadow-accent/30 transition-[scale,opacity] duration-100 active:scale-[0.97] active:opacity-90"
                   onClick={() => setConfigOpen(true)}
                 >
                   <ServerIcon size={17} />
-                  配置服务器
+                  {t("webdav.action.configureServer")}
                 </button>
               </div>
             }
@@ -601,18 +608,18 @@ export default function WebdavImportPage() {
                         onClick={() => void loadDir()}
                       >
                         <RefreshIcon size={16} />
-                        重试
+                        {t("common.retry")}
                       </button>
                     </div>
                   }
                 >
-                  <LoadingScreen label="读取目录…" />
+                  <LoadingScreen label={t("webdav.loading.directory")} />
                 </Show>
               }
             >
               <Show when={files().length > 0 && importedFiles().length > 0}>
                 <p class="px-0.5 pb-1 text-[11.5px] leading-[1.6] text-text-3">
-                  已导入的书：点击直接阅读，长按可重新导入
+                  {t("webdav.hint.importedBooks")}
                 </p>
               </Show>
 
@@ -625,8 +632,8 @@ export default function WebdavImportPage() {
                     </Show>
                     <p class="text-[13.5px] font-medium text-text-2">
                       {q()
-                        ? "未找到匹配的内容"
-                        : "当前目录没有可导入的内容"}
+                        ? t("webdav.empty.noMatch")
+                        : t("webdav.empty.noImportable")}
                     </p>
                   </div>
                 }
@@ -636,7 +643,7 @@ export default function WebdavImportPage() {
                     {(entry) => (
                       <button
                         class="flex w-full items-center gap-3 px-3.5 py-3 text-left transition-colors active:bg-surface-2"
-                        aria-label={`进入文件夹 ${entry.name}`}
+                        aria-label={t("webdav.entry.enterDir", { name: entry.name })}
                         onClick={() => enterDir(entry)}
                       >
                         <FolderIcon size={19} class="flex-none text-accent" />
@@ -689,19 +696,19 @@ export default function WebdavImportPage() {
               fallback={
                 <>
                   <span class="min-w-0 flex-1 truncate text-[13px] text-text-2">
-                    已选 {selectedCount()} 本
+                    {t("webdav.bar.selectedCount", { count: selectedCount() })}
                   </span>
                   <button
                     class="flex-none rounded-lg px-2 py-1 text-[12.5px] text-text-3 transition-colors active:bg-surface-2"
                     onClick={() => setSelected({})}
                   >
-                    取消选择
+                    {t("webdav.bar.clearSelection")}
                   </button>
                   <button
                     class="inline-flex flex-none items-center gap-1.5 rounded-xl bg-accent px-4 py-[10px] text-[13.5px] font-semibold text-on-accent shadow-lg shadow-accent/25 transition-[scale,opacity] duration-100 active:scale-[0.97] active:opacity-90"
                     onClick={() => void importSelected()}
                   >
-                    导入所选（{selectedCount()}）
+                    {t("webdav.bar.importSelected", { count: selectedCount() })}
                   </button>
                 </>
               }
@@ -711,7 +718,10 @@ export default function WebdavImportPage() {
                 aria-hidden="true"
               />
               <span class="flex-1 text-[13px] text-text-2">
-                正在导入 {importProgress()}/{importTotal()}
+                {t("webdav.bar.importing", {
+                  done: importProgress(),
+                  total: importTotal(),
+                })}
               </span>
             </Show>
           </div>
@@ -732,7 +742,7 @@ export default function WebdavImportPage() {
               class="fixed inset-0 z-[80] grid place-items-center px-8"
               role="dialog"
               aria-modal="true"
-              aria-label={`重新导入《${entry().name}》`}
+              aria-label={t("webdav.reimport.dialogLabel", { name: entry().name })}
             >
               <div
                 class="absolute inset-0 animate-sheet-fade bg-black/45 backdrop-blur-[2px]"
@@ -740,10 +750,10 @@ export default function WebdavImportPage() {
               />
               <div class="relative w-full max-w-[330px] animate-pop-in overflow-hidden rounded-[18px] border border-border bg-surface p-4 shadow-[0_18px_50px_rgb(0_0_0/0.3)]">
                 <p class="text-[15px] font-bold leading-snug">
-                  重新导入《{entry().name}》？
+                  {t("webdav.reimport.title", { name: entry().name })}
                 </p>
                 <p class="mt-2 text-[12.5px] leading-[1.7] text-text-2">
-                  这本书已导入本地书架。重新导入会用服务器上的最新文件替换本地内容，阅读进度与分组会保留，书签会尝试随新内容继承。
+                  {t("webdav.reimport.desc")}
                 </p>
                 <div class="mt-4 flex items-center gap-2.5">
                   <button
@@ -751,7 +761,7 @@ export default function WebdavImportPage() {
                     disabled={reimporting()}
                     onClick={() => setReimportEntry(null)}
                   >
-                    取消
+                    {t("common.cancel")}
                   </button>
                   <button
                     class="inline-flex flex-1 items-center justify-center gap-1.5 rounded-xl bg-accent px-4 py-[10px] text-[13.5px] font-semibold text-on-accent shadow-lg shadow-accent/25 transition-[scale,opacity] duration-100 active:scale-[0.97] active:opacity-90 disabled:opacity-60"
@@ -760,13 +770,13 @@ export default function WebdavImportPage() {
                   >
                     <Show
                       when={reimporting()}
-                      fallback="重新导入"
+                      fallback={t("webdav.reimport.action")}
                     >
                       <span
                         class="size-3.5 flex-none animate-spin rounded-full border-2 border-on-accent/40 border-t-on-accent"
                         aria-hidden="true"
                       />
-                      正在检查…
+                      {t("webdav.reimport.checking")}
                     </Show>
                   </button>
                 </div>
@@ -785,7 +795,7 @@ export default function WebdavImportPage() {
             busy={riskImporting()}
             onCancel={() => {
               setBookmarkRisk(null);
-              showToast("已取消重新导入");
+              showToast(t("webdav.toast.reimportCancelled"));
             }}
             onProceed={() => void confirmProceedWithRisk()}
           />

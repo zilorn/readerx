@@ -5,6 +5,7 @@
  */
 import { Show } from "solid-js";
 import { Portal } from "solid-js/web";
+import { t } from "../lib/i18n";
 
 export interface OnlineTocOverwriteDialogProps {
   bookTitle: string;
@@ -25,21 +26,23 @@ export function OnlineTocOverwriteDialog(props: OnlineTocOverwriteDialogProps) {
         class="fixed inset-0 z-[85] grid place-items-center px-8"
         role="dialog"
         aria-modal="true"
-        aria-label={`覆盖更新《${props.bookTitle}》的目录`}
+        aria-label={t("sourceEditor.toc.ariaLabel", { bookTitle: props.bookTitle })}
       >
         <div
           class="absolute inset-0 animate-sheet-fade bg-black/45 backdrop-blur-[2px]"
           onClick={props.busy ? undefined : props.onCancel}
         />
         <div class="relative w-full max-w-[340px] animate-pop-in overflow-hidden rounded-[18px] border border-border bg-surface p-4 shadow-[0_18px_50px_rgb(0_0_0/0.3)]">
-          <p class="text-[15px] font-bold leading-snug">目录与书架不一致</p>
+          <p class="text-[15px] font-bold leading-snug">{t("sourceEditor.toc.title")}</p>
           <p class="mt-2 text-[12.5px] leading-[1.7] text-text-2">
-            《{props.bookTitle}》的书源返回了最新目录（{props.oldCount} 章 →
-            {props.newCount} 章），与书架中的差异不是单纯的末尾新增，无法安全地直接追加。
+            {t("sourceEditor.toc.desc", {
+              bookTitle: props.bookTitle,
+              oldCount: props.oldCount,
+              newCount: props.newCount,
+            })}
           </p>
           <p class="mt-2 text-[12px] leading-[1.6] text-text-3">
-            覆盖将以最新目录整本替换章节列表：章节地址未变的章节会保留已缓存正文，被修改 /
-            调整的章节之后会按需重新获取；章节结构变动可能影响阅读进度与书签的精确跳转。
+            {t("sourceEditor.toc.effect")}
           </p>
           <div class="mt-3.5 flex items-center gap-2.5">
             <button
@@ -48,7 +51,7 @@ export function OnlineTocOverwriteDialog(props: OnlineTocOverwriteDialogProps) {
               disabled={props.busy}
               onClick={props.onCancel}
             >
-              取消
+              {t("common.cancel")}
             </button>
             <button
               type="button"
@@ -56,12 +59,12 @@ export function OnlineTocOverwriteDialog(props: OnlineTocOverwriteDialogProps) {
               disabled={props.busy}
               onClick={props.onConfirm}
             >
-              <Show when={props.busy} fallback="覆盖更新">
+              <Show when={props.busy} fallback={t("sourceEditor.toc.confirm")}>
                 <span
                   class="size-3.5 flex-none animate-spin rounded-full border-2 border-on-accent/40 border-t-on-accent"
                   aria-hidden="true"
                 />
-                正在覆盖…
+                {t("sourceEditor.toc.applying")}
               </Show>
             </button>
           </div>

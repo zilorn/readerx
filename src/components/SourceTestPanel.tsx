@@ -7,6 +7,7 @@
 import { For, Show } from "solid-js";
 import { TestIcon } from "./icons";
 import { ENTRY_FUNCTION_META, type BookSourceCapabilities } from "../lib/bookSourcesTypes";
+import { t } from "../lib/i18n";
 
 export interface SourceTestResult {
   text: string;
@@ -48,8 +49,8 @@ export function SourceTestPanel(props: SourceTestPanelProps) {
   return (
     <div class="rounded-[14px] border border-border bg-surface">
       <div class="flex items-center gap-2 border-b border-border px-4 py-2.5">
-        <span class="text-[13px] font-bold">测试</span>
-        <span class="text-[11px] text-text-3">保存当前代码后运行</span>
+        <span class="text-[13px] font-bold">{t("sources.test.title")}</span>
+        <span class="text-[11px] text-text-3">{t("sources.test.hint")}</span>
       </div>
       <div class="space-y-2.5 px-4 py-3">
         <div class="flex flex-wrap gap-1.5">
@@ -68,7 +69,7 @@ export function SourceTestPanel(props: SourceTestPanelProps) {
                   props.onArgsText(defaultArgs(meta.fnName));
                 }}
               >
-                {meta.label}
+                {t(meta.label)}
               </button>
             )}
           </For>
@@ -87,14 +88,14 @@ export function SourceTestPanel(props: SourceTestPanelProps) {
             onClick={props.onRun}
           >
             <TestIcon size={16} />
-            {props.testing ? "运行中…" : "保存并测试"}
+            {props.testing ? t("sources.test.running") : t("sources.test.run")}
           </button>
           <button
             type="button"
             class="rounded-xl bg-surface-2 px-3.5 py-2.5 text-[13px] font-semibold text-text-2 active:scale-[0.98]"
             onClick={props.onExportJson}
           >
-            导出 JSON
+            {t("sources.test.exportJson")}
           </button>
         </div>
         <Show when={props.result}>

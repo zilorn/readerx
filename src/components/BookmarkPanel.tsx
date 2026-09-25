@@ -9,6 +9,7 @@
  * 点条目仍是原来的跳转定位。
  */
 import { For, Show, createEffect, createMemo, createSignal, on } from "solid-js";
+import { t } from "../lib/i18n";
 import type { Bookmark } from "../lib/bookmarks";
 import { matchBookmarks, type BookmarkMark, type BookmarkMatch } from "../lib/bookmarkSearch";
 import { BookmarkIcon, CloseIcon, SearchIcon, TrashIcon } from "./icons";
@@ -131,7 +132,7 @@ function BookmarkItem(props: {
       </button>
       <button
         class="my-1 grid w-11 flex-none cursor-pointer place-items-center self-center rounded-xl text-text-3 transition-colors active:bg-danger-weak active:text-danger"
-        aria-label="删除书签"
+        aria-label={t("readerChrome.bookmark.deleteLabel")}
         onClick={() => props.onDelete(bookmark())}
       >
         <TrashIcon size={18} />
@@ -208,27 +209,29 @@ export function BookmarkPanel(props: BookmarkPanelProps) {
         data-reader-ui
         class="absolute inset-x-0 bottom-0 z-[41] flex max-h-[72%] select-none animate-sheet-up flex-col overflow-hidden rounded-t-[16px] bg-surface shadow-[0_-10px_34px_rgb(0_0_0/0.22)]"
         role="dialog"
-        aria-label="书签"
+        aria-label={t("readerChrome.bookmark.title")}
       >
         <div class="flex flex-none items-center gap-2.5 border-b border-border px-4 py-3">
           <BookmarkIcon size={19} class="text-accent" />
-          <span class="text-[15px] font-bold">书签</span>
+          <span class="text-[15px] font-bold">{t("readerChrome.bookmark.title")}</span>
           <span class="flex-1 text-xs text-text-3">
             <Show
               when={term()}
               fallback={
                 <>
-                  共 {props.bookmarks.length} 条
-                  {groups().length > 1 ? ` · ${groups().length} 章` : ""}
+                  {t("readerChrome.bookmark.totalCount", { count: props.bookmarks.length })}
+                  {groups().length > 1
+                    ? t("readerChrome.bookmark.chapterCount", { count: groups().length })
+                    : ""}
                 </>
               }
             >
-              找到 {matches().length} 条
+              {t("readerChrome.bookmark.foundCount", { count: matches().length })}
             </Show>
           </span>
           <button
             class="grid h-10 w-10 flex-none cursor-pointer place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-            aria-label="关闭书签"
+            aria-label={t("readerChrome.bookmark.closeLabel")}
             onClick={props.onClose}
           >
             <CloseIcon />
@@ -241,9 +244,9 @@ export function BookmarkPanel(props: BookmarkPanelProps) {
             <div class="flex flex-col items-center gap-3 px-6 py-14 text-center">
               <BookmarkIcon size={40} class="text-text-3/70" />
               <p class="text-[13px] leading-relaxed text-text-3">
-                暂无书签
+                {t("readerChrome.bookmark.emptyTitle")}
                 <br />
-                长按正文选取文字后点「书签」即可添加
+                {t("readerChrome.bookmark.emptyHint")}
               </p>
             </div>
           }
@@ -255,7 +258,7 @@ export function BookmarkPanel(props: BookmarkPanelProps) {
                 class="min-w-0 flex-1 bg-transparent py-[7px] text-[13.5px] text-text outline-none placeholder:text-text-3"
                 type="text"
                 enterkeyhint="search"
-                placeholder="搜索章节或书签内容"
+                placeholder={t("readerChrome.bookmark.searchPlaceholder")}
                 value={inputText()}
                 onInput={(event) => setInputText(event.currentTarget.value)}
               />
@@ -263,7 +266,7 @@ export function BookmarkPanel(props: BookmarkPanelProps) {
                 <button
                   class="grid h-6 w-6 flex-none place-items-center rounded-full text-text-3 transition-colors hover:text-text-2 active:bg-surface-2"
                   type="button"
-                  aria-label="清空搜索词"
+                  aria-label={t("readerChrome.bookmark.clearSearch")}
                   onClick={() => setInputText("")}
                 >
                   <CloseIcon size={15} />
@@ -277,8 +280,12 @@ export function BookmarkPanel(props: BookmarkPanelProps) {
             fallback={
               <div class="flex flex-col items-center gap-2 px-6 py-12 text-center text-text-3">
                 <SearchIcon size={38} class="mb-1 text-text-3/70" />
-                <p class="text-[13.5px] font-semibold text-text-2">未找到匹配的书签</p>
-                <p class="text-[12px] leading-relaxed">可搜索章节标题或书签里的文字</p>
+                <p class="text-[13.5px] font-semibold text-text-2">
+                  {t("readerChrome.bookmark.noMatch")}
+                </p>
+                <p class="text-[12px] leading-relaxed">
+                  {t("readerChrome.bookmark.noMatchHint")}
+                </p>
               </div>
             }
           >
@@ -315,11 +322,13 @@ export function BookmarkPanel(props: BookmarkPanelProps) {
                           </h3>
                           <Show when={isCurrent}>
                             <span class="shrink-0 rounded-md bg-accent-weak px-1.5 py-0.5 text-[10px] font-medium text-accent">
-                              本章
+                              {t("readerChrome.bookmark.currentBadge")}
                             </span>
                           </Show>
                           <span class="shrink-0 text-[10.5px] text-text-3">
-                            {group.items.length} 条
+                            {t("readerChrome.bookmark.itemCount", {
+                              count: group.items.length,
+                            })}
                           </span>
                         </header>
                         <ul class="divide-y divide-border px-1">

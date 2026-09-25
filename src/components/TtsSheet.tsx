@@ -24,6 +24,7 @@ import {
   setHttpTtsMethod,
   setHttpTtsUrl,
 } from "../lib/ttsSettings";
+import { t, type MessageKey } from "../lib/i18n";
 import { CheckIcon, CloseIcon, HeadphonesIcon, TimerIcon } from "./icons";
 import { ScrollArea } from "./ScrollArea";
 
@@ -46,16 +47,11 @@ export interface TtsSheetProps {
   onClose: () => void;
 }
 
-const MINUTE_OPTIONS: Array<{ label: string; minutes: number }> = [
-  { label: "10 分钟", minutes: 10 },
-  { label: "20 分钟", minutes: 20 },
-  { label: "30 分钟", minutes: 30 },
-  { label: "60 分钟", minutes: 60 },
-];
+const MINUTE_OPTIONS = [10, 20, 30, 60] as const;
 
-const ENGINES: Array<{ id: TtsEngine; label: string; desc: string }> = [
-  { id: "native", label: "原生语音", desc: "系统 TTS" },
-  { id: "http", label: "自定义源", desc: "HTTP 接口" },
+const ENGINES: Array<{ id: TtsEngine; labelKey: MessageKey; descKey: MessageKey }> = [
+  { id: "native", labelKey: "tts.engine.native", descKey: "tts.engine.nativeDesc" },
+  { id: "http", labelKey: "tts.engine.http", descKey: "tts.engine.httpDesc" },
 ];
 
 function formatRemain(sec: number): string {
@@ -103,10 +99,10 @@ export function TtsSheet(props: TtsSheetProps) {
 
   const voicesNotice = () => {
     const st = nativeVoicesState();
-    if (st === "loading" || voiceLoadingHint()) return "正在获取系统语音…";
-    if (st === "unavailable") return "当前环境无系统语音（需在 Tauri 内运行）";
+    if (st === "loading" || voiceLoadingHint()) return t("tts.voice.loading");
+    if (st === "unavailable") return t("tts.voice.unavailable");
     if (st === "ready" && nativeVoiceList().length === 0) {
-      return "未检测到可用语音，将使用系统默认音色";
+      return t("tts.voice.none");
     }
     return null;
   };
@@ -122,17 +118,17 @@ export function TtsSheet(props: TtsSheetProps) {
         data-reader-ui
         class="absolute inset-x-0 bottom-0 z-[51] flex max-h-[86%] animate-sheet-up select-none flex-col overflow-hidden rounded-t-[16px] bg-surface shadow-[0_-10px_34px_rgb(0_0_0/0.22)]"
         role="dialog"
-        aria-label="听书设置"
+        aria-label={t("tts.sheet.title")}
       >
         <div class="flex flex-none items-center gap-2.5 border-b border-border px-4 py-3">
           <HeadphonesIcon size={19} class="text-accent" />
-          <span class="text-[15px] font-bold">听书设置</span>
+          <span class="text-[15px] font-bold">{t("tts.sheet.title")}</span>
           <span class="flex-1 text-xs text-text-3">
-            {isNative() ? "暂停后从当前句开头重读" : "服务端返回音频后逐句播放"}
+            {isNative() ? t("tts.sheet.nativeHint") : t("tts.sheet.httpHint")}
           </span>
           <button
             class="grid h-10 w-10 flex-none cursor-pointer place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-            aria-label="关闭听书设置"
+            aria-label={t("tts.sheet.close")}
             onClick={props.onClose}
           >
             <CloseIcon />
@@ -141,7 +137,7 @@ export function TtsSheet(props: TtsSheetProps) {
 
         <ScrollArea class="min-h-0 flex-1" contentClass="px-1 py-3 pb-[calc(14px+env(safe-area-inset-bottom))]">
           {/* 引擎 */}
-          <SectionTitle text="引擎" />
+          <SectionTitle text={t("tts.section.engine")} />
           <div class="grid grid-cols-2 gap-2 px-3 pb-4">
             <For each={ENGINES}>
               {(eng) => {
@@ -161,9 +157,9 @@ export function TtsSheet(props: TtsSheetProps) {
                         classList={{ "text-accent": active(), "text-text": !active() }}
                         class="text-[13px] font-semibold leading-tight"
                       >
-                        {eng.label}
+                        {t(eng.labelKey)}
                       </span>
-                      <span class="text-[10.5px] leading-tight text-text-3">{eng.desc}</span>
+                      <span class="text-[10.5px] leading-tight text-text-3">{t(eng.descKey)}</span>
                     </span>
                     <span class="ml-auto flex-none">
                       <Show when={active()}>
@@ -178,7 +174,7 @@ export function TtsSheet(props: TtsSheetProps) {
 
           {/* 原生语音：音色选择 */}
           <Show when={isNative()}>
-            <SectionTitle text="音色" />
+            <SectionTitle text={t("tts.section.voice")} />
             <Show when={voicesNotice()}>
               {(notice) => (
                 <div class="px-3 pb-3 text-[12px] leading-snug text-text-3">{notice()}</div>
@@ -224,7 +220,7 @@ export function TtsSheet(props: TtsSheetProps) {
 
           {/* 自定义 HTTP 源 */}
           <Show when={!isNative()}>
-            <SectionTitle text="自定义源配置" />
+            <SectionTitle text={t("tts.section.httpConfig")} />
             <div class="flex flex-col gap-2 px-3 pb-2">
               <div class="flex overflow-hidden rounded-lg border border-border">
                 <button
@@ -261,7 +257,7 @@ export function TtsSheet(props: TtsSheetProps) {
                 <textarea
                   class={`${inputBase} min-h-[64px] resize-none leading-snug`}
                   spellcheck={false}
-                  placeholder={'{"text": "{$TEXT}"} 或 text={$TEXT}'}
+                  placeholder={t("tts.sheet.bodyPlaceholder")}
                   value={httpTtsBody()}
                   onInput={(e) => setHttpTtsBody(e.currentTarget.value)}
                 />
@@ -271,49 +267,49 @@ export function TtsSheet(props: TtsSheetProps) {
               <button
                 class="flex w-full cursor-pointer items-center justify-center gap-1.5 rounded-lg border border-accent/40 bg-accent-weak py-2 text-[12.5px] font-semibold text-accent transition-[scale] duration-100 active:scale-[0.98] disabled:cursor-default disabled:opacity-60"
                 disabled={props.prewarmText() !== null}
-                aria-label="批量预热整本书"
+                aria-label={t("tts.prewarm.bookAria")}
                 onClick={props.onPrewarmBook}
               >
                 {props.prewarmText() === null
-                  ? "批量预热整本书（写入按书籍缓存）"
-                  : `预热中 ${props.prewarmText()}`}
+                  ? t("tts.prewarm.book")
+                  : t("tts.prewarm.running", { text: props.prewarmText() ?? "" })}
               </button>
             </div>
             <div class="px-3 pb-4 pt-1">
               <div class="rounded-lg border border-border bg-surface-2 px-3 py-2 text-[11.5px] leading-relaxed text-text-3">
-                <div class="pb-0.5 font-semibold tracking-wide text-text-2">占位与编码</div>
+                <div class="pb-0.5 font-semibold tracking-wide text-text-2">{t("tts.help.heading")}</div>
                 <ul class="list-none space-y-0.5">
                   {helpLine("{$TEXT}")}
                   <li class="leading-snug">
-                    <span class="mr-1 text-text-3">→</span>当前句文本，默认 URL 编码一次
+                    <span class="mr-1 text-text-3">→</span>{t("tts.help.text")}
                   </li>
                   {helpLine("{$TEXT?URLencoding=0}")}
                   <li class="leading-snug">
-                    <span class="mr-1 text-text-3">→</span>不编码
+                    <span class="mr-1 text-text-3">→</span>{t("tts.help.noEncoding")}
                   </li>
                   {helpLine("{$TEXT?URLencoding=2}")}
                   <li class="leading-snug">
-                    <span class="mr-1 text-text-3">→</span>编码两次（数字可任意）
+                    <span class="mr-1 text-text-3">→</span>{t("tts.help.doubleEncoding")}
                   </li>
                   {helpLine("{$RATE}")}
                   <li class="leading-snug">
-                    <span class="mr-1 text-text-3">→</span>当前倍速数值（1 / 1.5 / 2 …），由服务端变速不变调
+                    <span class="mr-1 text-text-3">→</span>{t("tts.help.rate")}
                   </li>
                   <li class="leading-snug">
                     <span class="mr-1 text-text-3">·</span>
-                    地址里用了 {`{$RATE}`} 时客户端原速播放；没声明则退回客户端变速（可能有变调）
+                    {t("tts.help.rateClient")}
                   </li>
                   <li class="leading-snug">
                     <span class="mr-1 text-text-3">·</span>
-                    POST 的 body 以 {`{`} 或 {`[`} 开头按 JSON 发送，否则按表单编码
+                    {t("tts.help.postBody")}
                   </li>
                   <li class="leading-snug">
                     <span class="mr-1 text-text-3">·</span>
-                    服务端返回音频字节（mp3 / wav / ogg）
+                    {t("tts.help.audioBytes")}
                   </li>
                   <li class="leading-snug">
                     <span class="mr-1 text-text-3">·</span>
-                    合成好的音频按书籍缓存（设置 → 听书缓存 可查看 / 清除）
+                    {t("tts.help.cache")}
                   </li>
                 </ul>
               </div>
@@ -321,7 +317,7 @@ export function TtsSheet(props: TtsSheetProps) {
           </Show>
 
           {/* 倍速 */}
-          <SectionTitle text="倍速" />
+          <SectionTitle text={t("tts.section.rate")} />
           <div class="flex flex-wrap gap-2 px-3 pb-4">
             <For each={TTS_RATES}>
               {(rate) => {
@@ -344,7 +340,7 @@ export function TtsSheet(props: TtsSheetProps) {
           </div>
 
           {/* 定时 */}
-          <SectionTitle text="定时停止" />
+          <SectionTitle text={t("tts.section.timer")} />
           <div class="flex flex-wrap items-center gap-2 px-3 pb-3">
             <button
               class="cursor-pointer rounded-lg border px-2.5 py-[7px] text-[12.5px] transition-colors"
@@ -356,12 +352,12 @@ export function TtsSheet(props: TtsSheetProps) {
               aria-pressed={props.timerMode() === "off"}
               onClick={() => props.onTimer("off")}
             >
-              关闭
+              {t("tts.timer.off")}
             </button>
             <For each={MINUTE_OPTIONS}>
-              {(opt) => {
+              {(minutes) => {
                 const active = () =>
-                  props.timerMode() === "minutes" && props.timerMinutes() === opt.minutes;
+                  props.timerMode() === "minutes" && props.timerMinutes() === minutes;
                 return (
                   <button
                     class="cursor-pointer rounded-lg border px-2.5 py-[7px] text-[12.5px] tabular-nums transition-colors"
@@ -370,9 +366,9 @@ export function TtsSheet(props: TtsSheetProps) {
                       "border-border text-text-2": !active(),
                     }}
                     aria-pressed={active()}
-                    onClick={() => props.onTimer("minutes", opt.minutes)}
+                    onClick={() => props.onTimer("minutes", minutes)}
                   >
-                    {opt.label}
+                    {t("tts.timer.minutes", { count: minutes })}
                   </button>
                 );
               }}
@@ -387,7 +383,7 @@ export function TtsSheet(props: TtsSheetProps) {
               aria-pressed={props.timerMode() === "chapter"}
               onClick={() => props.onTimer("chapter")}
             >
-              本章结束
+              {t("tts.timer.chapterEnd")}
             </button>
           </div>
 
@@ -395,12 +391,12 @@ export function TtsSheet(props: TtsSheetProps) {
             <Show when={props.timerMode() === "minutes" && props.timerRemainSec() !== null}>
               <TimerIcon size={14} />
               <span>
-                剩余 {formatRemain(props.timerRemainSec() ?? 0)} 后自动停止
+                {t("tts.timer.remaining", { time: formatRemain(props.timerRemainSec() ?? 0) })}
               </span>
             </Show>
             <Show when={props.timerMode() === "chapter"}>
               <TimerIcon size={14} />
-              <span>朗读到本章结尾自动停止</span>
+              <span>{t("tts.timer.chapterHint")}</span>
             </Show>
           </div>
 
@@ -411,7 +407,7 @@ export function TtsSheet(props: TtsSheetProps) {
               props.onClose();
             }}
           >
-            停止朗读
+            {t("tts.action.stop")}
           </button>
         </ScrollArea>
       </div>

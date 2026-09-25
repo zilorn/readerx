@@ -1,5 +1,6 @@
 import { For, Show } from "solid-js";
 import { Portal } from "solid-js/web";
+import { t } from "../lib/i18n";
 import type { BookmarkInheritPreview } from "../lib/bookmarks";
 
 interface BookmarkRiskDialogProps {
@@ -19,8 +20,15 @@ export function BookmarkRiskDialog(props: BookmarkRiskDialogProps) {
     props.preview.total > 0 && props.preview.failedCount === props.preview.total;
   const summary = () =>
     allFailed()
-      ? `重新导入《${props.bookTitle}》后，原有的 ${props.preview.total} 条书签将全部无法在新内容中定位`
-      : `重新导入《${props.bookTitle}》后，原有的 ${props.preview.total} 条书签中有 ${props.preview.failedCount} 条无法在新内容中精确定位`;
+      ? t("readerChrome.bookmarkRisk.allFailed", {
+          title: props.bookTitle,
+          count: props.preview.total,
+        })
+      : t("readerChrome.bookmarkRisk.someFailed", {
+          title: props.bookTitle,
+          count: props.preview.total,
+          failed: props.preview.failedCount,
+        });
 
   return (
     <Portal>
@@ -28,18 +36,19 @@ export function BookmarkRiskDialog(props: BookmarkRiskDialogProps) {
         class="fixed inset-0 z-[85] grid place-items-center px-8"
         role="dialog"
         aria-modal="true"
-        aria-label={`重新导入《${props.bookTitle}》可能导致书签失效`}
+        aria-label={t("readerChrome.bookmarkRisk.dialogLabel", { title: props.bookTitle })}
       >
         <div
           class="absolute inset-0 animate-sheet-fade bg-black/45 backdrop-blur-[2px]"
           onClick={props.onCancel}
         />
         <div class="relative w-full max-w-[340px] animate-pop-in overflow-hidden rounded-[18px] border border-border bg-surface p-4 shadow-[0_18px_50px_rgb(0_0_0/0.3)]">
-          <p class="text-[15px] font-bold leading-snug">部分书签可能失效</p>
+          <p class="text-[15px] font-bold leading-snug">{t("readerChrome.bookmarkRisk.title")}</p>
           <p class="mt-2 text-[12.5px] leading-[1.7] text-text-2">
-            {summary()}：正文可能被修改或章节变动，重新导入后这些书签将无法跳转或可能跳错。
+            {summary()}
+            {t("readerChrome.bookmarkRisk.reason")}
             <Show when={props.preview.failedCount < props.preview.total}>
-              <span>其余书签会按原样保留。</span>
+              <span>{t("readerChrome.bookmarkRisk.restKept")}</span>
             </Show>
           </p>
           <Show when={props.preview.samples.length > 0}>
@@ -57,7 +66,7 @@ export function BookmarkRiskDialog(props: BookmarkRiskDialogProps) {
             </ul>
           </Show>
           <p class="mt-2 text-[12px] leading-[1.6] text-text-3">
-            取消本次重新导入即可保留现有内容与书签。
+            {t("readerChrome.bookmarkRisk.cancelHint")}
           </p>
           <div class="mt-3.5 flex items-center gap-2.5">
             <button
@@ -66,7 +75,7 @@ export function BookmarkRiskDialog(props: BookmarkRiskDialogProps) {
               disabled={props.busy}
               onClick={props.onCancel}
             >
-              取消
+              {t("common.cancel")}
             </button>
             <button
               class="inline-flex flex-1 items-center justify-center gap-1.5 rounded-xl bg-accent px-4 py-[10px] text-[13.5px] font-semibold text-on-accent shadow-lg shadow-accent/25 transition-[scale,opacity] duration-100 active:scale-[0.97] active:opacity-90 disabled:opacity-60"
@@ -76,13 +85,13 @@ export function BookmarkRiskDialog(props: BookmarkRiskDialogProps) {
             >
               <Show
                 when={props.busy}
-                fallback="仍要重新导入"
+                fallback={t("readerChrome.bookmarkRisk.proceed")}
               >
                 <span
                   class="size-3.5 flex-none animate-spin rounded-full border-2 border-on-accent/40 border-t-on-accent"
                   aria-hidden="true"
                 />
-                正在导入…
+                {t("readerChrome.bookmarkRisk.importing")}
               </Show>
             </button>
           </div>

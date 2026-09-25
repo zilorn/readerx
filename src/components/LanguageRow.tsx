@@ -31,16 +31,13 @@ export function LanguageRow() {
       </h2>
       <div class="overflow-hidden rounded-[14px] border border-border bg-surface">
         <div class="flex w-full cursor-default items-center gap-3 px-4 py-[13px] text-left">
-          <span
-            class="flex min-w-0 flex-1 flex-col gap-0.5"
-            aria-hidden="true"
-          >
-            <span class="text-[14.5px] font-medium">{t("app.language.title")}</span>
+          <span class="flex min-w-0 flex-1 flex-col gap-0.5">
+            <span class="text-[14.5px] font-medium">{t("app.language.row")}</span>
           </span>
           <div
             class="flex flex-none gap-0.5 rounded-[10px] bg-surface-2 p-[3px]"
             role="radiogroup"
-            aria-label={t("app.language.title")}
+            aria-label={t("app.language.row")}
           >
             <For each={LANGUAGE_OPTIONS}>
               {(option) => (

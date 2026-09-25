@@ -5,6 +5,7 @@ import {
   groupList,
   HIDDEN_GROUP_ID,
 } from "../lib/groups";
+import { t } from "../lib/i18n";
 import { ScrollArea } from "./ScrollArea";
 
 interface GroupPickerProps {
@@ -30,18 +31,18 @@ export function GroupPicker(props: GroupPickerProps) {
   }
 
   return (
-    <div class="fixed inset-0 z-[90]" role="dialog" aria-label="选择分组">
+    <div class="fixed inset-0 z-[90]" role="dialog" aria-label={t("book.picker.choose")}>
       <div
         class="absolute inset-0 animate-sheet-fade bg-black/45 backdrop-blur-[2px]"
         onClick={props.onClose}
       />
       <div class="absolute inset-x-0 bottom-0 z-[91] flex max-h-[72%] animate-sheet-up flex-col overflow-hidden rounded-t-[16px] bg-surface shadow-[0_-10px_34px_rgb(0_0_0/0.22)]">
         <div class="flex flex-none items-center gap-2.5 border-b border-border px-4 py-3">
-          <span class="text-[15px] font-bold">移入分组</span>
-          <span class="flex-1 text-xs text-text-3">选择一个书架分组</span>
+          <span class="text-[15px] font-bold">{t("book.picker.title")}</span>
+          <span class="flex-1 text-xs text-text-3">{t("book.picker.subtitle")}</span>
           <button
             class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-            aria-label="关闭"
+            aria-label={t("common.close")}
             onClick={props.onClose}
           >
             <CloseIcon />
@@ -54,14 +55,14 @@ export function GroupPicker(props: GroupPickerProps) {
           contentClass="px-0 py-1 pb-[calc(14px+env(safe-area-inset-bottom))]"
         >
           <GroupRow
-            label="未分组"
+            label={t("common.ungrouped")}
             active={!props.value}
             onClick={() => pick(null)}
           />
           {/* 内置隐藏分组：不落库、不可改名/删除；仅用于把书从书架常规视图隐藏 */}
           <GroupRow
-            label="隐藏"
-            hint="加入后不在书架与搜索中显示"
+            label={t("book.groups.hidden")}
+            hint={t("book.groups.hiddenHint")}
             icon={<EyeOffIcon size={18} />}
             active={props.value === HIDDEN_GROUP_ID}
             onClick={() => pick(HIDDEN_GROUP_ID)}
@@ -80,7 +81,7 @@ export function GroupPicker(props: GroupPickerProps) {
             <input
               value={newName()}
               onInput={(e) => setNewName(e.currentTarget.value)}
-              placeholder="新建分组"
+              placeholder={t("book.groups.newPlaceholder")}
               class="min-w-0 flex-1 rounded-[10px] border border-border bg-bg px-3 py-[9px] text-[13.5px] text-text outline-none transition-colors placeholder:text-text-3 focus:border-accent"
               onKeyDown={(e) => {
                 if (e.key === "Enter") createAndPick();
@@ -91,7 +92,7 @@ export function GroupPicker(props: GroupPickerProps) {
               onClick={createAndPick}
             >
               <PlusIcon size={16} />
-              创建
+              {t("book.picker.create")}
             </button>
           </div>
         </ScrollArea>

@@ -17,6 +17,7 @@ import { CloseIcon, SearchIcon } from "./icons";
 import { HighlightText } from "./HighlightText";
 import { ScrollArea } from "./ScrollArea";
 import type { LocalBook } from "../lib/booksTypes";
+import { t, type MessageKey } from "../lib/i18n";
 import {
   searchBookText,
   type BookSearchHit,
@@ -43,10 +44,10 @@ export interface BookSearchPanelProps {
   onOpenResult: (target: BookSearchOpenTarget) => void;
 }
 
-const SCOPE_OPTIONS: { value: BookSearchScope; label: string }[] = [
-  { value: "all", label: "全部" },
-  { value: "title", label: "标题" },
-  { value: "body", label: "正文" },
+const SCOPE_OPTIONS: { value: BookSearchScope; labelKey: MessageKey }[] = [
+  { value: "all", labelKey: "common.all" },
+  { value: "title", labelKey: "discover.bookSearch.scopeTitle" },
+  { value: "body", labelKey: "discover.bookSearch.scopeBody" },
 ];
 
 /** 单条结果卡片：顶部章节信息，下方命中内容 */
@@ -100,12 +101,12 @@ function HitCard(props: {
         </span>
         <Show when={hit.kind === "title"}>
           <span class="flex-none rounded-full bg-accent-weak px-2 py-0.5 text-[10px] font-semibold text-accent">
-            章标题
+            {t("discover.bookSearch.kindTitle")}
           </span>
         </Show>
         <Show when={props.active}>
           <span class="flex-none rounded-full bg-accent px-2 py-0.5 text-[10px] font-semibold text-on-accent">
-            当前
+            {t("discover.bookSearch.current")}
           </span>
         </Show>
       </div>
@@ -210,18 +211,18 @@ export function BookSearchPanel(props: BookSearchPanelProps) {
       <div
         data-reader-ui
         role="dialog"
-        aria-label="全书搜索"
+        aria-label={t("discover.bookSearch.title")}
         class="absolute inset-x-0 bottom-0 z-[46] flex h-[min(86%,760px)] animate-sheet-up select-none flex-col overflow-hidden rounded-t-[16px] bg-surface shadow-[0_-10px_34px_rgb(0_0_0/0.22)]"
       >
         <div class="flex flex-none items-center gap-2.5 border-b border-border px-4 py-3">
           <SearchIcon size={18} class="flex-none text-accent" />
-          <span class="text-[15px] font-bold">全书搜索</span>
+          <span class="text-[15px] font-bold">{t("discover.bookSearch.title")}</span>
           <span class="min-w-0 flex-1 truncate text-xs text-text-3">
             {props.book?.title ?? ""}
           </span>
           <button
             class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-            aria-label="关闭全书搜索"
+            aria-label={t("discover.bookSearch.close")}
             onClick={props.onClose}
           >
             <CloseIcon />
@@ -235,7 +236,7 @@ export function BookSearchPanel(props: BookSearchPanelProps) {
               ref={inputRef}
               class="min-w-0 flex-1 bg-transparent py-[8px] text-[14px] text-text outline-none placeholder:text-text-3"
               type="text"
-              placeholder="搜索标题或正文"
+              placeholder={t("discover.bookSearch.placeholder")}
               value={inputText()}
               onInput={(event) => onInput(event.currentTarget.value)}
             />
@@ -243,7 +244,7 @@ export function BookSearchPanel(props: BookSearchPanelProps) {
               <button
                 class="grid h-6 w-6 flex-none place-items-center rounded-full text-text-3 transition-colors hover:text-text-2 active:bg-surface-2"
                 type="button"
-                aria-label="清空搜索词"
+                aria-label={t("discover.bookSearch.clear")}
                 onClick={clearInput}
               >
                 <CloseIcon size={15} />
@@ -263,13 +264,13 @@ export function BookSearchPanel(props: BookSearchPanelProps) {
                   }}
                   onClick={() => setScope(option.value)}
                 >
-                  {option.label}
+                  {t(option.labelKey)}
                 </button>
               )}
             </For>
             <Show when={hitCount() > 0}>
               <span class="ml-auto flex-none text-xs text-text-3 tabular-nums">
-                {hitCount()} 处
+                {t("discover.bookSearch.count", { count: hitCount() })}
               </span>
             </Show>
           </div>
@@ -286,10 +287,10 @@ export function BookSearchPanel(props: BookSearchPanelProps) {
                 <div class="flex flex-col items-center gap-1 px-6 py-14 text-center text-text-3">
                   <SearchIcon size={48} class="mb-2" />
                   <p class="text-[15px] font-semibold text-text-2">
-                    输入关键词搜索全书
+                    {t("discover.bookSearch.hint")}
                   </p>
                   <p class="text-[12px] leading-[1.7]">
-                    可匹配章节标题与正文内容
+                    {t("discover.bookSearch.hintDetail")}
                   </p>
                 </div>
               }
@@ -300,16 +301,18 @@ export function BookSearchPanel(props: BookSearchPanelProps) {
                   <div class="flex flex-col items-center gap-1 px-6 py-14 text-center text-text-3">
                     <SearchIcon size={48} class="mb-2" />
                     <p class="text-[15px] font-semibold text-text-2">
-                      未找到匹配内容
+                      {t("discover.bookSearch.noMatch")}
                     </p>
-                    <p class="text-[12px]">可切换搜索范围后重试</p>
+                    <p class="text-[12px]">{t("discover.bookSearch.noMatchHint")}</p>
                   </div>
                 }
               >
                 <div class="mb-2 flex items-center justify-end">
                   <Show when={outcome()?.truncated}>
                     <span class="text-[11px] text-text-3">
-                      命中过多，仅显示前 {hitCount()} 处
+                      {t("discover.bookSearch.truncated", {
+                        count: hitCount(),
+                      })}
                     </span>
                   </Show>
                 </div>

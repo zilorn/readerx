@@ -10,12 +10,14 @@ import {
 } from "../lib/audioCache";
 import { ensureLocalBooksLoaded, bookMetaById } from "../lib/books";
 import { hanText } from "../lib/hanDisplay";
+import { t } from "../lib/i18n";
 import {
   currentTtsCacheLimit,
   setTtsCacheLimit,
   TTS_CACHE_LIMIT_PRESETS,
   TTS_CACHE_LIMIT_UNLIMITED,
 } from "../lib/store";
+import { bookDisplayTitle } from "../lib/bookDisplay";
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -25,7 +27,9 @@ function formatBytes(bytes: number): string {
 
 /** 额度档位的展示文案（0 = 不限） */
 function limitLabel(limit: number): string {
-  return limit === TTS_CACHE_LIMIT_UNLIMITED ? "不限" : `${limit} 段`;
+  return limit === TTS_CACHE_LIMIT_UNLIMITED
+    ? t("settings.ttsCache.unlimited")
+    : t("settings.ttsCache.segments", { count: limit });
 }
 
 export default function TtsCachePage() {
@@ -98,20 +102,23 @@ export default function TtsCachePage() {
       .finally(() => setCacheBusy(false));
   }
 
-  const bookTitle = (id: string) => hanText(bookMetaById(id)?.title || id);
+  const bookTitle = (id: string) => {
+    const meta = bookMetaById(id);
+    return meta ? hanText(bookDisplayTitle(meta.title)) : id;
+  };
 
   return (
     <div class="page">
       <PageHeader
-        title="听书缓存"
-        subtitle="本机合成音频"
+        title={t("settings.ttsCache.title")}
+        subtitle={t("settings.ttsCache.subtitle")}
         onBack={goBack}
       />
 
       <div class="px-[18px] pb-[calc(36px+env(safe-area-inset-bottom))] pt-2">
         <section class="mb-6">
           <h2 class="mx-1 mb-2 text-[12.5px] font-medium tracking-[0.04em] text-text-3">
-            每本书额度
+            {t("settings.ttsCache.limitTitle")}
           </h2>
           <div class="divide-y divide-border overflow-hidden rounded-[14px] border border-border bg-surface">
             <div class="px-4 py-[13px]">
@@ -135,7 +142,7 @@ export default function TtsCachePage() {
                 </For>
               </div>
               <p class="text-[11.5px] leading-[1.6] text-text-3">
-                额度是每本书各自的上限，写满后写入新音频会淘汰最旧的；选「不限」则一直保留
+                {t("settings.ttsCache.limitNote")}
               </p>
             </div>
           </div>
@@ -143,17 +150,17 @@ export default function TtsCachePage() {
 
         <section class="mb-6">
           <h2 class="mx-1 mb-2 text-[12.5px] font-medium tracking-[0.04em] text-text-3">
-            缓存书籍
+            {t("settings.ttsCache.booksTitle")}
           </h2>
           <p class="mx-1 mb-2 text-[11.5px] leading-[1.6] text-text-3">
-            自定义源合成好的音频按书籍保存在本机，同一本书、同一声源再次朗读时直接使用缓存；删除书籍时缓存会自动清理
+            {t("settings.ttsCache.booksDesc")}
           </p>
           <div class="divide-y divide-border overflow-hidden rounded-[14px] border border-border bg-surface">
             <Show
               when={(overview()?.books ?? []).length > 0}
               fallback={
                 <div class="px-4 py-3 text-[12.5px] text-text-3">
-                  暂无听书缓存
+                  {t("settings.ttsCache.empty")}
                 </div>
               }
             >
@@ -176,11 +183,18 @@ export default function TtsCachePage() {
                       </span>
                       <span class="text-[11.5px] text-text-3">
                         {currentTtsCacheLimit() === TTS_CACHE_LIMIT_UNLIMITED
-                          ? `${cache.files} 段 · ${formatBytes(cache.bytes)}`
-                          : `${cache.files} / ${currentTtsCacheLimit()} 段 · ${formatBytes(cache.bytes)}`}
+                          ? t("settings.ttsCache.bookUsage", {
+                              count: cache.files,
+                              size: formatBytes(cache.bytes),
+                            })
+                          : t("settings.ttsCache.bookUsageLimited", {
+                              used: cache.files,
+                              limit: currentTtsCacheLimit(),
+                              size: formatBytes(cache.bytes),
+                            })}
                       </span>
                     </span>
-                    <span class="flex-none text-danger">清除</span>
+                    <span class="flex-none text-danger">{t("settings.ttsCache.clear")}</span>
                   </button>
                 )}
               </For>
@@ -199,11 +213,11 @@ export default function TtsCachePage() {
               <span class="flex min-w-0 flex-1 flex-col gap-0.5">
                 <span class="text-[14.5px] font-medium">
                   {clearAllConfirming()
-                    ? "再点一次确认清空"
-                    : "清空全部听书缓存"}
+                    ? t("settings.action.clearConfirm")
+                    : t("settings.ttsCache.clearAll")}
                 </span>
                 <span class="text-[11.5px] text-text-3">
-                  删除所有书籍的合成音频，之后重新朗读会再次合成
+                  {t("settings.ttsCache.clearAllDesc")}
                 </span>
               </span>
             </button>

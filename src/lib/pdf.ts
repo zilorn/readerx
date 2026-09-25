@@ -39,6 +39,7 @@ import {
   type RunningHeadBounds,
 } from "./pdf/pdfText";
 import { loadPdfJs, type PdfDocument, type PdfOutlineNode, type PdfPage } from "./pdf/pdfjs";
+import { t } from "./i18n";
 import { createLogger } from "./logger";
 
 const log = createLogger("pdf");
@@ -241,7 +242,7 @@ async function buildChapter(
         images.push({
           ...(image.local ? { local: image.local } : {}),
           ...(image.src ? { src: image.src } : {}),
-          alt: `第 ${pageNumber} 页`,
+          alt: t("library.pdf.page", { page: pageNumber }),
         });
       }
       continue;
@@ -285,8 +286,8 @@ export async function parsePdfFile(file: File, options: ParsePdfOptions): Promis
   const doc = await task.promise;
   try {
     const pageCount = doc.numPages;
-    if (pageCount <= 0) throw new Error("PDF 没有可阅读的页面");
-    const fallbackTitle = file.name.replace(/\.pdf$/i, "").trim() || "未命名";
+    if (pageCount <= 0) throw new Error(t("library.pdf.noPages"));
+    const fallbackTitle = file.name.replace(/\.pdf$/i, "").trim() || t("common.unnamed");
 
     // 元数据：标题 / 作者缺失时退回文件名 / 佚名（与 EPUB 解析同一口径）
     let info: Record<string, unknown> = {};
@@ -338,7 +339,7 @@ export async function parsePdfFile(file: File, options: ParsePdfOptions): Promis
     }
     if (chapters.length === 0) {
       log.warn("PDF 未解析出可读内容（文件可能已加密或损坏）", `pages=${pageCount}`);
-      throw new Error("PDF 中没有解析出可读内容，请确认文件未加密且未损坏");
+      throw new Error(t("library.pdf.noContent"));
     }
 
     // 封面：第一页渲染成缩略图（扫描件的第一页本身就是章节图，无需重复渲染）
@@ -361,7 +362,7 @@ export async function parsePdfFile(file: File, options: ParsePdfOptions): Promis
     );
     return {
       title: metaText("Title") || fallbackTitle,
-      author: metaText("Author") || "佚名",
+      author: metaText("Author") || t("common.anonymousAuthor"),
       chapters,
       ...(cover ? { cover } : {}),
     };

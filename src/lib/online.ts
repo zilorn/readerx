@@ -66,6 +66,7 @@ import {
   type SourceContentBuild,
 } from "./sourceContent";
 import { createLogger } from "./logger";
+import { t } from "./i18n";
 
 /** 在线书的日志出口：逐章走 debug，聚合结果走 info / warn（正文一个字都不写） */
 const log = createLogger("online");
@@ -196,7 +197,7 @@ export async function fetchBookToc(
       `ms=${ms}`,
       result.error ?? "获取目录失败",
     );
-    throw new Error(result.error ?? "获取目录失败");
+    throw new Error(result.error ?? t("discover.error.tocFetchFailed"));
   }
   const value = result.value;
   if (!Array.isArray(value)) {
@@ -206,7 +207,7 @@ export async function fetchBookToc(
       `book=${item.bookName}`,
       `ms=${ms}`,
     );
-    throw new Error("bookToc 未返回章节数组");
+    throw new Error(t("discover.error.tocNoArray"));
   }
   const chapters: ChapterItem[] = [];
   for (const raw of value as unknown[]) {
@@ -223,7 +224,7 @@ export async function fetchBookToc(
       `raw=${value.length}`,
       `ms=${ms}`,
     );
-    throw new Error("目录为空（书源未解析出章节）");
+    throw new Error(t("discover.error.tocEmpty"));
   }
   log.debug(
     "拉取目录完成",
@@ -819,7 +820,7 @@ async function streamChapterTasks(options: ChapterStreamOptions): Promise<Chapte
     const chapter = book.chapters[index];
     const url = (chapter?.url ?? "").trim();
     if (!chapter || !url) {
-      markFailure(bookId, index, "章节缺少地址");
+      markFailure(bookId, index, t("discover.error.chapterNoUrl"));
       log.debug(
         "章节缺少地址，无法拉取正文",
         `book=${bookId}`,
@@ -862,7 +863,7 @@ async function streamChapterTasks(options: ChapterStreamOptions): Promise<Chapte
     handled.add(result.index);
     pending.delete(result.index);
     if (!result.ok) {
-      markFailure(bookId, result.index, result.error || "未知错误");
+      markFailure(bookId, result.index, result.error || t("common.unknownError"));
       // 逐章失败按 debug 记（一轮下载可能几十章失败，汇总由调用方在收尾时记一条 warn）
       log.debug(
         "章节正文拉取失败",
@@ -1321,7 +1322,7 @@ async function fetchChapterNow(bookId: string, chapterIndex: number): Promise<vo
     const chapter = book.chapters[chapterIndex];
     const url = (chapter?.url ?? "").trim();
     if (!chapter || !url) {
-      markFailure(bookId, chapterIndex, "章节缺少地址");
+      markFailure(bookId, chapterIndex, t("discover.error.chapterNoUrl"));
       return;
     }
     if (chapterHasContent(chapter)) return; // 期间已被别的任务写回
@@ -1331,7 +1332,7 @@ async function fetchChapterNow(bookId: string, chapterIndex: number): Promise<vo
     ]);
     const res = results[0];
     if (!res?.ok) {
-      const error = res?.error || "获取正文失败";
+      const error = res?.error || t("discover.error.chapterFetchFailed");
       markFailure(bookId, chapterIndex, error);
       log.debug("当前章单独取回失败", `book=${bookId}`, `chapter=${chapterIndex}`, error);
       return;
@@ -1734,7 +1735,10 @@ export async function reloadChapterContent(
     return {
       applied: false,
       cancelled: false,
-      error: inflight.index === chapterIndex ? "本章正在重新加载" : "已有章节正在重新加载",
+      error:
+        inflight.index === chapterIndex
+          ? t("discover.error.reloadBusy")
+          : t("discover.error.reloadOtherBusy"),
     };
   }
   const sourceId = book.bookSourceId!;
@@ -1755,7 +1759,7 @@ export async function reloadChapterContent(
     ]);
     const res = results[0];
     if (!res?.ok) {
-      const error = res?.error || "获取正文失败";
+      const error = res?.error || t("discover.error.chapterFetchFailed");
       markFailure(bookId, chapterIndex, error);
       log.warn(
         "重新加载本章失败",
@@ -1806,7 +1810,7 @@ export async function reloadChapterContent(
     // 拉取期间目录可能被覆盖更新（下标含义已变）：本次结果作废，不写到别的章节上
     if (tocEpochOf(bookId) !== epoch) {
       log.warn("重新加载本章结果作废：期间目录已更新", `book=${bookId}`, `chapter=${chapterIndex}`);
-      return { applied: false, cancelled: false, error: "目录已更新，未写入本章" };
+      return { applied: false, cancelled: false, error: t("discover.error.tocChanged") };
     }
     const latest = localBookById(bookId);
     if (!latest) {
@@ -1815,12 +1819,12 @@ export async function reloadChapterContent(
         `book=${bookId}`,
         `chapter=${chapterIndex}`,
       );
-      return { applied: false, cancelled: false, error: "书籍已不在书库，未重新加载" };
+      return { applied: false, cancelled: false, error: t("discover.error.bookGone") };
     }
     const target = latest.chapters[chapterIndex];
     if (!target) {
       log.warn("重新加载本章结果作废：章节已变化", `book=${bookId}`, `chapter=${chapterIndex}`);
-      return { applied: false, cancelled: false, error: "章节已变化，未重新加载" };
+      return { applied: false, cancelled: false, error: t("discover.error.chapterChanged") };
     }
     // 只构建/回写本章的新对象（不整本深拷贝），大书含图时不再反复整本过 IPC
     const draft = draftFromBuild(target, build);
@@ -1831,7 +1835,7 @@ export async function reloadChapterContent(
     );
     if (written === 0) {
       log.warn("重新加载本章结果作废：目录已更新", `book=${bookId}`, `chapter=${chapterIndex}`);
-      return { applied: false, cancelled: false, error: "目录已更新，未写入本章" };
+      return { applied: false, cancelled: false, error: t("discover.error.tocChanged") };
     }
     clearFailures(bookId, [chapterIndex]);
     log.info(
@@ -1885,14 +1889,16 @@ export type OnlineTocUpdate =
 /** 重新获取在线书的书源目录（阅读设置「检查书籍更新」用）。
  *  书源缺失 / 停用 / 未启用目录能力，或拉取失败时抛出可读错误。 */
 export async function fetchOnlineBookToc(book: LocalBook): Promise<ChapterItem[]> {
-  if (!isOnlineBook(book)) throw new Error("不是在线书，无法检查更新");
-  if (!book.bookUrl) throw new Error("该书缺少书源书籍地址，无法检查更新");
+  if (!isOnlineBook(book)) throw new Error(t("discover.error.notOnlineBook"));
+  if (!book.bookUrl) throw new Error(t("discover.error.missingBookUrl"));
   const sourceId = book.bookSourceId!;
   await ensureBookSourcesLoaded();
   const source = bookSourceSummaryById(sourceId);
-  if (!source) throw new Error("该书源已删除，无法检查更新");
-  if (!source.enabled) throw new Error("该书源已停用，请先在「书源」中启用");
-  if (!source.capabilities.toc) throw new Error("该书源未启用「目录」能力，无法检查更新");
+  if (!source) throw new Error(t("discover.error.sourceDeleted"));
+  if (!source.enabled) throw new Error(t("discover.error.sourceDisabled"));
+  if (!source.capabilities.toc) {
+    throw new Error(t("discover.error.tocCapability"));
+  }
   const tags = normalizeBookTags(book.tags);
   const item: BookItem = {
     bookName: book.title,
@@ -2054,14 +2060,14 @@ export async function refreshOnlineBookInfo(
   const started = performance.now();
   const meta = bookMetaById(bookId);
   if (!meta || !isOnlineBook(meta) || !meta.bookSourceId || !meta.bookUrl) {
-    throw new Error("仅在线书支持重新拉取书籍信息");
+    throw new Error(t("discover.error.refreshOnlineOnly"));
   }
   await ensureBookSourcesLoaded();
   const source = bookSourceSummaryById(meta.bookSourceId);
-  if (!source) throw new Error("该书源已删除，无法重新拉取");
-  if (!source.enabled) throw new Error("该书源已停用，请先在「书源」中启用");
+  if (!source) throw new Error(t("discover.error.sourceDeletedForRefresh"));
+  if (!source.enabled) throw new Error(t("discover.error.sourceDisabled"));
   if (!source.capabilities.detail) {
-    throw new Error("该书源未启用「详情」能力，无法重新拉取书籍信息");
+    throw new Error(t("discover.error.detailCapability"));
   }
   const tags = normalizeBookTags(meta.tags);
   const item: BookItem = {
@@ -2079,7 +2085,7 @@ export async function refreshOnlineBookInfo(
       `ms=${Math.round(performance.now() - started)}`,
       result.error ?? "拉取书籍信息失败",
     );
-    throw new Error(result.error ?? "拉取书籍信息失败");
+    throw new Error(result.error ?? t("discover.error.refreshFailed"));
   }
   const merged = mergeBookDetail(item, result.value);
 

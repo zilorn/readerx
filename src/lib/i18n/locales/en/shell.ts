@@ -8,6 +8,7 @@ export const shell = {
   "app.title": "ReaderX · Reading",
 
   // Language preference (settings page)
+  "app.language.row": "Interface language",
   "app.language.title": "Language",
   "app.language.system": "System",
   /** Language names are written in their own language, regardless of the UI language */

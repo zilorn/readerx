@@ -9,6 +9,7 @@
  */
 import { createSignal } from "solid-js";
 import { readState, writeState } from "./backend";
+import { t, type MessageKey } from "./i18n";
 
 export interface ChapterRule {
   id: string;
@@ -81,6 +82,25 @@ const BUILTIN_RULES: ChapterRule[] = [
   },
 ];
 
+/**
+ * 内置规则的**显示名** key（按规则 id 取）。
+ * 规则对象里的 `name` 不随语言变化 —— 它是自动匹配说明与持久化数据的一部分，
+ * 用户自定义规则的 name 更是用户填写的内容，两者都保持原样。
+ */
+const BUILTIN_NAME_KEYS: Record<string, MessageKey> = {
+  "builtin-zh-prelude": "chapterRules.builtin.zhPrelude",
+  "builtin-zh-chapter": "chapterRules.builtin.zhChapter",
+  "builtin-zh-front": "chapterRules.builtin.zhFront",
+  "builtin-en-chapter": "chapterRules.builtin.enChapter",
+  "builtin-zh-volume": "chapterRules.builtin.zhVolume",
+};
+
+/** 规则的显示名：内置规则取词典文案，用户自定义规则用其自身名称 */
+export function chapterRuleDisplayName(rule: ChapterRule): string {
+  const key = rule.builtin ? BUILTIN_NAME_KEYS[rule.id] : undefined;
+  return key ? t(key) : rule.name;
+}
+
 /** 去掉用户在输入框里习惯性粘贴的 /…/gi 包裹 */
 export function normalizeUserPattern(input: string): string {
   let pattern = input.trim();
@@ -94,12 +114,14 @@ export function normalizeUserPattern(input: string): string {
 /** 返回 null 表示可编译，否则返回错误信息 */
 export function validateRulePattern(pattern: string): string | null {
   const normalized = normalizeUserPattern(pattern);
-  if (!normalized) return "请输入正则表达式";
+  if (!normalized) return t("chapterRules.validation.patternRequired");
   try {
     new RegExp(normalized, "gim");
     return null;
   } catch (err) {
-    return err instanceof Error ? err.message : "正则表达式无法解析";
+    return err instanceof Error
+      ? err.message
+      : t("chapterRules.validation.patternInvalid");
   }
 }
 
@@ -152,7 +174,9 @@ export interface AddRuleResult {
 /** 新增一条用户规则；名称必填、正则需可编译 */
 export function addChapterRule(name: string, pattern: string): AddRuleResult {
   const trimmedName = name.trim();
-  if (!trimmedName) return { ok: false, error: "请填写规则名称" };
+  if (!trimmedName) {
+    return { ok: false, error: t("chapterRules.validation.nameRequired") };
+  }
   const normalized = normalizeUserPattern(pattern);
   const error = validateRulePattern(normalized);
   if (error) return { ok: false, error };
@@ -267,12 +291,13 @@ function splitFrontIntro(frontMatter: string): { title: string; body: string } {
   const labels =
     /^(?:内容简介|作品简介|故事简介|故事梗概|内容介绍|内容提要|文案|楔子|引子|序章|序言|前言|卷首语|写在前面|序)$/;
   const lines = frontMatter.split("\n").map((line) => line.trim()).filter(Boolean);
-  let title = "开篇";
+  const frontMatterTitle = t("chapterRules.generated.frontMatter");
+  let title = frontMatterTitle;
   const kept: string[] = [];
   for (const line of lines) {
     // 允许“内容简介：…”这种标签直接带正文在同一行
     const label = line.replace(/[:：].*$/, "").trim();
-    if (title === "开篇" && label && label.length <= 12 && labels.test(label)) {
+    if (title === frontMatterTitle && label && label.length <= 12 && labels.test(label)) {
       title = label;
       if (line === label) continue; // 标签独占一行：已用作章节名，正文不再重复
     }
@@ -305,13 +330,18 @@ function trySplitByRule(text: string, rule: ChapterRule): RawSplitChapter[] | nu
 
     if (i === 0 && frontMatter && !looksLikeTitleBlock(frontMatter)) {
       if (frontMatter.length > 800) {
-        chapters.push({ title: "开篇", body: frontMatter });
+        chapters.push({
+          title: t("chapterRules.generated.frontMatter"),
+          body: frontMatter,
+        });
       } else {
         body = body ? `${frontMatter}\n\n${body}` : frontMatter;
       }
     }
     chapters.push({
-      title: heading.slice(0, 80) || `第${chapters.length + 1}节`,
+      title:
+        heading.slice(0, 80) ||
+        t("chapterRules.generated.section", { index: chapters.length + 1 }),
       body,
     });
   }
@@ -359,7 +389,9 @@ function trySplitFrontIntro(text: string, headingPattern: string): RawSplitChapt
     const heading = (matches[i][0] ?? "").trim();
     const body = text.slice(start + (matches[i][0]?.length ?? 0), end).trim();
     chapters.push({
-      title: heading.slice(0, 80) || `第${i + 1}节`,
+      title:
+        heading.slice(0, 80) ||
+        t("chapterRules.generated.section", { index: i + 1 }),
       body,
     });
   }
@@ -384,7 +416,10 @@ export function splitTextByChars(
 
   const pushChapter = () => {
     if (buffer.length === 0) return;
-    chapters.push({ title: `第${chapters.length + 1}章`, paragraphs: buffer });
+    chapters.push({
+      title: t("chapterRules.generated.chapter", { index: chapters.length + 1 }),
+      paragraphs: buffer,
+    });
     buffer = [];
     bufferedChars = 0;
   };
@@ -428,7 +463,7 @@ export function splitText(
       return {
         mode: "regex",
         rule,
-        ruleName: rule.name,
+        ruleName: chapterRuleDisplayName(rule),
         chapters: raw.map((chapter) => ({
           title: chapter.title,
           paragraphs: paragraphsFromText(chapter.body),
@@ -438,7 +473,7 @@ export function splitText(
   }
   return {
     mode: "chars",
-    ruleName: `按字数分章（每章约 ${charsPerChapter} 字）`,
+    ruleName: t("chapterRules.split.byChars", { count: charsPerChapter }),
     chapters: splitTextByChars(normalized, charsPerChapter),
   };
 }

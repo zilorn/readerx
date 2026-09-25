@@ -18,6 +18,7 @@
 import { createSignal } from "solid-js";
 import { readState, writeState } from "./backend";
 import { assignChapterCids, type LocalBook, type LocalBookChapter } from "./booksTypes";
+import { t } from "./i18n";
 import { chapterUnits, type ReaderBlock } from "./pagination";
 
 const STORAGE_KEY = "readerx.bookmarks";
@@ -126,7 +127,10 @@ function persist(): void {
 
 /** 书签所属章节的展示名（章节无标题时兜底为「第 N 章」） */
 export function bookmarkChapterLabel(bookmark: Bookmark): string {
-  return bookmark.chapterTitle || `第 ${bookmark.chapterIndex + 1} 章`;
+  return (
+    bookmark.chapterTitle ||
+    t("readerChrome.bookmark.chapterFallback", { index: bookmark.chapterIndex + 1 })
+  );
 }
 
 /** 某本书的全部书签（响应式，无序） */

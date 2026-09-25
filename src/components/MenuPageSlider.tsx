@@ -5,6 +5,7 @@
  * 显示「x/y页」提示，松手后才真正翻页。
  */
 import { createSignal, onCleanup, onMount, Show } from "solid-js";
+import { t } from "../lib/i18n";
 
 export interface MenuPageSliderProps {
   /** 当前页（0 起） */
@@ -113,11 +114,14 @@ export function MenuPageSlider(props: MenuPageSliderProps) {
       <div
         ref={trackRef}
         role="slider"
-        aria-label="本章页数进度"
+        aria-label={t("readerChrome.pageSlider.label")}
         aria-valuemin={1}
         aria-valuemax={props.total}
         aria-valuenow={now() + 1}
-        aria-valuetext={`${now() + 1}/${props.total}页`}
+        aria-valuetext={t("readerChrome.pageSlider.valueText", {
+          page: now() + 1,
+          total: props.total,
+        })}
         class="relative h-12 w-full cursor-pointer touch-none"
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
@@ -127,7 +131,7 @@ export function MenuPageSlider(props: MenuPageSliderProps) {
         {/* 拖动提示：x/y页 */}
         <Show when={scrub() !== null}>
           <div class="pointer-events-none absolute -top-1 left-1/2 -translate-x-1/2 -translate-y-full whitespace-nowrap rounded-full border border-border bg-surface px-3 py-1 text-[12px] font-semibold leading-none text-text tabular-nums shadow-md">
-            {now() + 1}/{props.total}页
+            {t("readerChrome.pageSlider.valueText", { page: now() + 1, total: props.total })}
           </div>
         </Show>
 

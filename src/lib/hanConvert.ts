@@ -16,6 +16,7 @@ import { createSignal } from "solid-js";
 import type { HanConverter, HanDirection } from "./hanDict";
 import { readState, writeState } from "./backend";
 import { reportFailure } from "./errorReport";
+import { t } from "./i18n";
 
 export type { HanConverter, HanDirection } from "./hanDict";
 
@@ -50,7 +51,7 @@ function ensureConverter(direction: HanDirection): Promise<void> {
     setDictEpoch((epoch) => epoch + 1);
   })().catch((error: unknown) => {
     loads.delete(direction); // 允许用户重选时再试
-    reportFailure("简繁转换词典载入失败", error);
+    reportFailure(t("readerChrome.han.dictLoadFailed"), error);
   });
   loads.set(direction, task);
   return task;
@@ -67,7 +68,7 @@ export async function initHanConvert(): Promise<void> {
     setModeSignal(mode);
     void ensureConverter(mode);
   } catch (error) {
-    reportFailure("简繁转换设置载入失败", error);
+    reportFailure(t("readerChrome.han.settingsLoadFailed"), error);
   }
 }
 

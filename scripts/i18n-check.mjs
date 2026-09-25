@@ -130,10 +130,93 @@ function walk(dir, out = []) {
 }
 
 /**
- * 硬编码中文扫描：块注释与行注释跳过，`log.*` / `console.*` 所在行跳过（日志保持中文）。
- * 去掉字符串字面量后仍有中文 → JSX 文本，算失败；中文只在字符串里 → 可能仍是漏改
- * （如 `?? "未知错误"`），列成提示人工确认。
+ * 硬编码中文扫描：只认「真正会渲染出去」的中文 ——
+ * 用行内分词器把字符串字面量、正则字面量、注释（含 JSX 注释块）分开：
+ *   · 字符串之外还有中文（去掉正则与注释后）→ JSX 文本节点，算失败；
+ *   · 只在字符串里出现的中文 → 可能是漏改的兜底文案（`?? "未知错误"`），列成提示；
+ *   · 注释与正则里的中文（`// 说明`、`/^(封面|cover)$/`）一律忽略 —— 它们本就是中文。
+ * `log.*` / `console.*` 所在行整体跳过（日志保持中文）。
  */
+function scanLine(line, state) {
+  let code = "";
+  let strings = "";
+  let index = 0;
+  while (index < line.length) {
+    const char = line[index];
+    const next = line[index + 1];
+    if (state.block) {
+      if (char === "*" && next === "/") {
+        state.block = false;
+        index += 2;
+      } else index += 1;
+      continue;
+    }
+    if (state.jsxComment) {
+      if (char === "*" && next === "/") {
+        state.jsxComment = false;
+        index += 2;
+      } else index += 1;
+      continue;
+    }
+    if (state.template) {
+      strings += char;
+      if (char === "\\") {
+        strings += next ?? "";
+        index += 2;
+        continue;
+      }
+      if (char === "`") state.template = false;
+      index += 1;
+      continue;
+    }
+    if (char === "/" && next === "/") break; // 行尾注释
+    if (char === "/" && next === "*") {
+      state.block = true;
+      index += 2;
+      continue;
+    }
+    if (char === "{" && next === "/" && line[index + 2] === "*") {
+      state.jsxComment = true;
+      index += 3;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      let end = index + 1;
+      while (end < line.length && line[end] !== char) {
+        if (line[end] === "\\") end += 1;
+        end += 1;
+      }
+      strings += line.slice(index, Math.min(end + 1, line.length));
+      index = end + 1;
+      continue;
+    }
+    if (char === "`") {
+      state.template = true;
+      strings += char;
+      index += 1;
+      continue;
+    }
+    // 正则字面量：前一个非空字符不像「值」时才算正则（`= /x/`、`(/x/)`、`return /x/`）
+    if (char === "/" && /(^|[=(,:;[!&|?{}]|\breturn|\btypeof)$/.test(code.trimEnd())) {
+      let end = index + 1;
+      let inClass = false;
+      while (end < line.length) {
+        const current = line[end];
+        if (current === "\\") end += 1;
+        else if (current === "[") inClass = true;
+        else if (current === "]") inClass = false;
+        else if (current === "/" && !inClass) break;
+        end += 1;
+      }
+      index = line[end] === "/" ? end + 1 : end;
+      continue;
+    }
+    code += char;
+    index += 1;
+  }
+  return { code, strings };
+}
+
 function checkHardcodedCjk() {
   const files = walk(SRC_DIR).filter(
     (path) => !path.includes(`${join("src", "lib", "i18n", "locales")}`),
@@ -142,68 +225,97 @@ function checkHardcodedCjk() {
   const stringHits = [];
   for (const path of files) {
     const lines = readFileSync(path, "utf8").split("\n");
-    let inBlockComment = false;
-    let inTemplate = false;
+    const state = { block: false, jsxComment: false, template: false };
     lines.forEach((line, index) => {
       const trimmed = line.trim();
-      let text = line;
-      if (inBlockComment) {
-        if (trimmed.includes("*/")) inBlockComment = false;
+      if (state.template) {
+        // 跨行模板字面量：整行按字符串看待
+        if (CJK.test(line)) stringHits.push(`${relative(ROOT, path)}:${index + 1}  ${trimmed}`);
+        const closers = (line.match(/(?<!\\)`/g) ?? []).length;
+        if (closers % 2 === 1) state.template = false;
         return;
       }
-      if (inTemplate) {
-        // 跨行模板字面量：整行按字符串看待，是否文案交给人判断
-        if (CJK.test(text)) {
-          stringHits.push(`${relative(ROOT, path)}:${index + 1}  ${trimmed}`);
-        }
-        if ((text.match(/(?<!\\)`/g) ?? []).length % 2 === 1) inTemplate = false;
+      if (state.block || state.jsxComment) {
+        // 注释续行：只维护状态
+        if (state.block && trimmed.includes("*/")) state.block = false;
+        if (state.jsxComment && trimmed.includes("*/")) state.jsxComment = false;
         return;
       }
-      if (trimmed.startsWith("/*")) {
-        if (!trimmed.includes("*/")) inBlockComment = true;
-        return;
-      }
-      if (trimmed.startsWith("//") || trimmed.startsWith("*")) return;
-      // JSX 注释 {/* … */}：整个注释块都不是界面文案
-      text = text.replace(/\{\/\*.*?\*\/\}/g, "");
-      if (trimmed.startsWith("{/*") && !trimmed.includes("*/")) return;
-      if (/\b(?:log|console)\.\w+\(/.test(text)) return;
-      if (!CJK.test(text)) return;
+      // 每一行都要过一遍分词器：即使本行没有中文，也要正确推进「块注释 / 模板串」状态
+      const { code, strings } = scanLine(line, state);
+      if (!CJK.test(line)) return;
+      if (/\b(?:log|console)\.\w+\(/.test(line)) return;
       const where = `${relative(ROOT, path)}:${index + 1}`;
-      // 常见属性上的硬编码文案：几乎一定是漏改
+      if (CJK.test(code)) {
+        jsxHits.push(`${where}  ${trimmed}`);
+        return;
+      }
+      // 属性上的中文一定是界面文案（`aria-label="…"` 等），不只是提示；
+      // 但要排除同名局部变量声明（`let title = "开篇"` 这类哨兵值不是界面文案）
+      const isDeclaration = /\b(?:let|const|var)\s+(?:\w+\s*,\s*)*[\w$]*\b(?:label|title|placeholder|desc|errorText|backLabel|subtitle)\s*=/.test(
+        line,
+      );
       if (
-        /\b(?:label|title|placeholder|aria-label|alt|desc|errorText|backLabel|subtitle)\s*=\s*"[^"]*[\u4e00-\u9fff]/.test(
-          text,
+        !isDeclaration &&
+        /(?:^|[^\w.$])(?:label|title|placeholder|aria-label|alt|desc|errorText|backLabel|subtitle)\s*=\s*["'`][^"'`]*[\u4e00-\u9fff]/.test(
+          line,
         )
       ) {
         jsxHits.push(`${where}  ${trimmed}`);
         return;
       }
-      // 去掉字符串 / 模板字面量后还剩中文 → JSX 文本节点
-      const withoutStrings = text
-        .replace(/"(?:[^"\\]|\\.)*"/g, '""')
-        .replace(/'(?:[^'\\]|\\.)*'/g, "''")
-        .replace(/`(?:[^`\\]|\\.)*`/g, "``");
-      if (CJK.test(withoutStrings)) {
-        jsxHits.push(`${where}  ${trimmed}`);
-        return;
-      }
-      // 字符串里的中文：日志之外仍可能是文案（默认值 / 三元兜底）
-      stringHits.push(`${where}  ${trimmed}`);
-      // 本行开了跨行模板字面量：后续行按字符串看待
-      if ((text.match(/(?<!\\)`/g) ?? []).length % 2 === 1) inTemplate = true;
+      if (CJK.test(strings)) stringHits.push(`${where}  ${trimmed}`);
     });
   }
   for (const hit of jsxHits) fail(`疑似漏改的界面中文：${hit}`);
-  for (const hit of stringHits.slice(0, 40)) warn(`字符串里的中文，请确认是否文案：${hit}`);
-  if (stringHits.length > 40) warn(`……另有 ${stringHits.length - 40} 处，见上方规律`);
+  // 默认只列前 40 条；`I18N_CHECK_ALL=1` 时全列（复核用）
+  const limit = process.env.I18N_CHECK_ALL ? stringHits.length : 40;
+  for (const hit of stringHits.slice(0, limit)) warn(`字符串里的中文，请确认是否文案：${hit}`);
+  if (stringHits.length > limit) warn(`……另有 ${stringHits.length - limit} 处，见上方规律`);
   return { jsxHits: jsxHits.length, stringHits: stringHits.length };
+}
+
+/**
+ * 英文词典里残留的中文：除了语言名（语言用自身语言书写）与刻意保留的 CJK 标记之外，
+ * 都说明这条没翻译（或复制粘贴时忘了改）。
+ */
+const CJK_IN_EN_ALLOWED = new Set([
+  "app.language.zhCN", // 语言名用自身语言书写
+  "chapterRules.builtin.zhChapter", // 说明内置正则匹配什么，保留 CJK 标记
+  "chapterRules.builtin.zhVolume",
+]);
+
+function checkUntranslatedEn(zh, en) {
+  const cjk = /[\u4e00-\u9fff]/;
+  const leftovers = [...zh.keys()].filter(
+    (key) => !CJK_IN_EN_ALLOWED.has(key) && cjk.test(en.get(key)?.value ?? ""),
+  );
+  if (leftovers.length > 0) {
+    warn(`英文词典里仍有中文（确认是否漏翻）：${leftovers.join(", ")}`);
+  }
+}
+
+/** 用了 {count} 却没给英语复数变体的 key：可能是漏了 _one / _other，也可能英文不需要变化 */
+function checkPluralCoverage(zh, en) {
+  const missing = [];
+  for (const [key, zhEntry] of zh) {
+    if (!zhEntry.value.includes("{count}")) continue;
+    if (en.has(`${key}_one`) || en.has(`${key}_other`)) continue;
+    missing.push(key);
+  }
+  if (missing.length > 0) {
+    warn(
+      `含 {count} 但没有 _one / _other 变体（英文名词若不随数量变化可忽略）：${missing.join(", ")}`,
+    );
+  }
 }
 
 async function main() {
   const { zh, en } = await collect();
   checkCoverage(zh, en);
   checkPlaceholders(zh, en);
+  checkPluralCoverage(zh, en);
+  checkUntranslatedEn(zh, en);
 
   const sources = new Map(walk(SRC_DIR).map((path) => [path, readFileSync(path, "utf8")]));
   const used = usedKeys(sources);

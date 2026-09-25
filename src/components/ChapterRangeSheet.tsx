@@ -5,6 +5,7 @@
  * 选中的行标「当前」，尚未缓存正文的章标「未缓存」—— 便于从还没下过的地方接着下载。
  */
 import { For, Show, createEffect, on } from "solid-js";
+import { t } from "../lib/i18n";
 import type { LocalBookChapter } from "../lib/booksTypes";
 import { chapterHasContent } from "../lib/online";
 import { CheckIcon, CloseIcon } from "./icons";
@@ -75,11 +76,11 @@ export function ChapterRangeSheet(props: ChapterRangeSheetProps) {
         <div class="flex flex-none items-center gap-2.5 border-b border-border px-4 py-3">
           <span class="text-[15px] font-bold">{props.title}</span>
           <span class="flex-1 text-xs text-text-3">
-            可选第 {minOrdinal()}–{maxOrdinal()} 章
+            {t("readerChrome.chapterRange.hint", { min: minOrdinal(), max: maxOrdinal() })}
           </span>
           <button
             class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-            aria-label="关闭"
+            aria-label={t("common.close")}
             onClick={props.onClose}
           >
             <CloseIcon />
@@ -87,17 +88,17 @@ export function ChapterRangeSheet(props: ChapterRangeSheetProps) {
         </div>
         <div class="flex flex-none items-center gap-3 border-b border-border px-4 py-2.5">
           <label class="flex flex-none items-center gap-1.5 rounded-[10px] border border-border bg-bg px-3 py-1.5 text-[13px] text-text-3">
-            第
+            {t("readerChrome.chapterRange.ordinalPrefix")}
             <input
               class="w-14 bg-transparent text-center text-[14px] font-semibold tabular-nums text-text outline-none"
               type="text"
               inputmode="numeric"
               enterkeyhint="done"
-              aria-label="章节序号"
+              aria-label={t("readerChrome.chapterRange.ordinalLabel")}
               value={String(ordinal())}
               onInput={(e) => onOrdinalInput(e.currentTarget)}
             />
-            章
+            {t("readerChrome.chapterRange.ordinalSuffix")}
           </label>
           <span class="min-w-0 flex-1 truncate text-[12.5px] text-text-2">
             {current()?.title ?? ""}
@@ -137,7 +138,7 @@ export function ChapterRangeSheet(props: ChapterRangeSheetProps) {
                   <span class="min-w-0 flex-1 truncate">{item.title}</span>
                   <Show when={!chapterHasContent(item)}>
                     <span class="flex-none rounded-full bg-surface-2 px-2 py-0.5 text-[10px] text-text-3">
-                      未缓存
+                      {t("readerChrome.chapterRange.notCached")}
                     </span>
                   </Show>
                   <Show when={active()}>

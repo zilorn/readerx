@@ -12,6 +12,7 @@ import { unzipSync } from "fflate";
 import type { ChapterBlock, LocalBookChapter, ParagraphPart } from "./booksTypes";
 import { chapterCid, imageRefToBlock, paragraphFromParts } from "./booksTypes";
 import { makeCoverThumb } from "./coverImage";
+import { t } from "./i18n";
 import { createLogger } from "./logger";
 
 const log = createLogger("epub");
@@ -258,7 +259,7 @@ function renderBlocks(
       if (tag === "IMG" || tag === "IMAGE") {
         const src = getImageSrc(el);
         // 即使图片缺失也保留占位，避免在段落中间静默丢图
-        buf.push({ img: { src: src ?? "", alt: el.getAttribute("alt") ?? "插图" } });
+        buf.push({ img: { src: src ?? "", alt: el.getAttribute("alt") ?? t("library.epub.imageAlt") } });
         continue;
       }
 
@@ -463,26 +464,26 @@ async function parseEpubEntries(file: File): Promise<ParsedEpub> {
   try {
     entries = unzipSync(bytes);
   } catch {
-    throw new Error("无法解压 EPUB（文件可能损坏或不是有效的 ZIP）");
+    throw new Error(t("library.epub.unzipFailed"));
   }
 
   const containerEntry = entries["META-INF/container.xml"];
-  if (!containerEntry) throw new Error("EPUB 缺少 META-INF/container.xml，不是标准 EPUB");
+  if (!containerEntry) throw new Error(t("library.epub.noContainer"));
   const containerDoc = parseXml(decodeText(containerEntry));
   const rootfile = containerDoc.querySelector("rootfile");
   const opfPath = rootfile?.getAttribute("full-path")?.trim();
-  if (!opfPath) throw new Error("EPUB container.xml 中未找到 OPF 清单");
+  if (!opfPath) throw new Error(t("library.epub.noOpfPath"));
 
   const opfKey = resolvePath("", opfPath);
   const opfEntry = entries[opfKey];
-  if (!opfEntry) throw new Error(`EPUB 清单不存在：${opfPath}`);
+  if (!opfEntry) throw new Error(t("library.epub.opfMissing", { path: opfPath }));
   const opfDoc = parseXml(decodeText(opfEntry));
   const opfDir = opfKey.includes("/") ? opfKey.slice(0, opfKey.lastIndexOf("/") + 1) : "";
 
   const title =
     firstNamespaceText(opfDoc, "title") ||
-    (file.name.replace(/\.(epub|equb)$/i, "").trim() || "未命名");
-  const author = firstNamespaceText(opfDoc, "creator") || "佚名";
+    (file.name.replace(/\.(epub|equb)$/i, "").trim() || t("common.unnamed"));
+  const author = firstNamespaceText(opfDoc, "creator") || t("common.anonymousAuthor");
   const intro = firstNamespaceText(opfDoc, "description") || undefined;
 
   const manifest = new Map<string, { href: string; mediaType: string; properties: string }>();
@@ -508,14 +509,14 @@ async function parseEpubEntries(file: File): Promise<ParsedEpub> {
   let index = 0;
   for (const idref of spineOrder) {
     const item = manifest.get(idref);
-    if (!item) throw new Error(`EPUB spine 引用了不存在的清单项：${idref}`);
+    if (!item) throw new Error(t("library.epub.spineItemMissing", { id: idref }));
     // 跳过导航文档 / NCX 等非正文项，避免把目录当正文
     if (item.properties.includes("nav") || item.mediaType === "application/x-dtbncx+xml") {
       continue;
     }
     const hrefKey = resolvePath(opfDir, item.href);
     const content = entries[hrefKey];
-    if (!content) throw new Error(`EPUB 正文文件缺失：${item.href}`);
+    if (!content) throw new Error(t("library.epub.contentMissing", { path: item.href }));
     index += 1;
 
     const itemDir = hrefKey.includes("/") ? hrefKey.slice(0, hrefKey.lastIndexOf("/") + 1) : "";
@@ -539,16 +540,17 @@ async function parseEpubEntries(file: File): Promise<ParsedEpub> {
     const container = doc.body ?? doc.querySelector("body") ?? doc.documentElement;
     container.querySelectorAll("head, script, style, link, meta, title, noscript, template, iframe, object, embed, source, track")
       .forEach((el) => el.remove());
-    const docTitle = firstText(doc, "title") || `第 ${index} 节`;
+    const sectionFallback = t("library.epub.sectionFallback", { index });
+    const docTitle = firstText(doc, "title") || sectionFallback;
     const blocks = renderBlocks(container, getImageSrc);
     chapters.push(
-      ...buildDocumentChapters(blocks, docTitle, `第 ${index} 节`, chapters.length),
+      ...buildDocumentChapters(blocks, docTitle, sectionFallback, chapters.length),
     );
   }
 
   if (chapters.length === 0) {
     log.warn("EPUB 未解析出可读章节（文件可能已加密）", `spine=${spineOrder.length}`);
-    throw new Error("EPUB 中没有解析出可读章节，请确认文件未加密");
+    throw new Error(t("library.epub.noChapters"));
   }
 
   // 封面：优先 EPUB3 manifest properties="cover-image"，其次 EPUB2 meta name="cover"

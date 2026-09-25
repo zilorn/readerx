@@ -13,6 +13,7 @@
  */
 import { createSignal } from "solid-js";
 import { readState, writeState } from "./backend";
+import { t } from "./i18n";
 import {
   remapInlineImages,
   type ChapterBlock,
@@ -131,14 +132,16 @@ export function normalizeFindInput(input: string, regex: boolean): string {
 
 /** 返回 null 表示可保存，否则返回错误信息 */
 export function validateReplaceRule(find: string, regex: boolean): string | null {
-  if (!find.trim()) return "请填写要查找的文字";
+  if (!find.trim()) return t("chapterRules.validation.findRequired");
   const normalized = normalizeFindInput(find, regex);
-  if (!normalized) return "请填写要查找的文字";
+  if (!normalized) return t("chapterRules.validation.findRequired");
   if (regex) {
     try {
       new RegExp(normalized);
     } catch (err) {
-      return err instanceof Error ? err.message : "正则表达式无法解析";
+      return err instanceof Error
+        ? err.message
+        : t("chapterRules.validation.patternInvalid");
     }
   }
   return null;

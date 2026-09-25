@@ -17,6 +17,7 @@
  *    （可见端的折叠 caret）与 [lo,hi) 偏移通过 props.custom 注入；回调直接给偏移。
  */
 import { Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
+import { t } from "../lib/i18n";
 import { BookmarkIcon, CopyIcon, ReplaceIcon, SpeakerIcon } from "./icons";
 
 /** 自定义（跨页）选区数据：全文 + 定位锚点 + 镜像偏移区间 */
@@ -376,7 +377,7 @@ export function SelectionMenu(props: SelectionMenuProps) {
                 onClick={() => props.onCopy(current().text)}
               >
                 <CopyIcon size={17} />
-                <span>复制</span>
+                <span>{t("common.copy")}</span>
               </button>
               <div class="mx-1 h-5 w-px flex-none bg-border" />
               <button
@@ -388,7 +389,7 @@ export function SelectionMenu(props: SelectionMenuProps) {
                 }}
               >
                 <BookmarkIcon size={17} />
-                <span>书签</span>
+                <span>{t("readerChrome.selection.bookmark")}</span>
               </button>
               <div class="mx-1 h-5 w-px flex-none bg-border" />
               <button
@@ -400,7 +401,7 @@ export function SelectionMenu(props: SelectionMenuProps) {
                 }}
               >
                 <SpeakerIcon size={17} />
-                <span>朗读</span>
+                <span>{t("readerChrome.selection.speak")}</span>
               </button>
               <Show when={props.onReplace}>
                 <div class="mx-1 h-5 w-px flex-none bg-border" />
@@ -414,7 +415,7 @@ export function SelectionMenu(props: SelectionMenuProps) {
                   }}
                 >
                   <ReplaceIcon size={17} />
-                  <span>替换</span>
+                  <span>{t("readerChrome.selection.replace")}</span>
                 </button>
               </Show>
             </div>

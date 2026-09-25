@@ -7,6 +7,7 @@ export const shell = {
   "app.title": "ReaderX · 阅读",
 
   // 语言偏好（设置页）
+  "app.language.row": "界面语言",
   "app.language.title": "语言",
   "app.language.system": "跟随系统",
   /** 语言名用各自的语言书写，不随界面语言变化 */

@@ -1,6 +1,7 @@
 import { For, Show } from "solid-js";
 import { Portal } from "solid-js/web";
 import type { BookmarkInheritPreview } from "../lib/bookmarks";
+import { t } from "../lib/i18n";
 
 interface ReloadChapterRiskDialogProps {
   /** 将被重新加载的章节名（在线书当前章） */
@@ -19,8 +20,11 @@ export function ReloadChapterRiskDialog(props: ReloadChapterRiskDialogProps) {
     props.preview.total > 0 && props.preview.failedCount === props.preview.total;
   const summary = () =>
     allFailed()
-      ? `本章现有的 ${props.preview.total} 条书签，在重新获取的正文中都将无法精确定位`
-      : `本章现有的 ${props.preview.total} 条书签中，有 ${props.preview.failedCount} 条在重新获取的正文中无法精确定位`;
+      ? t("sourceEditor.reload.allFailed", { count: props.preview.total })
+      : t("sourceEditor.reload.partialFailed", {
+          total: props.preview.total,
+          failed: props.preview.failedCount,
+        });
 
   return (
     <Portal>
@@ -28,18 +32,18 @@ export function ReloadChapterRiskDialog(props: ReloadChapterRiskDialogProps) {
         class="fixed inset-0 z-[85] grid place-items-center px-8"
         role="dialog"
         aria-modal="true"
-        aria-label={`重新加载《${props.chapterTitle}》可能导致书签失效`}
+        aria-label={t("sourceEditor.reload.ariaLabel", { chapterTitle: props.chapterTitle })}
       >
         <div
           class="absolute inset-0 animate-sheet-fade bg-black/45 backdrop-blur-[2px]"
           onClick={props.onCancel}
         />
         <div class="relative w-full max-w-[340px] animate-pop-in overflow-hidden rounded-[18px] border border-border bg-surface p-4 shadow-[0_18px_50px_rgb(0_0_0/0.3)]">
-          <p class="text-[15px] font-bold leading-snug">重载后书签可能失效</p>
+          <p class="text-[15px] font-bold leading-snug">{t("sourceEditor.reload.title")}</p>
           <p class="mt-2 text-[12.5px] leading-[1.7] text-text-2">
-            {summary()}：重新加载会用书源的最新正文替换本章内容，正文变化后这些书签可能无法跳转或可能跳错。
+            {summary()}
             <Show when={props.preview.failedCount < props.preview.total}>
-              <span>其余书签不受影响，仍按原样保留。</span>
+              <span>{t("sourceEditor.reload.restKept")}</span>
             </Show>
           </p>
           <Show when={props.preview.samples.length > 0}>
@@ -52,7 +56,7 @@ export function ReloadChapterRiskDialog(props: ReloadChapterRiskDialogProps) {
             </ul>
           </Show>
           <p class="mt-2 text-[12px] leading-[1.6] text-text-3">
-            取消本次重新加载即可保留本章现有正文与书签。
+            {t("sourceEditor.reload.keepHint")}
           </p>
           <div class="mt-3.5 flex items-center gap-2.5">
             <button
@@ -60,14 +64,14 @@ export function ReloadChapterRiskDialog(props: ReloadChapterRiskDialogProps) {
               type="button"
               onClick={props.onCancel}
             >
-              取消
+              {t("common.cancel")}
             </button>
             <button
               class="flex-1 rounded-xl bg-accent px-4 py-[10px] text-[13.5px] font-semibold text-on-accent shadow-lg shadow-accent/25 transition-[scale,opacity] duration-100 active:scale-[0.97] active:opacity-90"
               type="button"
               onClick={props.onProceed}
             >
-              仍要重新加载
+              {t("sourceEditor.reload.proceed")}
             </button>
           </div>
         </div>

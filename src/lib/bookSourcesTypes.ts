@@ -2,6 +2,7 @@
  * 书源（Book Source）相关共享类型。
  * 与 Rust 侧 `src-tauri/src/models.rs` 中同名字段保持一一对应（camelCase）。
  */
+import type { MessageKey } from "./i18n";
 
 /** 书源能力开关（可按能力单独禁用） */
 export interface BookSourceCapabilities {
@@ -224,26 +225,60 @@ export interface SourceCallMeta {
   fnName: string;
 }
 
-/** 入口函数元信息（白名单；来源与 models/engine 同步） */
+/**
+ * 入口函数元信息（白名单；来源与 models/engine 同步）。
+ * label / desc 存文案 key（模块顶层不能调 t()），界面处再取当前语言。
+ */
 export const ENTRY_FUNCTION_META: {
   fnName: string;
-  label: string;
+  label: MessageKey;
   capability: keyof BookSourceCapabilities;
-  desc: string;
+  desc: MessageKey;
   /** 测试面板是否需要输入 */
   test?: boolean;
 }[] = [
-  { fnName: "searchBook", label: "搜索", capability: "search", desc: "按关键词搜索", test: true },
-  { fnName: "discoverBooks", label: "发现", capability: "discover", desc: "按分类发现书籍", test: true },
-  { fnName: "bookDetail", label: "详情", capability: "detail", desc: "富化书籍信息", test: true },
-  { fnName: "bookToc", label: "目录", capability: "toc", desc: "获取章节列表", test: true },
-  { fnName: "bookContent", label: "正文", capability: "content", desc: "获取单章正文", test: true },
+  {
+    fnName: "searchBook",
+    label: "common.search",
+    capability: "search",
+    desc: "sources.entryDesc.search",
+    test: true,
+  },
+  {
+    fnName: "discoverBooks",
+    label: "sources.capability.discover",
+    capability: "discover",
+    desc: "sources.entryDesc.discover",
+    test: true,
+  },
+  {
+    fnName: "bookDetail",
+    label: "common.details",
+    capability: "detail",
+    desc: "sources.entryDesc.detail",
+    test: true,
+  },
+  {
+    fnName: "bookToc",
+    label: "sources.capability.toc",
+    capability: "toc",
+    desc: "sources.entryDesc.toc",
+    test: true,
+  },
+  {
+    fnName: "bookContent",
+    label: "sources.capability.content",
+    capability: "content",
+    desc: "sources.entryDesc.content",
+    test: true,
+  },
 ];
 
-export const CAPABILITY_LABELS: Record<keyof BookSourceCapabilities, string> = {
-  search: "搜索",
-  discover: "发现",
-  detail: "详情",
-  toc: "目录",
-  content: "正文",
+/** 能力开关的中文名同样存 key，渲染时 t() */
+export const CAPABILITY_LABELS: Record<keyof BookSourceCapabilities, MessageKey> = {
+  search: "common.search",
+  discover: "sources.capability.discover",
+  detail: "common.details",
+  toc: "sources.capability.toc",
+  content: "sources.capability.content",
 };

@@ -22,6 +22,7 @@
 | `pnpm dev`               | 启动 Vite 开发服务器（固定 `http://localhost:1420`） |
 | `pnpm build`             | 生产构建（输出 `dist/`）                             |
 | `pnpm exec tsc --noEmit` | 类型检查（严格模式，改动后必须跑，勿提交红叉）       |
+| `pnpm run i18n:check`    | 界面文案词典校验（中英 key / 占位符 / 漏改的中文）   |
 | `pnpm tauri dev`         | Tauri 桌面开发窗口                                   |
 | `pnpm tauri android dev` | Android 真机/模拟器开发                              |
 | `pnpm tauri build`       | 打包发布                                             |
@@ -91,6 +92,17 @@
 - 应用外壳为 ≤480px 的居中手机列（`.app` 对应 Tailwind `mx-auto max-w-[480px]`），内容滚动区为 `.app-view` 对应 `flex-1 overflow-y-auto`；新页面按现有结构书写。
 - 阅读字号来自全局 signal（px 值内联设置），行高/字距沿用阅读区既有排版（`leading-[1.95]` / `tracking-[0.01em]`、段首 `indent-[2em]`），修改字号勿破坏排版节奏。
 - 图标不引第三方库：往 `src/components/icons.tsx` 里加内联 SVG 函数（线性 24px，stroke="currentColor"）。
+
+## 界面文案与多语言（i18n）
+
+- 用户可见文案一律走 `src/lib/i18n` 的 `t("模块.key")`，**不要在组件里写死中文**；
+  词典按业务模块放在 `src/lib/i18n/locales/{zh-CN,en}/`，key 前缀与模块同名，中英两侧一起补。
+- `t()` 只能在函数 / 组件里调用（词典按需加载，也要跟随语言变化）：模块顶层常量存 key，
+  渲染时再 `t(...)`。
+- 日志（`log.*`）、代码注释、参与匹配 / 持久化的字符串（正则、状态 key、书源字段名、JS 代码样例）
+  保持中文，不进词典；落库的兜底值靠显示层翻译（见 `src/lib/bookDisplay.ts`）。
+- 改完跑 `pnpm run i18n:check` 与 `pnpm exec tsc --noEmit`；完整规范、复数写法与已知取舍见
+  `docs/i18n.md`。
 
 ## 类型与质量门槛
 

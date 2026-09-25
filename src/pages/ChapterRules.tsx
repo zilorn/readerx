@@ -9,10 +9,12 @@ import {
 } from "../components/icons";
 import {
   addChapterRule,
+  chapterRuleDisplayName,
   chapterRuleList,
   removeChapterRule,
 } from "../lib/chapterRules";
 import { ScrollArea } from "../components/ScrollArea";
+import { t } from "../lib/i18n";
 
 const SAMPLE_PATTERN = String.raw`^\s*第\s*[0-9一二三四五六七八九十百千万零〇两]+\s*章[^\n]{0,50}`;
 
@@ -38,7 +40,7 @@ export default function ChapterRulesPage() {
   function onAddRule() {
     const result = addChapterRule(ruleName(), rulePattern());
     if (!result.ok) {
-      setRuleError(result.error ?? "添加失败");
+      setRuleError(result.error ?? t("chapterRules.error.addFailed"));
       return;
     }
     setRuleOpen(false);
@@ -51,15 +53,15 @@ export default function ChapterRulesPage() {
   return (
     <div class="page">
       <PageHeader
-        title="分章规则"
-        subtitle="导入 TXT 时生效"
+        title={t("chapterRules.title")}
+        subtitle={t("chapterRules.subtitle")}
         onBack={goBack}
       />
 
       <div class="px-[18px] pb-[calc(36px+env(safe-area-inset-bottom))] pt-2">
         <section class="mb-6">
           <h2 class="mx-1 mb-2 text-[12.5px] font-medium tracking-[0.04em] text-text-3">
-            自动分章（按列表顺序尝试）
+            {t("chapterRules.section.auto")}
           </h2>
           <div class="divide-y divide-border overflow-hidden rounded-[14px] border border-border bg-surface">
             <For each={chapterRuleList()}>
@@ -73,10 +75,10 @@ export default function ChapterRulesPage() {
                   </span>
                   <span class="flex min-w-0 flex-1 flex-col gap-0.5">
                     <span class="inline-flex items-center gap-[7px] text-[14.5px] font-medium">
-                      {rule.name}
+                      {chapterRuleDisplayName(rule)}
                       {rule.builtin && (
                         <i class="not-italic rounded-full bg-surface-2 px-1.5 py-0.5 text-[9.5px] font-semibold text-text-3">
-                          内置
+                          {t("chapterRules.badge.builtin")}
                         </i>
                       )}
                     </span>
@@ -87,7 +89,9 @@ export default function ChapterRulesPage() {
                   <Show when={!rule.builtin}>
                     <button
                       class="grid h-[34px] w-[34px] flex-none place-items-center rounded-xl text-text-3 transition-colors active:text-danger"
-                      aria-label={`删除规则「${rule.name}」`}
+                      aria-label={t("chapterRules.action.deleteAria", {
+                        name: chapterRuleDisplayName(rule),
+                      })}
                       onClick={() => onDeleteRule(rule.id)}
                     >
                       <TrashIcon size={17} />
@@ -101,13 +105,13 @@ export default function ChapterRulesPage() {
               onClick={openRuleSheet}
             >
               <PlusIcon size={16} />
-              添加分章规则
+              {t("chapterRules.action.add")}
             </button>
           </div>
         </section>
 
         <p class="-mt-2 mb-2.5 text-center text-[11px] text-text-3">
-          内置规则不可删除；全部规则未命中时自动按字数分章
+          {t("chapterRules.hint.builtinLocked")}
         </p>
       </div>
 
@@ -120,14 +124,18 @@ export default function ChapterRulesPage() {
         <div
           class="fixed inset-x-0 bottom-0 z-[41] mx-auto flex max-h-[72%] max-w-[var(--app-column)] animate-sheet-up flex-col overflow-hidden rounded-t-[16px] bg-surface shadow-[0_-10px_34px_rgb(0_0_0/0.22)]"
           role="dialog"
-          aria-label="添加分章规则"
+          aria-label={t("chapterRules.action.add")}
         >
           <div class="flex flex-none items-center gap-2.5 border-b border-border px-4 py-3">
-            <span class="text-[15px] font-bold">添加分章规则</span>
-            <span class="flex-1 text-xs text-text-3">正则匹配标题</span>
+            <span class="text-[15px] font-bold">
+              {t("chapterRules.action.add")}
+            </span>
+            <span class="flex-1 text-xs text-text-3">
+              {t("chapterRules.sheet.patternHint")}
+            </span>
             <button
               class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-              aria-label="关闭"
+              aria-label={t("common.close")}
               onClick={() => setRuleOpen(false)}
             >
               <CloseIcon />
@@ -139,18 +147,18 @@ export default function ChapterRulesPage() {
           >
             <label class="flex min-w-0 flex-col gap-[5px]">
               <span class="text-[11.5px] font-semibold tracking-[0.03em] text-text-3">
-                规则名称
+                {t("chapterRules.form.name")}
               </span>
               <input
                 class="w-full rounded-[10px] border border-border bg-surface px-[11px] py-[9px] text-[13.5px] text-text outline-none transition-colors focus:border-accent placeholder:text-text-3"
                 value={ruleName()}
-                placeholder="如：第X集"
+                placeholder={t("chapterRules.form.namePlaceholder")}
                 onInput={(e) => setRuleName(e.currentTarget.value)}
               />
             </label>
             <label class="flex min-w-0 flex-col gap-[5px]">
               <span class="text-[11.5px] font-semibold tracking-[0.03em] text-text-3">
-                正则表达式
+                {t("chapterRules.form.pattern")}
               </span>
               <textarea
                 class="min-h-16 w-full resize-y rounded-[10px] border border-border bg-surface px-[11px] py-[9px] font-mono text-[12.5px] leading-[1.5] text-text outline-none transition-colors focus:border-accent placeholder:text-text-3"
@@ -161,17 +169,17 @@ export default function ChapterRulesPage() {
               />
             </label>
             <p class="text-[11.5px] leading-[1.65] text-text-3">
-              命中后整行作为章节标题，行首用{" "}
+              {t("chapterRules.form.hintBefore")}{" "}
               <code class="rounded bg-surface-2 px-1 py-0.5 text-[10.5px]">
                 ^
               </code>{" "}
-              更稳妥；自动以忽略大小写 + 多行模式匹配。
+              {t("chapterRules.form.hintAfter")}
             </p>
             <button
               class="self-start rounded-lg bg-accent-weak px-2 py-1.5 text-xs text-accent"
               onClick={() => setRulePattern(SAMPLE_PATTERN)}
             >
-              填入示例：中文章节标题
+              {t("chapterRules.form.fillSample")}
             </button>
             <Show when={ruleError()}>
               <p
@@ -185,10 +193,10 @@ export default function ChapterRulesPage() {
               class="mt-3.5 inline-flex w-full items-center justify-center gap-1.5 rounded-xl bg-accent px-[22px] py-[11px] text-sm font-semibold text-on-accent shadow-lg shadow-accent/30 transition-[scale,opacity] duration-100 active:scale-[0.97] active:opacity-90"
               onClick={onAddRule}
             >
-              保存规则
+              {t("chapterRules.action.save")}
             </button>
             <p class="-mt-2 mb-2.5 text-center text-[11px] text-text-3">
-              新增规则会立即用于之后导入的 TXT 文件
+              {t("chapterRules.hint.appliesToImports")}
             </p>
           </ScrollArea>
         </div>

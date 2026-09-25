@@ -38,6 +38,7 @@ import {
 import { lastSourceGroupFilter, rememberSourceGroupFilter } from "../lib/store";
 import { getRemoteSource, saveRemoteSource } from "../lib/backend";
 import type { BookSource } from "../lib/bookSourcesTypes";
+import { t } from "../lib/i18n";
 import { showToast } from "../lib/toast";
 import { SourceGroupChips, sourceGroupChips } from "../components/SourceGroupChips";
 import { SourceGroupPicker } from "../components/SourceGroupPicker";
@@ -196,8 +197,10 @@ export default function BookSourcesPage() {
     void runBatch(async (ids) => {
       const changed = await setBookSourcesEnabled(ids, enabled);
       return changed > 0
-        ? `已${enabled ? "启用" : "停用"} ${changed} 个书源`
-        : "所选书源状态未变化";
+        ? t(enabled ? "sources.batch.enableDone" : "sources.batch.disableDone", {
+            count: changed,
+          })
+        : t("sources.batch.noChange");
     });
   }
 
@@ -208,7 +211,9 @@ export default function BookSourcesPage() {
         if (await setBookSourceGroup(id, groupId)) moved += 1;
       }
       const name = sourceGroupName(groupId);
-      return name ? `${moved} 个书源已归入「${name}」` : `${moved} 个书源已移出分组`;
+      return name
+        ? t("sources.batch.grouped", { count: moved, name })
+        : t("sources.batch.ungrouped", { count: moved });
     });
   }
 
@@ -216,18 +221,18 @@ export default function BookSourcesPage() {
     void runBatch(async (ids) => {
       const fetched = await Promise.all(ids.map((id) => getRemoteSource(id)));
       const sources = fetched.filter((source): source is BookSource => source !== null);
-      if (sources.length === 0) return "所选书源已不存在";
+      if (sources.length === 0) return t("sources.batch.missing");
       await navigator.clipboard
         .writeText(buildBookSourceExportText(sources))
         .catch(() => undefined);
-      return `已复制 ${sources.length} 个书源的 JSON`;
+      return t("sources.batch.exported", { count: sources.length });
     });
   }
 
   function batchDelete(): void {
     void runBatch(async (ids) => {
       for (const id of ids) await removeBookSource(id);
-      return `已删除 ${ids.length} 个书源`;
+      return t("sources.batch.deleted", { count: ids.length });
     });
   }
 
@@ -312,8 +317,8 @@ export default function BookSourcesPage() {
         return {
           ok: false,
           message: issue
-            ? `未识别到书源：${issue.message}`
-            : "没有识别到可导入的书源",
+            ? t("sources.import.unrecognized", { reason: issue.message })
+            : t("sources.import.none"),
         };
       }
       presentImportPlan(plan);
@@ -339,7 +344,7 @@ export default function BookSourcesPage() {
     if (urlBusy()) return;
     const value = urlInput().trim();
     if (!value) {
-      setUrlError("请输入书源 JSON 的网址");
+      setUrlError(t("sources.url.missing"));
       return;
     }
     setUrlBusy(true);
@@ -350,8 +355,8 @@ export default function BookSourcesPage() {
         const issue = plan.issues[0];
         setUrlError(
           issue
-            ? `未识别到书源：${issue.message}`
-            : "该网址内容里没有可导入的书源",
+            ? t("sources.import.unrecognized", { reason: issue.message })
+            : t("sources.url.noSource"),
         );
         return;
       }
@@ -386,8 +391,11 @@ export default function BookSourcesPage() {
         await saveRemoteSource(resolveImportEntryGroup(item.entry, useGroups));
         overwritten++;
       }
-      const keptText = kept > 0 ? `，保留本机 ${kept} 个` : "";
-      showToast(`导入完成：新增 ${created} 个，覆盖 ${overwritten} 个${keptText}`);
+      showToast(
+        kept > 0
+          ? t("sources.import.doneKept", { created, overwritten, kept })
+          : t("sources.import.done", { created, overwritten }),
+      );
     } catch (err) {
       showToast(String(err), true);
     }
@@ -405,7 +413,7 @@ export default function BookSourcesPage() {
   async function onDelete(id: string) {
     try {
       await removeBookSource(id);
-      showToast("书源已删除");
+      showToast(t("sources.delete.done"));
     } catch (err) {
       showToast(String(err), true);
     }
@@ -426,7 +434,11 @@ export default function BookSourcesPage() {
     try {
       if (!(await setBookSourceGroup(id, groupId))) return;
       const name = sourceGroupName(groupId);
-      showToast(name ? `已归入「${name}」` : "已移出分组");
+      showToast(
+        name
+          ? t("sources.group.assigned", { name })
+          : t("sources.group.removed"),
+      );
     } catch (err) {
       showToast(String(err), true);
     }
@@ -437,14 +449,18 @@ export default function BookSourcesPage() {
     if (!source) return;
     const text = buildBookSourceExportText([source]);
     await navigator.clipboard.writeText(text).catch(() => undefined);
-    showToast("书源 JSON 已复制");
+    showToast(t("sources.copy.done"));
   }
 
   return (
     <div class="page">
       <PageHeader
-        title={selecting() ? "选中书源" : "书源管理"}
-        subtitle={selecting() ? `已选 ${selectedCount()} 个` : undefined}
+        title={selecting() ? t("sources.page.titleSelecting") : t("sources.page.title")}
+        subtitle={
+          selecting()
+            ? t("sources.page.selectedCount", { count: selectedCount() })
+            : undefined
+        }
         onBack={goBack}
         right={
           <div class="flex flex-none items-center gap-1">
@@ -461,28 +477,28 @@ export default function BookSourcesPage() {
                 <>
                   <button
                     class="grid h-10 w-10 place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-                    aria-label="导入 JSON"
+                    aria-label={t("sources.import.json")}
                     onClick={() => fileInput?.click()}
                   >
                     <DownloadIcon size={21} />
                   </button>
                   <button
                     class="grid h-10 w-10 place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-                    aria-label="粘贴导入"
+                    aria-label={t("sources.paste.label")}
                     onClick={openPasteImport}
                   >
                     <ClipboardIcon size={21} />
                   </button>
                   <button
                     class="grid h-10 w-10 place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-                    aria-label="从网址导入"
+                    aria-label={t("sources.url.label")}
                     onClick={openUrlImport}
                   >
                     <LinkIcon size={21} />
                   </button>
                   <button
                     class="grid h-10 w-10 place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-                    aria-label="新建书源"
+                    aria-label={t("sources.new.label")}
                     onClick={onNew}
                   >
                     <PlusIcon size={21} />
@@ -493,16 +509,18 @@ export default function BookSourcesPage() {
               <button
                 class="h-10 rounded-xl px-2.5 text-[13.5px] font-medium text-accent transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2 disabled:opacity-35"
                 aria-label={
-                  allVisibleSelected() ? "取消全选当前筛选的书源" : "全选当前筛选的书源"
+                  allVisibleSelected()
+                    ? t("sources.select.deselectAllHint")
+                    : t("sources.select.allHint")
                 }
                 disabled={visibleSources().length === 0}
                 onClick={toggleSelectAll}
               >
-                {allVisibleSelected() ? "取消全选" : "全选"}
+                {allVisibleSelected() ? t("common.deselectAll") : t("common.selectAll")}
               </button>
               <button
                 class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-                aria-label="退出多选"
+                aria-label={t("sources.select.exit")}
                 onClick={cancelSelect}
               >
                 <CloseIcon />
@@ -527,7 +545,7 @@ export default function BookSourcesPage() {
               value={filter()}
               onSelect={(key) => rememberSourceGroupFilter(key)}
               onManage={selecting() ? undefined : () => setGroupManagerOpen(true)}
-              manageLabel="分组管理"
+              manageLabel={t("sourceGroups.chips.manage")}
             />
           </div>
         </Show>
@@ -539,9 +557,9 @@ export default function BookSourcesPage() {
               fallback={
                 <div class="flex flex-col items-center gap-2 px-6 py-16 text-center text-text-3">
                   <SourceIcon size={44} class="mb-1 text-text-3/70" />
-                  <p class="text-[15px] font-semibold text-text-2">还没有书源</p>
+                  <p class="text-[15px] font-semibold text-text-2">{t("sources.empty.title")}</p>
                   <p class="mt-1 text-[12px] leading-[1.6]">
-                    从社区导入 JSON，或在「发现」页使用模板新建
+                    {t("sources.empty.hint")}
                   </p>
                   <div class="mt-3 flex flex-wrap items-center justify-center gap-2">
                     <button
@@ -549,42 +567,44 @@ export default function BookSourcesPage() {
                       onClick={() => fileInput?.click()}
                     >
                       <DownloadIcon size={16} />
-                      导入 JSON
+                      {t("sources.import.json")}
                     </button>
                     <button
                       class="inline-flex items-center gap-1.5 rounded-xl bg-surface-2 px-4 py-2.5 text-[13px] font-semibold text-text-2 active:scale-[0.97]"
                       onClick={onNew}
                     >
                       <PlusIcon size={16} />
-                      新建
+                      {t("common.create")}
                     </button>
                     <button
                       class="inline-flex items-center gap-1.5 rounded-xl bg-surface-2 px-4 py-2.5 text-[13px] font-semibold text-text-2 active:scale-[0.97]"
                       onClick={openPasteImport}
                     >
                       <ClipboardIcon size={16} />
-                      粘贴导入
+                      {t("sources.paste.label")}
                     </button>
                     <button
                       class="inline-flex items-center gap-1.5 rounded-xl bg-surface-2 px-4 py-2.5 text-[13px] font-semibold text-text-2 active:scale-[0.97]"
                       onClick={openUrlImport}
                     >
                       <LinkIcon size={16} />
-                      从网址导入
+                      {t("sources.url.label")}
                     </button>
                   </div>
                 </div>
               }
             >
               <p class="py-14 text-center text-[12.5px] text-text-3">
-                {filter() === SOURCE_FILTER_NONE ? "没有未分组的书源" : "该分组还没有书源"}
+                {filter() === SOURCE_FILTER_NONE
+                  ? t("sources.empty.noUngrouped")
+                  : t("sources.empty.group")}
               </p>
             </Show>
           }
         >
           <Show when={selecting()}>
             <p class="mx-0.5 mb-1.5 mt-2.5 text-xs text-text-3">
-              长按书源进入多选；点击已选书源可取消，底部可批量启停、分组、导出或删除
+              {t("sources.select.hint")}
             </p>
           </Show>
           <div class="divide-y divide-border overflow-hidden rounded-[14px] border border-border bg-surface">
@@ -606,8 +626,10 @@ export default function BookSourcesPage() {
             </For>
           </div>
           <p class="mt-2.5 text-center text-[11px] leading-[1.6] text-text-3">
-            已启用 {visibleSources().filter((s) => s.enabled).length} /{" "}
-            {visibleSources().length} 个书源
+            {t("sources.page.enabledCount", {
+              enabled: visibleSources().filter((s) => s.enabled).length,
+              total: visibleSources().length,
+            })}
           </p>
         </Show>
       </div>
@@ -656,24 +678,24 @@ export default function BookSourcesPage() {
         <div
           class="fixed inset-x-0 bottom-0 z-[41] mx-auto max-w-[var(--app-column)] animate-sheet-up rounded-t-[16px] bg-surface px-4 pb-[calc(20px+env(safe-area-inset-bottom))] pt-4 shadow-[0_-10px_34px_rgb(0_0_0/0.22)]"
           role="dialog"
-          aria-label="删除书源"
+          aria-label={t("sources.delete.aria")}
         >
-          <p class="mb-1 text-center text-[15px] font-bold">删除书源？</p>
+          <p class="mb-1 text-center text-[15px] font-bold">{t("sources.delete.title")}</p>
           <p class="mb-4 text-center text-[12px] leading-[1.6] text-text-3">
-            已用该书源下载到本地的书籍不受影响
+            {t("sources.delete.desc")}
           </p>
           <div class="flex gap-2.5">
             <button
               class="flex-1 rounded-xl bg-surface-2 px-4 py-2.5 text-[13.5px] font-semibold text-text-2"
               onClick={() => setDeleteId(null)}
             >
-              取消
+              {t("common.cancel")}
             </button>
             <button
               class="flex-1 rounded-xl bg-danger px-4 py-2.5 text-[13.5px] font-semibold text-white"
               onClick={() => void onDelete(deleteId()!)}
             >
-              删除
+              {t("common.delete")}
             </button>
           </div>
         </div>
@@ -688,11 +710,11 @@ export default function BookSourcesPage() {
         <div
           class="fixed inset-x-0 bottom-0 z-[41] mx-auto max-w-[var(--app-column)] animate-sheet-up rounded-t-[16px] bg-surface px-4 pb-[calc(20px+env(safe-area-inset-bottom))] pt-4 shadow-[0_-10px_34px_rgb(0_0_0/0.22)]"
           role="dialog"
-          aria-label="从网址导入书源"
+          aria-label={t("sources.url.dialogAria")}
         >
-          <p class="mb-1 text-center text-[15px] font-bold">从网址导入</p>
+          <p class="mb-1 text-center text-[15px] font-bold">{t("sources.url.label")}</p>
           <p class="mb-4 text-center text-[12px] leading-[1.6] text-text-3">
-            输入指向书源 JSON（单条或数组）的网址，拉取后进入确认
+            {t("sources.url.hint")}
           </p>
           <div class="flex items-center gap-2 rounded-[12px] border border-border bg-bg px-3 py-2.5">
             <LinkIcon size={17} class="flex-none text-text-3" />
@@ -724,14 +746,14 @@ export default function BookSourcesPage() {
               disabled={urlBusy()}
               onClick={closeUrlImport}
             >
-              取消
+              {t("common.cancel")}
             </button>
             <button
               class="flex-1 rounded-xl bg-accent px-4 py-2.5 text-[13.5px] font-semibold text-on-accent disabled:pointer-events-none disabled:opacity-50"
               disabled={urlBusy()}
               onClick={() => void runUrlImport()}
             >
-              {urlBusy() ? "拉取中…" : "拉取并导入"}
+              {urlBusy() ? t("sources.url.fetching") : t("sources.url.fetchAndImport")}
             </button>
           </div>
         </div>

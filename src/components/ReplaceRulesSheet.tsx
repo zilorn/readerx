@@ -27,6 +27,7 @@ import {
   type TextReplaceRule,
 } from "../lib/textReplacements";
 import { showToast } from "../lib/toast";
+import { t, type MessageKey } from "../lib/i18n";
 import { ScrollArea } from "./ScrollArea";
 
 export interface ReplaceRulesSheetProps {
@@ -39,9 +40,22 @@ export interface ReplaceRulesSheetProps {
   onClose: () => void;
 }
 
-const SCOPE_OPTIONS: { value: ReplaceScope; label: string; hint: string }[] = [
-  { value: "book", label: "仅本书", hint: "只作用于当前这本书" },
-  { value: "global", label: "全局", hint: "对书架里所有书生效" },
+/** 作用域选项：常量里只存 key，渲染时再 t() */
+const SCOPE_OPTIONS: {
+  value: ReplaceScope;
+  labelKey: MessageKey;
+  hintKey: MessageKey;
+}[] = [
+  {
+    value: "book",
+    labelKey: "chapterRules.replace.scopeBook",
+    hintKey: "chapterRules.replace.scopeBookHint",
+  },
+  {
+    value: "global",
+    labelKey: "chapterRules.replace.scopeGlobal",
+    hintKey: "chapterRules.replace.scopeGlobalHint",
+  },
 ];
 
 interface Draft {
@@ -137,7 +151,7 @@ export function ReplaceRulesSheet(props: ReplaceRulesSheetProps) {
       return;
     }
     if (draft().scope === "book" && !props.bookId) {
-      setError("缺少目标书籍，无法保存为「仅本书」");
+      setError(t("chapterRules.replace.error.noBook"));
       return;
     }
     const base = editingRule();
@@ -152,10 +166,10 @@ export function ReplaceRulesSheet(props: ReplaceRulesSheetProps) {
     };
     if (base) {
       updateReplaceRule(rule);
-      showToast("已保存替换");
+      showToast(t("chapterRules.replace.saved"));
     } else {
       addReplaceRule(rule);
-      showToast("已添加替换");
+      showToast(t("chapterRules.replace.added"));
     }
     backToList();
   }
@@ -164,12 +178,14 @@ export function ReplaceRulesSheet(props: ReplaceRulesSheetProps) {
     const current = editingRule();
     if (!current) return;
     removeReplaceRule(current.id);
-    showToast("已删除替换");
+    showToast(t("chapterRules.replace.deleted"));
     backToList();
   }
 
   function scopeLabel(scope: ReplaceScope): string {
-    return scope === "global" ? "全局" : "本书";
+    return scope === "global"
+      ? t("chapterRules.replace.scopeGlobal")
+      : t("chapterRules.replace.scopeBookBadge");
   }
 
   return (
@@ -183,7 +199,7 @@ export function ReplaceRulesSheet(props: ReplaceRulesSheetProps) {
         data-reader-ui
         class="absolute inset-x-0 bottom-0 z-[53] flex max-h-[76%] animate-sheet-up select-none flex-col overflow-hidden rounded-t-[16px] bg-surface shadow-[0_-10px_34px_rgb(0_0_0/0.22)]"
         role="dialog"
-        aria-label="文本替换"
+        aria-label={t("chapterRules.replace.title")}
       >
         {/* 标题栏 */}
         <div class="flex flex-none items-center gap-2.5 border-b border-border px-4 py-3">
@@ -193,7 +209,7 @@ export function ReplaceRulesSheet(props: ReplaceRulesSheetProps) {
           >
             <button
               class="grid h-10 w-10 -ml-1 flex-none cursor-pointer place-items-center rounded-xl text-text-2 transition-colors active:bg-surface-2"
-              aria-label="返回替换列表"
+              aria-label={t("chapterRules.replace.backToList")}
               onClick={backToList}
             >
               <ChevronRightIcon size={20} class="rotate-180" />
@@ -201,17 +217,21 @@ export function ReplaceRulesSheet(props: ReplaceRulesSheetProps) {
           </Show>
           <div class="flex min-w-0 flex-1 flex-col">
             <span class="text-[15px] font-bold">
-              {isNew() ? "新建替换" : isEditing() ? "编辑替换" : "文本替换"}
+              {isNew()
+                ? t("chapterRules.replace.new")
+                : isEditing()
+                  ? t("chapterRules.replace.edit")
+                  : t("chapterRules.replace.title")}
             </span>
             <Show when={!isEditing()}>
               <span class="text-[10.5px] leading-tight text-text-3">
-                仅影响阅读显示，不改动原文
+                {t("chapterRules.replace.subtitle")}
               </span>
             </Show>
           </div>
           <button
             class="grid h-10 w-10 flex-none cursor-pointer place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-            aria-label="关闭文本替换"
+            aria-label={t("chapterRules.replace.close")}
             onClick={props.onClose}
           >
             <CloseIcon />
@@ -230,13 +250,13 @@ export function ReplaceRulesSheet(props: ReplaceRulesSheetProps) {
                 when={totalCount() > 0}
                 fallback={
                   <div class="rounded-[14px] border border-dashed border-border bg-bg px-4 py-10 text-center text-[12.5px] text-text-3">
-                    还没有文本替换
+                    {t("chapterRules.replace.empty")}
                   </div>
                 }
               >
                 <Show when={globalRules().length > 0}>
                   <h3 class="mx-1 mb-1.5 text-[11px] font-semibold tracking-[0.05em] text-text-3">
-                    全局（所有书生效）
+                    {t("chapterRules.replace.scopeGlobalSection")}
                   </h3>
                   <div class="mb-3">
                     <Card>
@@ -248,7 +268,7 @@ export function ReplaceRulesSheet(props: ReplaceRulesSheetProps) {
                             onEdit={() => enterEdit(rule)}
                             onDelete={() => {
                               removeReplaceRule(rule.id);
-                              showToast("已删除替换");
+                              showToast(t("chapterRules.replace.deleted"));
                             }}
                           />
                         )}
@@ -258,7 +278,11 @@ export function ReplaceRulesSheet(props: ReplaceRulesSheetProps) {
                 </Show>
                 <Show when={bookRules().length > 0}>
                   <h3 class="mx-1 mb-1.5 text-[11px] font-semibold tracking-[0.05em] text-text-3">
-                    {props.bookTitle ? `仅《${props.bookTitle}》` : "仅当前这本书"}
+                    {props.bookTitle
+                      ? t("chapterRules.replace.scopeBookSection", {
+                          title: props.bookTitle,
+                        })
+                      : t("chapterRules.replace.scopeBookSectionFallback")}
                   </h3>
                   <div class="mb-3">
                     <Card>
@@ -270,7 +294,7 @@ export function ReplaceRulesSheet(props: ReplaceRulesSheetProps) {
                             onEdit={() => enterEdit(rule)}
                             onDelete={() => {
                               removeReplaceRule(rule.id);
-                              showToast("已删除替换");
+                              showToast(t("chapterRules.replace.deleted"));
                             }}
                           />
                         )}
@@ -285,7 +309,7 @@ export function ReplaceRulesSheet(props: ReplaceRulesSheetProps) {
                 onClick={beginNew}
               >
                 <PlusIcon size={16} />
-                新建替换
+                {t("chapterRules.replace.new")}
               </button>
             </ScrollArea>
           }
@@ -309,16 +333,16 @@ export function ReplaceRulesSheet(props: ReplaceRulesSheetProps) {
                       aria-pressed={draft().regex}
                     >
                       <RegexIcon size={13} />
-                      正则
+                      {t("chapterRules.replace.regex")}
                     </button>
                   }
                 >
-                  查找
+                  {t("chapterRules.replace.find")}
                 </Label>
                 <input
                   class={inputCls}
                   value={draft().find}
-                  placeholder="要被替换的文字"
+                  placeholder={t("chapterRules.replace.findPlaceholder")}
                   onInput={(e) => {
                     setDraft((d) => ({ ...d, find: e.currentTarget.value }));
                     if (error()) setError("");
@@ -327,11 +351,11 @@ export function ReplaceRulesSheet(props: ReplaceRulesSheetProps) {
               </label>
 
               <label class="block min-w-0">
-                <Label>替换为</Label>
+                <Label>{t("chapterRules.replace.replaceWith")}</Label>
                 <input
                   class={inputCls}
                   value={draft().replace}
-                  placeholder="留空 = 删除匹配文字"
+                  placeholder={t("chapterRules.replace.replacePlaceholder")}
                   onInput={(e) =>
                     setDraft((d) => ({
                       ...d,
@@ -342,7 +366,7 @@ export function ReplaceRulesSheet(props: ReplaceRulesSheetProps) {
               </label>
 
               <div class="block min-w-0">
-                <Label>作用范围</Label>
+                <Label>{t("chapterRules.replace.scope")}</Label>
                 <div class="flex gap-2">
                   <For each={SCOPE_OPTIONS}>
                     {(opt) => (
@@ -365,15 +389,17 @@ export function ReplaceRulesSheet(props: ReplaceRulesSheetProps) {
                             "text-text-2": draft().scope !== opt.value,
                           }}
                         >
-                          {opt.label}
+                          {t(opt.labelKey)}
                           <Show when={draft().scope === opt.value}>
                             <CheckIcon size={14} />
                           </Show>
                         </span>
                         <span class="mt-0.5 block text-[10.5px] leading-snug text-text-3">
                           {draft().scope === opt.value && props.bookTitle && opt.value === "book"
-                            ? `只作用《${props.bookTitle}》`
-                            : opt.hint}
+                            ? t("chapterRules.replace.scopeBookHintTitle", {
+                                title: props.bookTitle,
+                              })
+                            : t(opt.hintKey)}
                         </span>
                       </button>
                     )}
@@ -384,9 +410,9 @@ export function ReplaceRulesSheet(props: ReplaceRulesSheetProps) {
 
             <Show when={draft().regex}>
               <p class="-mt-1 text-[11px] leading-[1.65] text-text-3">
-                按正则表达式查找并全部替换，替换内容支持{" "}
+                {t("chapterRules.replace.regexHintBefore")}{" "}
                 <code class="rounded bg-surface-2 px-1 py-0.5 text-[10px]">$1</code>{" "}
-                等捕获组引用；去掉正则即按普通文字匹配。
+                {t("chapterRules.replace.regexHintAfter")}
               </p>
             </Show>
 
@@ -405,7 +431,7 @@ export function ReplaceRulesSheet(props: ReplaceRulesSheetProps) {
                 onClick={onSave}
               >
                 <CheckIcon size={17} />
-                保存替换
+                {t("chapterRules.replace.save")}
               </button>
               <Show when={editingRule()}>
                 <button
@@ -413,7 +439,7 @@ export function ReplaceRulesSheet(props: ReplaceRulesSheetProps) {
                   onClick={onDelete}
                 >
                   <TrashIcon size={17} />
-                  删除此替换
+                  {t("chapterRules.replace.delete")}
                 </button>
               </Show>
             </div>
@@ -444,7 +470,7 @@ function RuleRow(props: {
           props.onEdit();
         }
       }}
-      aria-label={`编辑替换：${rule().find}`}
+      aria-label={t("chapterRules.replace.editAria", { find: rule().find })}
     >
       <span class="grid h-[36px] w-[36px] flex-none place-items-center rounded-[10px] bg-surface-2 text-accent">
         <ReplaceIcon size={18} />
@@ -457,7 +483,7 @@ function RuleRow(props: {
           <Show when={rule().regex}>
             <i class="not-italic inline-flex items-center gap-0.5 rounded-full bg-surface-2 px-1.5 py-px text-[9.5px] font-semibold text-text-3">
               <RegexIcon size={10} />
-              正则
+              {t("chapterRules.replace.regex")}
             </i>
           </Show>
         </span>
@@ -468,14 +494,14 @@ function RuleRow(props: {
           class="max-w-full truncate text-[11.5px] text-text-3"
           classList={{ "italic": !rule().replace }}
         >
-          {rule().replace || "删除匹配文字"}
+          {rule().replace || t("chapterRules.replace.deletedMatch")}
         </span>
       </span>
       <span class="flex flex-none items-center gap-1">
         <button
           type="button"
           tabIndex={-1}
-          aria-label={`删除替换：${rule().find}`}
+          aria-label={t("chapterRules.replace.deleteAria", { find: rule().find })}
           class="grid h-8 w-8 cursor-pointer place-items-center rounded-lg text-text-3 transition-colors active:bg-danger-weak active:text-danger"
           onClick={(e) => {
             e.stopPropagation();

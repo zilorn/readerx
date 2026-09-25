@@ -12,6 +12,7 @@ import {
   type BookMeta,
 } from "../lib/booksTypes";
 import { fileToCoverThumb } from "../lib/coverImage";
+import { t } from "../lib/i18n";
 import { showToast } from "../lib/toast";
 import { TagChips } from "./TagChips";
 import { CloseIcon, ImageIcon, PlusIcon, TrashIcon } from "./icons";
@@ -46,7 +47,7 @@ export function BookMetaSheet(props: BookMetaSheetProps) {
     if (!file) return;
     const thumb = await fileToCoverThumb(file);
     if (!thumb) {
-      showToast("无法读取该图片，请换一张 JPG / PNG", true);
+      showToast(t("book.meta.coverReadFailed"), true);
       return;
     }
     setCoverDraft(thumb);
@@ -76,7 +77,7 @@ export function BookMetaSheet(props: BookMetaSheetProps) {
   async function onSave() {
     if (saving()) return;
     if (!titleDraft().trim()) {
-      setError("书名不能为空");
+      setError(t("book.meta.titleRequired"));
       return;
     }
     setSaving(true);
@@ -90,9 +91,9 @@ export function BookMetaSheet(props: BookMetaSheetProps) {
         tags: tagsDraft(),
       });
       props.onClose();
-      showToast("已保存");
+      showToast(t("common.saved"));
     } catch {
-      setError("保存失败，请重试");
+      setError(t("book.meta.saveFailed"));
     } finally {
       setSaving(false);
     }
@@ -108,14 +109,14 @@ export function BookMetaSheet(props: BookMetaSheetProps) {
         class="fixed inset-x-0 bottom-0 z-[71] mx-auto flex max-h-[88%] max-w-[var(--app-column)] animate-sheet-up flex-col overflow-hidden rounded-t-[16px] bg-surface shadow-[0_-10px_34px_rgb(0_0_0/0.22)]"
         role="dialog"
         aria-modal="true"
-        aria-label="编辑书籍信息"
+        aria-label={t("book.meta.title")}
       >
         <div class="flex flex-none items-center gap-2.5 border-b border-border px-4 py-3">
-          <span class="text-[15px] font-bold">编辑书籍信息</span>
-          <span class="flex-1 text-xs text-text-3">保存后书架同步更新</span>
+          <span class="text-[15px] font-bold">{t("book.meta.title")}</span>
+          <span class="flex-1 text-xs text-text-3">{t("book.meta.subtitle")}</span>
           <button
             class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-            aria-label="关闭"
+            aria-label={t("common.close")}
             onClick={close}
           >
             <CloseIcon />
@@ -134,7 +135,7 @@ export function BookMetaSheet(props: BookMetaSheetProps) {
                 <div class="grid h-[120px] w-[88px] flex-none place-items-center overflow-hidden rounded-[10px] border border-dashed border-border bg-bg text-text-3">
                   <div class="flex flex-col items-center gap-1.5 text-[10px]">
                     <ImageIcon size={26} />
-                    无封面
+                    {t("book.meta.noCover")}
                   </div>
                 </div>
               }
@@ -153,7 +154,7 @@ export function BookMetaSheet(props: BookMetaSheetProps) {
                 onClick={() => coverInput?.click()}
               >
                 <ImageIcon size={17} />
-                更换封面
+                {t("book.meta.changeCover")}
               </button>
               <Show when={coverDraft() !== null}>
                 <button
@@ -162,7 +163,7 @@ export function BookMetaSheet(props: BookMetaSheetProps) {
                   onClick={() => setCoverDraft(null)}
                 >
                   <TrashIcon size={16} />
-                  移除封面
+                  {t("book.meta.removeCover")}
                 </button>
               </Show>
             </div>
@@ -170,34 +171,38 @@ export function BookMetaSheet(props: BookMetaSheetProps) {
 
           <label class="flex min-w-0 flex-col gap-[5px]">
             <span class="text-[11.5px] font-semibold tracking-[0.03em] text-text-3">
-              书名
+              {t("book.field.title")}
             </span>
             <input
               class="w-full rounded-[10px] border border-border bg-bg px-[11px] py-[9px] text-[13.5px] text-text outline-none transition-colors focus:border-accent placeholder:text-text-3"
               value={titleDraft()}
-              placeholder="书名"
+              placeholder={t("book.field.title")}
               onInput={(e) => setTitleDraft(e.currentTarget.value)}
             />
           </label>
           <label class="flex min-w-0 flex-col gap-[5px]">
             <span class="text-[11.5px] font-semibold tracking-[0.03em] text-text-3">
-              作者
+              {t("book.field.author")}
             </span>
             <input
               class="w-full rounded-[10px] border border-border bg-bg px-[11px] py-[9px] text-[13.5px] text-text outline-none transition-colors focus:border-accent placeholder:text-text-3"
               value={authorDraft()}
-              placeholder="作者"
+              placeholder={t("book.field.author")}
               onInput={(e) => setAuthorDraft(e.currentTarget.value)}
             />
           </label>
           <div class="flex min-w-0 flex-col gap-[5px]">
             <span class="text-[11.5px] font-semibold tracking-[0.03em] text-text-3">
-              标签
+              {t("book.field.tags")}
             </span>
             <div class="rounded-[10px] border border-border bg-bg px-[11px] py-2 transition-colors focus-within:border-accent">
               <Show
                 when={tagsDraft().length > 0}
-                fallback={<p class="py-1 text-[12px] text-text-3">暂无标签</p>}
+                fallback={
+                  <p class="py-1 text-[12px] text-text-3">
+                    {t("book.meta.tagsEmpty")}
+                  </p>
+                }
               >
                 <div class="flex flex-wrap gap-1.5 pb-1.5">
                   <TagChips tags={tagsDraft()} onRemove={removeTag} />
@@ -206,7 +211,7 @@ export function BookMetaSheet(props: BookMetaSheetProps) {
               <div class="flex items-center gap-1">
                 <input
                   class="min-w-0 flex-1 bg-transparent text-[13.5px] text-text outline-none placeholder:text-text-3"
-                  placeholder="输入标签，回车或加号添加"
+                  placeholder={t("book.meta.tagPlaceholder")}
                   value={tagInput()}
                   onInput={(e) => setTagInput(e.currentTarget.value)}
                   onKeyDown={(e) => {
@@ -218,7 +223,7 @@ export function BookMetaSheet(props: BookMetaSheetProps) {
                 />
                 <button
                   type="button"
-                  aria-label="添加标签"
+                  aria-label={t("book.meta.addTag")}
                   disabled={!tagInput().trim()}
                   class="grid h-7 w-7 flex-none place-items-center rounded-lg bg-surface-2 text-text-2 transition-[background-color,scale] duration-150 active:scale-90 active:bg-surface disabled:opacity-40"
                   onClick={addTagsFromInput}
@@ -230,13 +235,13 @@ export function BookMetaSheet(props: BookMetaSheetProps) {
           </div>
           <label class="flex min-w-0 flex-col gap-[5px]">
             <span class="text-[11.5px] font-semibold tracking-[0.03em] text-text-3">
-              简介
+              {t("book.field.intro")}
             </span>
             <textarea
               class="min-h-[120px] w-full resize-none rounded-[10px] border border-border bg-bg px-[11px] py-[9px] text-[13px] leading-[1.6] text-text outline-none transition-colors focus:border-accent placeholder:text-text-3"
               rows={6}
               value={introDraft()}
-              placeholder="书籍简介（可留空）"
+              placeholder={t("book.meta.introPlaceholder")}
               onInput={(e) => setIntroDraft(e.currentTarget.value)}
             />
           </label>
@@ -258,13 +263,13 @@ export function BookMetaSheet(props: BookMetaSheetProps) {
           >
             <Show
               when={saving()}
-              fallback="保存"
+              fallback={t("common.save")}
             >
               <span
                 class="size-3.5 flex-none animate-spin rounded-full border-2 border-on-accent/40 border-t-on-accent"
                 aria-hidden="true"
               />
-              正在保存…
+              {t("book.meta.saving")}
             </Show>
           </button>
         </ScrollArea>

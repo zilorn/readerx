@@ -8,6 +8,7 @@ import {
   TrashIcon,
 } from "./icons";
 import { createGroup, deleteGroup, groupList, renameGroup } from "../lib/groups";
+import { t } from "../lib/i18n";
 import { ScrollArea } from "./ScrollArea";
 
 /** 底部抽屉：书架分组管理（新建 / 重命名 / 删除），由书架长按分组栏呼出 */
@@ -45,7 +46,7 @@ export function GroupManagerSheet(props: { onClose: () => void }) {
   }
 
   return (
-    <div class="fixed inset-0 z-50" role="dialog" aria-label="书架分组管理">
+    <div class="fixed inset-0 z-50" role="dialog" aria-label={t("book.groups.manage")}>
       <div
         class="absolute inset-0 animate-sheet-fade bg-black/45 backdrop-blur-[2px]"
         onClick={props.onClose}
@@ -56,14 +57,14 @@ export function GroupManagerSheet(props: { onClose: () => void }) {
             <FolderIcon size={18} />
           </span>
           <span class="flex min-w-0 flex-1 flex-col">
-            <span class="text-[15px] font-bold leading-tight">书架分组</span>
+            <span class="text-[15px] font-bold leading-tight">{t("book.groups.title")}</span>
             <span class="text-[11px] text-text-3">
-              新建、重命名或删除书架分组
+              {t("book.groups.subtitle")}
             </span>
           </span>
           <button
             class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-            aria-label="关闭书架分组管理"
+            aria-label={t("book.groups.close")}
             onClick={props.onClose}
           >
             <CloseIcon />
@@ -76,7 +77,7 @@ export function GroupManagerSheet(props: { onClose: () => void }) {
             when={groupList().length > 0}
             fallback={
               <p class="px-4 py-4 text-center text-[12.5px] text-text-3">
-                还没有书架分组，在下方创建一个。
+                {t("book.groups.empty")}
               </p>
             }
           >
@@ -96,7 +97,7 @@ export function GroupManagerSheet(props: { onClose: () => void }) {
                           </span>
                           <button
                             class="grid h-8 w-8 flex-none place-items-center rounded-lg text-text-2 transition-colors active:bg-surface-2"
-                            aria-label={`重命名《${group.name}》`}
+                            aria-label={t("book.groups.rename", { name: group.name })}
                             onClick={() => startEdit(group.id, group.name)}
                           >
                             <EditIcon size={16} />
@@ -108,8 +109,8 @@ export function GroupManagerSheet(props: { onClose: () => void }) {
                             }}
                             aria-label={
                               confirmDelete() === group.id
-                                ? `确认删除分组《${group.name}》`
-                                : `删除分组《${group.name}》`
+                                ? t("book.groups.confirmDelete", { name: group.name })
+                                : t("book.groups.delete", { name: group.name })
                             }
                             onClick={() => void handleDelete(group.id)}
                           >
@@ -133,7 +134,7 @@ export function GroupManagerSheet(props: { onClose: () => void }) {
                       />
                       <button
                         class="grid h-8 w-8 flex-none place-items-center rounded-lg text-accent transition-colors active:bg-surface-2"
-                        aria-label="保存分组名"
+                        aria-label={t("book.groups.saveName")}
                         onClick={() => commitEdit(group.id)}
                       >
                         <CheckIcon size={17} />
@@ -151,7 +152,7 @@ export function GroupManagerSheet(props: { onClose: () => void }) {
           <input
             value={newName()}
             onInput={(e) => setNewName(e.currentTarget.value)}
-            placeholder="新建分组"
+            placeholder={t("book.groups.newPlaceholder")}
             class="min-w-0 flex-1 rounded-[10px] border border-border bg-bg px-3 py-[8px] text-[13.5px] text-text outline-none transition-colors placeholder:text-text-3 focus:border-accent"
             onKeyDown={(e) => {
               if (e.key === "Enter") handleCreate();
@@ -162,7 +163,7 @@ export function GroupManagerSheet(props: { onClose: () => void }) {
             onClick={handleCreate}
           >
             <PlusIcon size={15} />
-            添加
+            {t("common.add")}
           </button>
         </div>
       </div>

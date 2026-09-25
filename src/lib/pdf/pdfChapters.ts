@@ -7,6 +7,7 @@
  *
  * 本模块是纯计算（不碰 pdf.js、不碰 DOM），可直接单测。
  */
+import { t } from "../i18n";
 
 /** 一章的页区间（0 基，含首含尾）与该章的展示标题 */
 export interface PdfChapterRange {
@@ -214,13 +215,13 @@ export function chunkRanges(
 /** 章节标题兜底：没有标题时用「第 N 页」「第 N–M 页」 */
 function pageRangeTitle(range: PdfChapterRange): string {
   return range.start === range.end
-    ? `第 ${range.start + 1} 页`
-    : `第 ${range.start + 1}–${range.end + 1} 页`;
+    ? t("library.pdf.page", { page: range.start + 1 })
+    : t("library.pdf.pageRange", { start: range.start + 1, end: range.end + 1 });
 }
 
 /** 章节标题：大纲标题 + 页码范围（同一标题跨多页时便于定位） */
 export function chapterTitleOf(range: PdfChapterRange): string {
   const title = range.title.trim();
   const pages = pageRangeTitle(range);
-  return title ? `${title}（${pages}）` : pages;
+  return title ? t("library.pdf.chapterTitle", { title, pages }) : pages;
 }

@@ -1,5 +1,6 @@
 import { For, Show } from "solid-js";
 import { FolderIcon } from "./icons";
+import { t } from "../lib/i18n";
 import {
   SOURCE_FILTER_ALL,
   SOURCE_FILTER_NONE,
@@ -22,11 +23,11 @@ export function sourceGroupChips(
   active: string,
 ): SourceGroupChip[] {
   const chips: SourceGroupChip[] = [
-    { key: SOURCE_FILTER_ALL, label: "全部", count: counts[SOURCE_FILTER_ALL] ?? 0 },
+    { key: SOURCE_FILTER_ALL, label: t("common.all"), count: counts[SOURCE_FILTER_ALL] ?? 0 },
   ];
   const noneCount = counts[SOURCE_FILTER_NONE] ?? 0;
   if (noneCount > 0 || active === SOURCE_FILTER_NONE) {
-    chips.push({ key: SOURCE_FILTER_NONE, label: "未分组", count: noneCount });
+    chips.push({ key: SOURCE_FILTER_NONE, label: t("common.ungrouped"), count: noneCount });
   }
   for (const group of sourceGroupList()) {
     chips.push({ key: group.id, label: group.name, count: counts[group.id] ?? 0 });
@@ -64,11 +65,11 @@ export function SourceGroupChips(props: SourceGroupChipsProps) {
       <Show when={props.onManage}>
         <button
           class="inline-flex flex-none select-none items-center gap-1.5 rounded-full border border-dashed border-border px-3 py-[7px] text-[13px] text-text-3 touch-manipulation active:bg-surface-2"
-          aria-label="书源分组管理"
+          aria-label={t("sourceGroups.manage.aria")}
           onClick={() => props.onManage?.()}
         >
           <FolderIcon size={15} />
-          {props.manageLabel ?? "分组"}
+          {props.manageLabel ?? t("sourceGroups.chips.short")}
         </button>
       </Show>
     </div>

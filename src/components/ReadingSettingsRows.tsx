@@ -18,17 +18,18 @@ import {
   setParaSpacing,
   type PageMode,
 } from "../lib/store";
+import { t, type MessageKey } from "../lib/i18n";
 import { currentHanMode, setHanMode, type HanMode } from "../lib/hanConvert";
 
-const PAGE_MODE_OPTIONS: { value: PageMode; label: string }[] = [
-  { value: "paged", label: "左右翻页" },
-  { value: "scroll", label: "上下滚动" },
+const PAGE_MODE_OPTIONS: { value: PageMode; labelKey: MessageKey }[] = [
+  { value: "paged", labelKey: "readerChrome.reading.pageModePaged" },
+  { value: "scroll", labelKey: "readerChrome.reading.pageModeScroll" },
 ];
 
-const HAN_MODE_OPTIONS: { value: HanMode; label: string }[] = [
-  { value: "off", label: "关闭" },
-  { value: "s2t", label: "简→繁" },
-  { value: "t2s", label: "繁→简" },
+const HAN_MODE_OPTIONS: { value: HanMode; labelKey: MessageKey }[] = [
+  { value: "off", labelKey: "readerChrome.reading.hanOff" },
+  { value: "s2t", labelKey: "readerChrome.reading.hanS2T" },
+  { value: "t2s", labelKey: "readerChrome.reading.hanT2S" },
 ];
 
 /** 正文字号：A− / 数值 / A+ */
@@ -36,12 +37,12 @@ function FontSizeRow() {
   return (
     <div class="flex w-full cursor-default items-center gap-3 px-4 py-[13px] text-left">
       <span class="flex min-w-0 flex-1 flex-col gap-0.5">
-        <span class="text-[14.5px] font-medium">正文字号</span>
+        <span class="text-[14.5px] font-medium">{t("readerChrome.reading.fontSize")}</span>
       </span>
       <div class="flex flex-none items-center gap-2.5">
         <button
           class="grid h-[34px] w-[34px] place-items-center rounded-lg border border-border text-[13px] font-bold text-text-2 disabled:opacity-35"
-          aria-label="减小正文字号"
+          aria-label={t("readerChrome.reading.fontSizeDecrease")}
           disabled={currentFontSize() <= FONT_MIN}
           onClick={() => setFontSize(currentFontSize() - 1)}
         >
@@ -52,7 +53,7 @@ function FontSizeRow() {
         </span>
         <button
           class="grid h-[34px] w-[34px] place-items-center rounded-lg border border-border text-[13px] font-bold text-text-2 disabled:opacity-35"
-          aria-label="增大正文字号"
+          aria-label={t("readerChrome.reading.fontSizeIncrease")}
           disabled={currentFontSize() >= FONT_MAX}
           onClick={() => setFontSize(currentFontSize() + 1)}
         >
@@ -68,8 +69,10 @@ function ParaSpacingRow() {
   return (
     <div class="flex w-full cursor-default items-center gap-3 px-4 py-[13px] text-left">
       <span class="flex min-w-0 flex-1 flex-col gap-0.5">
-        <span class="text-[14.5px] font-medium">段落间距</span>
-        <span class="text-[11.5px] text-text-3">正文段落之间的留白</span>
+        <span class="text-[14.5px] font-medium">{t("readerChrome.reading.paraSpacing")}</span>
+        <span class="text-[11.5px] text-text-3">
+          {t("readerChrome.reading.paraSpacingDesc")}
+        </span>
       </span>
       <div class="flex flex-none items-center gap-3">
         <span class="min-w-[42px] text-right text-[13px] font-semibold tabular-nums">
@@ -82,7 +85,7 @@ function ParaSpacingRow() {
           max={PARA_SPACING_MAX}
           step={PARA_SPACING_STEP}
           value={currentParaSpacing()}
-          aria-label="段落间距"
+          aria-label={t("readerChrome.reading.paraSpacing")}
           onInput={(e) => setParaSpacing(Number(e.currentTarget.value))}
         />
       </div>
@@ -95,12 +98,12 @@ function PageModeRow() {
   return (
     <div class="flex w-full cursor-default items-center gap-3 px-4 py-[13px] text-left">
       <span class="flex min-w-0 flex-1 flex-col gap-0.5">
-        <span class="text-[14.5px] font-medium">翻页方式</span>
+        <span class="text-[14.5px] font-medium">{t("readerChrome.reading.pageMode")}</span>
       </span>
       <div
         class="flex flex-none gap-0.5 rounded-[10px] bg-surface-2 p-[3px]"
         role="radiogroup"
-        aria-label="翻页方式"
+        aria-label={t("readerChrome.reading.pageMode")}
       >
         {PAGE_MODE_OPTIONS.map((opt) => (
           <button
@@ -113,7 +116,7 @@ function PageModeRow() {
             }}
             onClick={() => setPageMode(opt.value)}
           >
-            {opt.label}
+            {t(opt.labelKey)}
           </button>
         ))}
       </div>
@@ -126,13 +129,13 @@ function HanModeRow() {
   return (
     <div class="flex w-full cursor-default items-center gap-3 px-4 py-[13px] text-left">
       <span class="flex min-w-0 flex-1 flex-col gap-0.5">
-        <span class="text-[14.5px] font-medium">简繁转换</span>
-        <span class="text-[11.5px] text-text-3">书名、简介、目录与正文</span>
+        <span class="text-[14.5px] font-medium">{t("readerChrome.reading.hanMode")}</span>
+        <span class="text-[11.5px] text-text-3">{t("readerChrome.reading.hanModeDesc")}</span>
       </span>
       <div
         class="flex flex-none gap-0.5 rounded-[10px] bg-surface-2 p-[3px]"
         role="radiogroup"
-        aria-label="简繁转换"
+        aria-label={t("readerChrome.reading.hanMode")}
       >
         {HAN_MODE_OPTIONS.map((opt) => (
           <button
@@ -145,7 +148,7 @@ function HanModeRow() {
             }}
             onClick={() => setHanMode(opt.value)}
           >
-            {opt.label}
+            {t(opt.labelKey)}
           </button>
         ))}
       </div>

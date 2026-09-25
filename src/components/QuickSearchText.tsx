@@ -5,6 +5,7 @@
  */
 import { Show } from "solid-js";
 import { SearchIcon } from "./icons";
+import { t } from "../lib/i18n";
 
 export interface QuickSearchTextProps {
   /** 参与搜索的词（展示用的简繁转换副本，看到什么就搜什么） */
@@ -31,7 +32,10 @@ export function QuickSearchText(props: QuickSearchTextProps) {
         <button
           type="button"
           class="inline-flex max-w-full items-start gap-1 text-left transition-opacity duration-150 active:opacity-55"
-          aria-label={`${props.action}：${props.text}`}
+          aria-label={t("discover.quickSearch.aria", {
+            action: props.action,
+            text: props.text,
+          })}
           onClick={() => onSearch()(props.text)}
         >
           <span class={textClass()}>{props.text}</span>

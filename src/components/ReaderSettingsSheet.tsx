@@ -6,6 +6,7 @@
  * 状态栏本体渲染在 Reader.tsx 阅读区底部，此处只改全局偏好。
  */
 import { For, Show, type JSX } from "solid-js";
+import { t, type MessageKey } from "../lib/i18n";
 import {
   currentMenuSliderEnabled,
   currentProgressScope,
@@ -48,9 +49,9 @@ export interface ReaderSettingsSheetProps {
   };
 }
 
-const SCOPE_OPTIONS: { value: ProgressScope; label: string }[] = [
-  { value: "book", label: "整本书" },
-  { value: "chapter", label: "当前章节" },
+const SCOPE_OPTIONS: { value: ProgressScope; labelKey: MessageKey }[] = [
+  { value: "book", labelKey: "readerChrome.settings.scopeBook" },
+  { value: "chapter", labelKey: "readerChrome.settings.scopeChapter" },
 ];
 
 function Card(props: { children: JSX.Element }) {
@@ -107,15 +108,15 @@ export function ReaderSettingsSheet(props: ReaderSettingsSheetProps) {
         data-reader-ui
         class="absolute inset-x-0 bottom-0 z-[51] flex max-h-[70%] animate-sheet-up select-none flex-col overflow-hidden rounded-t-[16px] bg-surface shadow-[0_-10px_34px_rgb(0_0_0/0.22)]"
         role="dialog"
-        aria-label="阅读设置"
+        aria-label={t("readerChrome.settings.title")}
       >
         <div class="flex flex-none items-center gap-2.5 border-b border-border px-4 py-3">
           <SettingsIcon size={19} class="text-accent" />
-          <span class="text-[15px] font-bold">阅读设置</span>
+          <span class="text-[15px] font-bold">{t("readerChrome.settings.title")}</span>
           <span class="flex-1" />
           <button
             class="grid h-10 w-10 flex-none cursor-pointer place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-            aria-label="关闭阅读设置"
+            aria-label={t("readerChrome.settings.closeLabel")}
             onClick={props.onClose}
           >
             <CloseIcon />
@@ -139,9 +140,11 @@ export function ReaderSettingsSheet(props: ReaderSettingsSheetProps) {
                   <ReplaceIcon size={18} />
                 </span>
                 <span class="flex min-w-0 flex-1 flex-col gap-0.5">
-                  <span class="text-[14.5px] font-medium">文本替换</span>
+                  <span class="text-[14.5px] font-medium">
+                    {t("readerChrome.settings.textReplace")}
+                  </span>
                   <span class="text-[11.5px] text-text-3">
-                    替换阅读正文，不改动原文文件
+                    {t("readerChrome.settings.textReplaceDesc")}
                   </span>
                 </span>
                 <ChevronRightIcon size={17} class="flex-none text-text-3" />
@@ -153,26 +156,32 @@ export function ReaderSettingsSheet(props: ReaderSettingsSheetProps) {
             <Card>
               <div class="flex w-full items-center gap-3 px-4 py-[13px] text-left">
                 <span class="flex min-w-0 flex-1 flex-col gap-0.5">
-                  <span class="text-[14.5px] font-medium">底部状态栏</span>
+                  <span class="text-[14.5px] font-medium">
+                    {t("readerChrome.settings.statusBar")}
+                  </span>
                   <span class="text-[11.5px] text-text-3">
-                    阅读时在正文底部常驻显示章节名与阅读进度
+                    {t("readerChrome.settings.statusBarDesc")}
                   </span>
                 </span>
                 <ToggleSwitch
                   on={currentStatusBarEnabled()}
-                  label="底部状态栏"
+                  label={t("readerChrome.settings.statusBar")}
                   onChange={() => setStatusBarEnabled(!currentStatusBarEnabled())}
                 />
               </div>
               <div class="flex w-full items-center gap-3 px-4 py-[13px] text-left">
                 <span class="flex min-w-0 flex-1 flex-col gap-0.5">
-                  <span class="text-[14.5px] font-medium">进度百分比口径</span>
-                  <span class="text-[11.5px] text-text-3">状态栏百分比按哪个范围统计</span>
+                  <span class="text-[14.5px] font-medium">
+                    {t("readerChrome.settings.progressScope")}
+                  </span>
+                  <span class="text-[11.5px] text-text-3">
+                    {t("readerChrome.settings.progressScopeDesc")}
+                  </span>
                 </span>
                 <div
                   class="flex flex-none gap-0.5 rounded-[10px] bg-surface-2 p-[3px]"
                   role="radiogroup"
-                  aria-label="进度百分比口径"
+                  aria-label={t("readerChrome.settings.progressScope")}
                 >
                   <For each={SCOPE_OPTIONS}>
                     {(opt) => {
@@ -188,7 +197,7 @@ export function ReaderSettingsSheet(props: ReaderSettingsSheetProps) {
                           }}
                           onClick={() => setProgressScope(opt.value)}
                         >
-                          {opt.label}
+                          {t(opt.labelKey)}
                         </button>
                       );
                     }}
@@ -197,14 +206,16 @@ export function ReaderSettingsSheet(props: ReaderSettingsSheetProps) {
               </div>
               <div class="flex w-full items-center gap-3 px-4 py-[13px] text-left">
                 <span class="flex min-w-0 flex-1 flex-col gap-0.5">
-                  <span class="text-[14.5px] font-medium">菜单进度条</span>
+                  <span class="text-[14.5px] font-medium">
+                    {t("readerChrome.settings.menuSlider")}
+                  </span>
                   <span class="text-[11.5px] text-text-3">
-                    左右翻页时在菜单上方显示，可拖动跳转页数
+                    {t("readerChrome.settings.menuSliderDesc")}
                   </span>
                 </span>
                 <ToggleSwitch
                   on={currentMenuSliderEnabled()}
-                  label="菜单进度条"
+                  label={t("readerChrome.settings.menuSlider")}
                   onChange={() => setMenuSliderEnabled(!currentMenuSliderEnabled())}
                 />
               </div>
@@ -218,26 +229,26 @@ export function ReaderSettingsSheet(props: ReaderSettingsSheetProps) {
                 <Show when={props.onlineUpdate}>
                   <OnlineActionRow
                     icon={<UpdateIcon size={18} />}
-                    title="检查书籍更新"
-                    desc="重新获取书源目录，追加最新章节"
+                    title={t("readerChrome.settings.checkUpdate")}
+                    desc={t("readerChrome.settings.checkUpdateDesc")}
                     disabled={props.onlineUpdate?.disabled}
                     busy={props.onlineUpdate?.busy}
-                    busyLabel="正在检查更新…"
+                    busyLabel={t("readerChrome.settings.checkUpdateBusy")}
                     onClick={() => props.onlineUpdate?.onCheck()}
                   />
                 </Show>
                 <Show when={props.onlineReload}>
                   <OnlineActionRow
                     icon={<RefreshIcon size={18} />}
-                    title="重新加载本章"
+                    title={t("readerChrome.settings.reloadChapter")}
                     desc={
                       props.onlineReload?.disabled
-                        ? "正在重新获取本章正文"
-                        : "从书源重新获取当前章节正文"
+                        ? t("readerChrome.settings.reloadChapterBusyDesc")
+                        : t("readerChrome.settings.reloadChapterDesc")
                     }
                     disabled={props.onlineReload?.disabled}
                     busy={props.onlineReload?.busy}
-                    busyLabel="正在重新加载本章…"
+                    busyLabel={t("readerChrome.settings.reloadChapterBusy")}
                     onClick={() => props.onlineReload?.onReload()}
                   />
                 </Show>

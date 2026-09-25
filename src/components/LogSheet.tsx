@@ -22,17 +22,18 @@ import {
   type LogTail,
 } from "../lib/logs";
 import type { LogLevel } from "../lib/logger";
+import { t, type MessageKey } from "../lib/i18n";
 
 /** 一次读取的行数上限（后端也会截断） */
 const TAIL_LINES = 2_000;
 /** 清空的二次确认时限（与设置页「重置进度」同一手感） */
 const CONFIRM_MS = 3_000;
 
-const FILTERS: { value: LogFilter; label: string }[] = [
-  { value: null, label: "全部" },
-  { value: "info", label: "信息" },
-  { value: "warn", label: "警告" },
-  { value: "error", label: "错误" },
+const FILTERS: { value: LogFilter; labelKey: MessageKey }[] = [
+  { value: null, labelKey: "common.all" },
+  { value: "info", labelKey: "settings.logs.filterInfo" },
+  { value: "warn", labelKey: "settings.logs.filterWarn" },
+  { value: "error", labelKey: "settings.logs.filterError" },
 ];
 
 /** 后端级别规格 → 界面上的「常规 / 详细」 */
@@ -82,14 +83,14 @@ export function LogSheet(props: LogSheetProps) {
   async function copyAll(): Promise<void> {
     const text = tail()?.text ?? "";
     if (!text) {
-      showToast("没有可复制的日志", true);
+      showToast(t("settings.logs.copyEmpty"), true);
       return;
     }
     try {
       await navigator.clipboard.writeText(text);
-      showToast("日志已复制到剪贴板");
+      showToast(t("settings.logs.copied"));
     } catch (error) {
-      reportFailure("复制日志失败", error);
+      reportFailure(t("settings.logs.copyFailed"), error);
     }
   }
 
@@ -104,10 +105,10 @@ export function LogSheet(props: LogSheetProps) {
     setConfirming(false);
     void clearLogs()
       .then(() => {
-        showToast("日志已清空");
+        showToast(t("settings.logs.cleared"));
         return reload();
       })
-      .catch((error) => reportFailure("清空日志失败", error));
+      .catch((error) => reportFailure(t("settings.logs.clearFailed"), error));
   }
 
   async function onDetailChange(level: LogLevel): Promise<void> {
@@ -115,10 +116,14 @@ export function LogSheet(props: LogSheetProps) {
     try {
       const info = await setLogLevel(level);
       setDetail(levelMode(info.level) === "debug");
-      showToast(level === "debug" ? "已开启详细日志" : "已恢复常规日志");
+      showToast(
+        level === "debug"
+          ? t("settings.logs.verboseOn")
+          : t("settings.logs.verboseOff"),
+      );
       await reload();
     } catch (error) {
-      reportFailure("切换日志级别失败", error);
+      reportFailure(t("settings.logs.levelFailed"), error);
     }
   }
 
@@ -136,15 +141,15 @@ export function LogSheet(props: LogSheetProps) {
               <TerminalIcon size={18} />
             </span>
             <div class="flex min-w-0 flex-1 flex-col">
-              <h1 class="text-[16px] font-bold leading-tight tracking-[0.02em]">应用日志</h1>
+              <h1 class="text-[16px] font-bold leading-tight tracking-[0.02em]">{t("settings.logs.title")}</h1>
               <span class="truncate text-[11px] text-text-3">
-                {tail()?.path || tail()?.fileError || "读取中…"}
+                {tail()?.path || tail()?.fileError || t("common.loadingDots")}
               </span>
             </div>
             <button
               class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
               type="button"
-              aria-label="关闭应用日志"
+              aria-label={t("settings.logs.close")}
               onClick={props.onClose}
             >
               <CloseIcon />
@@ -158,14 +163,14 @@ export function LogSheet(props: LogSheetProps) {
                 type="button"
                 onClick={() => setFilter(item.value)}
               >
-                {item.label}
+                {t(item.labelKey)}
               </button>
             ))}
             <span class="ml-auto flex items-center gap-1">
               <button
                 class="grid h-8 w-8 place-items-center rounded-lg text-text-2 transition-colors duration-150 active:bg-surface-2"
                 type="button"
-                aria-label="复制日志"
+                aria-label={t("settings.logs.copy")}
                 onClick={() => void copyAll()}
               >
                 <CopyIcon size={16} />
@@ -173,7 +178,7 @@ export function LogSheet(props: LogSheetProps) {
               <button
                 class="grid h-8 w-8 place-items-center rounded-lg text-text-2 transition-colors duration-150 active:bg-surface-2"
                 type="button"
-                aria-label="刷新日志"
+                aria-label={t("settings.logs.refresh")}
                 onClick={() => void reload()}
               >
                 <RefreshIcon size={16} />
@@ -182,20 +187,20 @@ export function LogSheet(props: LogSheetProps) {
           </div>
 
           <div class="flex flex-none items-center gap-1.5 border-b border-border px-[18px] py-2">
-            <span class="text-[11.5px] text-text-3">级别</span>
+            <span class="text-[11.5px] text-text-3">{t("settings.logs.level")}</span>
             <button
               class={chipClass(!detail())}
               type="button"
               onClick={() => void onDetailChange("info")}
             >
-              常规
+              {t("settings.logs.levelNormal")}
             </button>
             <button
               class={chipClass(detail())}
               type="button"
               onClick={() => void onDetailChange("debug")}
             >
-              详细
+              {t("settings.logs.levelVerbose")}
             </button>
             <button
               class="ml-auto flex items-center gap-1 rounded-lg px-2 py-1 text-[11.5px] text-danger transition-colors duration-150 active:bg-danger-weak"
@@ -203,7 +208,9 @@ export function LogSheet(props: LogSheetProps) {
               onClick={onClear}
             >
               <TrashIcon size={14} />
-              {confirming() ? "再点一次确认清空" : "清空"}
+              {confirming()
+                ? t("settings.action.clearConfirm")
+                : t("common.clear")}
             </button>
           </div>
 
@@ -219,12 +226,12 @@ export function LogSheet(props: LogSheetProps) {
               fallback={
                 <div class="grid h-full place-items-center px-6 text-center text-[12.5px] text-text-3">
                   {loading()
-                    ? "读取中…"
+                    ? t("common.loadingDots")
                     : tail()?.fileError
                       ? tail()!.fileError
                       : filter() === null
-                        ? "暂无日志"
-                        : "该级别下暂无日志"}
+                        ? t("settings.logs.empty")
+                        : t("settings.logs.emptyAtLevel")}
                 </div>
               }
             >
@@ -236,7 +243,7 @@ export function LogSheet(props: LogSheetProps) {
 
           <Show when={detail()}>
             <p class="flex flex-none items-center border-t border-border px-[18px] py-2 text-[11px] text-text-3">
-              详细日志会记录每一步请求与解析，排障结束后建议切回常规
+              {t("settings.logs.verboseNote")}
             </p>
           </Show>
         </div>

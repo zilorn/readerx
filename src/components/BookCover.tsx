@@ -1,6 +1,8 @@
 import { Show, createEffect, createMemo, createSignal } from "solid-js";
 import { bookMetaById } from "../lib/books";
 import { hanText } from "../lib/hanDisplay";
+import { t } from "../lib/i18n";
+import { bookDisplayAuthor, bookDisplayTitle } from "../lib/bookDisplay";
 
 type CoverVariant = "grid" | "thumb" | "row";
 
@@ -39,8 +41,8 @@ export function BookCover(props: BookCoverProps) {
   const background = () =>
     `linear-gradient(165deg, hsl(${hue()} 58% 52%), hsl(${(hue() + 24) % 360} 62% 34%))`;
   // 兜底封面上的书名 / 作者走简繁转换显示副本（书库原文不变）
-  const title = () => hanText(book()?.title ?? "");
-  const author = () => hanText(book()?.author ?? "");
+  const title = () => hanText(bookDisplayTitle(book()?.title));
+  const author = () => hanText(bookDisplayAuthor(book()?.author));
   const variantClass =
     variant === "grid"
       ? "w-full"
@@ -57,7 +59,11 @@ export function BookCover(props: BookCoverProps) {
 
   const formatLabel = () => {
     const format = book()?.format;
-    return format === "online" ? "在线" : format ? format.toUpperCase() : "";
+    return format === "online"
+      ? t("shelf.source.online")
+      : format
+        ? format.toUpperCase()
+        : "";
   };
 
   return (
@@ -65,7 +71,9 @@ export function BookCover(props: BookCoverProps) {
       class={`${baseClass} ${variantClass} ${sheenClass()}`}
       style={{ background: background() }}
       role="img"
-      aria-label={props.label ?? `${title() || "书籍"}封面`}
+      aria-label={
+        props.label ?? t("shelf.cover.ariaLabel", { title: title() })
+      }
     >
       <span class="absolute left-1.5 top-1.5 z-10 rounded-full bg-black/30 px-[5px] py-[2.5px] text-[9px] leading-none tracking-[0.08em]">
         {formatLabel()}

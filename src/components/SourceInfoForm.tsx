@@ -8,6 +8,7 @@ import { For } from "solid-js";
 import { ChevronRightIcon, ClearIcon, FolderIcon, GlobeKeyIcon } from "./icons";
 import { ToggleSwitch } from "./ToggleSwitch";
 import { CAPABILITY_LABELS, type BookSourceCapabilities } from "../lib/bookSourcesTypes";
+import { t } from "../lib/i18n";
 
 export interface SourceInfoFormProps {
   name: string;
@@ -52,7 +53,7 @@ export function SourceInfoForm(props: SourceInfoFormProps) {
       {/* 元信息 */}
       <section class="space-y-2.5">
         <label class="flex flex-col gap-1">
-          <span class={LABEL_CLASS}>名称</span>
+          <span class={LABEL_CLASS}>{t("sourceEditor.form.name")}</span>
           <input
             class={FIELD_CLASS}
             value={props.name}
@@ -60,7 +61,7 @@ export function SourceInfoForm(props: SourceInfoFormProps) {
           />
         </label>
         <label class="flex flex-col gap-1">
-          <span class={LABEL_CLASS}>站点地址（bookSourceUrl）</span>
+          <span class={LABEL_CLASS}>{t("sourceEditor.form.bookSourceUrl")}</span>
           <input
             class={`${FIELD_CLASS} text-[13px]`}
             value={props.bookSourceUrl}
@@ -69,7 +70,7 @@ export function SourceInfoForm(props: SourceInfoFormProps) {
         </label>
         <div class="flex gap-2.5">
           <label class="flex min-w-0 flex-1 flex-col gap-1">
-            <span class={LABEL_CLASS}>作者</span>
+            <span class={LABEL_CLASS}>{t("sourceEditor.form.author")}</span>
             <input
               class={FIELD_CLASS}
               value={props.author}
@@ -77,7 +78,7 @@ export function SourceInfoForm(props: SourceInfoFormProps) {
             />
           </label>
           <label class="flex w-24 flex-col gap-1">
-            <span class={LABEL_CLASS}>版本</span>
+            <span class={LABEL_CLASS}>{t("sourceEditor.form.version")}</span>
             <input
               class={FIELD_CLASS}
               value={props.version}
@@ -86,7 +87,7 @@ export function SourceInfoForm(props: SourceInfoFormProps) {
           </label>
         </div>
         <div class="flex flex-col gap-1">
-          <span class={LABEL_CLASS}>分组</span>
+          <span class={LABEL_CLASS}>{t("sourceEditor.form.group")}</span>
           <button
             class="flex items-center gap-2 rounded-[10px] border border-border bg-surface px-3 py-2 text-left text-[13px] outline-none active:bg-surface-2"
             onClick={props.onPickGroup}
@@ -96,7 +97,7 @@ export function SourceInfoForm(props: SourceInfoFormProps) {
               class="min-w-0 flex-1 truncate"
               classList={{ "text-text-3": !props.groupName }}
             >
-              {props.groupName || "未分组"}
+              {props.groupName || t("common.ungrouped")}
             </span>
             <ChevronRightIcon size={15} class="flex-none text-text-3" />
           </button>
@@ -106,10 +107,10 @@ export function SourceInfoForm(props: SourceInfoFormProps) {
       {/* 启用与能力开关 */}
       <section class="rounded-[14px] border border-border bg-surface">
         <div class="flex w-full items-center justify-between px-4 py-3">
-          <span class="text-[14px] font-medium">启用书源</span>
+          <span class="text-[14px] font-medium">{t("sourceEditor.form.enabled")}</span>
           <ToggleSwitch
             on={props.enabled}
-            label="启用书源"
+            label={t("sourceEditor.form.enabled")}
             onChange={() => props.onEnabled(!props.enabled)}
           />
         </div>
@@ -117,10 +118,10 @@ export function SourceInfoForm(props: SourceInfoFormProps) {
           <For each={capabilityKeys()}>
             {(key) => (
               <div class="flex w-full items-center justify-between px-4 py-2.5">
-                <span class="text-[13.5px] text-text-2">{CAPABILITY_LABELS[key]}</span>
+                <span class="text-[13.5px] text-text-2">{t(CAPABILITY_LABELS[key])}</span>
                 <ToggleSwitch
                   on={props.caps[key]}
-                  label={CAPABILITY_LABELS[key]}
+                  label={t("sourceEditor.form.ability", { name: t(CAPABILITY_LABELS[key]) })}
                   onChange={() => props.onCaps({ ...props.caps, [key]: !props.caps[key] })}
                 />
               </div>
@@ -132,9 +133,7 @@ export function SourceInfoForm(props: SourceInfoFormProps) {
       {/* 请求与会话 */}
       <section class="space-y-2.5">
         <label class="flex flex-col gap-1">
-          <span class={LABEL_CLASS}>
-            User-Agent（留空用内置默认；过 CF 等站点可在此填浏览器 UA）
-          </span>
+          <span class={LABEL_CLASS}>{t("sourceEditor.form.userAgent")}</span>
           <input
             class={`${FIELD_CLASS} text-[12px]`}
             value={props.userAgent}
@@ -142,9 +141,7 @@ export function SourceInfoForm(props: SourceInfoFormProps) {
           />
         </label>
         <label class="flex flex-col gap-1">
-          <span class={LABEL_CLASS}>
-            默认请求头（每行「名称: 值」，Cookie 等可在此粘贴，CF 站点见 docs/cloudflare.md）
-          </span>
+          <span class={LABEL_CLASS}>{t("sourceEditor.form.headers")}</span>
           <textarea
             class="min-h-16 resize-y rounded-[10px] border border-border bg-surface px-3 py-2 font-mono text-[11.5px] leading-[1.6] outline-none focus:border-accent"
             rows={3}
@@ -157,29 +154,31 @@ export function SourceInfoForm(props: SourceInfoFormProps) {
         <div class="space-y-2 rounded-[14px] border border-border bg-surface p-3.5">
           <div class="flex items-center gap-1.5">
             <GlobeKeyIcon size={16} class="text-text-2" />
-            <span class="whitespace-nowrap text-[13px] font-semibold text-text-2">网页登录</span>
+            <span class="whitespace-nowrap text-[13px] font-semibold text-text-2">
+              {t("sourceEditor.form.webLogin")}
+            </span>
             <span class="text-[10.5px] text-text-3">
-              WebView 浮层内完成登录，捕获含 httpOnly 的 Cookie
+              {t("sourceEditor.form.webLoginHint")}
             </span>
           </div>
           <div class="flex w-full items-center justify-between gap-3 rounded-[12px] border border-border px-3 py-2.5">
             <span class="text-left">
-              <span class="block text-[12.5px] font-medium text-text-2">自动网页认证</span>
+              <span class="block text-[12.5px] font-medium text-text-2">
+                {t("sourceEditor.form.autoAuth")}
+              </span>
               <span class="mt-0.5 block text-[10.5px] leading-[1.45] text-text-3">
-                请求遇 Cloudflare 挑战时自动弹窗认证并重试（令牌过期自动刷新）；书源代码
-                webview.login 同受此开关控制
+                {t("sourceEditor.form.autoAuthHint")}
               </span>
             </span>
             <ToggleSwitch
               on={props.autoAuth}
-              label="自动网页认证"
+              label={t("sourceEditor.form.autoAuth")}
               onChange={() => props.onAutoAuth(!props.autoAuth)}
             />
           </div>
           {!props.autoAuth && (
             <p class="text-[10.5px] leading-[1.5] text-text-3">
-              已关闭：该书源请求被拦截时不会自动弹出认证窗，书源代码的 webview.login
-              也会返回不可用；编辑页「打开登录页」不受影响
+              {t("sourceEditor.form.autoAuthOff")}
             </p>
           )}
           <input
@@ -194,7 +193,9 @@ export function SourceInfoForm(props: SourceInfoFormProps) {
               disabled={props.loginBusy || !props.loginSupported}
               onClick={props.onWebLogin}
             >
-              {props.loginBusy ? "登录窗口已打开…" : "打开登录页"}
+              {props.loginBusy
+                ? t("sourceEditor.form.loginOpening")
+                : t("sourceEditor.form.openLogin")}
             </button>
             <button
               class="inline-flex items-center justify-center gap-1.5 rounded-xl bg-surface-2 px-3 py-2 text-[12.5px] font-semibold text-text-2 active:scale-[0.98] disabled:opacity-45"
@@ -202,14 +203,12 @@ export function SourceInfoForm(props: SourceInfoFormProps) {
               onClick={props.onClearLogin}
             >
               <ClearIcon size={14} />
-              清空登录 Cookie
+              {t("sourceEditor.form.clearLogin")}
             </button>
           </div>
           {!props.loginSupported && (
             <p class="text-[10.5px] leading-[1.5] text-text-3">
-              当前平台不支持网页登录（Android 应用内浮层 / 桌面端独立登录窗口）；可在代码里用
-              <code class="font-mono"> webview.login(url) </code>
-              触发。
+              {t("sourceEditor.form.unsupported")}
             </p>
           )}
         </div>

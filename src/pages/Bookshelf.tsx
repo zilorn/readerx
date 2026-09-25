@@ -36,11 +36,12 @@ import {
 } from "../lib/booksTypes";
 import { withHanMeta } from "../lib/hanDisplay";
 import {
+  groupDisplayName,
   groupList,
   HIDDEN_GROUP_ID,
-  HIDDEN_GROUP_NAME,
   isHiddenGroupId,
 } from "../lib/groups";
+import { t } from "../lib/i18n";
 import { metaCardStatus } from "../lib/progress";
 import {
   lastShelfFilterKey,
@@ -51,6 +52,7 @@ import {
   shelfSourceFilterEnabled,
   type ShelfEntry,
 } from "../lib/store";
+import { bookDisplayTitle } from "../lib/bookDisplay";
 
 interface ShelfItem {
   entry: ShelfEntry;
@@ -116,6 +118,8 @@ function BookCard(props: {
 }) {
   const { entry, book } = props.item;
   const { hasRead, finished, percent } = cardProgress(entry, book);
+  /** 兜底书名只在显示时翻译（书库里的默认书名是持久化值，见 lib/bookDisplay.ts） */
+  const title = () => bookDisplayTitle(book.title);
 
   let longPressTimer: number | undefined;
   let longPressFired = false;
@@ -163,9 +167,9 @@ function BookCard(props: {
       aria-label={
         props.selectMode
           ? props.selected
-            ? `取消选中《${book.title}》`
-            : `选中《${book.title}》`
-          : `打开《${book.title}》`
+            ? t("shelf.deselectBookAria", { title: title() })
+            : t("shelf.selectBookAria", { title: title() })
+          : t("shelf.openAria", { title: title() })
       }
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
@@ -186,7 +190,7 @@ function BookCard(props: {
         </Show>
       </div>
       <span class="max-w-full truncate text-[13.5px] font-semibold">
-        {book.title}
+        {title()}
       </span>
       <Show when={hasRead}>
         <span
@@ -194,7 +198,9 @@ function BookCard(props: {
             finished ? "text-success" : "text-accent"
           }`}
         >
-          {finished ? "已读完" : `读到 ${percent}%`}
+          {finished
+            ? t("shelf.progress.finished")
+            : t("shelf.progress.percent", { percent })}
         </span>
         <span class="h-[3px] w-full overflow-hidden rounded-[2px] bg-surface-2" aria-hidden="true">
           <i
@@ -469,16 +475,16 @@ export default function BookshelfPage() {
     if (!showSourceChips() && groups.length === 0 && hiddenCount === 0) return chips;
     chips.push({
       key: "all",
-      label: "全部",
+      label: t("common.all"),
       count: shelfItems().length,
       value: { kind: "all" },
     });
     if (showSourceChips()) {
       const counts = sourceCounts();
       const options: { key: string; label: string; source: BookSource }[] = [
-        { key: "local", label: "本地", source: "local" },
+        { key: "local", label: t("shelf.source.local"), source: "local" },
         { key: "webdav", label: "WebDAV", source: "webdav" },
-        { key: "online", label: "在线", source: "online" },
+        { key: "online", label: t("shelf.source.online"), source: "online" },
       ];
       // 没有该来源的在架书就不显示对应 chip
       for (const option of options) {
@@ -496,7 +502,7 @@ export default function BookshelfPage() {
     if (hiddenCount > 0) {
       chips.push({
         key: `group-${HIDDEN_GROUP_ID}`,
-        label: HIDDEN_GROUP_NAME,
+        label: groupDisplayName(HIDDEN_GROUP_ID),
         count: hiddenCount,
         value: { kind: "group", groupId: HIDDEN_GROUP_ID },
       });
@@ -617,12 +623,12 @@ export default function BookshelfPage() {
   return (
     <div class="page relative select-none">
       <PageHeader
-        title={selecting() ? "选中书籍" : "书架"}
+        title={selecting() ? t("shelf.select.title") : t("shelf.title")}
         subtitle={
           selecting()
-            ? `已选 ${selectedCount()} 本`
+            ? t("shelf.select.count", { count: selectedCount() })
             : visibleItems().length > 0
-              ? `${visibleItems().length} 本在架`
+              ? t("shelf.onShelfCount", { count: visibleItems().length })
               : undefined
         }
         right={
@@ -631,16 +637,20 @@ export default function BookshelfPage() {
               <button
                 class="h-10 rounded-xl px-2.5 text-[13.5px] font-medium text-accent transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2 disabled:opacity-35"
                 aria-label={
-                  allVisibleSelected() ? "取消全选当前可见书籍" : "全选当前可见书籍"
+                  allVisibleSelected()
+                    ? t("shelf.select.noneAria")
+                    : t("shelf.select.allAria")
                 }
                 disabled={visibleItems().length === 0}
                 onClick={toggleSelectAll}
               >
-                {allVisibleSelected() ? "取消全选" : "全选"}
+                {allVisibleSelected()
+                  ? t("common.deselectAll")
+                  : t("common.selectAll")}
               </button>
               <button
                 class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-                aria-label="取消选择"
+                aria-label={t("shelf.select.exitAria")}
                 onClick={cancelSelect}
               >
                 <CloseIcon />
@@ -650,14 +660,14 @@ export default function BookshelfPage() {
             <div class="flex flex-none items-center gap-1">
               <button
                 class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-                aria-label="搜索书架书籍"
+                aria-label={t("shelf.searchAria")}
                 onClick={() => navigate("/shelf-search")}
               >
                 <SearchIcon />
               </button>
               <ImportButton
                 class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-                ariaLabel="导入书籍"
+                ariaLabel={t("shelf.import.title")}
               >
                 <PlusIcon />
               </ImportButton>
@@ -699,7 +709,7 @@ export default function BookshelfPage() {
           "pb-[calc(28px+env(safe-area-inset-bottom))]": !selecting(),
         }}
       >
-        <Show when={bookMetasReady()} fallback={<LoadingScreen label="加载本地书库…" />}>
+        <Show when={bookMetasReady()} fallback={<LoadingScreen label={t("shelf.loading.library")} />}>
           <Show
             when={visibleItems().length > 0}
             fallback={
@@ -707,34 +717,34 @@ export default function BookshelfPage() {
                 <LibraryIcon size={56} class="mb-2.5" />
                 <p class="text-[15.5px] font-semibold text-text-2">
                   {items().length === 0
-                    ? "书架空空如也"
+                    ? t("shelf.empty.noBooks")
                     : allHiddenOnly()
-                      ? "全部书籍均已隐藏"
+                      ? t("shelf.empty.allHidden")
                       : activeFilter().kind === "group"
-                        ? "该分组暂无书籍"
-                        : "没有符合条件的书籍"}
+                        ? t("shelf.empty.group")
+                        : t("shelf.empty.noMatch")}
                 </p>
                 <p class="mb-[18px] mt-0.5 text-[12.5px] leading-[1.6]">
                   {items().length === 0
-                    ? "导入 TXT / EPUB / PDF 到本地书架"
+                    ? t("shelf.empty.noBooksHint")
                     : allHiddenOnly()
-                      ? "点上方「隐藏」分组即可查看"
+                      ? t("shelf.empty.allHiddenHint")
                       : activeFilter().kind === "group"
-                        ? "回到书架顶部点「全部」即可看到其它书籍"
-                        : "切换书架顶部的筛选条件即可看到其它书籍"}
+                        ? t("shelf.empty.groupHint")
+                        : t("shelf.empty.noMatchHint")}
                 </p>
                 <ImportButton
                   class="inline-flex items-center justify-center gap-1.5 rounded-xl bg-accent px-[22px] py-[11px] text-sm font-semibold text-on-accent shadow-lg shadow-accent/30 transition-[scale,opacity] duration-100 active:scale-[0.97] active:opacity-90"
-                  ariaLabel="导入书籍"
+                  ariaLabel={t("shelf.import.title")}
                 >
-                  导入书籍
+                  {t("shelf.import.title")}
                 </ImportButton>
               </div>
             }
           >
             <Show when={selecting()}>
               <p class="mx-0.5 mt-2.5 text-xs text-text-3">
-                长按书籍进入多选；点击已选书籍可取消，底部可移动到分组或删除
+                {t("shelf.select.hint")}
               </p>
               <div class="mt-1">
                 <ShelfGrid
@@ -771,7 +781,7 @@ export default function BookshelfPage() {
                 onClick={() => setGroupPickerOpen(true)}
               >
                 <FolderIcon size={17} />
-                移动到分组
+                {t("shelf.select.moveToGroup")}
               </button>
               <button
                 class="inline-flex flex-1 items-center justify-center gap-1.5 rounded-xl border px-0.5 py-[11px] text-[13.5px] font-medium transition-colors"
@@ -782,7 +792,9 @@ export default function BookshelfPage() {
                 onClick={onRequestDelete}
               >
                 <TrashIcon size={17} />
-                {confirmDelete() ? "确认删除" : "删除"}
+                {confirmDelete()
+                  ? t("shelf.select.confirmDelete")
+                  : t("common.delete")}
               </button>
             </div>
           </Show>

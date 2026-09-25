@@ -12,9 +12,15 @@ import {
 import type { BookMeta } from "../lib/booksTypes";
 import { fuzzyScore } from "../lib/fuzzy";
 import { hanText } from "../lib/hanDisplay";
-import { groupName, isHiddenGroupId } from "../lib/groups";
+import {
+  groupDisplayName,
+  groupName,
+  isHiddenGroupId,
+} from "../lib/groups";
+import { t } from "../lib/i18n";
 import { metaCardStatus } from "../lib/progress";
 import { shelfOrder, type ShelfEntry } from "../lib/store";
+import { bookDisplayAuthor, bookDisplayTitle } from "../lib/bookDisplay";
 
 interface ShelfItem {
   entry: ShelfEntry;
@@ -115,14 +121,18 @@ export default function ShelfSearchPage() {
 
   return (
     <div class="page">
-      <PageHeader title="搜索书架" onBack={goBack} backLabel="返回书架">
+      <PageHeader
+        title={t("shelf.search.title")}
+        onBack={goBack}
+        backLabel={t("shelf.search.back")}
+      >
         <div class="flex items-center gap-2 px-[18px] pb-2 pt-1.5">
           <div class="flex min-w-0 flex-1 items-center gap-2 rounded-[12px] border border-border bg-surface px-3 transition-colors focus-within:border-accent">
             <SearchIcon size={17} class="flex-none text-text-3" />
             <input
               class="min-w-0 flex-1 bg-transparent py-[9px] text-[14px] text-text outline-none placeholder:text-text-3"
               type="text"
-              placeholder="书名 / 作者 / 文件名"
+              placeholder={t("shelf.search.placeholder")}
               autofocus
               value={keyword()}
               onInput={(event) => setKeyword(event.currentTarget.value)}
@@ -131,7 +141,7 @@ export default function ShelfSearchPage() {
               <button
                 class="grid h-6 w-6 flex-none place-items-center rounded-full text-text-3 transition-colors hover:text-text-2 active:bg-surface-2"
                 type="button"
-                aria-label="清空搜索词"
+                aria-label={t("shelf.search.clear")}
                 onClick={() => setKeyword("")}
               >
                 <CloseIcon size={15} />
@@ -140,24 +150,24 @@ export default function ShelfSearchPage() {
           </div>
           <Show when={keyword().trim()}>
             <span class="flex-none text-xs text-text-3">
-              {results().length} 本
+              {t("shelf.search.resultCount", { count: results().length })}
             </span>
           </Show>
         </div>
       </PageHeader>
 
       <div class="px-[18px] pb-[calc(28px+env(safe-area-inset-bottom))] pt-1">
-        <Show when={bookMetasReady()} fallback={<LoadingScreen label="加载本地书库…" />}>
+        <Show when={bookMetasReady()} fallback={<LoadingScreen label={t("shelf.loading.library")} />}>
           <Show
             when={keyword().trim() !== ""}
             fallback={
               <div class="flex flex-col items-center gap-1 px-6 py-16 text-center text-text-3">
                 <SearchIcon size={52} class="mb-2.5" />
                 <p class="text-[15.5px] font-semibold text-text-2">
-                  输入关键词开始搜索
+                  {t("shelf.search.prompt")}
                 </p>
                 <p class="mt-0.5 text-[12.5px] leading-[1.6]">
-                  支持按书名、作者、文件名模糊匹配
+                  {t("shelf.search.promptHint")}
                 </p>
               </div>
             }
@@ -168,7 +178,7 @@ export default function ShelfSearchPage() {
                 <div class="flex flex-col items-center gap-1 px-6 py-16 text-center text-text-3">
                   <SearchIcon size={52} class="mb-2.5" />
                   <p class="text-[15.5px] font-semibold text-text-2">
-                    未找到相关书籍
+                    {t("shelf.search.noResults")}
                   </p>
                 </div>
               }
@@ -178,15 +188,15 @@ export default function ShelfSearchPage() {
                   {(result) => {
                     const { entry, book } = result.item;
                     const summary = readSummary(entry, book);
-                    const title = hanText(book.title);
+                    const title = hanText(bookDisplayTitle(book.title));
                     // 展示与搜索都用同一套字形：书名/作者按用户偏好转换后显示
-                    const author = hanText(book.author);
+                    const author = hanText(bookDisplayAuthor(book.author));
                     return (
                       <div
                         role="button"
                         tabindex={0}
                         class="flex w-full items-center gap-3.5 px-3.5 py-3 text-left transition-colors active:bg-surface-2"
-                        aria-label={`打开《${title}》`}
+                        aria-label={t("shelf.openAria", { title })}
                         onClick={() => openBook(book.id)}
                         onKeyDown={(e) => {
                           if (e.key !== "Enter" && e.key !== " ") return;
@@ -201,7 +211,7 @@ export default function ShelfSearchPage() {
                           </span>
                           <span class="truncate text-[12px] text-text-3">
                             {author}
-                            <Show when={groupName(book.groupId)}>
+                            <Show when={groupDisplayName(book.groupId)}>
                               {(name) => (
                                 <span> · {name()}</span>
                               )}
@@ -217,8 +227,10 @@ export default function ShelfSearchPage() {
                                 }}
                               >
                                 {info().finished
-                                  ? "已读完"
-                                  : `读到 ${info().percent}%`}
+                                  ? t("shelf.progress.finished")
+                                  : t("shelf.progress.percent", {
+                                      percent: info().percent,
+                                    })}
                               </span>
                             )}
                           </Show>

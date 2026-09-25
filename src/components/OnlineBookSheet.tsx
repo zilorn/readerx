@@ -15,11 +15,13 @@ import { bookMetaList } from "../lib/books";
 import { addOnlineBookToShelf, fetchBookToc, mergeBookDetail, type PickedBook } from "../lib/online";
 import { notifyAddedToShelf } from "../lib/groups";
 import { showToast } from "../lib/toast";
+import { t } from "../lib/i18n";
 import { TagChips } from "./TagChips";
 import { QuickSearchText } from "./QuickSearchText";
 import { BookIcon, CloseIcon, ListIcon, RefreshIcon } from "./icons";
 import { ScrollArea } from "./ScrollArea";
 import { SourceCover } from "./SourceCover";
+import { isFallbackBookAuthor } from "../lib/bookDisplay";
 
 /** 目录预览默认先渲染的章节数（超出折叠，避免超长书首屏卡顿） */
 const TOC_PREVIEW_CAP = 300;
@@ -84,7 +86,7 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
       void loadToc(p, run);
     } else {
       setTocUnsupported(true);
-      setTocError("该书源未启用「目录」能力，无法预览章节");
+      setTocError(t("discover.online.tocUnsupported"));
     }
   }
 
@@ -196,7 +198,7 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
     if (!existing) {
       const list = chapters();
       if (!list || list.length === 0) {
-        setActionError("目录尚未就绪，暂时无法加入书架");
+        setActionError(t("discover.online.tocNotReady"));
         return;
       }
       setAdding(true);
@@ -224,7 +226,7 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
       }
       setAdding(false);
     } else {
-      showToast("已在书架中");
+      showToast(t("discover.sheet.alreadyInShelf"));
     }
     if (openReader && bookId) {
       // 抽屉挂在 Portal 上，不随页面一起隐藏：跳转前必须自己收起
@@ -255,16 +257,16 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
           class="fixed inset-x-0 bottom-0 z-[71] mx-auto flex max-h-[88%] w-full max-w-[var(--app-column)] animate-sheet-up flex-col overflow-hidden rounded-t-[16px] bg-surface shadow-[0_-10px_34px_rgb(0_0_0/0.22)]"
           role="dialog"
           aria-modal="true"
-          aria-label="在线书详情"
+          aria-label={t("discover.sheet.aria")}
         >
           <div class="flex flex-none items-center gap-2 border-b border-border px-4 py-3">
-            <span class="text-[15px] font-bold">书籍详情</span>
+            <span class="text-[15px] font-bold">{t("discover.sheet.title")}</span>
             <span class="min-w-0 flex-1 truncate text-xs text-text-3">
               {props.pick?.source.name ?? ""}
             </span>
             <button
               class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-              aria-label="关闭"
+              aria-label={t("common.close")}
               onClick={close}
             >
               <CloseIcon />
@@ -287,7 +289,7 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
                   <h2 class="text-[17px] font-bold leading-snug">
                     <QuickSearchText
                       text={hanText(info()?.bookName ?? "")}
-                      action="搜索书名"
+                      action={t("discover.quickSearch.title")}
                       iconSize={13}
                       iconClass="mt-[5px]"
                       onSearch={props.onQuickSearch ? quickSearch : undefined}
@@ -295,13 +297,13 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
                   </h2>
                   <p class="truncate text-[12.5px] text-text-3">
                     <Show
-                      when={info()?.author?.trim()}
-                      fallback={<span>佚名</span>}
+                      when={isFallbackBookAuthor(info()?.author) ? "" : info()?.author?.trim()}
+                      fallback={<span>{t("common.anonymousAuthor")}</span>}
                     >
                       {(author) => (
                         <QuickSearchText
                           text={hanText(author())}
-                          action="搜索作者"
+                          action={t("discover.quickSearch.author")}
                           textClass="truncate"
                           iconSize={12}
                           iconClass="mt-[3px]"
@@ -312,12 +314,14 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
                   </p>
                   <Show when={info()?.latest}>
                     <p class="truncate text-[12px] text-accent">
-                      最新：{hanText(info()!.latest!)}
+                      {t("discover.online.latest", { value: hanText(info()!.latest!) })}
                     </p>
                   </Show>
                   <Show when={info()?.updateTime}>
                     <p class="text-[11px] text-text-3">
-                      更新：{info()!.updateTime}
+                      {t("discover.online.updateTime", {
+                        value: info()!.updateTime ?? "",
+                      })}
                     </p>
                   </Show>
                   <Show when={displayTags().length > 0}>
@@ -331,7 +335,7 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
                   <Show when={inShelf()}>
                     <p class="mt-1 inline-flex w-fit items-center gap-1 rounded-full bg-accent-weak px-2 py-0.5 text-[11px] font-semibold text-accent">
                       <BookIcon size={12} />
-                      已在书架
+                      {t("discover.online.inShelf")}
                     </p>
                   </Show>
                 </div>
@@ -340,7 +344,7 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
               {/* 简介 */}
               <section class="mt-4">
                 <h3 class="mb-2 text-[12.5px] font-medium tracking-[0.04em] text-text-3">
-                  简介
+                  {t("discover.online.intro")}
                 </h3>
                 <Show
                   when={info()?.intro}
@@ -349,9 +353,14 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
                       when={infoBusy()}
                       fallback={
                         <div class="flex min-h-[56px] items-center justify-center rounded-[12px] border border-dashed border-border bg-surface px-4 text-center text-[12px] leading-[1.7] text-text-3">
-                          <Show when={infoError()} fallback="暂无简介">
+                          <Show
+                            when={infoError()}
+                            fallback={t("discover.online.noIntro")}
+                          >
                             <span class="text-danger">
-                              简介获取失败：{infoError()}
+                              {t("discover.online.introFailed", {
+                                message: infoError(),
+                              })}
                             </span>
                           </Show>
                         </div>
@@ -359,7 +368,7 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
                     >
                       <div class="flex items-center justify-center gap-1.5 py-3 text-[12px] text-text-3">
                         <RefreshIcon size={14} class="animate-spin" />
-                        简介加载中…
+                        {t("discover.online.introLoading")}
                       </div>
                     </Show>
                   }
@@ -375,11 +384,11 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
                 <div class="mb-2 flex items-center gap-1.5">
                   <ListIcon size={15} class="flex-none text-text-3" />
                   <h3 class="text-[12.5px] font-medium tracking-[0.04em] text-text-3">
-                    目录
+                    {t("discover.online.toc")}
                   </h3>
                   <Show when={tocCount() > 0}>
                     <span class="ml-auto text-[11px] text-text-3">
-                      共 {tocCount()} 章
+                      {t("discover.online.tocCount", { count: tocCount() })}
                     </span>
                   </Show>
                 </div>
@@ -393,7 +402,7 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
                           when={tocError()}
                           fallback={
                             <div class="flex min-h-[56px] items-center justify-center rounded-[12px] border border-dashed border-border bg-surface px-4 text-center text-[12px] text-text-3">
-                              目录加载中…
+                              {t("discover.online.tocLoading")}
                             </div>
                           }
                         >
@@ -404,7 +413,7 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
                                 class="flex-none rounded-lg bg-danger-weak px-2.5 py-1 text-[11.5px] font-semibold text-danger active:opacity-80"
                                 onClick={() => beginLoad(props.pick)}
                               >
-                                重试
+                                {t("common.retry")}
                               </button>
                             </Show>
                           </div>
@@ -413,7 +422,7 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
                     >
                       <div class="flex items-center justify-center gap-1.5 py-3 text-[12px] text-text-3">
                         <RefreshIcon size={14} class="animate-spin" />
-                        正在获取目录…
+                        {t("discover.online.tocFetching")}
                       </div>
                     </Show>
                   }
@@ -437,7 +446,9 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
                       class="mt-2 flex w-full items-center justify-center rounded-[10px] border border-border bg-surface py-2 text-[12px] font-medium text-text-2 active:bg-surface-2"
                       onClick={() => setShowAllChapters(true)}
                     >
-                      展开全部章节（还有 {collapsedCount()} 章）
+                      {t("discover.online.expandChapters", {
+                        count: collapsedCount(),
+                      })}
                     </button>
                   </Show>
                 </Show>
@@ -459,7 +470,7 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
                   disabled={adding() || !tocReady()}
                   onClick={() => void addToShelf(false)}
                 >
-                  加入书架
+                  {t("discover.online.addToShelf")}
                 </button>
               </Show>
               <button
@@ -467,9 +478,16 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
                 disabled={adding() || (!inShelf() && !tocReady())}
                 onClick={() => void addToShelf(true)}
               >
-                <Show when={adding()} fallback={inShelf() ? "开始阅读" : "加入书架并阅读"}>
+                <Show
+                  when={adding()}
+                  fallback={
+                    inShelf()
+                      ? t("discover.online.startReading")
+                      : t("discover.online.addAndRead")
+                  }
+                >
                   <RefreshIcon size={16} class="animate-spin" />
-                  正在加入…
+                  {t("discover.online.adding")}
                 </Show>
               </button>
             </div>

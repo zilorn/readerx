@@ -1,5 +1,6 @@
 import { For, createSignal } from "solid-js";
 import { CheckIcon, CloseIcon, FolderIcon, PlusIcon } from "./icons";
+import { t } from "../lib/i18n";
 import { createSourceGroup, sourceGroupList } from "../lib/sourceGroups";
 import { ScrollArea } from "./ScrollArea";
 
@@ -26,18 +27,18 @@ export function SourceGroupPicker(props: SourceGroupPickerProps) {
   }
 
   return (
-    <div class="fixed inset-0 z-50" role="dialog" aria-label="选择书源分组">
+    <div class="fixed inset-0 z-50" role="dialog" aria-label={t("sourceGroups.picker.hint")}>
       <div
         class="absolute inset-0 animate-sheet-fade bg-black/45 backdrop-blur-[2px]"
         onClick={props.onClose}
       />
       <div class="absolute inset-x-0 bottom-0 z-[51] flex max-h-[72%] animate-sheet-up flex-col overflow-hidden rounded-t-[16px] bg-surface shadow-[0_-10px_34px_rgb(0_0_0/0.22)]">
         <div class="flex flex-none items-center gap-2.5 border-b border-border px-4 py-3">
-          <span class="text-[15px] font-bold">归入分组</span>
-          <span class="flex-1 text-xs text-text-3">选择书源分组</span>
+          <span class="text-[15px] font-bold">{t("sourceGroups.picker.title")}</span>
+          <span class="flex-1 text-xs text-text-3">{t("sourceGroups.picker.hint")}</span>
           <button
             class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-            aria-label="关闭"
+            aria-label={t("common.close")}
             onClick={props.onClose}
           >
             <CloseIcon />
@@ -49,7 +50,11 @@ export function SourceGroupPicker(props: SourceGroupPickerProps) {
           class="min-h-0 flex-1"
           contentClass="px-0 py-1 pb-[calc(14px+env(safe-area-inset-bottom))]"
         >
-          <GroupRow label="未分组" active={!props.value} onClick={() => pick(null)} />
+          <GroupRow
+            label={t("common.ungrouped")}
+            active={!props.value}
+            onClick={() => pick(null)}
+          />
           <For each={sourceGroupList()}>
             {(group) => (
               <GroupRow
@@ -64,7 +69,7 @@ export function SourceGroupPicker(props: SourceGroupPickerProps) {
             <input
               value={newName()}
               onInput={(e) => setNewName(e.currentTarget.value)}
-              placeholder="新建分组"
+              placeholder={t("sourceGroups.create.placeholder")}
               class="min-w-0 flex-1 rounded-[10px] border border-border bg-bg px-3 py-[9px] text-[13.5px] text-text outline-none transition-colors placeholder:text-text-3 focus:border-accent"
               onKeyDown={(e) => {
                 if (e.key === "Enter") createAndPick();
@@ -75,7 +80,7 @@ export function SourceGroupPicker(props: SourceGroupPickerProps) {
               onClick={createAndPick}
             >
               <PlusIcon size={16} />
-              创建
+              {t("common.create")}
             </button>
           </div>
         </ScrollArea>

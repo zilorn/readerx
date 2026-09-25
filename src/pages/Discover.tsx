@@ -33,6 +33,7 @@ import { OnlineBookSheet } from "../components/OnlineBookSheet";
 import { SourceCover } from "../components/SourceCover";
 import { closeOnRouteChange } from "../lib/keptPage";
 import { createLogger } from "../lib/logger";
+import { t, type MessageKey } from "../lib/i18n";
 
 /** 发现页的日志出口：搜索 / 发现是用户主动发起、最需要留痕的动作 */
 const log = createLogger("discover");
@@ -204,10 +205,18 @@ export default function DiscoverPage() {
   });
 
   /** 分组把可用书源筛空时的说明（与全局没有可用书源区分开） */
-  const emptyScopeText = (what: string): string =>
-    groupFilter() === SOURCE_FILTER_ALL
-      ? `没有${what}的已启用书源`
-      : `该分组没有${what}的已启用书源`;
+  const emptyScopeText = (kind: "search" | "discover"): string =>
+    kind === "search"
+      ? t(
+          groupFilter() === SOURCE_FILTER_ALL
+            ? "discover.search.noSources"
+            : "discover.search.groupNoSources",
+        )
+      : t(
+          groupFilter() === SOURCE_FILTER_ALL
+            ? "discover.browse.noSources"
+            : "discover.browse.groupNoSources",
+        );
 
   function openPreview(entry: ResultEntry) {
     // 仍登记会话级 pick，保持与 /online/:key 深链的兼容
@@ -439,11 +448,11 @@ export default function DiscoverPage() {
   return (
     <div class="page">
       <PageHeader
-        title="发现"
+        title={t("shell.tab.discover")}
         right={
           <button
             class="grid h-10 w-10 place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-            aria-label="书源管理"
+            aria-label={t("discover.page.manageSources")}
             onClick={() => navigate("/sources")}
           >
             <SourceIcon size={21} />
@@ -455,9 +464,9 @@ export default function DiscoverPage() {
           <div class="flex gap-0.5 rounded-[10px] bg-surface-2 p-[3px]">
             {(
               [
-                { value: "search", label: "搜索" },
-                { value: "discover", label: "发现" },
-              ] as { value: Mode; label: string }[]
+                { value: "search", labelKey: "common.search" },
+                { value: "discover", labelKey: "shell.tab.discover" },
+              ] as { value: Mode; labelKey: MessageKey }[]
             ).map((opt) => (
               <button
                 class="flex-1 rounded-lg py-1.5 text-[13px] text-text-2"
@@ -467,7 +476,7 @@ export default function DiscoverPage() {
                 }}
                 onClick={() => setMode(opt.value)}
               >
-                {opt.label}
+                {t(opt.labelKey)}
               </button>
             ))}
           </div>
@@ -477,19 +486,25 @@ export default function DiscoverPage() {
       <div class="px-[18px] pb-[calc(36px+env(safe-area-inset-bottom))] pt-1">
         <Show
           when={bookSourcesReady()}
-          fallback={<p class="py-10 text-center text-[12px] text-text-3">书源加载中…</p>}
+          fallback={
+            <p class="py-10 text-center text-[12px] text-text-3">
+              {t("discover.page.sourcesLoading")}
+            </p>
+          }
         >
           <Show
             when={bookSourceList().some((s) => s.enabled)}
             fallback={
               <div class="flex flex-col items-center gap-2 px-6 py-16 text-center text-text-3">
                 <CompassIcon size={46} class="text-text-3/70" />
-                <p class="text-[15px] font-semibold text-text-2">没有已启用的书源</p>
+                <p class="text-[15px] font-semibold text-text-2">
+                  {t("discover.page.noSources")}
+                </p>
                 <button
                   class="mt-2 inline-flex items-center gap-1.5 rounded-xl bg-accent px-4 py-2.5 text-[13px] font-semibold text-on-accent active:scale-[0.97]"
                   onClick={() => navigate("/sources")}
                 >
-                  去管理书源
+                  {t("discover.page.goManageSources")}
                 </button>
               </div>
             }
@@ -511,7 +526,7 @@ export default function DiscoverPage() {
                   <SearchIcon size={17} class="flex-none text-text-3" />
                   <input
                     class="min-w-0 flex-1 bg-transparent text-[14px] outline-none placeholder:text-text-3"
-                    placeholder="输入书名 / 作者…"
+                    placeholder={t("discover.search.placeholder")}
                     value={keyword()}
                     onKeyDown={(e) => {
                       if (e.key === "Enter") void onSearch();
@@ -521,7 +536,7 @@ export default function DiscoverPage() {
                 </div>
                 <button
                   class="grid h-[42px] w-[42px] flex-none place-items-center rounded-[10px] bg-accent text-on-accent active:scale-[0.95] disabled:opacity-50"
-                  aria-label="搜索"
+                  aria-label={t("common.search")}
                   disabled={searching() || !canSearch()}
                   onClick={() => void onSearch()}
                 >
@@ -530,7 +545,7 @@ export default function DiscoverPage() {
               </div>
               <Show when={!canSearch()}>
                 <p class="pb-2 text-center text-[12px] text-text-3">
-                  {emptyScopeText("可搜索")}
+                  {emptyScopeText("search")}
                 </p>
               </Show>
               <Show when={searching()}>
@@ -539,13 +554,18 @@ export default function DiscoverPage() {
                   classList={{ "py-8": results().length === 0, "py-3": results().length > 0 }}
                 >
                   <RefreshIcon size={16} class="animate-spin" />
-                  正在搜索书源 {searchProgress()} / {searchTotal() || "…"}（并发
-                  {currentSourceParallel()}）
+                  {t("discover.search.progress", {
+                    done: searchProgress(),
+                    total: searchTotal() || "…",
+                    parallel: currentSourceParallel(),
+                  })}
                 </div>
               </Show>
               <Show when={!searching() && searchDone() && results().length === 0}>
                 <p class="py-8 text-center text-[12.5px] text-text-3">
-                  {errorText() ? `搜索失败：${errorText()}` : "没有找到结果"}
+                  {errorText()
+                    ? t("discover.search.failed", { message: errorText() })
+                    : t("discover.search.noResults")}
                 </p>
               </Show>
               <Show when={results().length > 0}>
@@ -558,8 +578,8 @@ export default function DiscoverPage() {
                 </div>
                 <p class="mt-2 text-center text-[11px] text-text-3">
                   {searching()
-                    ? `已找到 ${results().length} 条 · 仍在搜索其他书源…`
-                    : `${results().length} 条结果 · 点击查看详情并加入书架`}
+                    ? t("discover.search.foundMore", { count: results().length })
+                    : t("discover.search.resultCount", { count: results().length })}
                 </p>
               </Show>
             </Show>
@@ -567,7 +587,7 @@ export default function DiscoverPage() {
             <Show when={mode() === "discover"}>
               <Show when={discoverSources().length === 0}>
                 <p class="py-8 text-center text-[12.5px] text-text-3">
-                  {emptyScopeText("支持「发现」")}
+                  {emptyScopeText("discover")}
                 </p>
               </Show>
               <Show when={discoverSources().length > 0}>
@@ -610,7 +630,7 @@ export default function DiscoverPage() {
                 <Show when={discBusy() && discResults().length === 0}>
                   <div class="flex items-center justify-center gap-2 py-8 text-[12.5px] text-text-3">
                     <RefreshIcon size={16} class="animate-spin" />
-                    加载中…
+                    {t("common.loading")}
                   </div>
                 </Show>
                 <Show when={discError()}>
@@ -638,7 +658,7 @@ export default function DiscoverPage() {
                       void loadDiscoverPage(source, cat, discPage() + 1, false);
                     }}
                   >
-                    加载更多
+                    {t("discover.browse.loadMore")}
                   </button>
                 </Show>
               </Show>

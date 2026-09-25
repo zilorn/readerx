@@ -18,6 +18,7 @@ import {
 import type { BookFormat, BookMeta, LocalBook } from "./booksTypes";
 import { ensureShelfEntry } from "./store";
 import { createLogger } from "./logger";
+import { t, type MessageKey } from "./i18n";
 
 /** WebDAV 的日志出口：只记服务器地址与路径，绝不记密码 / Authorization 头 */
 const log = createLogger("webdav");
@@ -139,7 +140,7 @@ export function createDavServer(input: DavServerInput): DavServer {
     password: input.password,
     createdAt: Date.now(),
   };
-  if (!server.url) throw new Error("请填写服务器地址");
+  if (!server.url) throw new Error(t("webdav.error.urlRequired"));
   setServersSignal((prev) => [...prev, server]);
   persistServers();
   if (!activeId()) {
@@ -158,7 +159,7 @@ export function createDavServer(input: DavServerInput): DavServer {
 
 export function updateDavServer(id: string, input: DavServerInput): void {
   const url = normalizeUrl(input.url);
-  if (!url) throw new Error("请填写服务器地址");
+  if (!url) throw new Error(t("webdav.error.urlRequired"));
   setServersSignal((prev) =>
     prev.map((s) =>
       s.id === id
@@ -228,22 +229,23 @@ function davListUrl(server: DavServer, path: string): string {
 }
 
 function httpErrorLabel(status: number): string {
-  if (status === 401 || status === 403)
-    return "认证失败，请检查服务器账号密码与权限";
-  if (status === 404) return "目录不存在或地址配置有误";
-  if (status >= 500) return "服务器出错";
+  if (status === 401 || status === 403) return t("webdav.error.auth");
+  if (status === 404) return t("webdav.error.notFound");
+  if (status >= 500) return t("webdav.error.serverError");
   return `HTTP ${status}`;
 }
 
-async function assertOk(res: Response, fallback: string): Promise<void> {
+async function assertOk(res: Response, actionKey: MessageKey): Promise<void> {
   if (res.ok) return;
+  const action = t(actionKey);
+  const reason = httpErrorLabel(res.status);
   log.warn(
     "WebDAV 请求失败",
     `status=${res.status}`,
-    `reason=${httpErrorLabel(res.status)}`,
-    `action=${fallback}`,
+    `reason=${reason}`,
+    `action=${action}`,
   );
-  throw new Error(`${fallback}（${httpErrorLabel(res.status)}）`);
+  throw new Error(t("webdav.error.withReason", { action, reason }));
 }
 
 /** 当前目录下的直接子条目（文件夹 + 支持的书），PROPFIND Depth:1 只取一层 */
@@ -276,9 +278,9 @@ export async function listDavDirectory(
       `ms=${Math.round(performance.now() - started)}`,
       err,
     );
-    throw new Error("无法连接服务器，请检查地址与网络");
+    throw new Error(t("webdav.error.connectFailed"));
   }
-  await assertOk(res, "读取目录失败");
+  await assertOk(res, "webdav.error.listFailed");
   const xml = await res.text();
   const entries = parseMultiStatus(xml, url, path);
   log.info(
@@ -304,7 +306,7 @@ function parseMultiStatus(
 ): DavEntry[] {
   const doc = new DOMParser().parseFromString(xml, "application/xml");
   if (doc.querySelector("parsererror")) {
-    throw new Error("服务器返回了无法解析的目录数据");
+    throw new Error(t("webdav.error.parseFailed"));
   }
   const entries: DavEntry[] = [];
   const base = new URL(requestUrl);
@@ -413,9 +415,9 @@ export async function downloadDavFile(
       `ms=${Math.round(performance.now() - started)}`,
       err,
     );
-    throw new Error("下载失败，无法连接服务器");
+    throw new Error(t("webdav.error.downloadFailed"));
   }
-  await assertOk(res, "下载书籍失败");
+  await assertOk(res, "webdav.error.downloadBookFailed");
   const bytes = await res.arrayBuffer();
   const fileName = path.split("/").filter(Boolean).pop() ?? path;
   log.debug(
@@ -440,7 +442,8 @@ export async function fetchDavBookDraft(
   const started = performance.now();
   const { bytes, fileName } = await downloadDavFile(server, path);
   const format = detectBookFormat(fileName);
-  if (!format) throw new Error(`不支持的书籍格式：${fileName}`);
+  if (!format)
+    throw new Error(t("webdav.error.unsupportedFormat", { name: fileName }));
   const file = new File([bytes], fileName, { type: mimeOfFormat(format) });
   const draft =
     format === "txt"

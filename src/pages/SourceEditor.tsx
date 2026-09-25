@@ -1,7 +1,7 @@
-import { createSignal, onMount, Show } from "solid-js";
+import { createMemo, createSignal, onMount, Show } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 import { PageHeader } from "../components/PageHeader";
-import { PageTabs, type PageTab } from "../components/PageTabs";
+import { PageTabs } from "../components/PageTabs";
 import { JsCodeEditor } from "../components/JsCodeEditor";
 import { SourceInfoForm } from "../components/SourceInfoForm";
 import { SourceGroupPicker } from "../components/SourceGroupPicker";
@@ -35,6 +35,7 @@ import {
 } from "../lib/bookSourcesTypes";
 import { showToast } from "../lib/toast";
 import { createLogger } from "../lib/logger";
+import { t, type MessageKey } from "../lib/i18n";
 
 /** 书源编辑页的日志出口：测试调用是本页最需要留痕的用户动作 */
 const log = createLogger("source-editor");
@@ -42,13 +43,14 @@ const log = createLogger("source-editor");
 /** 编辑页内的三块内容（常驻 Tab；不是路由） */
 type EditorTab = "info" | "code" | "test";
 
-const EDITOR_TABS: readonly PageTab<EditorTab>[] = [
-  { key: "info", label: "书源信息" },
-  { key: "code", label: "JS代码" },
-  { key: "test", label: "测试" },
+/** Tab 常量：只存 key，渲染时再 t() */
+const EDITOR_TABS: readonly { key: EditorTab; labelKey: MessageKey }[] = [
+  { key: "info", labelKey: "sourceEditor.tab.info" },
+  { key: "code", labelKey: "sourceEditor.tab.code" },
+  { key: "test", labelKey: "sourceEditor.tab.test" },
 ];
 
-const CODE_DOC_HINT = "入口函数与宿主 API 见 docs/book-source-spec.md / docs/book-source-api.md";
+const CODE_DOC_HINT_KEY: MessageKey = "sourceEditor.code.docHint";
 const FOOT_PAD = "pb-[calc(28px+env(safe-area-inset-bottom))]";
 
 /** 书源编辑页（新建与编辑共用；会话来自 bookSources.currentEditorSource） */
@@ -61,6 +63,10 @@ export default function SourceEditorPage() {
     blankBookSource({ id: newBookSourceId(), js: TEMPLATE_JS });
 
   const [tab, setTab] = createSignal<EditorTab>("info");
+  /** Tab 文案在渲染时求值：语言一变跟着更新（常量表里只有 key） */
+  const editorTabs = createMemo(() =>
+    EDITOR_TABS.map((item) => ({ key: item.key, label: t(item.labelKey) })),
+  );
 
   const [name, setName] = createSignal(draft().name);
   const [bookSourceUrl, setBookSourceUrl] = createSignal(draft().bookSourceUrl);
@@ -116,7 +122,7 @@ export default function SourceEditorPage() {
     const next: BookSource = {
       schemaVersion: 1,
       id,
-      name: name().trim() || "未命名书源",
+      name: name().trim() || t("sourceEditor.unnamedSource"),
       bookSourceUrl: bookSourceUrl().trim(),
       author: author().trim(),
       version: version().trim(),
@@ -136,9 +142,9 @@ export default function SourceEditorPage() {
   }
 
   function validate(source: BookSource): string | null {
-    if (!source.name) return "名称不能为空";
-    if (!source.bookSourceUrl) return "站点地址不能为空";
-    if (!source.js.trim()) return "JS 代码不能为空";
+    if (!source.name) return t("sourceEditor.validation.nameRequired");
+    if (!source.bookSourceUrl) return t("sourceEditor.validation.urlRequired");
+    if (!source.js.trim()) return t("sourceEditor.validation.jsRequired");
     return null;
   }
 
@@ -162,7 +168,7 @@ export default function SourceEditorPage() {
   async function onSave(back = true) {
     const source = await saveAndStay();
     if (validate(source) === null) {
-      showToast("书源已保存");
+      showToast(t("sourceEditor.saved"));
       if (back) goBack();
     }
   }
@@ -177,7 +183,7 @@ export default function SourceEditorPage() {
       parsed = JSON.parse(argsText() || "[]") as unknown[];
       if (!Array.isArray(parsed)) parsed = [parsed];
     } catch {
-      setResult({ text: "参数不是合法 JSON 数组", error: true });
+      setResult({ text: t("sourceEditor.test.argsInvalid"), error: true });
       setTesting(false);
       return;
     }
@@ -202,10 +208,12 @@ export default function SourceEditorPage() {
     const pretty =
       r.ok && r.value !== undefined
         ? JSON.stringify(r.value, null, 2)
-        : r.error ?? "无返回";
+        : r.error ?? t("sourceEditor.test.noResult");
     const logText = r.logs.length ? `\n--- console ---\n${r.logs.join("\n")}` : "";
     setResult({
-      text: `${r.ok ? `成功 · ${r.elapsedMs}ms` : "失败"}：\n${pretty.slice(0, 6000)}${logText}`,
+      text: `${
+        r.ok ? t("sourceEditor.test.ok", { ms: r.elapsedMs }) : t("common.failed")
+      }${t("common.failureSeparator")}\n${pretty.slice(0, 6000)}${logText}`,
       error: !r.ok,
     });
     setTesting(false);
@@ -219,7 +227,7 @@ export default function SourceEditorPage() {
     }
     try {
       await removeBookSource(draft().id);
-      showToast("书源已删除");
+      showToast(t("sourceEditor.deleted"));
       goBack();
     } catch (e) {
       showToast(String(e), true);
@@ -233,7 +241,7 @@ export default function SourceEditorPage() {
     await navigator.clipboard
       .writeText(buildBookSourceExportText([source]))
       .catch(() => undefined);
-    showToast("书源 JSON 已复制");
+    showToast(t("common.copied"));
   }
 
   /** 填入模板：已有代码时需再点一次确认（避免一键抹掉正在写的内容） */
@@ -251,7 +259,7 @@ export default function SourceEditorPage() {
     if (loginBusy()) return;
     const url = (loginUrl().trim() || bookSourceUrl().trim() || draft().bookSourceUrl).trim();
     if (!/^https?:\/\/.+/.test(url)) {
-      showToast("请输入合法的 http/https 登录地址", true);
+      showToast(t("sourceEditor.validation.loginUrl"), true);
       return;
     }
     setLoginBusy(true);
@@ -264,35 +272,35 @@ export default function SourceEditorPage() {
       } else {
         const stored = storageEntryCount(r.storage);
         const parts: string[] = [];
-        if (r.count > 0) parts.push(`${r.count} 个 Cookie`);
-        if (stored > 0) parts.push(`${stored} 项存储`);
+        if (r.count > 0) parts.push(t("sourceEditor.login.cookieCount", { count: r.count }));
+        if (stored > 0) parts.push(t("sourceEditor.login.storageCount", { count: stored }));
         showToast(
           parts.length > 0
-            ? `已捕获 ${parts.join(" 与 ")} 并保存到该书源`
-            : "登录完成，但没有捕获到登录信息",
+            ? t("sourceEditor.login.captured", { parts: parts.join(t("sourceEditor.login.join")) })
+            : t("sourceEditor.login.nothingCaptured"),
         );
       }
     } else if (r.message.includes("取消") || r.message.includes("超时") || r.message.includes("关闭")) {
-      showToast(r.message || "已取消登录");
+      showToast(r.message || t("sourceEditor.login.cancelled"));
     } else {
-      showToast(r.message || "登录失败", true);
+      showToast(r.message || t("sourceEditor.login.failed"), true);
     }
   }
 
   async function onClearLogin() {
     const removed = await clearSourceLogin(draft().id);
-    showToast(removed > 0 ? "已清空登录态" : "没有保存的登录态");
+    showToast(removed > 0 ? t("sourceEditor.login.cleared") : t("sourceEditor.login.none"));
   }
 
   return (
     <div class="page flex h-full min-h-0 flex-col">
       <PageHeader
-        title={isNew ? "新建书源" : "编辑书源"}
+        title={isNew ? t("sourceEditor.title.new") : t("sourceEditor.title.edit")}
         onBack={goBack}
         right={
           <button
             class="grid h-10 w-10 place-items-center rounded-xl text-text-2 active:scale-[0.94] active:bg-surface-2"
-            aria-label="保存"
+            aria-label={t("sourceEditor.action.save")}
             onClick={() => void onSave(true)}
           >
             <SaveIcon size={20} />
@@ -300,7 +308,12 @@ export default function SourceEditorPage() {
         }
       />
 
-      <PageTabs tabs={EDITOR_TABS} value={tab()} onChange={setTab} label="书源编辑" />
+      <PageTabs
+        tabs={editorTabs()}
+        value={tab()}
+        onChange={setTab}
+        label={t("sourceEditor.tabs.label")}
+      />
 
       {/* 书源信息 */}
       <Show when={tab() === "info"}>
@@ -343,7 +356,7 @@ export default function SourceEditorPage() {
               onClick={() => void onDelete()}
             >
               <TrashIcon size={15} />
-              {confirmDelete() ? "再点一次确认删除" : "删除书源"}
+              {confirmDelete() ? t("sourceEditor.deleteConfirm") : t("sourceEditor.action.deleteSource")}
             </button>
           </Show>
         </ScrollArea>
@@ -353,19 +366,21 @@ export default function SourceEditorPage() {
       <Show when={tab() === "code"}>
         <div class="flex min-h-0 flex-1 flex-col">
           <div class="flex flex-none items-center justify-between gap-2 px-[18px] pb-1.5 pt-2.5">
-            <span class="truncate text-[11px] text-text-3">{CODE_DOC_HINT}</span>
+            <span class="truncate text-[11px] text-text-3">{t(CODE_DOC_HINT_KEY)}</span>
             <button
               class="flex-none rounded-lg bg-surface-2 px-2 py-1 text-[11px] text-text-2 active:scale-[0.96]"
               onClick={onFillTemplate}
             >
-              {confirmTemplate() ? "再点一次覆盖" : "填入模板"}
+              {confirmTemplate()
+                ? t("sourceEditor.code.confirmOverwrite")
+                : t("sourceEditor.code.fillTemplate")}
             </button>
           </div>
           <JsCodeEditor
             class="min-h-0 flex-1 border-t border-border"
             value={js()}
             onInput={setJs}
-            label="书源 JS 代码"
+            label={t("sourceEditor.code.ariaLabel")}
           />
         </div>
       </Show>

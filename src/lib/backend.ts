@@ -6,6 +6,7 @@
 import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
 import { bookToMeta, type BookMeta, type LocalBook, type LocalBookChapter } from "./booksTypes";
 import { reportFailure } from "./errorReport";
+import { t } from "./i18n";
 import { createLogger } from "./logger";
 import type {
   BookImageFile,
@@ -42,7 +43,7 @@ export async function readState<T>(key: string): Promise<T | null> {
     const value = await invoke<T | null>("readerx_state_get", { key });
     return value ?? null;
   } catch (err) {
-    reportFailure("读取本地设置失败", err);
+    reportFailure(t("library.state.readFailed"), err);
     return null;
   }
 }
@@ -56,7 +57,7 @@ export async function writeState(key: string, value: unknown): Promise<void> {
   try {
     await invoke("readerx_state_set", { key, value });
   } catch (err) {
-    reportFailure("保存本地设置失败", err);
+    reportFailure(t("library.state.writeFailed"), err);
   }
 }
 
@@ -68,7 +69,7 @@ export async function removeState(key: string): Promise<void> {
   try {
     await invoke("readerx_state_remove", { key });
   } catch (err) {
-    reportFailure("清除本地设置失败", err);
+    reportFailure(t("library.state.removeFailed"), err);
   }
 }
 
@@ -88,7 +89,7 @@ export async function getRemoteBook(id: string): Promise<LocalBook | null> {
   try {
     return await invoke<LocalBook | null>("readerx_book_get", { id });
   } catch (err) {
-    reportFailure("读取书籍失败", err);
+    reportFailure(t("library.book.readFailed"), err);
     return null;
   }
 }
@@ -150,8 +151,12 @@ export async function patchRemoteBookMeta(
   if (!tauri) {
     const book = memoryBooks.get(id);
     if (!book) return;
-    if (patch.title !== undefined) book.title = patch.title.trim() || "未命名书籍";
-    if (patch.author !== undefined) book.author = patch.author.trim() || "佚名";
+    if (patch.title !== undefined) {
+      book.title = patch.title.trim() || t("common.unnamedBook");
+    }
+    if (patch.author !== undefined) {
+      book.author = patch.author.trim() || t("common.anonymousAuthor");
+    }
     if (patch.intro !== undefined) {
       const intro = patch.intro?.trim();
       book.intro = intro ? intro : undefined;
@@ -213,7 +218,7 @@ export async function listRemoteSources(): Promise<BookSourceSummary[]> {
   try {
     return await invoke<BookSourceSummary[]>("readerx_sources_list");
   } catch (err) {
-    reportFailure("读取书源列表失败", err);
+    reportFailure(t("library.source.listFailed"), err);
     return [];
   }
 }
@@ -223,7 +228,7 @@ export async function getRemoteSource(id: string): Promise<BookSource | null> {
   try {
     return await invoke<BookSource | null>("readerx_source_get", { id });
   } catch (err) {
-    reportFailure("读取书源失败", err);
+    reportFailure(t("library.source.readFailed"), err);
     return null;
   }
 }
@@ -260,7 +265,7 @@ export async function callRemoteSource(
   args: unknown,
 ): Promise<SourceCallResult> {
   if (!tauri) {
-    return { ok: false, error: "书源功能仅在应用内可用", logs: [], elapsedMs: 0 };
+    return { ok: false, error: t("library.source.appOnly"), logs: [], elapsedMs: 0 };
   }
   try {
     log.debug("调用书源函数", `sourceId=${sourceId}`, `fn=${fnName}`);
@@ -290,7 +295,7 @@ export async function fetchRemoteChapterContents(
       chapters,
     });
   } catch (err) {
-    reportFailure("拉取章节正文失败", err);
+    reportFailure(t("library.source.fetchContentsFailed"), err);
     return [];
   }
 }
@@ -329,7 +334,7 @@ export async function fetchRemoteChapterTasks(
   runId: number,
   onTask: (result: ChapterTaskResult) => void,
 ): Promise<ChapterTaskRunOutcome> {
-  if (!tauri) return { summary: null, error: "书源功能仅在应用内可用" };
+  if (!tauri) return { summary: null, error: t("library.source.appOnly") };
   if (tasks.length === 0) {
     return {
       summary: {
@@ -419,7 +424,7 @@ export async function fetchRemoteSourceImage(
   url: string,
   referer: string | null,
 ): Promise<SourceImageResult> {
-  if (!tauri) return { data: "", error: "书源图片仅应用内可用" };
+  if (!tauri) return { data: "", error: t("library.source.imageAppOnly") };
   try {
     // 不记图片字节，只记哪本书源、哪张图
     log.debug("下载书源封面图片", `sourceId=${sourceId}`, url);
@@ -430,7 +435,7 @@ export async function fetchRemoteSourceImage(
     });
     if (!r.ok || !r.data) {
       log.warn("书源封面图片下载失败", `sourceId=${sourceId}`, url, r.error);
-      return { data: "", error: r.error || "图片下载失败" };
+      return { data: "", error: r.error || t("library.source.imageDownloadFailed") };
     }
     return { data: `data:${r.mime || "image/jpeg"};base64,${r.data}`, error: "" };
   } catch (err) {
@@ -458,7 +463,7 @@ export async function fetchRemoteChapterImageFile(
     bytes: 0,
     error,
   });
-  if (!tauri) return failed("书源图片仅应用内可用");
+  if (!tauri) return failed(t("library.source.imageAppOnly"));
   try {
     // 不记图片字节，只记哪本书源、哪本书、哪张图
     log.debug("下载章节插图", `sourceId=${sourceId}`, `bookId=${bookId}`, url);
@@ -470,7 +475,7 @@ export async function fetchRemoteChapterImageFile(
     });
     if (!r.ok || !r.local) {
       log.warn("章节插图下载失败", `sourceId=${sourceId}`, `bookId=${bookId}`, url, r.error);
-      return failed(r.error || "图片下载失败");
+      return failed(r.error || t("library.source.imageDownloadFailed"));
     }
     return r;
   } catch (err) {
@@ -507,7 +512,7 @@ export async function putBookPdfPageImage(
   pageNumber: number,
   dataUrl: string,
 ): Promise<BookImageFile> {
-  if (!tauri) throw new Error("PDF 页面图仅应用内可落盘");
+  if (!tauri) throw new Error(t("library.pdf.pageImageAppOnly"));
   return invoke<BookImageFile>("readerx_book_pdf_page", {
     bookId,
     pageNumber,
@@ -549,7 +554,7 @@ export interface PickedBookFile {
  * 直接就能拿到 `File`）。用户取消时返回 `null`。
  */
 export async function pickBookFile(): Promise<PickedBookFile | null> {
-  if (!tauri) throw new Error("原生文件选择仅在应用内可用");
+  if (!tauri) throw new Error(t("library.file.appOnly"));
   const picked = await invoke<PickedBookFile | null>("readerx_pick_book_file");
   if (!picked) return null;
   // 字段名与后端对不上时（后端序列化口径改了、内核里还是旧二进制）必须在这里报出原因：
@@ -557,7 +562,7 @@ export async function pickBookFile(): Promise<PickedBookFile | null> {
   if (!picked.dataBase64) {
     // 只记文件名与「内容为空」这个事实，不记文件内容
     log.warn("原生文件选择未返回文件内容", `fileName=${picked.fileName}`);
-    throw new Error("读取所选文件失败：没有拿到文件内容");
+    throw new Error(t("library.file.noContent"));
   }
   return picked;
 }
@@ -572,13 +577,13 @@ export async function pickBookFile(): Promise<PickedBookFile | null> {
  */
 export async function openDevTools(): Promise<void> {
   if (!tauri) {
-    reportFailure("打开开发者工具失败", "仅在应用内可用");
+    reportFailure(t("library.devTools.failed"), t("library.app.onlyInApp"));
     return;
   }
   try {
     await invoke("readerx_open_devtools");
   } catch (err) {
-    reportFailure("打开开发者工具失败", err);
+    reportFailure(t("library.devTools.failed"), err);
   }
 }
 
@@ -614,7 +619,7 @@ export async function loginSourceWebview(
       url,
       cookies: "",
       count: 0,
-      message: "网页登录仅在应用内可用",
+      message: t("library.login.appOnly"),
     };
   }
   try {
@@ -637,7 +642,7 @@ export async function clearSourceLogin(sourceId: string): Promise<number> {
   try {
     return await invoke<number>("readerx_source_login_clear", { sourceId });
   } catch (err) {
-    reportFailure("清除登录状态失败", err);
+    reportFailure(t("library.login.clearFailed"), err);
     return 0;
   }
 }

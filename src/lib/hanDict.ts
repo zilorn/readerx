@@ -11,6 +11,7 @@
  * 简→繁一份约 450 KB（gzip）、繁→简约 23 KB，都只在用户真正开启该方向时才下载。
  */
 import { ConverterFactory, Trie } from "opencc-js/core";
+import { t } from "./i18n";
 import s2tAsset from "../generated/han-dict-s2t.bin?url";
 import t2sAsset from "../generated/han-dict-t2s.bin?url";
 
@@ -39,7 +40,9 @@ const ASSETS: Record<HanDirection, string> = { s2t: s2tAsset, t2s: t2sAsset };
 /** 取回词典资源并解压成文本 */
 async function fetchPayload(url: string): Promise<string> {
   const response = await fetch(url);
-  if (!response.ok) throw new Error(`词典资源请求失败：HTTP ${response.status}`);
+  if (!response.ok) {
+    throw new Error(t("readerChrome.han.dictRequestFailed", { status: response.status }));
+  }
   const bytes = await response.arrayBuffer();
   // 优先用内核自带的 gzip 解压流；老内核没有时退回纯 JS 解压（fflate，仅在需要时才载入）
   if (typeof DecompressionStream === "function") {
@@ -60,7 +63,7 @@ function unpackSections(direction: HanDirection, payload: string): Record<string
   const expected = SECTIONS[direction];
   const [format, names] = lines;
   if (format !== FORMAT || names !== expected.join(",") || lines.length !== expected.length + 2) {
-    throw new Error("词典资源与当前版本不匹配（请重新构建）");
+    throw new Error(t("readerChrome.han.dictMismatch"));
   }
   const sections: Record<string, string> = {};
   expected.forEach((name, index) => {

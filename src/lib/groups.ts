@@ -8,6 +8,7 @@
 import { createSignal } from "solid-js";
 import { readState, writeState } from "./backend";
 import { clearLocalGroup, bookMetaById, setLocalBookGroup } from "./books";
+import { t } from "./i18n";
 import { showActionToast, showToast } from "./toast";
 
 export interface Group {
@@ -67,6 +68,15 @@ export function groupName(id?: string | null): string {
   return groups().find((group) => group.id === id)?.name ?? "";
 }
 
+/**
+ * 分组的显示名：内置隐藏分组的名字是保留名（HIDDEN_GROUP_NAME 参与比较，不随语言变化），
+ * 只在展示时翻译；用户自建分组名原样返回。
+ */
+export function groupDisplayName(id?: string | null): string {
+  if (id === HIDDEN_GROUP_ID) return t("book.groups.hidden");
+  return groupName(id);
+}
+
 function newGroupId(): string {
   return `grp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
 }
@@ -124,7 +134,7 @@ export function closeGroupAssign(): void {
 export async function assignBookGroup(bookId: string, groupId: string | null): Promise<void> {
   // 提示还在屏幕上时书可能已被删掉：别报「已移入」却什么都没发生
   if (!bookMetaById(bookId)) {
-    showToast("这本书已不在书架", true);
+    showToast(t("book.groups.bookMissing"), true);
     return;
   }
   try {
@@ -133,13 +143,17 @@ export async function assignBookGroup(bookId: string, groupId: string | null): P
     showToast(e instanceof Error ? e.message : String(e), true);
     return;
   }
-  showToast(groupId ? `已移入「${groupName(groupId)}」` : "已移出分组");
+  showToast(
+    groupId
+      ? t("book.groups.movedTo", { name: groupDisplayName(groupId) })
+      : t("book.groups.movedOut"),
+  );
 }
 
 /** 书籍入架成功的提示：右侧「加入分组」按钮打开移入分组抽屉 */
 export function notifyAddedToShelf(bookId: string): void {
-  showActionToast("已放入书架", {
-    label: "加入分组",
+  showActionToast(t("book.groups.addedToShelf"), {
+    label: t("book.groups.joinGroup"),
     onClick: () => openGroupAssign(bookId),
   });
 }

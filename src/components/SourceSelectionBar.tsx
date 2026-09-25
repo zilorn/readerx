@@ -1,5 +1,6 @@
 import { Show, createSignal, onCleanup, type JSX } from "solid-js";
 import { FileTextIcon, FolderIcon, PowerIcon, TrashIcon } from "./icons";
+import { t } from "../lib/i18n";
 
 /** 删除确认的有效时长：超时后按钮回到「删除」 */
 const CONFIRM_WINDOW_MS = 3000;
@@ -39,31 +40,35 @@ export function SourceSelectionBar(props: SourceSelectionBarProps) {
       <div class="fixed inset-x-0 bottom-0 z-30 mx-auto w-full max-w-[var(--app-column)] animate-sheet-up border-t border-border bg-surface px-[18px] pb-[calc(10px+env(safe-area-inset-bottom))] pt-3 shadow-[0_-8px_28px_rgb(0_0_0/0.14)]">
         <div class="flex items-stretch gap-2">
           <BarAction
-            label="启用"
+            label={t("common.enable")}
             disabled={props.busy}
             onClick={() => props.onSetEnabled(true)}
           >
             <PowerIcon size={17} />
           </BarAction>
           <BarAction
-            label="停用"
+            label={t("common.disable")}
             disabled={props.busy}
             onClick={() => props.onSetEnabled(false)}
           >
             <PowerIcon size={17} />
           </BarAction>
           <BarAction
-            label="分组"
+            label={t("sources.batch.group")}
             disabled={props.busy}
             onClick={props.onAssignGroup}
           >
             <FolderIcon size={17} />
           </BarAction>
-          <BarAction label="导出" disabled={props.busy} onClick={props.onExport}>
+          <BarAction
+            label={t("sources.batch.export")}
+            disabled={props.busy}
+            onClick={props.onExport}
+          >
             <FileTextIcon size={17} />
           </BarAction>
           <BarAction
-            label={confirmDelete() ? "确认" : "删除"}
+            label={confirmDelete() ? t("common.confirm") : t("common.delete")}
             danger
             active={confirmDelete()}
             disabled={props.busy}

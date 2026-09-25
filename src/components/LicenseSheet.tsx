@@ -2,6 +2,7 @@
  * “关于 → 开源许可”弹层：读取随应用打包的 LICENSE 全文。
  */
 import { readLicenseText } from "../lib/backend";
+import { t } from "../lib/i18n";
 import { FileTextIcon } from "./icons";
 import { TextDocumentSheet } from "./TextDocumentSheet";
 
@@ -16,11 +17,11 @@ export function LicenseSheet(props: LicenseSheetProps) {
       open={props.open}
       onClose={props.onClose}
       title="MIT License"
-      subtitle="ReaderX 开源许可"
+      subtitle={t("settings.license.subtitle")}
       icon={<FileTextIcon size={18} />}
-      closeLabel="关闭开源许可"
+      closeLabel={t("settings.license.close")}
       load={readLicenseText}
-      errorText="无法读取许可文本"
+      errorText={t("settings.license.error")}
     />
   );
 }

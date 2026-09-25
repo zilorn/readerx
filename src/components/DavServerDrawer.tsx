@@ -27,6 +27,7 @@ import {
 } from "../lib/webdav";
 import { showToast } from "../lib/toast";
 import { ScrollArea } from "./ScrollArea";
+import { t } from "../lib/i18n";
 
 interface DavServerDrawerProps {
   open: boolean;
@@ -85,7 +86,7 @@ export function DavServerDrawer(props: DavServerDrawerProps) {
 
   async function save() {
     if (!url().trim()) {
-      showToast("请填写服务器地址", true);
+      showToast(t("webdav.error.urlRequired"), true);
       return;
     }
     if (busy()) return;
@@ -100,14 +101,17 @@ export function DavServerDrawer(props: DavServerDrawerProps) {
       const editing = editingId();
       if (editing && davServerById(editing)) {
         updateDavServer(editing, input);
-        showToast("已保存服务器配置");
+        showToast(t("webdav.toast.serverSaved"));
       } else {
         createDavServer(input);
-        showToast("已添加服务器");
+        showToast(t("webdav.toast.serverAdded"));
       }
       toList();
     } catch (err) {
-      showToast(err instanceof Error ? err.message : "保存失败", true);
+      showToast(
+        err instanceof Error ? err.message : t("webdav.error.saveFailed"),
+        true,
+      );
     } finally {
       setBusy(false);
     }
@@ -123,7 +127,7 @@ export function DavServerDrawer(props: DavServerDrawerProps) {
     window.clearTimeout(deleteTimer);
     setDeletingId(null);
     deleteDavServer(id);
-    showToast("已删除服务器");
+    showToast(t("webdav.toast.serverDeleted"));
   }
 
   function pickServer(id: string) {
@@ -138,7 +142,7 @@ export function DavServerDrawer(props: DavServerDrawerProps) {
         <div
           class="fixed inset-0 z-[70]"
           role="dialog"
-          aria-label="WebDAV 服务器配置"
+          aria-label={t("webdav.drawer.dialogLabel")}
         >
           <div
             class="absolute inset-0 animate-sheet-fade bg-black/45 backdrop-blur-[2px]"
@@ -149,23 +153,25 @@ export function DavServerDrawer(props: DavServerDrawerProps) {
               <Show
                 when={view() === "form"}
                 fallback={
-                  <span class="flex-1 text-[15px] font-bold">WebDAV 服务器</span>
+                  <span class="flex-1 text-[15px] font-bold">
+                    {t("webdav.drawer.title")}
+                  </span>
                 }
               >
                 <button
                   class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-                  aria-label="返回服务器列表"
+                  aria-label={t("webdav.drawer.backToList")}
                   onClick={toList}
                 >
                   <ChevronLeftIcon />
                 </button>
                 <span class="flex-1 text-[15px] font-bold">
-                  {editingId() ? "编辑服务器" : "新增服务器"}
+                  {editingId() ? t("webdav.server.edit") : t("webdav.server.add")}
                 </span>
               </Show>
               <button
                 class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-                aria-label="关闭"
+                aria-label={t("common.close")}
                 onClick={props.onClose}
               >
                 <CloseIcon />
@@ -178,7 +184,7 @@ export function DavServerDrawer(props: DavServerDrawerProps) {
             >
               <Show when={view() === "list"}>
                 <p class="px-[18px] pb-1 pt-2 text-[12px] text-text-3">
-                  可配置多台服务器，点选一台即在导入页使用
+                  {t("webdav.drawer.hint")}
                 </p>
                 <Show
                   when={davServers().length > 0}
@@ -186,7 +192,7 @@ export function DavServerDrawer(props: DavServerDrawerProps) {
                     <div class="flex flex-col items-center gap-1 px-6 py-10 text-center">
                       <ServerIcon size={42} class="mb-1 text-text-3" />
                       <p class="text-[13.5px] font-medium text-text-2">
-                        还没有 WebDAV 服务器
+                        {t("webdav.empty.noServers")}
                       </p>
                     </div>
                   }
@@ -210,33 +216,33 @@ export function DavServerDrawer(props: DavServerDrawerProps) {
                   onClick={startAdd}
                 >
                   <PlusIcon size={16} />
-                  新增服务器
+                  {t("webdav.server.add")}
                 </button>
               </Show>
 
               <Show when={view() === "form"}>
                 <div class="flex flex-col gap-3 px-[18px] pb-2 pt-3">
                   <Field
-                    label="名称"
-                    placeholder="如：我的坚果云"
+                    label={t("webdav.form.name")}
+                    placeholder={t("webdav.form.namePlaceholder")}
                     value={name()}
                     onInput={setName}
                   />
                   <Field
-                    label="服务器地址"
+                    label={t("webdav.form.url")}
                     placeholder="https://dav.example.com/dav"
                     value={url()}
                     onInput={setUrl}
                     autofocus
                   />
                   <Field
-                    label="账号"
-                    placeholder="（留空则为匿名访问）"
+                    label={t("webdav.form.username")}
+                    placeholder={t("webdav.form.usernamePlaceholder")}
                     value={username()}
                     onInput={setUsername}
                   />
                   <Field
-                    label="密码"
+                    label={t("webdav.form.password")}
                     placeholder=""
                     value={password()}
                     onInput={setPassword}
@@ -247,7 +253,7 @@ export function DavServerDrawer(props: DavServerDrawerProps) {
                     disabled={busy()}
                     onClick={() => void save()}
                   >
-                    {busy() ? "保存中…" : "保存"}
+                    {busy() ? t("webdav.form.saving") : t("common.save")}
                   </button>
                 </div>
               </Show>
@@ -269,8 +275,8 @@ function ServerRow(props: {
 }) {
   const account = () =>
     props.server.username.trim()
-      ? `账号 ${props.server.username.trim()}`
-      : "匿名访问";
+      ? t("webdav.server.account", { name: props.server.username.trim() })
+      : t("webdav.server.anonymous");
   return (
     <div
       class="flex items-center gap-1 px-[18px] py-2 transition-colors active:bg-surface-2"
@@ -278,7 +284,11 @@ function ServerRow(props: {
     >
       <button
         class="flex min-w-0 flex-1 items-center gap-3 py-2 text-left"
-        aria-label={props.active ? `${props.server.name}（正在使用）` : `使用 ${props.server.name}`}
+        aria-label={
+          props.active
+            ? t("webdav.server.inUse", { name: props.server.name })
+            : t("webdav.server.use", { name: props.server.name })
+        }
         onClick={props.onPick}
       >
         <span
@@ -307,18 +317,20 @@ function ServerRow(props: {
       </button>
       <button
         class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-colors active:bg-surface-2"
-        aria-label={`编辑 ${props.server.name}`}
+        aria-label={t("webdav.server.editLabel", { name: props.server.name })}
         onClick={props.onEdit}
       >
         <EditIcon size={17} />
       </button>
       <button
         class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-3 transition-colors active:bg-surface-2"
-        aria-label={`删除 ${props.server.name}`}
+        aria-label={t("webdav.server.deleteLabel", { name: props.server.name })}
         onClick={props.onDelete}
       >
         {props.deleting ? (
-          <span class="text-[11.5px] font-semibold text-danger">确认</span>
+          <span class="text-[11.5px] font-semibold text-danger">
+            {t("webdav.server.confirmDelete")}
+          </span>
         ) : (
           <TrashIcon size={17} />
         )}
