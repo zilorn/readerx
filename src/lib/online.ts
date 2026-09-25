@@ -6,7 +6,7 @@
  *   正在读的那一章单独先取、取回即落盘，其余窗口章节后台补齐；
  *   正文预取完毕后再单独过一遍窗口内**已下载章节**的图片（失败即放弃，读到该章时再取，
  *   见 prefetchWindowImages）；
- * - 显式批量下载剩余全部正文（并发可配、可取消）：正文下完后单独再过一遍图片；
+ * - 显式批量下载正文（默认全书，可指定章节范围；并发可配、可取消）：正文下完后单独再过一遍图片；
  * - 以上三种拉取（窗口预取 / 批量下载 / 重新加载本章）可并存且互不阻塞，冲突时以用户
  *   操作为准：批量下载开始时后台窗口预取让位，正文回写先到先得（只有「重新加载本章」
  *   能覆盖已有正文），目录覆盖更新推进「目录世代」让按旧下标在飞的回写作废。
@@ -367,7 +367,7 @@ interface RunSlot {
 interface BookRuns {
   /** 后台窗口预取（阅读时按需补齐） */
   window: RunSlot | null;
-  /** 用户批量下载（下载面板「下载剩余全部」） */
+  /** 用户批量下载（下载面板「下载剩余全部」/ 指定章节范围） */
   download: RunSlot | null;
   /** 正在「重新加载本章」的章节（用户操作；其余拉取跳过它） */
   reload: { index: number; token: CancelToken } | null;
@@ -933,15 +933,33 @@ export interface OnlineDownloadSummary {
   images: OnlineImageProgress;
 }
 
+/** 批量下载的章节范围（目录下标，含两端；省略即整本） */
+export interface OnlineDownloadRange {
+  start: number;
+  end: number;
+}
+
+/** 把请求的范围夹进目录下标区间（空目录给空范围） */
+function clampDownloadRange(total: number, range?: OnlineDownloadRange): OnlineDownloadRange {
+  if (total <= 0) return { start: 0, end: -1 };
+  const start = Math.min(Math.max(range?.start ?? 0, 0), total - 1);
+  const end = Math.min(Math.max(range?.end ?? total - 1, start), total - 1);
+  return { start, end };
+}
+
 /**
- * 批量下载剩余全部正文（下载面板「下载剩余全部」）：一次算好缺正文章节，按批取回、按批落盘。
+ * 批量下载剩余正文（下载面板「下载剩余全部」/ 选定章节范围）：一次算好范围内缺正文章节，
+ * 按批取回、按批落盘；图片阶段同样只过这个范围。
  *
- * 用户操作优先：开始时后台窗口预取立刻让位（它覆盖的窗口范围本就在本次目标里，且本次会按
- * 「阅读焦点」优先取回正在读的那一章），因此两者不会重复请求同一批章节；下载期间用户读到
- * 未缓存的章节时，那一章同样单独先取回，不按目录顺序排在后面。正文下完后再单独过一遍图片。
+ * 用户操作优先：开始时后台窗口预取立刻让位（全书下载的目标本就覆盖窗口范围；只下某一段时，
+ * 读到范围外的章节由「阅读焦点」单独优先取回，不必等下载跑完），因此两者不会重复请求同一批
+ * 章节；下载期间用户读到未缓存的章节时，那一章同样单独先取回，不按目录顺序排在后面。
  * 已有同种任务在跑时返回 null（不重复发起）。
  */
-async function runDownloadFetch(bookId: string): Promise<OnlineDownloadSummary | null> {
+async function runDownloadFetch(
+  bookId: string,
+  range?: OnlineDownloadRange,
+): Promise<OnlineDownloadSummary | null> {
   if (onlineDownloadActive(bookId)) return null;
   const initial = localBookById(bookId);
   if (!initial || !isOnlineBook(initial)) return null;
@@ -949,8 +967,9 @@ async function runDownloadFetch(bookId: string): Promise<OnlineDownloadSummary |
   const epoch = tocEpochOf(bookId);
   cancelBackgroundFetch(bookId); // 用户操作优先：后台窗口预取让位
   const token = startRun(bookId, "download", "download", 0, []);
+  const bounds = clampDownloadRange(initial.chapters.length, range);
   const targets: number[] = [];
-  for (let i = 0; i < initial.chapters.length; i++) {
+  for (let i = bounds.start; i <= bounds.end; i++) {
     if (!chapterHasContent(initial.chapters[i])) targets.push(i);
   }
   const started = performance.now();
@@ -961,6 +980,7 @@ async function runDownloadFetch(bookId: string): Promise<OnlineDownloadSummary |
     `book=${bookId}`,
     `title=${initial.title}`,
     `chapters=${initial.chapters.length}`,
+    `range=${bounds.start + 1}-${bounds.end + 1}`,
     `targets=${targets.length}`,
     `source=${sourceId}`,
   );
@@ -983,9 +1003,23 @@ async function runDownloadFetch(bookId: string): Promise<OnlineDownloadSummary |
   /** 这一章此刻是否还需要取（已由别的任务写回 / 正在被用户重载则跳过） */
   const needsFetch = (book: LocalBook, index: number): boolean => {
     if (handled.has(index) || !targetSet.has(index)) return false;
+    return needsBody(book, index);
+  };
+
+  /**
+   * 阅读焦点章不受所选范围限制：用户正读到的那一章没正文就单独取回
+   * （只下第 x–y 章时，读到范围外的一章同样不该干等下载跑完）。
+   */
+  const needsFetchFocused = (book: LocalBook, index: number): boolean => {
+    if (handled.has(index)) return false;
+    return needsBody(book, index);
+  };
+
+  /** 章内无正文且没有别的任务（重新加载本章）正在处理它 */
+  function needsBody(book: LocalBook, index: number): boolean {
     if (runMap()[bookId]?.reload?.index === index) return false;
     return !chapterHasContentAt(book, index);
-  };
+  }
 
   /** 阅读焦点章优先：正在阅读页上未缓存的那一章先单独取回并落盘 */
   const fetchFocused = async (): Promise<void> => {
@@ -993,7 +1027,7 @@ async function runDownloadFetch(bookId: string): Promise<OnlineDownloadSummary |
     if (idx === undefined) return;
     const bookNow = localBookById(bookId);
     if (!bookNow) return; // 书已被删除：停止拉取
-    if (!needsFetch(bookNow, idx)) return;
+    if (!needsFetchFocused(bookNow, idx)) return;
     handled.add(idx);
     const plans = await fetchChapterPlans(bookId, sourceId, bookNow, [idx], token);
     const plan = plans[0];
@@ -1040,7 +1074,11 @@ async function runDownloadFetch(bookId: string): Promise<OnlineDownloadSummary |
       // 正文都已缓存：只跑图片阶段，章节计数清零（下载面板按图片进度显示）
       patchSlot(bookId, "download", { total: 0, done: 0, pending: [] });
     }
-    if (!token.cancelled) await runDownloadImages(bookId, sourceId, token);
+    if (!token.cancelled) {
+      // 图片阶段可能要跑很久：先补上正在读的那一章（可能在所选范围外）
+      await fetchFocused();
+    }
+    if (!token.cancelled) await runDownloadImages(bookId, sourceId, token, bounds);
   } catch (err) {
     // 意外中断（磁盘 I/O 等）：收尾清掉活动状态，避免该书永远卡在“下载中”
     log.error("批量下载意外中断", `book=${bookId}`, err);
@@ -1056,6 +1094,7 @@ async function runDownloadFetch(bookId: string): Promise<OnlineDownloadSummary |
     "批量下载结束",
     `book=${bookId}`,
     `title=${initial.title}`,
+    `range=${bounds.start + 1}-${bounds.end + 1}`,
     `targets=${targets.length}`,
     `done=${settled}`,
     `failedChapters=${failedChapters}`,
@@ -1083,7 +1122,7 @@ async function runDownloadFetch(bookId: string): Promise<OnlineDownloadSummary |
 }
 
 /**
- * 批量下载的图片阶段：正文全部就绪后，单独把各章尚未本地化的图片过一遍。
+ * 批量下载的图片阶段：所选范围的正文都就绪后，单独把范围内各章尚未本地化的图片过一遍。
  * 与正文分两趟跑（不与获取章节同时取图片）：图片同样经书源会话下载并写回章节，
  * 失败不计入章节失败，之后阅读该章时按占位框的「重试」再取。
  */
@@ -1091,12 +1130,13 @@ async function runDownloadImages(
   bookId: string,
   sourceId: string,
   token: CancelToken,
+  range: OnlineDownloadRange,
 ): Promise<void> {
   const book = localBookById(bookId);
   if (!book || !isOnlineBook(book)) return;
   const jobs = book.chapters
     .map((chapter, index) => ({ index, chapter, urls: pendingImageUrls(chapter) }))
-    .filter((job) => job.urls.length > 0);
+    .filter((job) => job.index >= range.start && job.index <= range.end && job.urls.length > 0);
   if (jobs.length === 0) return;
   const total = jobs.reduce((sum, job) => sum + job.urls.length, 0);
   let done = 0;
@@ -1188,14 +1228,16 @@ export async function ensureReadingWindow(
   await runWindowFetch(bookId, chapterIndex);
 }
 
-/** 批量下载剩余全部正文（下载面板「下载剩余全部」）。
+/** 批量下载剩余正文（下载面板「下载剩余全部」）。
+ *  `range` 为目录下标区间（含两端），省略即整本；图片阶段同样只过这个范围。
  *  已有一轮批量下载在跑时返回 null（不重复发起）；后台窗口预取会被让位，不阻塞本次下载。 */
 export async function downloadRemainingChapters(
   bookId: string,
+  range?: OnlineDownloadRange,
 ): Promise<OnlineDownloadSummary | null> {
   const book = localBookById(bookId);
   if (!book || !isOnlineBook(book)) return null;
-  return await runDownloadFetch(bookId);
+  return await runDownloadFetch(bookId, range);
 }
 
 // ---------------------------------------------------------------------------

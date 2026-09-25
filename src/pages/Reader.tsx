@@ -43,6 +43,7 @@ import {
   reloadChapterContent,
   retryReadingImage,
   windowImagesPending,
+  type OnlineDownloadRange,
 } from "../lib/online";
 import {
   chapterImageError,
@@ -61,6 +62,7 @@ import {
 import type { BookSearchHit } from "../lib/bookSearch";
 import type { ChapterItem } from "../lib/bookSourcesTypes";
 import { BookmarkPanel } from "../components/BookmarkPanel";
+import { ChapterRangeSheet } from "../components/ChapterRangeSheet";
 import { MenuPageSlider } from "../components/MenuPageSlider";
 import { OnlineTocOverwriteDialog } from "../components/OnlineTocOverwriteDialog";
 import { ReloadChapterRiskDialog } from "../components/ReloadChapterRiskDialog";
@@ -311,6 +313,11 @@ function sameChapterToc(a: Pick<LocalBook, "chapters">, b: Pick<LocalBook, "chap
     if (x[i].cid !== y[i].cid) return false;
   }
   return true;
+}
+
+/** 章节范围文案：单章「第 5 章」、跨章「第 3–9 章」（入参为目录下标） */
+function chapterRangeLabel(from: number, to: number): string {
+  return from === to ? `第 ${from + 1} 章` : `第 ${from + 1}–${to + 1} 章`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1026,6 +1033,39 @@ export default function ReaderPage() {
   /** 有正文拉取在跑（窗口预取 / 批量下载）—— 只用于显示，不再拿它禁用用户操作 */
   const remoteFetching = createMemo(() => onlineRunBusy(bookId()));
   const [downloadOpen, setDownloadOpen] = createSignal(false);
+  /** 下载面板选定的章节范围（目录下标，含两端；null = 全书） */
+  const [downloadRange, setDownloadRange] = createSignal<OnlineDownloadRange | null>(null);
+  /** 正在挑端点的章节抽屉（起始章 / 结束章） */
+  const [rangePick, setRangePick] = createSignal<"start" | "end" | null>(null);
+
+  /** 本次要下载的起止章下标（目录更新后自动夹进有效范围；未选范围即全书） */
+  const downloadBounds = createMemo<OnlineDownloadRange>(() => {
+    const list = book()?.chapters ?? [];
+    const last = list.length - 1;
+    if (last < 0) return { start: 0, end: -1 };
+    const range = downloadRange();
+    if (!range) return { start: 0, end: last };
+    const start = Math.min(Math.max(range.start, 0), last);
+    return { start, end: Math.min(Math.max(range.end, start), last) };
+  });
+
+  /** 所选范围内还没正文的章节数（下载面板据此说明还剩多少章要下） */
+  const downloadPendingInRange = createMemo(() => {
+    const list = book()?.chapters ?? [];
+    const { start, end } = downloadBounds();
+    let count = 0;
+    for (let i = start; i <= end; i++) {
+      if (!chapterHasContent(list[i])) count++;
+    }
+    return count;
+  });
+
+  /** 端点按钮文案：「第 12 章 · 章节标题」 */
+  const endpointLabel = (index: number): string => {
+    const ordinal = `第 ${index + 1} 章`;
+    const title = book()?.chapters[index]?.title;
+    return title ? `${ordinal} · ${title}` : ordinal;
+  };
 
   /** 在线书拉取中仍待获取的章节下标集合（目录“下载中”徽标用；空闲为 null） */
   const remotePendingSet = createMemo(() => {
@@ -4009,6 +4049,9 @@ export default function ReaderPage() {
                       class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
                       aria-label="下载正文"
                       onClick={() => {
+                        // 上一次选过的范围不带进这一次（下载进行中则保留，与进度显示一致）
+                        if (!remoteDownloading()) setDownloadRange(null);
+                        setRangePick(null);
                         setDownloadOpen(true);
                         setMenuOpen(false);
                       }}
@@ -4492,9 +4535,52 @@ export default function ReaderPage() {
                 </div>
                 <ScrollArea class="min-h-0 flex-1" contentClass="space-y-3 px-4 py-4">
                   <p class="text-[12px] leading-[1.7] text-text-3">
-                    平时阅读只按需缓存当前章与前后各 {LAZY_WINDOW} 章（顺序阅读不断章）；这里可把全书正文批量下载到本机，之后断网也能读。
+                    平时阅读只按需缓存当前章与前后各 {LAZY_WINDOW} 章（顺序阅读不断章）；这里可把所选范围的正文批量下载到本机，之后断网也能读。
                     请求并行度跟随全局「书源并发」设置（设置 → 书源）。
                   </p>
+                  {/* 下载范围：默认全书，可只下第 x–y 章 */}
+                  <div class="rounded-[12px] bg-surface-2 px-3.5 py-3">
+                    <div class="flex items-center gap-2">
+                      <span class="flex-1 text-[12px] font-semibold text-text-2">下载范围</span>
+                      <button
+                        class="flex-none rounded-full px-2.5 py-1 text-[11.5px] transition-colors active:bg-surface disabled:opacity-40"
+                        classList={{
+                          "bg-accent-weak font-semibold text-accent": downloadRange() === null,
+                          "text-text-3": downloadRange() !== null,
+                        }}
+                        disabled={remoteDownloading()}
+                        onClick={() => setDownloadRange(null)}
+                      >
+                        全书
+                      </button>
+                    </div>
+                    <div class="mt-2 flex items-center gap-2">
+                      <button
+                        class="min-w-0 flex-1 rounded-[10px] bg-bg px-3 py-2 text-left transition-colors active:bg-surface disabled:opacity-50"
+                        disabled={remoteDownloading()}
+                        onClick={() => setRangePick("start")}
+                      >
+                        <span class="block text-[10.5px] text-text-3">起始章</span>
+                        <span class="block truncate text-[12.5px] text-text-2">
+                          {endpointLabel(downloadBounds().start)}
+                        </span>
+                      </button>
+                      <span class="flex-none text-[11px] text-text-3">至</span>
+                      <button
+                        class="min-w-0 flex-1 rounded-[10px] bg-bg px-3 py-2 text-left transition-colors active:bg-surface disabled:opacity-50"
+                        disabled={remoteDownloading()}
+                        onClick={() => setRangePick("end")}
+                      >
+                        <span class="block text-[10.5px] text-text-3">结束章</span>
+                        <span class="block truncate text-[12.5px] text-text-2">
+                          {endpointLabel(downloadBounds().end)}
+                        </span>
+                      </button>
+                    </div>
+                    <p class="mt-2 text-[11px] text-text-3">
+                      范围内 {downloadPendingInRange()} 章待下载
+                    </p>
+                  </div>
                   <p class="text-[11.5px] leading-[1.6] text-text-3">
                     含图片的章节（漫画 / 图文）在正文下完后单独再过一遍图片（阅读时读到的章节也会随手缓存），
                     占用空间随图片数量明显增大。
@@ -4583,14 +4669,22 @@ export default function ReaderPage() {
                       onClick={() => {
                         void (async () => {
                           // 下载期间后台窗口预取会让位；这里拿到的是本轮结果（不受下一轮拉取影响）
-                          const summary = await downloadRemainingChapters(bookId());
+                          const range = downloadRange() === null ? undefined : downloadBounds();
+                          const summary = await downloadRemainingChapters(bookId(), range);
                           if (!summary || summary.cancelled) return;
                           const chapters = `${summary.done} 章正文`;
                           const images =
                             summary.images.total > 0
                               ? `、${summary.images.done - summary.images.failed} 张图片`
                               : "";
-                          if (summary.done === 0 && summary.images.total === 0) return;
+                          if (summary.done === 0 && summary.images.total === 0) {
+                            showToast(
+                              range
+                                ? `${chapterRangeLabel(range.start, range.end)}正文均已下载`
+                                : "全书正文均已下载",
+                            );
+                            return;
+                          }
                           if (summary.failedChapters > 0 || summary.images.failed > 0) {
                             const failed = [
                               summary.failedChapters > 0 ? `${summary.failedChapters} 章` : "",
@@ -4605,7 +4699,11 @@ export default function ReaderPage() {
                         })();
                       }}
                     >
-                      {remoteDownloading() ? "下载中…" : "下载剩余全部"}
+                      {remoteDownloading()
+                        ? "下载中…"
+                        : downloadRange() === null
+                          ? "下载剩余全部"
+                          : `下载${chapterRangeLabel(downloadBounds().start, downloadBounds().end)}`}
                     </button>
                   </div>
                   <p class="pb-1 text-center text-[11px] text-text-3">
@@ -4613,6 +4711,32 @@ export default function ReaderPage() {
                   </p>
                 </ScrollArea>
               </div>
+
+              {/* 起始章 / 结束章选择（盖在下载面板之上，选完即收起） */}
+              <Show when={rangePick()}>
+                {(bound) => (
+                  <ChapterRangeSheet
+                    open
+                    title={bound() === "start" ? "起始章" : "结束章"}
+                    chapters={book()!.chapters}
+                    value={bound() === "start" ? downloadBounds().start : downloadBounds().end}
+                    min={bound() === "start" ? 0 : downloadBounds().start}
+                    max={
+                      bound() === "start"
+                        ? downloadBounds().end
+                        : Math.max(0, book()!.chapters.length - 1)
+                    }
+                    onSelect={(index) =>
+                      setDownloadRange(
+                        bound() === "start"
+                          ? { start: index, end: downloadBounds().end }
+                          : { start: downloadBounds().start, end: index },
+                      )
+                    }
+                    onClose={() => setRangePick(null)}
+                  />
+                )}
+              </Show>
             </Show>
 
             {/* 全书搜索（阅读器内抽屉，不产生路由历史；命中后进入搜索模式高亮逐条查看） */}
