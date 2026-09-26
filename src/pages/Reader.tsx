@@ -4692,7 +4692,11 @@ export default function ReaderPage() {
               currentIndex={chapterIdx()}
               onClose={() => setBmPanelOpen(false)}
               onJump={jumpToBookmark}
-              onDelete={(bookmark) => removeBookmark(bookmark.id)}
+              onDelete={(bookmark) => {
+                // 面板里已经二次确认过，这里直接删，再给一条删掉的提示
+                removeBookmark(bookmark.id);
+                showToast(t("reader.bookmarkRemoved"));
+              }}
             />
 
             {/* 长按/拖选文本后的自定义菜单（搜索模式下让位给命中高亮） */}

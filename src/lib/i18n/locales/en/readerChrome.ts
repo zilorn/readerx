@@ -66,6 +66,8 @@ export const readerChrome = {
   "readerChrome.bookmark.itemCount_other": "{count} items",
   "readerChrome.bookmark.currentBadge": "This chapter",
   "readerChrome.bookmark.deleteLabel": "Delete bookmark",
+  /** Shown after the first tap: the button turns into a check mark and a second tap deletes */
+  "readerChrome.bookmark.deleteConfirmLabel": "Tap again to delete this bookmark",
   "readerChrome.bookmark.emptyTitle": "No bookmarks yet",
   "readerChrome.bookmark.emptyHint": 'Select text in the book and tap "Bookmark" to add one',
   "readerChrome.bookmark.searchPlaceholder": "Search chapters or bookmark text",

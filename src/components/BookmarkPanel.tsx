@@ -1,18 +1,19 @@
 /**
  * 书签列表面板（底部抽屉）：列出某本书的全部书签。
  * 书签按章节分组为一张张卡片（卡片按章节顺序排列），
- * 卡片内书签按正文文本顺序排列；点击跳转到精确位置，可逐条删除。
+ * 卡片内书签按正文文本顺序排列；点击跳转到精确位置，可逐条删除
+ * （删除要二次确认：首点只进入待确认态，再点同一条才真删，免得误触丢书签）。
  * 打开时自动定位到当前章节的卡片（本章没有书签则定位到最近的一章）。
  *
  * 顶部搜索框按「书签所在章节」或「书签正文」筛选：章节名命中的整章书签都保留
  * （按章节找书签），只命中正文的则只留命中的条目；命中文字在卡片上高亮，
  * 点条目仍是原来的跳转定位。
  */
-import { For, Show, createEffect, createMemo, createSignal, on } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, on, onCleanup } from "solid-js";
 import { t } from "../lib/i18n";
 import type { Bookmark } from "../lib/bookmarks";
 import { matchBookmarks, type BookmarkMark, type BookmarkMatch } from "../lib/bookmarkSearch";
-import { BookmarkIcon, CloseIcon, SearchIcon, TrashIcon } from "./icons";
+import { BookmarkIcon, CheckIcon, CloseIcon, SearchIcon, TrashIcon } from "./icons";
 import { HighlightText } from "./HighlightText";
 import { ScrollArea } from "./ScrollArea";
 
@@ -30,6 +31,9 @@ export interface BookmarkPanelProps {
 
 /** 目标卡片放不下时顶对齐留出的上边距（px） */
 const FOCUS_TOP_GAP = 8;
+
+/** 删除确认窗口（毫秒）：超过这段时间没再点，按钮退回普通删除态 */
+const DELETE_CONFIRM_MS = 3000;
 
 interface BookmarkGroup {
   /** 章节身份（cid；“本章”标识与定位依赖它） */
@@ -107,11 +111,17 @@ function focusGroup(
   return best;
 }
 
-/** 单条书签：展示命中窗口（未搜索时即开头预览）并高亮命中文字 */
+/**
+ * 单条书签：展示命中窗口（未搜索时即开头预览）并高亮命中文字。
+ * 删除按钮是两段式：`confirming` 为真时换成红色对勾（再点即删），否则是普通垃圾桶。
+ */
 function BookmarkItem(props: {
   match: BookmarkMatch;
+  /** 是否处于「待确认删除」态 */
+  confirming: boolean;
   onJump: (bookmark: Bookmark) => void;
-  onDelete: (bookmark: Bookmark) => void;
+  /** 请求删除：首次点按只进入待确认态，由面板决定何时真删 */
+  onRequestDelete: (bookmark: Bookmark) => void;
 }) {
   const bookmark = () => props.match.bookmark;
   return (
@@ -131,11 +141,21 @@ function BookmarkItem(props: {
         </span>
       </button>
       <button
-        class="my-1 grid w-11 flex-none cursor-pointer place-items-center self-center rounded-xl text-text-3 transition-colors active:bg-danger-weak active:text-danger"
-        aria-label={t("readerChrome.bookmark.deleteLabel")}
-        onClick={() => props.onDelete(bookmark())}
+        class="my-1 grid w-11 flex-none cursor-pointer place-items-center self-center rounded-xl transition-colors"
+        classList={{
+          "bg-danger-weak text-danger": props.confirming,
+          "text-text-3 active:bg-danger-weak active:text-danger": !props.confirming,
+        }}
+        aria-label={
+          props.confirming
+            ? t("readerChrome.bookmark.deleteConfirmLabel")
+            : t("readerChrome.bookmark.deleteLabel")
+        }
+        onClick={() => props.onRequestDelete(bookmark())}
       >
-        <TrashIcon size={18} />
+        <Show when={props.confirming} fallback={<TrashIcon size={18} />}>
+          <CheckIcon size={18} />
+        </Show>
       </button>
     </li>
   );
@@ -151,6 +171,33 @@ export function BookmarkPanel(props: BookmarkPanelProps) {
   let scrollEl: HTMLDivElement | undefined;
   /** 已挂载的章节卡片（cid → 卡片元素），供打开时定位 */
   const groupEls = new Map<string, HTMLElement>();
+  /** 待确认删除的书签 id（同一时刻只允许一条处于待确认态） */
+  const [confirmId, setConfirmId] = createSignal<string | null>(null);
+  let confirmTimer: number | undefined;
+
+  /** 取消待确认态（清定时器 + 退回普通删除按钮） */
+  function resetConfirm(): void {
+    window.clearTimeout(confirmTimer);
+    confirmTimer = undefined;
+    setConfirmId(null);
+  }
+
+  onCleanup(() => window.clearTimeout(confirmTimer));
+
+  /**
+   * 删除按钮入口：首点只进入待确认态（`DELETE_CONFIRM_MS` 内有效，再点其它条目则改判那一条），
+   * 同一按钮再点一次才真的删除 —— 避免误触丢掉书签。
+   */
+  function requestDelete(bookmark: Bookmark): void {
+    if (confirmId() !== bookmark.id) {
+      window.clearTimeout(confirmTimer);
+      setConfirmId(bookmark.id);
+      confirmTimer = window.setTimeout(() => setConfirmId(null), DELETE_CONFIRM_MS);
+      return;
+    }
+    resetConfirm();
+    props.onDelete(bookmark);
+  }
 
   /**
    * 把目标卡片滚进面板可视区（本章没有书签时即最近的一章）。
@@ -172,10 +219,12 @@ export function BookmarkPanel(props: BookmarkPanelProps) {
 
   // 打开时回到未搜索状态并定位当前章节。卡片由 <Show> 随 open 重新挂载，
   // ref 先于本效果执行，因此打开时一定已就位。
+  // 关 / 开都清掉待确认删除：抽屉收起后再拉开，删除按钮回到普通态。
   createEffect(
     on(
       () => props.open,
       (open) => {
+        resetConfirm();
         if (!open) {
           groupEls.clear();
           return;
@@ -336,8 +385,9 @@ export function BookmarkPanel(props: BookmarkPanelProps) {
                             {(match) => (
                               <BookmarkItem
                                 match={match}
+                                confirming={confirmId() === match.bookmark.id}
                                 onJump={props.onJump}
-                                onDelete={props.onDelete}
+                                onRequestDelete={requestDelete}
                               />
                             )}
                           </For>

@@ -22,6 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   一致，见 `src/lib/readerLayout.ts` 的 `readerContentWidth`），上下滚动模式照旧是居中的单列。
   点按分区的左 / 中 / 右改为以正文块为准（`src/pages/Reader.tsx`）—— 否则宽窗口里点在左右页中间
   会被当成「呼出菜单」而不是翻页。
+- **删除书签改为二次确认**：书签面板里每条书签右侧的删除按钮此前点一下就直接删掉，误触即丢。
+  现在第一次点按只是**待确认**——按钮由垃圾桶换成红色对勾（`aria-label` 同步改为「再点一次删除
+  该书签」），3 秒内再点同一条才真删；超时、改点别的条目或关掉重开面板都会退回普通删除态
+  （`src/components/BookmarkPanel.tsx`）。真删后补一条「已移除书签」提示（`src/pages/Reader.tsx`），
+  与选中正文后再点「书签」取消书签的反馈一致。
 
 ### Added
 

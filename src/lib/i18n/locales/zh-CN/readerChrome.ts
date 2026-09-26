@@ -57,6 +57,8 @@ export const readerChrome = {
   "readerChrome.bookmark.itemCount": "{count} 条",
   "readerChrome.bookmark.currentBadge": "本章",
   "readerChrome.bookmark.deleteLabel": "删除书签",
+  /** 首点删除后按钮变成对勾，提示再点一次才真删 */
+  "readerChrome.bookmark.deleteConfirmLabel": "再点一次删除该书签",
   "readerChrome.bookmark.emptyTitle": "暂无书签",
   "readerChrome.bookmark.emptyHint": "长按正文选取文字后点「书签」即可添加",
   "readerChrome.bookmark.searchPlaceholder": "搜索章节或书签内容",
