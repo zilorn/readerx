@@ -48,6 +48,12 @@ of pages and the same local library.
   refused when it connects — accept it again from "Find devices"); when both devices change the
   same thing, it lands in a conflict list where you pick which copy to keep. No cloud service,
   no account (see `docs/sync.md`, section 7.1)
+- **Data backup** `/data-backup` (Settings → Data): export everything on this device into
+  **a single zip** — shelf and full book text, bookmarks, groups, sources, images, replacement and
+  chapter rules, reading progress and interface preferences; importing can **merge** (fills in
+  what is missing, overwrites matching ids, never deletes anything extra on this device) or
+  **replace** (goes back to the state of that backup). Source login cookies and WebDAV passwords
+  are left out by default; see `docs/backup.md`
 - **Reading** `/book/:id`: chapter reading, previous / next chapter, table-of-contents drawer,
   reading progress synced across pages; on a wide desktop window the text is laid out as two
   side-by-side pages (one page on phones and narrow windows; the column width adapts to the
