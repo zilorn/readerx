@@ -14,10 +14,11 @@ edition = "2021"
 name = "readerx_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
-# 单一 workspace：主 crate、书源网页登录插件、书源引擎核心 crate 共享同一 target 目录，
-# 便于 tauri 移动端构建发现插件的 android 工程，也让独立二进制复用同一份依赖。
+# 单一 workspace：主 crate、书源网页登录插件、书源引擎核心 crate、同步框架 crate
+# 共享同一 target 目录，便于 tauri 移动端构建发现插件的 android 工程，
+# 也让独立二进制（readerx-source / readerx-sync）复用同一份依赖。
 [workspace]
-members = [".", "plugins/tauri-plugin-webview-login", "crates/readerx-source", "crates/readerx-log"]
+members = [".", "plugins/tauri-plugin-webview-login", "crates/readerx-source", "crates/readerx-log", "crates/readerx-sync"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
