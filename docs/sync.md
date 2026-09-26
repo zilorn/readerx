@@ -159,16 +159,31 @@ Conflict    冲突记录：原因、双方取值与时间、状态、裁决写�
 
 ```text
 客户端 → Hello{protocol, group, device, name, knowledge, port_c, nonce_c}
-服务端 → Hello{ok, protocol, group, device, name, nonce_s}      ← 校验协议 / 群组 / 信任名单
+服务端 → Hello{ok, protocol, group, device, name, nonce_s, code?, message?}  ← 校验协议 / 群组 / 信任名单
 客户端 → Auth{proof = HMAC(secret, 文本(client))}
-服务端 → Auth{ok, proof = HMAC(secret, 文本(server))}           ← 双向认证
+服务端 → Auth{ok, proof = HMAC(secret, 文本(server)), code?, message?}       ← 双向认证
 之后每帧：Envelope{seq, mac}，MAC 覆盖 (seq ‖ 规范化 JSON)，seq 必须严格递增
 ```
+
+拒绝时 `ok=false` 并带上 **`code`**（`proto::HandshakeCode`）：`protocol_mismatch` /
+`group_mismatch` / `not_trusted` / `removed_by_peer` / `busy` / `auth_failed` /
+`unexpected_message`。码属于线协议的一部分 —— 两端各自按码出文案，界面据此给出可操作引导：
+客户端把码落成 `error::Code`，错误串形如 `group_mismatch|两台设备不在同一同步群组`，
+App 侧再翻成当前语言（`src/lib/sync.ts` 的 `syncErrorText`）。`message` 仍带一句中文提示，
+只用于日志与排障；旧对端不带 `code` 时按提示文本处理（`#[serde(default)]`）。
 
 `port_c` 是客户端**自己同步服务的监听端口**（`0` = 没在监听）。服务端据此把对端地址记成
 「**来源 IP + `port_c`**」，下次才能主动连回来。**不能拿这条连接的源端口当地址**：
 它是内核临时分配的，连接一断就回收，拿它当对端地址会让下一次连接直接被拒
 （`ECONNREFUSED`）。对端声明 `0` 时服务端会**清掉**它的旧地址，而不是留着一个死地址反复重试。
+来源 IP 是通配地址（`0.0.0.0` / `::`）时同样不记：那不是能连的地址，界面上会被当成
+「本机地址」展示、用户照着填必然失败；引擎启动时还会清掉历史数据里这类地址
+（`SyncEngine::forget_unusable_peer_addrs`）。记下对端之后服务端会回调宿主
+（`ServerOptions::with_peer_seen`），App 借此推一次状态事件，界面立刻刷新设备列表。
+
+同步页「本机地址」由 `src-tauri/src/sync/lan.rs` 现取网卡地址：同步服务监听在
+`0.0.0.0:47821`，而 `0.0.0.0` 只是「所有网卡」的绑定意图、不是能连的地址，
+所以界面列的是真实地址（跳过回环 / 未指定 / IPv6 链路本地，最像局域网的排最前）。
 
 - 请求：`Pull{since, limit}` / `Push{ops}` / `Stat` / `Ping`；
 - 分帧：`[u32 大端长度][JSON]`，握手阶段上限 64 KiB、业务帧 8 MiB；
@@ -176,7 +191,8 @@ Conflict    冲突记录：原因、双方取值与时间、状态、裁决写�
   **只回应本群组的查询**——陌生设备连「这里有一台 ReaderX」都探不到；
   同一台设备从多个网卡应答时优先记住回环地址。
 - 握手还会查一次**本机拒绝接入的名单**（`device.json` 的 `removed_devices`，界面上「删除设备」
-  的结果）：名单里的设备在群组校验之后就被拒（`设备已被对端移除`），一条数据都不收。
+  的结果）：名单里的设备在群组校验之后就被拒（`removed_by_peer`，提示里给「重新接受」的入口），
+  一条数据都不收。
   名单读的是引擎的当前状态，所以删除 / 重新接受都不需要重启监听端。
   它是**本机单方面**的名单：对端不知情，也不会因此丢掉它手里的数据（见第 7.4 节）。
 
@@ -230,8 +246,9 @@ src-tauri/src/sync/
   settings.rs    设备本地设置（开关 / 自动同步 / 落地游标），与 device.json 分开放
   identity.rs    跨设备身份：同一本书在两台设备上算出同一个实体 id
   bridge.rs      本地数据 ↔ 引擎实体（发布本地改动 / 落地远端结果）
+  lan.rs         本机对外的局域网地址（同步页「本机地址」，见第 5 节）
   service.rs     引擎与网络的生命周期、自动同步线程、事件推送
-  commands.rs    readerx_sync_* 这些 Tauri command
+  commands.rs    readerx_sync_* 这些 Tauri command（含 `readerx_sync_lan_addrs`）
 src/lib/sync.ts                  前端接线：状态 signal + 事件 + 缓存重载
 src/pages/Sync.tsx               设置 → 同步（开关 / 配对 / 设备 / 自动同步 / 冲突入口）
 src/pages/SyncConflicts.tsx      冲突裁决
