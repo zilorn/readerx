@@ -15,6 +15,9 @@ export const discover = {
   "discover.search.noSources": "没有可搜索的已启用书源",
   "discover.search.groupNoSources": "该分组没有可搜索的已启用书源",
   "discover.search.progress": "正在搜索书源 {done} / {total}（并发{parallel}）",
+  "discover.search.stop": "停止",
+  /** 搜索进行中搜索按钮的无障碍名称：按下会作废当前这一轮并按输入框里的词重搜 */
+  "discover.search.restart": "停止当前搜索并重新搜索",
   "discover.search.failed": "搜索失败：{message}",
   "discover.search.noResults": "没有找到结果",
   "discover.search.foundMore": "已找到 {count} 条 · 仍在搜索其他书源…",

@@ -15,6 +15,9 @@ export const discover = {
   "discover.search.noSources": "No enabled source can search",
   "discover.search.groupNoSources": "No searchable enabled source in this group",
   "discover.search.progress": "Searching {done} / {total} sources ({parallel} in parallel)",
+  "discover.search.stop": "Stop",
+  /** Accessible name of the search button while searching: it drops this round and searches the input again */
+  "discover.search.restart": "Stop the current search and search again",
   "discover.search.failed": "Search failed: {message}",
   "discover.search.noResults": "No results found",
   "discover.search.foundMore": "{count} results so far · still searching other sources…",
