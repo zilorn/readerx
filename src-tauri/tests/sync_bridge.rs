@@ -561,3 +561,81 @@ fn app_advertises_its_listen_port_to_the_peer() {
     service.shutdown();
     let _ = data_root;
 }
+
+/// App 侧「删除设备」的真实路径：移除之后，那台设备**连进来会被拒**，
+/// 而 App 自己的设备列表里也不再显示它。
+#[test]
+fn removed_peer_cannot_sync_into_the_app_anymore() {
+    let _serial = SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (handle, data_root) = setup();
+
+    // 对端设备：直接开的引擎
+    let peer = {
+        let dir = std::env::temp_dir().join(format!("readerx-sync-e2e-remove-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut options = EngineOptions::new("旧手机");
+        options.schemas = SchemaRegistry::readerx_defaults();
+        shared(SyncEngine::open(dir, options).unwrap())
+    };
+
+    // App 侧的服务：开启同步（端口被占用就跳过，不误报失败）
+    let service = SyncService::new(handle.clone());
+    let status = service.set_enabled(true).expect("开启同步应成功");
+    let Some(listen) = status.listen_addr.clone() else {
+        eprintln!("跳过：本机 {} 端口被占用", readerx_sync::DEFAULT_PORT);
+        let _ = service.set_enabled(false);
+        return;
+    };
+    let listen_port: u16 = listen
+        .rsplit(':')
+        .next()
+        .and_then(|port| port.parse().ok())
+        .expect("监听地址应带端口");
+
+    // 对端加入同一群组并开始监听，然后由 App 主动连它一次（互相认识）
+    lock_engine(&peer).join_group(&service.pairing_code().unwrap()).unwrap();
+    let options = {
+        let guard = lock_engine(&peer);
+        ServerOptions::from_engine(&guard)
+            .unwrap()
+            .with_bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+    };
+    let server = PeerServer::start(peer.clone(), options).unwrap();
+    let peer_addr = server.local_addr().to_string();
+
+    service
+        .sync_with_addr_now(&peer_addr)
+        .expect("与对端同步应成功");
+    let peer_device = lock_engine(&peer).device_id().to_string();
+    assert!(
+        service.peers().iter().any(|p| p.device_id == peer_device),
+        "同步一次后设备列表里应有对端"
+    );
+
+    // App 侧删除它
+    let remaining = service.remove_peer(&peer_device).expect("移除设备应成功");
+    assert!(
+        !remaining.iter().any(|p| p.device_id == peer_device),
+        "移除后设备列表里不该再有它"
+    );
+
+    // 对端主动连过来（App 的监听地址 + 回环）：握手就被拒
+    let app_loopback = format!("127.0.0.1:{listen_port}");
+    let error = {
+        let mut guard = lock_engine(&peer);
+        readerx_sync::sync_with_addr(&mut guard, &app_loopback, std::time::Duration::from_secs(5))
+            .expect_err("被移除的设备不该还能连进来")
+    };
+    assert!(
+        error.to_string().contains("已被对端移除"),
+        "错误应说明是被移除（实际：{error}）"
+    );
+    assert!(
+        !service.peers().iter().any(|p| p.device_id == peer_device),
+        "被拒绝的连接不能把设备记回列表"
+    );
+
+    drop(server);
+    service.shutdown();
+    let _ = data_root;
+}

@@ -260,6 +260,19 @@ fn serve_connection(
         reject(&mut writer, "设备不在信任名单")?;
         return Err(SyncError::Auth("设备不在信任名单".to_string()));
     }
+    // 被本机移除过的设备（同步界面「删除设备」）：握手就拒，数据一条都不收。
+    // 名单读的是**当前**引擎状态，因此移除 / 重新接受不需要重启服务端。
+    // 锁只在这一小段里持有：拒绝应答可能阻塞在网络上，不能抱着引擎锁写。
+    let removed = { lock_engine(&engine).is_device_removed(&client_device) };
+    if removed {
+        log::warn!(
+            "拒绝已移除设备接入 addr={addr} device={}",
+            crate::version::short_device(&client_device)
+        );
+        // 措辞按「被拒方看到的视角」写：对端会把这句当失败原因显示出来
+        reject(&mut writer, "设备已被对端移除")?;
+        return Err(SyncError::Auth("设备已被对端移除".to_string()));
+    }
 
     write_message(
         &mut writer,

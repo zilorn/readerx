@@ -29,7 +29,7 @@ use std::path::PathBuf;
 
 use crate::error::{Result, SyncError};
 use crate::hlc::{HlcClock, HlcState};
-use crate::id::{new_id, now_ms, EntityId, OpId};
+use crate::id::{new_id, now_ms, DeviceId, EntityId, OpId};
 use crate::merge::{self, MergeCtx, MergeOutcome, Rejection};
 use crate::model::{
     Conflict, ConflictReason, ConflictStatus, Entity, FieldState, OpKind, Operation, Resolution,
@@ -826,12 +826,17 @@ impl SyncEngine {
         self.store.save_conflicts(&self.conflicts)?;
         self.store.save_deferred(&self.deferred)?;
         self.store.save_peers(&self.peers)?;
+        self.store.save_device()?;
         self.store.save_clock(&HlcState::from_clock(&self.clock))?;
         self.dirty = false;
         Ok(())
     }
 
     /// 记录一次与对端的同步（地址、对方已知版本、结果）。
+    ///
+    /// **被移除的设备在这里被忽略**：删除只有在用户显式「重新接受」时（[`SyncEngine::accept_peer`]，
+    /// 界面上是在「查找局域网设备」里点「重新接受」）才撤销。否则「设备正在同步时点了删除」
+    /// 这种时序会让会话结束时的记录把删除悄悄抹掉 —— 删除必须是稳定的。
     pub fn record_peer_sync(
         &mut self,
         peer_device: &str,
@@ -840,6 +845,13 @@ impl SyncEngine {
         peer_knowledge: VersionVector,
         error: Option<String>,
     ) {
+        if self.store.is_device_removed(peer_device) {
+            log::debug!(
+                "设备已被移除，忽略本次同步记录 peer={}",
+                crate::version::short_device(peer_device)
+            );
+            return;
+        }
         let entry = self.peers.entry(peer_device.to_string()).or_insert_with(|| PeerState {
             device_id: peer_device.to_string(),
             ..PeerState::default()
@@ -856,6 +868,65 @@ impl SyncEngine {
             entry.sync_count += 1;
         }
         self.dirty = true;
+    }
+
+    /// 本机是否拒绝该设备接入（同步界面「删除设备」的结果）。
+    pub fn is_device_removed(&self, device: &str) -> bool {
+        self.store.is_device_removed(device)
+    }
+
+    /// 本机拒绝接入的设备 id 名单。
+    pub fn removed_devices(&self) -> &[DeviceId] {
+        self.store.removed_devices()
+    }
+
+    /// 移除一台已配对设备：**本机不再与它同步，并拒绝它接进来**。
+    ///
+    /// 做三件事：
+    /// 1. 从 `peers` 里删掉它（含地址与「对方已知版本」）—— 自动同步与「立即同步」
+    ///    都不会再找它，界面上的设备列表也不再显示；
+    /// 2. 记进拒绝名单（`device.json`），它的连接会在握手的群组校验之后被拒；
+    /// 3. 丢掉它那批「基线还没齐」的缓冲操作 —— 它已被拒绝，那批操作永远等不到前序，
+    ///    留着只会让缓冲一直不收敛。
+    ///
+    /// **不会**删掉已经合并进来的数据（那是两台设备共同的历史），也**不会**通知对端：
+    /// 无中心的局域网里没有「踢人」这回事，对端仍然持有它那份数据和群组密钥。
+    pub fn remove_peer(&mut self, peer_device: &str) -> Result<()> {
+        self.ensure_writable()?;
+        if peer_device.is_empty() || peer_device == self.device_id() {
+            return Err(SyncError::Invalid("不能移除本机".to_string()));
+        }
+        let was_known = self.peers.remove(peer_device).is_some();
+        let added = self.store.set_device_removed(peer_device, true);
+        let deferred_before = self.deferred.len();
+        self.deferred.retain(|op| op.origin != peer_device);
+        let dropped = deferred_before - self.deferred.len();
+        if !was_known && !added && dropped == 0 {
+            // 既没同步过、也不在名单里：没有再可做的，但也不必报错（幂等）
+            return Ok(());
+        }
+        self.dirty = true;
+        log::info!(
+            "已移除设备 peer={}（不再同步并拒绝其接入） 丢弃缓冲操作={dropped}",
+            crate::version::short_device(peer_device)
+        );
+        self.flush()
+    }
+
+    /// 解除对某台设备的拒绝（**显式重新接受**）。返回它之前是否真的在拒绝名单里。
+    ///
+    /// 这是撤销「删除设备」的唯一途径：只解除拒绝，不建立对端记录 ——
+    /// 之后与它同步一次（`session::sync_with_addr`）才会回到设备列表。
+    /// 自动同步 / 手动同步都**不能**把删除撤销掉（见 [`SyncEngine::record_peer_sync`]）。
+    pub fn accept_peer(&mut self, peer_device: &str) -> Result<bool> {
+        self.ensure_writable()?;
+        if !self.store.set_device_removed(peer_device, false) {
+            return Ok(false);
+        }
+        self.dirty = true;
+        log::info!("已重新接受设备 peer={}", crate::version::short_device(peer_device));
+        self.flush()?;
+        Ok(true)
     }
 
     /// 设置本机同步服务的监听端口（`0` = 停止监听）。
@@ -1337,6 +1408,81 @@ mod tests {
         assert!(matches!(result, ApplyResult::Applied { .. }));
         assert_eq!(b.deferred_ops().len(), 0, "前序到达后缓冲应被清空");
         assert_eq!(b.field(&id, "title"), Some(serde_json::json!("二")));
+    }
+
+    /// 「删除设备」：本机忘掉它 + 进拒绝名单，重启后仍然拒绝；
+    /// 同步记录**不能**撤销删除，只有显式接受（`accept_peer`）才行。
+    #[test]
+    fn removed_peer_is_rejected_until_it_is_accepted_explicitly() {
+        let dir = temp_dir("remove-peer");
+        let mut engine =
+            SyncEngine::open(&dir, EngineOptions::new("A").with_schemas(schemas())).unwrap();
+        // 先「同步过」一台设备：peers.json 里就记下了它
+        engine.record_peer_sync(
+            "peer-1",
+            "旧手机",
+            Some("192.168.0.9:47821".to_string()),
+            VersionVector::from_pairs([("peer-1", 3)]),
+            None,
+        );
+        engine.flush().unwrap();
+        assert!(engine.peers().contains_key("peer-1"));
+
+        engine.remove_peer("peer-1").unwrap();
+        assert!(!engine.peers().contains_key("peer-1"), "移除后不该再出现在设备列表里");
+        assert!(engine.is_device_removed("peer-1"), "移除的设备进拒绝名单");
+        assert!(engine.remove_peer(&engine.device_id().to_string()).is_err(), "不能移除本机");
+
+        // 并发时序：删除时还有一次同步在跑，它结束时会记录这一次同步 —— 不能把删除撤销
+        engine.record_peer_sync("peer-1", "旧手机", None, VersionVector::default(), None);
+        assert!(engine.is_device_removed("peer-1"), "同步记录不能撤销删除");
+        assert!(!engine.peers().contains_key("peer-1"), "被移除的设备不能被记回列表");
+        drop(engine);
+
+        let mut reopened =
+            SyncEngine::open(&dir, EngineOptions::new("A").with_schemas(schemas())).unwrap();
+        assert!(reopened.is_device_removed("peer-1"), "重启后仍应拒绝该设备");
+        assert!(!reopened.peers().contains_key("peer-1"));
+
+        // 显式重新接受（界面上就是「查找局域网设备」里的「重新接受」）
+        assert!(reopened.accept_peer("peer-1").unwrap(), "接受应报告状态变化");
+        assert!(!reopened.is_device_removed("peer-1"), "接受后不再拒绝");
+        // 再同步一次才会回到设备列表
+        reopened.record_peer_sync("peer-1", "旧手机", None, VersionVector::default(), None);
+        assert!(reopened.peers().contains_key("peer-1"));
+        reopened.flush().unwrap();
+        drop(reopened);
+
+        let again =
+            SyncEngine::open(&dir, EngineOptions::new("A").with_schemas(schemas())).unwrap();
+        assert!(!again.is_device_removed("peer-1"), "重新接受要落盘");
+        assert!(again.peers().contains_key("peer-1"));
+    }
+
+    /// 移除设备时，它那批「等不到前序」的缓冲操作一并丢掉：它已被拒绝，
+    /// 那些操作永远不会再有基线，留着只会让缓冲一直不收敛。
+    #[test]
+    fn removing_peer_drops_its_pending_ops() {
+        let dir = temp_dir("remove-deferred");
+        let mut a = engine("causal-remove-a");
+        let mut b =
+            SyncEngine::open(&dir, EngineOptions::new("B").with_schemas(schemas())).unwrap();
+        let id = a.create_entity("book", None, [("title", serde_json::json!("一"))]).unwrap();
+        a.set_field(&id, "title", serde_json::json!("二")).unwrap();
+        a.flush().unwrap();
+        let ops: Vec<Operation> = a.ops().to_vec();
+
+        // 只送第二条（基线含第一条）→ 进缓冲，来源是设备 A
+        b.apply_remote(&ops[1], Some(a.device_id())).unwrap();
+        assert_eq!(b.deferred_ops().len(), 1);
+
+        b.remove_peer(a.device_id()).unwrap();
+        assert_eq!(b.deferred_ops().len(), 0, "被移除设备的缓冲操作应清掉");
+        drop(b);
+
+        let reopened =
+            SyncEngine::open(&dir, EngineOptions::new("B").with_schemas(schemas())).unwrap();
+        assert_eq!(reopened.deferred_ops().len(), 0, "清空要落盘");
     }
 
     #[test]

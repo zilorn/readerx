@@ -85,6 +85,8 @@ pub struct SyncStatus {
     pub ops: usize,
     /// 已知对端数（不含本机）
     pub peers: usize,
+    /// 被本机删除（拒绝接入）的设备数
+    pub removed_peers: usize,
 }
 
 /// 一台已知对端。
@@ -110,6 +112,8 @@ pub struct DiscoveredDto {
     pub addr: String,
     /// 是否已经同步过
     pub known: bool,
+    /// 是否被本机移除过（界面上给「重新接受」，而不是当成新设备）
+    pub removed: bool,
 }
 
 /// 一次同步的结果。
@@ -694,7 +698,7 @@ impl<R: tauri::Runtime> SyncService<R> {
     }
 
     fn discover_peers_inner(&self, engine: &SharedEngine) -> Result<Vec<DiscoveredDto>, String> {
-        let (secret, group, device, name, known) = {
+        let (secret, group, device, name, known, removed) = {
             let guard = lock_engine(engine);
             (
                 guard.secret_bytes().map_err(|e| e.to_string())?,
@@ -702,6 +706,7 @@ impl<R: tauri::Runtime> SyncService<R> {
                 guard.device_id().to_string(),
                 guard.device_name().to_string(),
                 guard.peers().keys().cloned().collect::<Vec<String>>(),
+                guard.removed_devices().to_vec(),
             )
         };
         let found = readerx_sync::net::discovery::scan(
@@ -717,6 +722,7 @@ impl<R: tauri::Runtime> SyncService<R> {
             .into_iter()
             .map(|peer| DiscoveredDto {
                 known: known.iter().any(|id| id == &peer.device),
+                removed: removed.iter().any(|id| id == &peer.device),
                 device_id: peer.device,
                 name: peer.name,
                 addr: peer.addr.to_string(),
@@ -751,6 +757,7 @@ impl<R: tauri::Runtime> SyncService<R> {
             status.entities = engine_status.live_entities;
             status.ops = engine_status.ops;
             status.peers = engine_status.peers;
+            status.removed_peers = guard.removed_devices().len();
         }
         status
     }
@@ -788,6 +795,45 @@ impl<R: tauri::Runtime> SyncService<R> {
         });
         list.sort_by(|a, b| b.is_self.cmp(&a.is_self).then(a.name.cmp(&b.name)));
         list
+    }
+
+    /// 移除一台已配对设备：本机不再与它同步，并拒绝它连进来（直到重新接受）。
+    ///
+    /// 已经同步进来的数据**不受影响** —— 那是两台设备共同的历史，不能按来源回滚；
+    /// 对端也不会被通知（无中心的局域网里没有「踢人」，它只是连不进来）。
+    /// 返回移除后的设备列表，界面直接拿来刷新。
+    pub fn remove_peer(self: &Arc<Self>, device_id: &str) -> Result<Vec<PeerDto>, String> {
+        let engine = self.ensure_engine()?;
+        {
+            let mut guard = lock_engine(&engine);
+            guard.remove_peer(device_id).map_err(|e| e.to_string())?;
+        }
+        log::info!(
+            "已移除同步设备 device={}",
+            readerx_sync::version::short_device(device_id)
+        );
+        self.emit_status();
+        Ok(self.peers())
+    }
+
+    /// 重新接受一台被删除的设备（撤销拒绝）。
+    ///
+    /// 界面上的入口是「查找局域网设备」里的「重新接受」：先调它、再与对方同步一次，
+    /// 设备才会回到列表。**只有这个显式动作能撤销删除** —— 自动同步、手动同步都不会。
+    pub fn accept_peer(self: &Arc<Self>, device_id: &str) -> Result<SyncStatus, String> {
+        let engine = self.ensure_engine()?;
+        let changed = {
+            let mut guard = lock_engine(&engine);
+            guard.accept_peer(device_id).map_err(|e| e.to_string())?
+        };
+        if changed {
+            log::info!(
+                "已重新接受同步设备 device={}",
+                readerx_sync::version::short_device(device_id)
+            );
+        }
+        self.emit_status();
+        Ok(self.status())
     }
 
     /// 冲突队列（默认只看待裁决的）。

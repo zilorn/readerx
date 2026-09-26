@@ -179,6 +179,8 @@ pub fn run() {
             sync::commands::readerx_sync_sync_addr,
             sync::commands::readerx_sync_discover,
             sync::commands::readerx_sync_peers,
+            sync::commands::readerx_sync_remove_peer,
+            sync::commands::readerx_sync_accept_peer,
             sync::commands::readerx_sync_conflicts,
             sync::commands::readerx_sync_resolve,
             sync::commands::readerx_sync_reset

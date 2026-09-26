@@ -41,8 +41,10 @@ of pages and the same local library.
 - **Sync** `/sync` (Settings → Sync): two devices on the same local network sync **book info,
   reading position, bookmarks, groups and book sources** directly with each other (book files and
   covers stay on each device); turn it on or off, pair with a code, discover devices on the
-  network, sync manually or automatically at a fixed interval; when both devices change the same
-  thing, it lands in a conflict list where you pick which copy to keep. No cloud service, no account
+  network, sync manually or automatically at a fixed interval; paired devices can be removed from
+  the list (the removed device is no longer synced with and is refused when it connects — accept it
+  again from "Find devices"); when both devices change the same thing, it lands in a conflict list
+  where you pick which copy to keep. No cloud service, no account
 - **Reading** `/book/:id`: chapter reading, previous / next chapter, table-of-contents drawer,
   reading progress synced across pages; on a wide desktop window the text is laid out as two
   side-by-side pages (one page on phones and narrow windows; the column width adapts to the

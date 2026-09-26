@@ -67,8 +67,16 @@ export const sync = {
   "sync.discover.empty": "没有找到可同步的设备",
   "sync.discover.emptyHint": "确认对方已开启同步，且两台设备在同一个局域网内",
   "sync.discover.failed": "查找设备失败",
+  "sync.discover.removed": "已删除",
+  "sync.discover.reaccept": "重新接受",
   "sync.peer.lastSync": "上次同步：{time}（共 {count} 次）",
   "sync.peer.empty": "还没有已配对的设备：自动同步会在配对完成后开始",
+  "sync.peer.removeAria": "删除设备 {name}",
+  "sync.peer.removeConfirm": "确认删除",
+  "sync.peer.removed": "已删除设备 {name}",
+  "sync.peer.removeFailed": "删除设备失败",
+  "sync.peer.acceptFailed": "重新接受设备失败",
+  "sync.peer.removedHint": "已删除 {count} 台设备：它们不再与本机同步；在「查找」结果里可以重新接受",
 
   // 自动同步
   "sync.auto.title": "自动同步",

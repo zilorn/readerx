@@ -42,6 +42,8 @@ pub fn dispatch(cli: &Cli) -> Result<()> {
         "serve" => cmd_serve(cli),
         "discover" => cmd_discover(cli),
         "sync" => cmd_sync(cli),
+        "remove-peer" => cmd_remove_peer(cli),
+        "accept-peer" => cmd_accept_peer(cli),
         other => Err(SyncError::Invalid(format!(
             "未知命令：{other}（用 --help 看用法）"
         ))),
@@ -132,6 +134,9 @@ fn cmd_status(cli: &Cli) -> Result<()> {
             peer.addr.clone().unwrap_or_else(|| "-".to_string()),
             peer.sync_count
         );
+    }
+    for device in engine.removed_devices() {
+        println!("已移除    : {}", crate::version::short_device(device));
     }
     Ok(())
 }
@@ -529,4 +534,43 @@ fn cmd_sync(cli: &Cli) -> Result<()> {
 fn resolve_peer_addr(engine: &SyncEngine, target: &str) -> Option<String> {
     let peer = engine.peers().values().find(|p| p.device_id == target || p.device_id.starts_with(target))?;
     peer.addr.clone()
+}
+
+fn cmd_remove_peer(cli: &Cli) -> Result<()> {
+    let mut engine = cli.open_engine()?;
+    let device = resolve_peer_id(&engine, &cli.arg(0, "设备 id")?)?;
+    engine.remove_peer(&device)?;
+    println!("已移除设备 {device}（不再与它同步，并拒绝它连进来；用 accept-peer 可重新接受）");
+    Ok(())
+}
+
+fn cmd_accept_peer(cli: &Cli) -> Result<()> {
+    let mut engine = cli.open_engine()?;
+    let device = cli.arg(0, "设备 id")?;
+    let device = resolve_peer_id(&engine, &device)?;
+    if engine.accept_peer(&device)? {
+        println!("已重新接受设备 {device}（用 sync 与它同步一次）");
+    } else {
+        println!("设备不在移除名单里：{device}");
+    }
+    Ok(())
+}
+
+/// 把「设备 id（或前缀）」补全成完整 id（已知对端与已移除设备都能匹配）。
+fn resolve_peer_id(engine: &SyncEngine, target: &str) -> Result<String> {
+    if let Some(peer) = engine.peers().keys().find(|id| id.starts_with(target)) {
+        return Ok(peer.clone());
+    }
+    if let Some(device) = engine
+        .removed_devices()
+        .iter()
+        .find(|id| id.starts_with(target))
+    {
+        return Ok(device.clone());
+    }
+    if target.is_empty() {
+        return Err(SyncError::Invalid("设备 id 不能为空".to_string()));
+    }
+    // 不在任何名单里：原样返回，由 remove_peer / accept_peer 决定怎么处理
+    Ok(target.to_string())
 }

@@ -49,6 +49,8 @@ export interface SyncStatus {
   entities: number;
   ops: number;
   peers: number;
+  /** 被本机删除（拒绝接入）的设备数 */
+  removedPeers: number;
 }
 
 /** 已同步过的设备 */
@@ -68,6 +70,8 @@ export interface DiscoveredPeer {
   name: string;
   addr: string;
   known: boolean;
+  /** 被本机删除过（界面上给「重新接受」，而不是当成新设备） */
+  removed: boolean;
 }
 
 /** 一次同步的结果 */
@@ -123,6 +127,7 @@ const EMPTY_STATUS: SyncStatus = {
   entities: 0,
   ops: 0,
   peers: 0,
+  removedPeers: 0,
 };
 
 const [status, setStatus] = createSignal<SyncStatus>(EMPTY_STATUS);
@@ -352,6 +357,43 @@ export async function listSyncPeers(): Promise<SyncPeer[]> {
   } catch (error) {
     log.warn("读取同步设备列表失败", error);
     return [];
+  }
+}
+
+/**
+ * 删除（移除）一台已配对设备：本机不再与它同步，并拒绝它连进来。
+ *
+ * 只影响本机：对端仍持有它那份数据与群组密钥，也不会收到通知；
+ * 它下次主动同步会拿到「设备已被对端移除」。要恢复同步，需要在「查找局域网设备」
+ * 里对这台设备点「重新接受」（本质是本机主动与它同步一次）。
+ *
+ * @returns 删除后的设备列表；失败返回 null（错误已按统一口径提示）
+ */
+export async function removeSyncPeer(deviceId: string): Promise<SyncPeer[] | null> {
+  if (!isTauri()) return null;
+  try {
+    return await invoke<SyncPeer[]>("readerx_sync_remove_peer", { deviceId });
+  } catch (error) {
+    reportFailure(t("sync.peer.removeFailed"), error);
+    return null;
+  }
+}
+
+/**
+ * 重新接受一台被删除的设备：撤销本机的拒绝。
+ *
+ * 这是撤销「删除设备」的**唯一**途径 —— 自动同步与手动同步都不会把删除悄悄撤销。
+ * 撤销之后再与对方同步一次（`syncWithAddr`），它才会回到设备列表。
+ */
+export async function acceptSyncPeer(deviceId: string): Promise<boolean> {
+  if (!isTauri()) return false;
+  try {
+    const next = await invoke<SyncStatus>("readerx_sync_accept_peer", { deviceId });
+    applyStatus(next);
+    return true;
+  } catch (error) {
+    reportFailure(t("sync.peer.acceptFailed"), error);
+    return false;
   }
 }
 

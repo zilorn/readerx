@@ -4,7 +4,7 @@
 //! 目录布局（`<data_root>/`）：
 //!
 //! ```text
-//! device.json      设备身份：设备 id、名称、群组 id、群组密钥（配对用）
+//! device.json      设备身份：设备 id、名称、群组 id、群组密钥（配对用）、本机拒绝接入的设备
 //! clock.json       HLC 进度（重启后不能从 0 重新计数，否则回拨的钟会倒挂）
 //! oplog.jsonl      操作日志，一行一条 Operation（**唯一真相**，追加写 + fsync）
 //! entities.json    实体快照（物化视图）+ 快照覆盖到的日志行数
@@ -52,6 +52,13 @@ pub struct DeviceConfig {
     /// 群组密钥（hex）：握手鉴权 + 每帧 MAC；**配对码的一部分，不能进日志**
     pub secret: String,
     pub created_at_ms: u64,
+    /// 本机**拒绝接入**的设备 id（界面上「删除设备」的结果）。
+    ///
+    /// 名单里的设备连进来会在握手阶段被拒绝，直到本机重新与它同步一次
+    /// （显式重新接受，见 `SyncEngine::record_peer_sync`）。
+    /// 这是本机单方面的决定：对端不知情，也不会因此删掉它手里的数据。
+    #[serde(default)]
+    pub removed_devices: Vec<DeviceId>,
 }
 
 impl DeviceConfig {
@@ -64,6 +71,7 @@ impl DeviceConfig {
             group_id: new_id(),
             secret: hex_encode(&random_bytes(SECRET_BYTES)),
             created_at_ms: now_ms(),
+            removed_devices: Vec::new(),
         }
     }
 
@@ -154,6 +162,8 @@ pub struct PeerState {
 pub struct SyncStore {
     root: PathBuf,
     device: DeviceConfig,
+    /// `device` 有未落盘的改动（目前只有「已移除设备」名单会改）
+    device_dirty: bool,
 }
 
 impl SyncStore {
@@ -199,7 +209,7 @@ impl SyncStore {
                 log::debug!("同步目录权限设置失败（忽略）: {e}");
             }
         }
-        Ok(SyncStore { root, device })
+        Ok(SyncStore { root, device, device_dirty: false })
     }
 
     /// 用配对码加入已有群组（保留本设备 id，只换群组与密钥）。
@@ -209,13 +219,15 @@ impl SyncStore {
         let mut device = store.device.clone();
         device.group_id = group_id;
         device.secret = secret;
+        // 换群组 = 换一份数据：旧群组的「已移除设备」名单在这里没有意义
+        device.removed_devices.clear();
         write_json_atomic(&store.root.join("device.json"), &device)?;
         log::info!(
             "已加入同步群组 group={} device={}",
             crate::version::short_device(&device.group_id),
             crate::version::short_device(&device.device_id)
         );
-        Ok(SyncStore { root: store.root, device })
+        Ok(SyncStore { root: store.root, device, device_dirty: false })
     }
 
     pub fn root(&self) -> &Path {
@@ -224,6 +236,46 @@ impl SyncStore {
 
     pub fn device(&self) -> &DeviceConfig {
         &self.device
+    }
+
+    /// 本机拒绝接入的设备名单。
+    pub fn removed_devices(&self) -> &[DeviceId] {
+        &self.device.removed_devices
+    }
+
+    /// 该设备是否被本机拒绝接入。
+    pub fn is_device_removed(&self, device: &str) -> bool {
+        self.device.removed_devices.iter().any(|removed| removed == device)
+    }
+
+    /// 加入 / 移出「拒绝接入」名单（内存改动，由 [`SyncStore::save_device`] 落盘）。
+    ///
+    /// 返回是否真的变了 —— 调用方据此决定要不要记日志。
+    pub fn set_device_removed(&mut self, device: &str, removed: bool) -> bool {
+        if removed {
+            if self.is_device_removed(device) {
+                return false;
+            }
+            self.device.removed_devices.push(device.to_string());
+        } else {
+            let before = self.device.removed_devices.len();
+            self.device.removed_devices.retain(|entry| entry != device);
+            if self.device.removed_devices.len() == before {
+                return false;
+            }
+        }
+        self.device_dirty = true;
+        true
+    }
+
+    /// 把设备身份写回 `device.json`（没有改动时不碰盘）。
+    pub fn save_device(&mut self) -> Result<()> {
+        if !self.device_dirty {
+            return Ok(());
+        }
+        write_json_atomic(&self.root.join("device.json"), &self.device)?;
+        self.device_dirty = false;
+        Ok(())
     }
 
     pub fn device_id(&self) -> &str {

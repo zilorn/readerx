@@ -77,10 +77,23 @@ export const sync = {
   "sync.discover.emptyHint":
     "Make sure sync is on for the other device and both are on the same network",
   "sync.discover.failed": "Could not search for devices",
+  "sync.discover.removed": "Removed",
+  "sync.discover.reaccept": "Accept again",
   "sync.peer.lastSync": "Last sync: {time} ({count} times)",
   "sync.peer.empty": "No paired devices yet — auto sync starts once you pair one",
   "sync.peer.lastSync_one": "Last sync: {time} ({count} time)",
   "sync.peer.lastSync_other": "Last sync: {time} ({count} times)",
+  "sync.peer.removeAria": "Remove device {name}",
+  "sync.peer.removeConfirm": "Confirm",
+  "sync.peer.removed": "Removed {name}",
+  "sync.peer.removeFailed": "Could not remove the device",
+  "sync.peer.acceptFailed": "Could not accept the device again",
+  "sync.peer.removedHint":
+    "{count} removed devices are no longer synced with this one — accept them again from the search results",
+  "sync.peer.removedHint_one":
+    "{count} removed device is no longer synced with this one — accept it again from the search results",
+  "sync.peer.removedHint_other":
+    "{count} removed devices are no longer synced with this one — accept them again from the search results",
 
   // Auto sync
   "sync.auto.title": "Auto sync",

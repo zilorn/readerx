@@ -105,6 +105,24 @@ pub async fn readerx_sync_peers(app: AppHandle) -> Result<Vec<PeerDto>, String> 
     blocking("设备列表读取", move || Ok(service(&app)?.peers())).await
 }
 
+/// 移除一台已配对设备：本机不再与它同步，并拒绝它连进来（直到重新接受）。
+#[tauri::command]
+pub async fn readerx_sync_remove_peer(
+    app: AppHandle,
+    device_id: String,
+) -> Result<Vec<PeerDto>, String> {
+    blocking("设备移除", move || service(&app)?.remove_peer(&device_id)).await
+}
+
+/// 重新接受一台被删除的设备（撤销拒绝）。
+#[tauri::command]
+pub async fn readerx_sync_accept_peer(
+    app: AppHandle,
+    device_id: String,
+) -> Result<SyncStatus, String> {
+    blocking("设备重新接受", move || service(&app)?.accept_peer(&device_id)).await
+}
+
 /// 冲突队列；`includeSettled` 为真时连已裁决的一起返回。
 #[tauri::command]
 pub async fn readerx_sync_conflicts(

@@ -45,6 +45,8 @@ pub const USAGE_TEXT: &str = r#"readerx-sync —— ReaderX 局域网同步（�
   serve [--port <端口>] [--no-discovery]      启动同步服务（前台运行）
   discover                 广播发现局域网内的对端
   sync <地址|auto>         与对端同步一次（auto = 先发现再逐个同步）
+  remove-peer <设备id>     移除已配对设备（不再同步，并拒绝它连进来）
+  accept-peer <设备id>     重新接受被移除的设备（解除拒绝）
 
 示例：
   readerx-sync --data-dir /tmp/a init --name 手机

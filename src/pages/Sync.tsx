@@ -17,11 +17,13 @@ import { createLogger } from "../lib/logger";
 import { showToast } from "../lib/toast";
 import {
   SYNC_INTERVAL_PRESETS,
+  acceptSyncPeer,
   discoverSyncPeers,
   formatSyncInterval,
   joinSyncGroup,
   listSyncPeers,
   refreshSyncStatus,
+  removeSyncPeer,
   resetSyncData,
   setSyncAuto,
   setSyncDeviceName,
@@ -73,7 +75,10 @@ export default function SyncPage() {
   const [joinCode, setJoinCode] = createSignal("");
   const [deviceName, setDeviceName] = createSignal("");
   const [resetConfirming, setResetConfirming] = createSignal(false);
+  /** 正在二次确认删除的设备 id（点一次变确认态，再点才真的删） */
+  const [removingId, setRemovingId] = createSignal<string | null>(null);
   let resetTimer: number | undefined;
+  let removeTimer: number | undefined;
 
   async function reload(): Promise<void> {
     setPeers(await listSyncPeers());
@@ -182,7 +187,16 @@ export default function SyncPage() {
     const outcome = await syncWithAddr(addr);
     setBusy(false);
     await reload();
-    if (outcome && outcome.synced.length > 0) showToast(t("sync.result.ok", { names: addr, count: 1 }));
+    if (outcome && outcome.synced.length > 0) {
+      // 刚同步成功的设备既不再是陌生设备，也不再是「已删除」（主动同步 = 重新接受）
+      setFound(
+        (list) =>
+          list?.map((peer) =>
+            peer.addr === addr ? { ...peer, known: true, removed: false } : peer,
+          ) ?? null,
+      );
+      showToast(t("sync.result.ok", { names: addr, count: 1 }));
+    }
   }
 
   function onReset(): void {
@@ -202,6 +216,49 @@ export default function SyncPage() {
       setFound(null);
       setPairingCode("");
       if (ok) showToast(t("sync.reset.done"));
+    })();
+  }
+
+  /** 重新接受一台被删除的设备：先撤销拒绝，再与它同步一次（设备才会回到列表） */
+  async function onReaccept(peer: DiscoveredPeer): Promise<void> {
+    setBusy(true);
+    const ok = await acceptSyncPeer(peer.deviceId);
+    setBusy(false);
+    if (!ok) return;
+    // 拒绝已经撤销：这一条不再是「已删除」，剩下的只是同步一次
+    setFound(
+      (list) =>
+        list?.map((item) =>
+          item.deviceId === peer.deviceId ? { ...item, removed: false } : item,
+        ) ?? null,
+    );
+    await onSyncAddr(peer.addr);
+  }
+
+  /** 删除设备：先点一次进入确认态，再点才真的删（3 秒内没确认就收起） */
+  function onRemovePeer(peer: SyncPeer): void {
+    if (removingId() !== peer.deviceId) {
+      setRemovingId(peer.deviceId);
+      window.clearTimeout(removeTimer);
+      removeTimer = window.setTimeout(() => setRemovingId(null), 3000);
+      return;
+    }
+    window.clearTimeout(removeTimer);
+    setRemovingId(null);
+    void (async () => {
+      setBusy(true);
+      const list = await removeSyncPeer(peer.deviceId);
+      setBusy(false);
+      if (!list) return;
+      setPeers(list);
+      // 查找结果里刚刚可能还把它当「已配对设备」：同步改成「重新接受」，否则点了也回不来
+      setFound(
+        (found) =>
+          found?.map((item) =>
+            item.deviceId === peer.deviceId ? { ...item, known: false, removed: true } : item,
+          ) ?? null,
+      );
+      showToast(t("sync.peer.removed", { name: peer.name || peer.deviceId }));
     })();
   }
 
@@ -390,6 +447,13 @@ export default function SyncPage() {
               </button>
             </div>
 
+            {/* 删掉的设备只有在这里能恢复：先说明一声，别让人以为它们凭空消失了 */}
+            <Show when={status().removedPeers > 0}>
+              <div class="px-4 py-[13px] text-[12px] leading-[1.5] text-text-3">
+                {t("sync.peer.removedHint", { count: status().removedPeers })}
+              </div>
+            </Show>
+
             <Show when={found()}>
               {(list) => (
                 <Show
@@ -402,20 +466,33 @@ export default function SyncPage() {
                 >
                   <For each={list()}>
                     {(peer) => (
-                      <div class="flex items-center gap-3 px-4 py-[13px]">
+                      <div class="flex items-center gap-2 px-4 py-[13px]">
                         <span class="grid h-[34px] w-[34px] flex-none place-items-center rounded-[10px] bg-surface-2 text-text-2">
                           <DeviceIcon size={18} />
                         </span>
                         <span class="flex min-w-0 flex-1 flex-col gap-0.5">
-                          <span class="truncate text-[14.5px] font-medium">{peer.name}</span>
+                          <span class="flex min-w-0 items-center gap-1.5">
+                            <span class="truncate text-[14.5px] font-medium">{peer.name}</span>
+                            <Show when={peer.removed}>
+                              <span class="flex-none rounded-full bg-danger-weak px-1.5 text-[10.5px] font-semibold leading-[16px] text-danger">
+                                {t("sync.discover.removed")}
+                              </span>
+                            </Show>
+                          </span>
                           <span class="text-[11.5px] text-text-3">{peer.addr}</span>
                         </span>
                         <button
-                          class="inline-flex h-[32px] flex-none items-center rounded-[9px] bg-accent-weak px-3 text-[12.5px] font-semibold text-accent transition-[scale,opacity] duration-100 active:scale-[0.97] active:opacity-80 disabled:opacity-50"
+                          class="inline-flex h-[32px] flex-none items-center rounded-[9px] px-3 text-[12.5px] font-semibold transition-[scale,opacity] duration-100 active:scale-[0.97] active:opacity-80 disabled:opacity-50"
+                          classList={{
+                            "border border-border text-text-2": peer.removed,
+                            "bg-accent-weak text-accent": !peer.removed,
+                          }}
                           disabled={busy()}
-                          onClick={() => void onSyncAddr(peer.addr)}
+                          onClick={() =>
+                            void (peer.removed ? onReaccept(peer) : onSyncAddr(peer.addr))
+                          }
                         >
-                          {t("sync.action.syncNow")}
+                          {peer.removed ? t("sync.discover.reaccept") : t("sync.action.syncNow")}
                         </button>
                       </div>
                     )}
@@ -433,12 +510,14 @@ export default function SyncPage() {
             <Show when={remotePeers().length > 0}>
               <For each={remotePeers()}>
                 {(peer) => (
-                  <div class="flex items-center gap-3 px-4 py-[13px]">
+                  <div class="flex items-center gap-2 px-4 py-[13px]">
                     <span class="grid h-[34px] w-[34px] flex-none place-items-center rounded-[10px] bg-surface-2 text-text-2">
                       <DeviceIcon size={18} />
                     </span>
                     <span class="flex min-w-0 flex-1 flex-col gap-0.5">
-                      <span class="truncate text-[14.5px] font-medium">{peer.name}</span>
+                      <span class="truncate text-[14.5px] font-medium">
+                        {peer.name || peer.deviceId}
+                      </span>
                       <span class="text-[11.5px] text-text-3">
                         {t("sync.peer.lastSync", {
                           time: relativeTime(peer.lastSyncMs),
@@ -455,6 +534,23 @@ export default function SyncPage() {
                         {t("sync.action.syncNow")}
                       </button>
                     </Show>
+                    <button
+                      class="inline-flex h-[32px] flex-none items-center gap-1 rounded-[9px] px-2 text-[12.5px] font-medium transition-colors disabled:opacity-50"
+                      classList={{
+                        "bg-danger text-white": removingId() === peer.deviceId,
+                        "text-text-3 active:bg-surface-2": removingId() !== peer.deviceId,
+                      }}
+                      aria-label={t("sync.peer.removeAria", {
+                        name: peer.name || peer.deviceId,
+                      })}
+                      disabled={busy()}
+                      onClick={() => onRemovePeer(peer)}
+                    >
+                      <TrashIcon size={15} />
+                      <Show when={removingId() === peer.deviceId}>
+                        <span class="font-semibold">{t("sync.peer.removeConfirm")}</span>
+                      </Show>
+                    </button>
                   </div>
                 )}
               </For>
