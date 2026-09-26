@@ -3779,6 +3779,7 @@ name = "readerx"
 version = "0.2.1"
 dependencies = [
  "base64 0.22.1",
+ "libc",
  "log",
  "readerx-log",
  "readerx-source",

@@ -41,6 +41,29 @@ use crate::store::{LockGuard, PeerState, SyncStore};
 use crate::version::VersionVector;
 use crate::{SCHEMA_VERSION, PROTOCOL_VERSION};
 
+/// 「记下来也连不上」的对端地址：**未指定地址**（`0.0.0.0` / `::`）。
+///
+/// 那是绑定用的通配地址，不是目的地；界面还会把它当「本机地址」展示，用户照着填必然
+/// 失败（同步服务绑在 `0.0.0.0:47821`，见 `sync/lan.rs`）。历史版本会把这种「来源 IP
+/// 是通配地址」的连接记成对端地址，启动时扫一遍清掉。
+///
+/// **回环地址算可用**：同一台机器上的两个实例（模拟器 / 本机自测）本来就要用回环连，
+/// 把它当坏地址清掉会让这种场景再也连不上。
+///
+/// 解析不出来的字符串（旧格式 / 手改文件）不算在内：宁可留着让用户看见，
+/// 也不要静默抹掉一条可能有用的记录。
+pub(crate) fn unusable_peer_addr(addr: &str) -> bool {
+    // `SocketAddr` 直接解析最稳（`ip:port` 是唯一写入格式）
+    if let Ok(socket) = addr.parse::<std::net::SocketAddr>() {
+        return socket.ip().is_unspecified();
+    }
+    // 旧数据可能是裸 `ip`（没有端口）：也认，解析不出就当它可用
+    match addr.parse::<std::net::IpAddr>() {
+        Ok(ip) => ip.is_unspecified(),
+        Err(_) => false,
+    }
+}
+
 /// 打开引擎时的选项。
 #[derive(Clone, Debug)]
 pub struct EngineOptions {
@@ -957,6 +980,26 @@ impl SyncEngine {
         }
     }
 
+    /// 清掉历史数据里「根本连不上」的对端地址（未指定 / 回环地址）。
+    ///
+    /// 曾经的版本会把 `0.0.0.0:47821` 这类地址记成对端地址（来源 IP 是通配地址时），
+    /// 界面把它当「本机地址」展示、自动同步却永远连不上。启动时扫一遍清掉，
+    /// 之后地址由下次握手或 UDP 发现重新写入。
+    ///
+    /// 返回清掉的条数（>0 时调用方值得刷一次盘）。
+    pub fn forget_unusable_peer_addrs(&mut self) -> usize {
+        let stale: Vec<String> = self
+            .peers
+            .iter()
+            .filter(|(_, peer)| peer.addr.as_deref().is_some_and(unusable_peer_addr))
+            .map(|(device, _)| device.clone())
+            .collect();
+        for device in &stale {
+            let _ = self.forget_peer_addr(device);
+        }
+        stale.len()
+    }
+
     /// 刷新某台**已知对端**的地址（局域网里 DHCP 换 IP / 换网卡后用）。
     ///
     /// 只改地址，不动同步计数与对方已知版本 —— 它不是一次同步，只是「记下新门牌号」。
@@ -1731,6 +1774,44 @@ mod tests {
         assert!(engine.pending_conflict_count() >= 1);
         assert!(engine.conflicted_fields("s2").contains("key"));
         assert_eq!(engine.entities_of_kind("setting", false).len(), 2);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 未指定地址是「绑定用的通配地址」，不是能连的对端地址。
+    ///
+    /// 回归：曾经把 `0.0.0.0:47821` 记成对端地址，界面上当成「本机地址」显示，
+    /// 用户照着同步必然失败；而回环地址在「本机两实例」场景下是正经地址，不能一起清掉。
+    #[test]
+    fn unspecified_peer_addresses_are_unusable_but_loopback_is_kept() {
+        assert!(unusable_peer_addr("0.0.0.0:47821"));
+        assert!(unusable_peer_addr("[::]:47821"));
+        assert!(!unusable_peer_addr("127.0.0.1:47821"));
+        assert!(!unusable_peer_addr("192.168.0.101:47821"));
+        assert!(!unusable_peer_addr("fd00::1:47821"));
+        // 看不懂的历史值不静默抹掉
+        assert!(!unusable_peer_addr("nas.local:47821"));
+    }
+
+    #[test]
+    fn startup_cleanup_drops_only_the_unconnectable_addresses() {
+        let dir = temp_dir("stale-addr");
+        let mut engine =
+            SyncEngine::open(&dir, EngineOptions::new("A").with_schemas(schemas())).unwrap();
+        engine.record_peer_sync("peer-bad", "手机", Some("0.0.0.0:47821".into()), VersionVector::new(), None);
+        engine.record_peer_sync("peer-good", "台式机", Some("192.168.0.101:47821".into()), VersionVector::new(), None);
+        engine.flush().unwrap();
+
+        assert_eq!(engine.forget_unusable_peer_addrs(), 1);
+        assert!(engine.peers().get("peer-bad").unwrap().addr.is_none(), "坏地址要被清掉");
+        assert_eq!(
+            engine.peers().get("peer-good").unwrap().addr.as_deref(),
+            Some("192.168.0.101:47821"),
+            "好地址不受影响"
+        );
+        // 清干净后重复调用不再有动作
+        assert_eq!(engine.forget_unusable_peer_addrs(), 0);
+        // 设备本身留着（同步计数与对方已知版本还在）
+        assert!(engine.peers().contains_key("peer-bad"));
         fs::remove_dir_all(&dir).ok();
     }
 

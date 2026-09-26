@@ -21,6 +21,7 @@ import {
   discoverSyncPeers,
   formatSyncInterval,
   joinSyncGroup,
+  listSyncLanAddrs,
   listSyncPeers,
   refreshSyncStatus,
   removeSyncPeer,
@@ -29,6 +30,7 @@ import {
   setSyncDeviceName,
   setSyncEnabled,
   syncAppliedTick,
+  syncErrorText,
   syncNow,
   syncPairingCode,
   syncStatus,
@@ -51,6 +53,17 @@ function relativeTime(ms: number): string {
   return t("sync.time.daysAgo", { count: Math.round(hours / 24) });
 }
 
+/**
+ * 本机地址 → `ip:端口`。
+ *
+ * IPv6 要加方括号（`[fd00::1]:47821`），否则填进地址栏连不上；端口由同步服务决定，
+ * 与「本机地址」一起显示，用户抄全就能用。
+ */
+function withPort(host: string, port: number): string {
+  if (host.includes(":") && !host.startsWith("[")) return `[${host}]:${port}`;
+  return `${host}:${port}`;
+}
+
 function Section(props: { title: string; children: import("solid-js").JSX.Element }) {
   return (
     <section class="mb-6">
@@ -68,6 +81,8 @@ export default function SyncPage() {
   const navigate = useNavigate();
   const status = syncStatus;
   const [peers, setPeers] = createSignal<SyncPeer[]>([]);
+  /** 本机对外的局域网地址（`0.0.0.0` 之类的绑定地址绝不显示，见 listSyncLanAddrs） */
+  const [lanAddrs, setLanAddrs] = createSignal<string[]>([]);
   const [found, setFound] = createSignal<DiscoveredPeer[] | null>(null);
   const [discovering, setDiscovering] = createSignal(false);
   const [busy, setBusy] = createSignal(false);
@@ -79,6 +94,8 @@ export default function SyncPage() {
   const [removingId, setRemovingId] = createSignal<string | null>(null);
   let resetTimer: number | undefined;
   let removeTimer: number | undefined;
+  /** 上一次已刷新过的「同步动静」：状态事件推来的同一个值不重复拉设备列表 */
+  let lastActivity = "";
 
   async function reload(): Promise<void> {
     setPeers(await listSyncPeers());
@@ -91,6 +108,11 @@ export default function SyncPage() {
     setPairingCode(code ?? "");
   }
 
+  /** 刷新「本机地址」：网卡地址会随网络切换变化，每次都要现取 */
+  async function reloadAddrs(): Promise<void> {
+    setLanAddrs(await listSyncLanAddrs());
+  }
+
   /** 次级页返回：优先回上一页，直接打开链接时回它的入口（设置页） */
   function goBack() {
     if (window.history.length > 1) navigate(-1);
@@ -100,7 +122,7 @@ export default function SyncPage() {
   onMount(() => {
     void refreshSyncStatus().then(() => {
       setDeviceName(syncStatus().deviceName);
-      return reload();
+      return Promise.all([reload(), reloadAddrs()]);
     });
   });
 
@@ -111,6 +133,27 @@ export default function SyncPage() {
     const name = status().deviceName;
     if (name) setDeviceName((current) => current || name);
     if (status().enabled) void reload();
+  });
+
+  // 真正的「同步动静」来了就刷设备列表与本机地址：对端连进来、自动同步完成、
+  // 上次同步时间变了、冲突数变了、失败原因变了都属于这一类。
+  //
+  // 不能只依赖用户手动重进页面：这些变化多数发生在后台线程（自动同步 / 对端推送），
+  // 页面不主动跟进的话，界面会一直停在旧数据上（用户体感就是「必须重进页面才更新」）。
+  createEffect(() => {
+    const snapshot = [
+      status().enabled,
+      status().peers,
+      status().lastSyncMs,
+      status().pendingConflicts,
+      status().removedPeers,
+      status().lastError ?? "",
+    ].join("|");
+    if (snapshot === lastActivity) return;
+    lastActivity = snapshot;
+    if (!status().enabled) return;
+    void reload();
+    void reloadAddrs();
   });
 
   // 同步改了本地数据（进度 / 书签…）时，设备列表里的「上次同步」也该更新
@@ -173,12 +216,12 @@ export default function SyncPage() {
     setBusy(true);
     const outcome = await syncNow();
     setBusy(false);
-    await reload();
+    await Promise.all([reload(), reloadAddrs()]);
     if (!outcome) return;
     if (outcome.synced.length > 0) {
       showToast(t("sync.result.ok", { names: outcome.synced.join("、"), count: outcome.synced.length }));
     } else if (outcome.failed.length > 0) {
-      showToast(outcome.failed[0], true);
+      showToast(syncErrorText(outcome.failed[0]), true);
     }
   }
 
@@ -198,6 +241,14 @@ export default function SyncPage() {
       showToast(t("sync.result.ok", { names: addr, count: 1 }));
     }
   }
+
+  /** 本机同步服务的监听端口（本机地址行按它拼 `ip:端口`） */
+  const listenPort = () => {
+    const addr = status().listenAddr;
+    if (!addr) return 0;
+    const port = Number.parseInt(addr.slice(addr.lastIndexOf(":") + 1), 10);
+    return Number.isFinite(port) ? port : 0;
+  };
 
   function onReset(): void {
     if (!resetConfirming()) {
@@ -303,7 +354,9 @@ export default function SyncPage() {
                 </span>
                 <Show when={status().lastError}>
                   {(error) => (
-                    <span class="break-all text-[11.5px] text-danger">{error()}</span>
+                    <span class="break-all text-[11.5px] text-danger">
+                      {syncErrorText(error())}
+                    </span>
                   )}
                 </Show>
               </span>
@@ -375,15 +428,32 @@ export default function SyncPage() {
               </button>
             </div>
             <Show when={status().listenAddr}>
-              {(addr) => (
-                <div class="flex items-center gap-3 px-4 py-[13px]">
-                  <span class="flex min-w-0 flex-1 flex-col gap-0.5">
-                    <span class="text-[14.5px] font-medium">{t("sync.address.title")}</span>
-                    <span class="text-[11.5px] text-text-3">{t("sync.address.desc")}</span>
+              <div class="flex items-start gap-3 px-4 py-[13px]">
+                <span class="flex min-w-0 flex-1 flex-col gap-0.5">
+                  <span class="text-[14.5px] font-medium">{t("sync.address.title")}</span>
+                  <span class="text-[11.5px] leading-[1.5] text-text-3">
+                    {t("sync.address.desc")}
                   </span>
-                  <span class="flex-none text-[13px] tabular-nums text-text-2">{addr()}</span>
-                </div>
-              )}
+                  <Show
+                    when={lanAddrs().length > 0}
+                    fallback={
+                      <span class="mt-1 text-[11.5px] leading-[1.5] text-text-3">
+                        {t("sync.address.empty")}
+                      </span>
+                    }
+                  >
+                    <span class="mt-1 flex flex-col gap-0.5">
+                      <For each={lanAddrs()}>
+                        {(host) => (
+                          <span class="break-all font-mono text-[12.5px] text-text-2 select-all">
+                            {withPort(host, listenPort())}
+                          </span>
+                        )}
+                      </For>
+                    </span>
+                  </Show>
+                </span>
+              </div>
             </Show>
             <div class="flex items-center gap-3 px-4 py-[13px]">
               <span class="flex min-w-0 flex-1 flex-col gap-0.5">

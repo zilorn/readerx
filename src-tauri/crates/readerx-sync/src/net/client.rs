@@ -18,7 +18,7 @@ use std::net::TcpStream;
 use std::time::Duration;
 
 use crate::crypto::{self, derive_keys, nonce, proof, SessionKeys, ROLE_CLIENT, ROLE_SERVER, ROLE_SESSION};
-use crate::error::{Result, SyncError};
+use crate::error::{Result, SyncError, WireError};
 use crate::net::frame::{read_message, read_secure, write_message, write_secure};
 use crate::net::{PeerInfo, Transport};
 use crate::proto::{MAX_FRAME_BYTES, MAX_HANDSHAKE_BYTES, Request, Response};
@@ -86,31 +86,41 @@ impl TcpTransport {
             MAX_HANDSHAKE_BYTES,
         )?;
 
-        let hello: Response = read_message(&mut reader, MAX_HANDSHAKE_BYTES)?
-            .ok_or_else(|| SyncError::Transport("对端在握手前就关闭了连接".to_string()))?;
-        let (ok, server_device, server_name, server_nonce, message, protocol, peer_group) =
+        let hello: Response = read_message(&mut reader, MAX_HANDSHAKE_BYTES)?.ok_or_else(|| {
+            // 连上了、一句话没说就断：多半不是 ReaderX 的同步端口
+            SyncError::from(WireError::NotReaderx)
+        })?;
+        let (ok, server_device, server_name, server_nonce, message, protocol, peer_group, code) =
             match hello {
-                Response::Hello { ok, protocol, group: peer_group, device, name, nonce, message } => {
-                    (ok, device, name, nonce, message, protocol, peer_group)
+                Response::Hello { ok, protocol, group: peer_group, device, name, nonce, message, code } => {
+                    (ok, device, name, nonce, message, protocol, peer_group, code)
                 }
                 Response::Error { code, message } => {
-                    return Err(SyncError::Protocol(format!("{code}: {message}")))
+                    return Err(SyncError::from(WireError::from_wire(&code))
+                        .with_context(format!("{code}: {message}")))
                 }
                 other => {
-                    return Err(SyncError::Protocol(format!("握手期望 hello，收到 {}", other.kind())))
+                    return Err(SyncError::from(WireError::Unexpected)
+                        .with_context(format!("握手期望 hello，收到 {}", other.kind())))
                 }
             };
         if !ok {
-            return Err(SyncError::Auth(message.unwrap_or_else(|| "对端拒绝了本次连接".to_string())));
+            // 拒绝原因优先按对端给的码出文案（群组不一致 / 已被移除 / 版本不一致…）
+            let wire = code.as_deref().map(WireError::from_wire);
+            return Err(match (wire, message) {
+                (Some(wire), _) => SyncError::from(wire),
+                (None, Some(message)) => SyncError::Auth(message),
+                (None, None) => SyncError::Auth("对端拒绝了本次连接".to_string()),
+            });
         }
         if protocol != crate::PROTOCOL_VERSION {
-            return Err(SyncError::Protocol(format!(
+            return Err(SyncError::from(WireError::ProtocolMismatch).with_context(format!(
                 "协议版本不一致：本机 {} / 对端 {protocol}",
                 crate::PROTOCOL_VERSION
             )));
         }
         if peer_group != *group {
-            return Err(SyncError::Auth("群组不一致，无法同步".to_string()));
+            return Err(SyncError::from(WireError::GroupMismatch));
         }
 
         // 2) Auth：各自签自己角色的文本（避免把对方的 proof 反打回去的反射攻击）
@@ -120,21 +130,33 @@ impl TcpTransport {
 
         let auth: Response = read_message(&mut reader, MAX_HANDSHAKE_BYTES)?
             .ok_or_else(|| SyncError::Transport("鉴权阶段连接被关闭".to_string()))?;
-        let (auth_ok, server_proof, auth_message) = match auth {
-            Response::Auth { ok, proof, message } => (ok, proof, message),
+        let (auth_ok, server_proof, auth_message, auth_code) = match auth {
+            Response::Auth { ok, proof, message, code } => (ok, proof, message, code),
             Response::Error { code, message } => {
-                return Err(SyncError::Protocol(format!("{code}: {message}")))
+                return Err(SyncError::from(WireError::from_wire(&code))
+                    .with_context(format!("{code}: {message}")))
             }
-            other => return Err(SyncError::Protocol(format!("鉴权期望 auth，收到 {}", other.kind()))),
+            other => {
+                return Err(SyncError::from(WireError::Unexpected)
+                    .with_context(format!("鉴权期望 auth，收到 {}", other.kind())))
+            }
         };
         if !auth_ok {
-            return Err(SyncError::Auth(auth_message.unwrap_or_else(|| "鉴权被拒绝".to_string())));
+            let wire = auth_code.as_deref().map(WireError::from_wire);
+            return Err(match (wire, auth_message) {
+                (Some(wire), _) => SyncError::from(wire),
+                (None, Some(message)) => SyncError::Auth(message),
+                (None, None) => SyncError::Auth("鉴权被拒绝".to_string()),
+            });
         }
         let server_text =
             crypto::transcript(group, device, &server_device, &client_nonce, &server_nonce, ROLE_SERVER);
         let expected = proof(secret, &server_text);
         if !crypto::constant_time_eq(expected.as_bytes(), server_proof.as_bytes()) {
-            return Err(SyncError::Auth("对端未能证明自己持有群组密钥".to_string()));
+            return Err(SyncError::coded(
+                crate::error::Code::AuthFailed,
+                "对端未能证明自己持有群组密钥",
+            ));
         }
 
         let session_text =

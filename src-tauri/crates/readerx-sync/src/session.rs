@@ -411,8 +411,36 @@ mod tests {
         // 群组不一致：直接拒绝（场景 25 多租户隔离）
         let mut stranger = engine("tcp-stranger");
         let err = sync_with_addr(&mut stranger, &addr, Duration::from_secs(5)).unwrap_err();
-        assert!(matches!(err, SyncError::Auth(_)), "跨群组应被拒绝：{err}");
+        assert!(
+            matches!(err, SyncError::Coded(crate::error::Code::GroupMismatch, _)),
+            "跨群组应被拒绝：{err}"
+        );
 
+        drop(server);
+    }
+
+    /// 群组不一致必须带上**稳定错误码**：界面按码给出「用配对码重新加入」这类引导，
+    /// 而不是把一句中文提示原样端给英语用户（见 `error::Code` 与 `src/lib/sync.ts`）。
+    #[test]
+    fn group_mismatch_carries_the_actionable_error_code() {
+        let a = engine("code-a");
+        let mut stranger = engine("code-stranger");
+
+        let shared_a = shared(a);
+        let options = {
+            let a = crate::net::lock_engine(&shared_a);
+            ServerOptions::from_engine(&a).unwrap().with_bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+        };
+        let server = PeerServer::start(shared_a.clone(), options).unwrap();
+        let addr = server.local_addr().to_string();
+
+        let error = sync_with_addr(&mut stranger, &addr, Duration::from_secs(5)).unwrap_err();
+        assert_eq!(error.code(), "group_mismatch", "错误码要稳定：{error}");
+        assert!(
+            error.to_string().starts_with("group_mismatch|"),
+            "错误串要带码前缀：{error}"
+        );
+        assert_eq!(SyncError::code_of(&error.to_string()), "group_mismatch");
         drop(server);
     }
 
@@ -458,6 +486,39 @@ mod tests {
         );
         // 端口一定不是这条连接的临时源端口（临时端口不会等于我们指定的 47899）
         assert!(!recorded.contains(":0"), "{recorded}");
+        drop(server);
+    }
+
+    /// 对端连进来并记入设备列表时，服务端要通知宿主（界面据此立刻刷新设备列表，
+    /// 不用等用户重进页面）。
+    #[test]
+    fn server_notifies_the_host_when_it_records_a_peer() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let a = engine("notify-a");
+        let mut b = engine("notify-b");
+        pair(&a, &mut b);
+
+        let seen = Arc::new(AtomicUsize::new(0));
+        let counter = seen.clone();
+        let shared_a = shared(a);
+        let options = {
+            let a = crate::net::lock_engine(&shared_a);
+            ServerOptions::from_engine(&a)
+                .unwrap()
+                .with_bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                .with_peer_seen(Arc::new(move |_peer| {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                }))
+        };
+        let server = PeerServer::start(shared_a.clone(), options).unwrap();
+        let addr = server.local_addr().to_string();
+
+        b.set_listen_port(47_877);
+        sync_with_addr(&mut b, &addr, Duration::from_secs(5)).unwrap();
+
+        assert!(seen.load(Ordering::Relaxed) > 0, "记下对端后要通知宿主");
         drop(server);
     }
 

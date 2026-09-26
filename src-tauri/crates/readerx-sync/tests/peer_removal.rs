@@ -64,9 +64,11 @@ fn removed_device_is_rejected_until_we_contact_it_again() {
 
     // B 主动连过来：握手就被拒，且不会被重新记进 A 的设备列表
     let error = sync_to(&b, &addr_a).expect_err("被移除的设备不该还能连进来");
-    assert!(
-        error.to_string().contains("已被对端移除"),
-        "错误应说明是被移除（实际：{error}）"
+    // 判据是**错误码**：界面按码给「重新接受」的引导，中英文各有文案（见 error::Code）
+    assert_eq!(
+        error.code(),
+        "removed_by_peer",
+        "错误码应说明是被对端移除（实际：{error}）"
     );
     assert!(
         !lock_engine(&a).peers().contains_key(&b_id),

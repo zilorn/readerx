@@ -54,13 +54,33 @@ export const sync = {
   "sync.deviceName.save": "Save device name",
   "sync.deviceName.failed": "Could not change the device name",
   "sync.address.title": "Local address",
-  "sync.address.desc": "Other devices can also connect by entering this address",
+  "sync.address.desc": "Other devices on the same network reach this one at these addresses",
+  "sync.address.empty": "No local network address yet — connect to Wi-Fi or a cable first",
   "sync.pairing.title": "Pairing code",
   "sync.pairing.desc": "Enter it under “Join another device” on the other device",
   "sync.pairing.copy": "Copy",
   "sync.pairing.copied": "Pairing code copied",
   "sync.pairing.copyFailed": "Copy failed — press and hold to select",
   "sync.pairing.failed": "Could not read the pairing code",
+
+  // Failure reasons (translated from the backend error code, see syncErrorText in lib/sync.ts)
+  "sync.error.groupMismatch":
+    "The two devices are not in the same sync group: copy the pairing code on one device and enter it under “Join another device” on the other",
+  "sync.error.removedByPeer":
+    "This device was removed from the other device’s list: find it under “Find devices” and choose “Accept again”",
+  "sync.error.notTrusted":
+    "This device is not on the other device’s trust list — allow it there first",
+  "sync.error.protocolMismatch":
+    "The two devices speak different sync protocol versions: update ReaderX to the same version",
+  "sync.error.busy": "The other device is busy with another sync connection — try again later",
+  "sync.error.authFailed":
+    "The group keys do not match: copy the pairing code on one device and enter it under “Join another device” on the other",
+  "sync.error.unexpectedMessage":
+    "The other end is not a ReaderX sync service, or the versions are too far apart",
+  "sync.error.unsupportedVersion":
+    "The other device’s data format is newer than this app: update ReaderX",
+  "sync.error.notReaderx":
+    "The other end is not a ReaderX sync service: check the address and port",
 
   // Connect
   "sync.join.title": "Join another device",

@@ -105,6 +105,15 @@ pub async fn readerx_sync_peers(app: AppHandle) -> Result<Vec<PeerDto>, String> 
     blocking("设备列表读取", move || Ok(service(&app)?.peers())).await
 }
 
+/// 本机对外的局域网地址（同步界面「本机地址」展示用）。
+///
+/// 刻意**不放进 SyncStatus**：网卡地址会随 Wi-Fi / 有线切换、VPN 起落而变，
+/// 界面每次要显示时现取一次，才不会有「状态里那份是旧的」这种坑。
+#[tauri::command]
+pub async fn readerx_sync_lan_addrs() -> Result<Vec<String>, String> {
+    blocking("本机地址读取", move || Ok(crate::sync::local_addresses())).await
+}
+
 /// 移除一台已配对设备：本机不再与它同步，并拒绝它连进来（直到重新接受）。
 #[tauri::command]
 pub async fn readerx_sync_remove_peer(

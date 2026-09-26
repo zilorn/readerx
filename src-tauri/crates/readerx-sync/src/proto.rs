@@ -81,6 +81,9 @@ pub enum Response {
         nonce: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<String>,
+        /// 拒绝原因码（见 [`HandshakeCode`]）；旧对端不带该字段，按纯提示文本处理
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
     },
     /// 对 Auth 的回应（含服务端自己的 proof，做双向认证）
     Auth {
@@ -88,6 +91,9 @@ pub enum Response {
         proof: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<String>,
+        /// 拒绝原因码（`ok=false` 时用）
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
     },
     /// Pull 的应答：一批操作 + 服务端已知版本 + 是否还有
     Ops {
@@ -143,6 +149,37 @@ impl Response {
     /// 构造一条错误响应。
     pub fn error(code: impl Into<String>, message: impl Into<String>) -> Response {
         Response::Error { code: code.into(), message: message.into() }
+    }
+}
+
+/// 握手被拒绝的原因码。
+///
+/// 握手是**唯一**会跨进程传「为什么拒绝」的地方，而拒绝理由直接决定用户下一步做什么
+/// （换配对码 / 重新接受设备 / 升级程序），因此这些码属于线协议的一部分：
+/// 两端各自按码出文案，不靠中文提示互相对齐（见 [`crate::error::Code`]）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HandshakeCode {
+    ProtocolMismatch,
+    GroupMismatch,
+    NotTrusted,
+    RemovedByPeer,
+    Busy,
+    AuthFailed,
+    Unexpected,
+}
+
+impl HandshakeCode {
+    /// 线上的稳定短码
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            HandshakeCode::ProtocolMismatch => "protocol_mismatch",
+            HandshakeCode::GroupMismatch => "group_mismatch",
+            HandshakeCode::NotTrusted => "not_trusted",
+            HandshakeCode::RemovedByPeer => "removed_by_peer",
+            HandshakeCode::Busy => "busy",
+            HandshakeCode::AuthFailed => "auth_failed",
+            HandshakeCode::Unexpected => "unexpected_message",
+        }
     }
 }
 

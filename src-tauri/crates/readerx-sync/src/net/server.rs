@@ -28,8 +28,8 @@ use crate::crypto::{self, derive_keys, nonce, proof, ROLE_CLIENT, ROLE_SERVER, R
 use crate::error::{Result, SyncError};
 use crate::net::frame::{read_message, read_secure, write_message, write_secure};
 use crate::net::handler::handle_request;
-use crate::net::{lock_engine, SharedEngine};
-use crate::proto::{MAX_FRAME_BYTES, MAX_HANDSHAKE_BYTES, Request, Response};
+use crate::net::{lock_engine, PeerInfo, SharedEngine};
+use crate::proto::{HandshakeCode, MAX_FRAME_BYTES, MAX_HANDSHAKE_BYTES, Request, Response};
 
 /// 信任策略。
 #[derive(Clone, Debug, Default)]
@@ -54,12 +54,19 @@ impl TrustPolicy {
 ///
 /// 对端没在监听（`listen_port == 0`）时返回 `None` —— 调用方据此清掉旧地址，
 /// 而不是留着一个连不上的地址反复重试。
+///
+/// 来源 IP 是未指定地址（`0.0.0.0` / `::`）时同样返回 `None`：那不是一个能连的地址
+/// （界面会把它当「本机地址」展示，用户拿去同步必然失败），宁可当作「地址未知」，
+/// 换由 UDP 发现刷新。
 fn peer_listen_addr(source: &SocketAddr, listen_port: u16) -> Option<String> {
-    (listen_port > 0).then(|| SocketAddr::new(source.ip(), listen_port).to_string())
+    if listen_port == 0 || source.ip().is_unspecified() {
+        return None;
+    }
+    Some(SocketAddr::new(source.ip(), listen_port).to_string())
 }
 
 /// 服务端选项。
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ServerOptions {
     pub bind: SocketAddr,
     /// 群组密钥
@@ -70,6 +77,27 @@ pub struct ServerOptions {
     pub trust: TrustPolicy,
     pub timeout: Duration,
     pub max_connections: usize,
+    /// 记下「见过某台对端」之后的通知（对端的地址 / 名字变了，宿主据此推一次状态）。
+    ///
+    /// 放在这里而不是让宿主轮询：地址只有服务端知道（来源 IP + 对端自报的监听端口），
+    /// 而界面要在对端连进来的那一刻就刷新设备列表。
+    pub on_peer_seen: Option<Arc<dyn Fn(&PeerInfo) + Send + Sync>>,
+}
+
+impl std::fmt::Debug for ServerOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // 密钥不进日志：手写 Debug 时只留身份与监听信息
+        f.debug_struct("ServerOptions")
+            .field("bind", &self.bind)
+            .field("group", &self.group)
+            .field("device", &self.device)
+            .field("name", &self.name)
+            .field("trust", &self.trust)
+            .field("timeout", &self.timeout)
+            .field("max_connections", &self.max_connections)
+            .field("on_peer_seen", &self.on_peer_seen.is_some())
+            .finish()
+    }
 }
 
 impl ServerOptions {
@@ -84,6 +112,7 @@ impl ServerOptions {
             trust: TrustPolicy::Open,
             timeout: Duration::from_secs(20),
             max_connections: 8,
+            on_peer_seen: None,
         })
     }
 
@@ -94,6 +123,15 @@ impl ServerOptions {
 
     pub fn with_trust(mut self, trust: TrustPolicy) -> ServerOptions {
         self.trust = trust;
+        self
+    }
+
+    /// 记下对端后通知宿主（见字段说明）。
+    pub fn with_peer_seen(
+        mut self,
+        callback: Arc<dyn Fn(&PeerInfo) + Send + Sync>,
+    ) -> ServerOptions {
+        self.on_peer_seen = Some(callback);
         self
     }
 }
@@ -134,7 +172,10 @@ impl PeerServer {
                                 let mut stream = stream;
                                 let _ = write_message(
                                     &mut stream,
-                                    &Response::error("busy", "连接数已达上限"),
+                                    &Response::error(
+                                        HandshakeCode::Busy.as_str(),
+                                        "连接数已达上限",
+                                    ),
                                     MAX_HANDSHAKE_BYTES,
                                 );
                                 continue;
@@ -196,6 +237,23 @@ impl Drop for PeerServer {
     }
 }
 
+/// 记下对端后通知宿主（选项里没挂回调就什么都不做）。
+fn notify_peer_seen(
+    options: &ServerOptions,
+    device: &str,
+    name: &str,
+    addr: Option<String>,
+) {
+    let Some(callback) = &options.on_peer_seen else {
+        return;
+    };
+    callback(&PeerInfo {
+        device_id: device.to_string(),
+        name: name.to_string(),
+        addr,
+    });
+}
+
 /// 处理一条连接（握手 + 请求循环）。
 fn serve_connection(
     stream: TcpStream,
@@ -221,7 +279,10 @@ fn serve_connection(
         other => {
             let _ = write_message(
                 &mut writer,
-                &Response::error("unexpected", format!("期望 hello，收到 {}", other.kind())),
+                &Response::error(
+                    HandshakeCode::Unexpected.as_str(),
+                    format!("期望 hello，收到 {}", other.kind()),
+                ),
                 MAX_HANDSHAKE_BYTES,
             );
             return Err(SyncError::Protocol(format!("期望 hello，收到 {}", other.kind())));
@@ -229,7 +290,7 @@ fn serve_connection(
     };
 
     let server_nonce = nonce();
-    let reject = |writer: &mut TcpStream, reason: &str| -> Result<()> {
+    let reject = |writer: &mut TcpStream, code: HandshakeCode, reason: &str| -> Result<()> {
         write_message(
             writer,
             &Response::Hello {
@@ -240,24 +301,25 @@ fn serve_connection(
                 name: options.name.clone(),
                 nonce: server_nonce.clone(),
                 message: Some(reason.to_string()),
+                code: Some(code.as_str().to_string()),
             },
             MAX_HANDSHAKE_BYTES,
         )
     };
 
     if protocol != crate::PROTOCOL_VERSION {
-        reject(&mut writer, "协议版本不一致")?;
+        reject(&mut writer, HandshakeCode::ProtocolMismatch, "协议版本不一致")?;
         return Err(SyncError::Protocol(format!("协议版本不一致：{protocol}")));
     }
     if group != options.group {
         // 群组不同 = 不是同一份数据，绝不能同步（多租户隔离，见场景 25）
         log::warn!("拒绝来自其他群组的连接 addr={addr} group={}", crate::version::short_device(&group));
-        reject(&mut writer, "群组不一致")?;
+        reject(&mut writer, HandshakeCode::GroupMismatch, "群组不一致")?;
         return Err(SyncError::Auth("群组不一致".to_string()));
     }
     if !options.trust.allows(&client_device) {
         log::warn!("设备不在信任名单 addr={addr} device={}", crate::version::short_device(&client_device));
-        reject(&mut writer, "设备不在信任名单")?;
+        reject(&mut writer, HandshakeCode::NotTrusted, "设备不在信任名单")?;
         return Err(SyncError::Auth("设备不在信任名单".to_string()));
     }
     // 被本机移除过的设备（同步界面「删除设备」）：握手就拒，数据一条都不收。
@@ -270,7 +332,7 @@ fn serve_connection(
             crate::version::short_device(&client_device)
         );
         // 措辞按「被拒方看到的视角」写：对端会把这句当失败原因显示出来
-        reject(&mut writer, "设备已被对端移除")?;
+        reject(&mut writer, HandshakeCode::RemovedByPeer, "设备已被对端移除")?;
         return Err(SyncError::Auth("设备已被对端移除".to_string()));
     }
 
@@ -284,6 +346,7 @@ fn serve_connection(
             name: options.name.clone(),
             nonce: server_nonce.clone(),
             message: None,
+            code: None,
         },
         MAX_HANDSHAKE_BYTES,
     )?;
@@ -296,7 +359,12 @@ fn serve_connection(
         other => {
             let _ = write_message(
                 &mut writer,
-                &Response::Auth { ok: false, proof: String::new(), message: Some("期望 auth".to_string()) },
+                &Response::Auth {
+                    ok: false,
+                    proof: String::new(),
+                    message: Some("期望 auth".to_string()),
+                    code: Some(HandshakeCode::Unexpected.as_str().to_string()),
+                },
                 MAX_HANDSHAKE_BYTES,
             );
             return Err(SyncError::Protocol(format!("期望 auth，收到 {}", other.kind())));
@@ -315,7 +383,12 @@ fn serve_connection(
         log::warn!("鉴权失败 addr={addr} device={}", crate::version::short_device(&client_device));
         write_message(
             &mut writer,
-            &Response::Auth { ok: false, proof: String::new(), message: Some("鉴权失败".to_string()) },
+            &Response::Auth {
+                ok: false,
+                proof: String::new(),
+                message: Some("鉴权失败".to_string()),
+                code: Some(HandshakeCode::AuthFailed.as_str().to_string()),
+            },
             MAX_HANDSHAKE_BYTES,
         )?;
         return Err(SyncError::Auth("客户端 proof 校验失败".to_string()));
@@ -330,7 +403,12 @@ fn serve_connection(
     );
     write_message(
         &mut writer,
-        &Response::Auth { ok: true, proof: proof(&options.secret, &server_text), message: None },
+        &Response::Auth {
+            ok: true,
+            proof: proof(&options.secret, &server_text),
+            message: None,
+            code: None,
+        },
         MAX_HANDSHAKE_BYTES,
     )?;
 
@@ -365,6 +443,9 @@ fn serve_connection(
             engine.forget_peer_addr(&client_device);
         }
     }
+    // 地址 / 名字刚更新过：通知宿主刷一次界面（推送与自动同步是后台线程，
+    // 界面不主动查就看不到新设备与新地址）
+    notify_peer_seen(&options, &client_device, &client_name, peer_addr.clone());
 
     // 3) 请求循环
     let mut recv_seq = 0u64;
@@ -398,4 +479,27 @@ fn serve_connection(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 来源 IP 是通配地址时**不记地址**：`0.0.0.0:47821` 这种值会显示成「本机地址」，
+    /// 用户拿去同步必然失败（回归：历史数据里出现过它）。
+    #[test]
+    fn a_wildcard_source_is_not_a_connectable_address() {
+        for source in ["0.0.0.0:12345", "[::]:12345"] {
+            let source: SocketAddr = source.parse().unwrap();
+            assert_eq!(peer_listen_addr(&source, 47_821), None, "通配来源不能当对端地址");
+        }
+        // 正常来源照旧：来源 IP + 对端自报的监听端口
+        let source: SocketAddr = "192.168.0.101:50076".parse().unwrap();
+        assert_eq!(
+            peer_listen_addr(&source, 47_821).as_deref(),
+            Some("192.168.0.101:47821")
+        );
+        // 对端没在监听（port = 0）时不留地址
+        assert_eq!(peer_listen_addr(&source, 0), None);
+    }
 }

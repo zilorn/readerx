@@ -45,13 +45,28 @@ export const sync = {
   "sync.deviceName.save": "保存设备名称",
   "sync.deviceName.failed": "修改设备名称失败",
   "sync.address.title": "本机地址",
-  "sync.address.desc": "其它设备也可以直接填这个地址同步",
+  "sync.address.desc": "同一局域网内的设备用这个地址连接本机",
+  "sync.address.empty": "暂时没有可用的局域网地址：请先连接 Wi-Fi 或网线",
   "sync.pairing.title": "配对码",
   "sync.pairing.desc": "在另一台设备的「加入其它设备」里填入即可连接",
   "sync.pairing.copy": "复制",
   "sync.pairing.copied": "配对码已复制",
   "sync.pairing.copyFailed": "复制失败，请长按选中",
   "sync.pairing.failed": "读取配对码失败",
+
+  // 失败原因（按后端错误码翻文案，见 lib/sync.ts 的 syncErrorText）
+  "sync.error.groupMismatch":
+    "两台设备不在同一同步群组：在其中一台复制配对码，到另一台的「加入其它设备」里填入",
+  "sync.error.removedByPeer":
+    "本机已被对端从设备列表里删除：在「查找局域网设备」里对这台设备点「重新接受」",
+  "sync.error.notTrusted": "本机不在对端的信任名单里：需要在对方设备上放行本机",
+  "sync.error.protocolMismatch": "两台设备的同步协议版本不一致：请把 ReaderX 升级到同一版本",
+  "sync.error.busy": "对端正在处理其它同步连接，稍后再试",
+  "sync.error.authFailed":
+    "群组密钥不一致：在其中一台复制配对码，到另一台的「加入其它设备」里填入",
+  "sync.error.unexpectedMessage": "对端不是 ReaderX 的同步服务，或两台设备版本差异过大",
+  "sync.error.unsupportedVersion": "对端的数据格式版本比本程序新：请升级 ReaderX",
+  "sync.error.notReaderx": "对端不是 ReaderX 的同步服务：检查地址与端口是否正确",
 
   // 连接设备
   "sync.join.title": "加入其它设备",

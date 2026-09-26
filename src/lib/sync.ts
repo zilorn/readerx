@@ -15,10 +15,10 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { reloadLocalBooks } from "./books";
 import { reloadBookBookmarks } from "./bookmarks";
 import { refreshBookSources } from "./bookSources";
-import { reportFailure } from "./errorReport";
+import { describeError, reportFailure } from "./errorReport";
 import { reloadGroups } from "./groups";
 import { reloadReadingProgress } from "./store";
-import { t } from "./i18n";
+import { t, type MessageKey } from "./i18n";
 import { createLogger } from "./logger";
 import { showActionToast } from "./toast";
 
@@ -110,6 +110,50 @@ export interface SyncConflict {
 
 /** 裁决方式 */
 export type ConflictChoice = "local" | "remote" | "dismiss";
+
+/**
+ * 同步失败码（与 Rust 侧 `readerx_sync::error::Code` 的 `as_str` 一一对应）。
+ *
+ * 后端把「怎么失败」当码发过来（`码|提示`），界面据此给出**可操作的引导**并翻成当前
+ * 语言 —— 中文提示是给日志看的，不能直接端给英语用户。新增码时两边一起改：
+ * Rust 的 `Code::as_str` 与这里的 `CODE_MESSAGES` 表（类型上互相约束，漏一个会编译报错）。
+ */
+export type SyncErrorCode =
+  | "group_mismatch"
+  | "removed_by_peer"
+  | "not_trusted"
+  | "protocol_mismatch"
+  | "busy"
+  | "auth_failed"
+  | "unexpected_message"
+  | "unsupported_version"
+  | "not_readerx";
+
+/** 错误码 → 界面文案 key（全部按码映射，漏一个 key 会在类型检查时报错） */
+const CODE_MESSAGES: Record<SyncErrorCode, MessageKey> = {
+  group_mismatch: "sync.error.groupMismatch",
+  removed_by_peer: "sync.error.removedByPeer",
+  not_trusted: "sync.error.notTrusted",
+  protocol_mismatch: "sync.error.protocolMismatch",
+  busy: "sync.error.busy",
+  auth_failed: "sync.error.authFailed",
+  unexpected_message: "sync.error.unexpectedMessage",
+  unsupported_version: "sync.error.unsupportedVersion",
+  not_readerx: "sync.error.notReaderx",
+};
+
+/**
+ * 同步失败的展示文本：后端错误串是 `码|提示`，有码就翻成当前语言的**可操作提示**，
+ * 否则原样返回（网络错误、磁盘错误这类诊断信息）。
+ */
+export function syncErrorText(error: unknown): string {
+  const text = describeError(error);
+  const separator = text.indexOf("|");
+  if (separator <= 0) return text;
+  const code = text.slice(0, separator);
+  const message = CODE_MESSAGES[code as SyncErrorCode];
+  return message ? t(message) : text;
+}
 
 const EMPTY_STATUS: SyncStatus = {
   activated: false,
@@ -318,7 +362,8 @@ export async function syncNow(): Promise<SyncOutcome | null> {
     await refreshSyncStatus();
     return outcome;
   } catch (error) {
-    reportFailure(t("sync.now.failed"), error);
+    // 失败原因按码翻成当前语言的可操作提示（见 syncErrorText）
+    reportFailure(t("sync.now.failed"), error, 4_200, "warn", syncErrorText(error));
     await refreshSyncStatus();
     return null;
   }
@@ -332,7 +377,7 @@ export async function syncWithAddr(addr: string): Promise<SyncOutcome | null> {
     await refreshSyncStatus();
     return outcome;
   } catch (error) {
-    reportFailure(t("sync.now.failed"), error);
+    reportFailure(t("sync.now.failed"), error, 4_200, "warn", syncErrorText(error));
     await refreshSyncStatus();
     return null;
   }
@@ -356,6 +401,23 @@ export async function listSyncPeers(): Promise<SyncPeer[]> {
     return await invoke<SyncPeer[]>("readerx_sync_peers");
   } catch (error) {
     log.warn("读取同步设备列表失败", error);
+    return [];
+  }
+}
+
+/**
+ * 本机对外的局域网地址（同步界面「本机地址」展示用）。
+ *
+ * 后端按 `0.0.0.0:47821` 监听全部网卡，`0.0.0.0` 只是绑定意图、不是能连的地址：
+ * 展示真实网卡地址，取不到就返回空数组（界面按「暂无地址」处理），
+ * **绝不回退成通配地址** —— 那正是用户照着填却连不上的原因。
+ */
+export async function listSyncLanAddrs(): Promise<string[]> {
+  if (!isTauri()) return [];
+  try {
+    return await invoke<string[]>("readerx_sync_lan_addrs");
+  } catch (error) {
+    log.warn("读取本机局域网地址失败", error);
     return [];
   }
 }

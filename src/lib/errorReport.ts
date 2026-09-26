@@ -49,16 +49,21 @@ export function describeError(error: unknown): string {
  * 这里同时是这些失败的**日志点**：调用方只调这一个函数就够了，不要再自己补一条
  * `log.error` —— 同一个事件在日志里出现两次，只会让人怀疑是不是真的发生了两次。
  * `level` 默认 warn（可恢复的失败 / 降级）；未捕获异常这类用 error。
+ *
+ * `detail` 用来**替换提示里那句原因**（日志仍然记原始异常）：少数失败的原因需要翻成
+ * 当前语言 / 换成更可操作的措辞（见 `lib/sync.ts` 的 `syncErrorText`），
+ * 但去重窗口与日志口径仍按原始异常算。
  */
 export function reportFailure(
   what: string,
   error: unknown,
   durationMs = 4_200,
   level: LogLevel = "warn",
+  detail?: string,
 ): void {
   if (level === "error") log.error(what, error);
   else log.warn(what, error);
-  const reason = describeError(error);
+  const reason = detail ?? describeError(error);
   const separator = t("common.failureSeparator");
   const text = (reason ? `${what}${separator}${reason}` : what).slice(0, MAX_TEXT_LEN);
   const now = Date.now();

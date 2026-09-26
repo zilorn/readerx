@@ -285,6 +285,15 @@ impl<R: tauri::Runtime> SyncService<R> {
         .map_err(|e| e.to_string())?;
         let shared = net::shared(engine);
         let ops = lock_engine(&shared).op_count();
+        // 历史数据里可能留着 `0.0.0.0:47821` 这类「记下来也连不上」的对端地址
+        // （旧版本把通配的来源 IP 当成了对端地址）：启动时清掉，别让它继续显示在设备列表里
+        let stale_addrs = lock_engine(&shared).forget_unusable_peer_addrs();
+        if stale_addrs > 0 {
+            log::info!("已清掉 {stale_addrs} 条无法连接的对端地址");
+            if let Err(error) = lock_engine(&shared).flush() {
+                log::warn!("清理对端地址后落盘失败：{error}");
+            }
+        }
         {
             let mut inner = self.lock();
             inner.index = BookIndex::default();
@@ -1050,7 +1059,7 @@ impl<R: tauri::Runtime> SyncService<R> {
     }
 
     /// 拉起 TCP 监听与 UDP 发现（幂等）。
-    fn start_network(&self) {
+    fn start_network(self: &Arc<Self>) {
         let Some(engine) = self.engine() else {
             return;
         };
@@ -1076,6 +1085,16 @@ impl<R: tauri::Runtime> SyncService<R> {
                     guard.device_name().to_string(),
                 )
             };
+            // 对端连进来的那一刻就推一次状态：设备地址 / 上次同步时间只在服务端线程里
+            // 更新，不通知界面的话，用户得手动重进页面才能看到这台设备（见 SyncStatus）
+            let peer_seen = std::sync::Arc::new({
+                let service = Arc::clone(self);
+                move |peer: &readerx_sync::net::PeerInfo| {
+                    log::debug!("对端已记入设备列表 device={}", readerx_sync::version::short_device(&peer.device_id));
+                    service.emit_status();
+                }
+            });
+            let options = options.with_peer_seen(peer_seen);
             match PeerServer::start(engine.clone(), options) {
                 Ok(server) => {
                     let port = server.local_addr().port();

@@ -5,6 +5,7 @@
 //!   settings.rs  设备本地的同步设置（开关 / 自动同步 / 落地游标）
 //!   identity.rs  跨设备身份（书 / 分组 / 书源在两台设备上算出同一个 id）
 //!   bridge.rs    本地数据 ↔ 引擎实体（发布本地改动 / 落地远端结果）
+//!   lan.rs       本机对外的局域网地址（界面「本机地址」展示用）
 //!   service.rs   引擎与网络的生命周期、自动同步线程、事件推送
 //!   commands.rs  供 WebView 调用的 Tauri command
 //! ```
@@ -20,6 +21,7 @@
 #[doc(hidden)]
 pub mod bridge;
 mod identity;
+mod lan;
 mod service;
 mod settings;
 
@@ -28,6 +30,7 @@ mod settings;
 pub mod commands;
 
 pub use bridge::PublishMode;
+pub use lan::local_addresses;
 pub use service::SyncService;
 
 /// Tauri 全局状态：同步服务句柄。

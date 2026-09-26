@@ -67,6 +67,11 @@ sha2 = "0.10"
 [dev-dependencies]
 tauri = { version = "2", features = ["test"] }
 
+# 同步界面要列本机真实的局域网地址（`getifaddrs`），只有桌面 Unix 走这条路：
+# Android 的 bionic 不导出该符号（那边改用 `ip addr` 输出解析，见 sync/lan.rs）。
+[target.'cfg(all(unix, not(target_os = "android")))'.dependencies]
+libc = "0.2"
+
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-single-instance = "2"
 
