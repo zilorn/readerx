@@ -3521,6 +3521,7 @@ export default function ReaderPage() {
         bookSearchOpen() ||
         readerSettingsOpen() ||
         replaceSheetOpen() ||
+        downloadOpen() ||
         !isPaged()
       )
         return;
@@ -4820,11 +4821,16 @@ export default function ReaderPage() {
 
             {/* 在线书：批量下载正文 */}
             <Show when={downloadOpen()}>
+              {/* data-reader-ui：下载面板挂在阅读区内部，事件会冒泡到阅读区的
+                  按下 / 抬手手势（点按分区翻页、横滑翻页）；不标记的话在面板上
+                  点一下就会按点到的位置翻页 / 呼出菜单 */}
               <div
+                data-reader-ui
                 class="fixed inset-0 z-40 animate-sheet-fade bg-black/45 backdrop-blur-[2px]"
                 onClick={() => setDownloadOpen(false)}
               />
               <div
+                data-reader-ui
                 class="fixed inset-x-0 bottom-0 z-[41] mx-auto flex max-h-[70%] max-w-[var(--app-column)] animate-sheet-up flex-col overflow-hidden rounded-t-[16px] bg-surface shadow-[0_-10px_34px_rgb(0_0_0/0.22)]"
                 role="dialog"
                 aria-label={t("reader.downloadTitle")}
