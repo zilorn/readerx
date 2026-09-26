@@ -347,6 +347,20 @@ impl<R: tauri::Runtime> SyncService<R> {
         result.map_err(|e| e.to_string())
     }
 
+    /// 本地数据被整体导入 / 覆盖之后调用（见 `src/data_transfer/`）。
+    ///
+    /// 导入是绕过命令层直接批量写文件的：书 / 书源 / 进度 / 书签都不会逐条触发本地
+    /// 写钩子，所以在这里补一次全量对账，否则导入的内容在下次同步前对其它设备不可见。
+    /// 同步从未启用（没有引擎）时是空操作。
+    pub fn on_data_imported(&self) {
+        if self.engine().is_none() {
+            return;
+        }
+        if let Err(error) = self.reconcile_local() {
+            log::warn!("导入后同步对账失败（下次启动会继续）：{error}");
+        }
+    }
+
     // ------------------------------------------------------------ 开关与设置
 
     /// 开启 / 关闭同步。

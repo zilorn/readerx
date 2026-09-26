@@ -33,7 +33,7 @@ pub(crate) fn state_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf
     Ok(dir)
 }
 
-fn valid_state_key(key: &str) -> bool {
+pub(crate) fn valid_state_key(key: &str) -> bool {
     !key.is_empty()
         && key.len() <= 80
         && !key.contains("..")

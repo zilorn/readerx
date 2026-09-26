@@ -59,6 +59,13 @@ base64 = "0.22"
 # 跨设备书身份用 sha256 派生（见 src/sync/identity.rs）：同一个文件在两台设备上
 # 要算出同一个 id，不能用进程内随机种子的哈希。
 sha2 = "0.10"
+# 全量数据导出 / 导入（见 src/data_transfer/）：备份是一个 zip 归档（正文体积大，
+# 必须压缩；zip 也方便用户自己解开来检查）。默认 feature 会拖进 bzip2 / zstd / lzma
+# 等一整串压缩后端，这里只要 deflate。
+zip = { version = "2", default-features = false, features = ["deflate"] }
+# 备份文件名要带本地日期（`readerx-backup-2026-09-26.zip`）。与 readerx-log 用同一份
+# 时区实现，不额外引 chrono。
+time = { version = "0.3", features = ["local-offset"] }
 
 # 桌面端单实例：重复启动不再开出第二个进程，而是聚焦已在运行的那个窗口
 # （两个实例会同时写同一份书库与设置）。插件不支持移动端，那边由系统保证单实例，

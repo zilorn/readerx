@@ -47,7 +47,7 @@ fn valid_book_id(book_id: &str) -> bool {
 
 /// 本地副本文件名是否合法：必须是本模块写出的 `<bookId>_<sha1hex>.<ext>` 形态
 /// （文件名即 URL 路径段，直接用于自定义协议，必须严格校验，杜绝路径穿越）
-fn valid_local_name(name: &str) -> bool {
+pub(crate) fn valid_local_name(name: &str) -> bool {
     let Some((stem, ext)) = name.rsplit_once('.') else {
         return false;
     };

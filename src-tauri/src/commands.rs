@@ -38,7 +38,7 @@ use readerx_source::auth::LoginOutcome;
 ///
 /// 这里也是**所有命令的统一日志点**：成功记一条 debug（含耗时，排查「哪一步慢」）、
 /// 失败记一条 warn（含真实原因）。逐个命令手写日志既容易漏，也会与前端提示重复。
-async fn blocking<F, T>(what: &'static str, task: F) -> Result<T, String>
+pub(crate) async fn blocking<F, T>(what: &'static str, task: F) -> Result<T, String>
 where
     F: FnOnce() -> Result<T, String> + Send + 'static,
     T: Send + 'static,

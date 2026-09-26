@@ -38,18 +38,18 @@ pub use lan::local_addresses;
 pub use service::SyncService;
 
 /// Tauri 全局状态：同步服务句柄。
-pub struct SyncState(pub std::sync::Arc<SyncService>);
+pub struct SyncState<R: tauri::Runtime = tauri::Wry>(pub std::sync::Arc<SyncService<R>>);
 
 /// 服务句柄（命令层用）。
-pub type SharedService = std::sync::Arc<SyncService>;
+pub type SharedService<R = tauri::Wry> = std::sync::Arc<SyncService<R>>;
 
 /// 取同步服务（本地写路径上的同步钩子用）。
 ///
 /// 同步从未启用时服务也在，只是没有引擎 —— 钩子函数自己会空操作，
 /// 因此本地写路径可以无条件调用，不必到处判断「同步开没开」。
-pub fn service_hook(app: &tauri::AppHandle) -> std::sync::Arc<SyncService> {
+pub fn service_hook<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> std::sync::Arc<SyncService<R>> {
     use tauri::Manager;
-    app.try_state::<SyncState>()
+    app.try_state::<SyncState<R>>()
         .map(|state| state.0.clone())
         .unwrap_or_else(|| SyncService::new(app.clone()))
 }

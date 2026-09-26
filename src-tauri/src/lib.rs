@@ -2,6 +2,8 @@ mod book_images;
 mod book_store;
 mod chapter_runs;
 mod commands;
+// 全量数据导出 / 导入：备份是一个 zip（含正文与插图），与「同步」分工见模块文档
+mod data_transfer;
 mod logging;
 mod models;
 // 桌面端单实例：重复启动只聚焦已有窗口，不开第二个进程（移动端由系统保证）
@@ -165,6 +167,9 @@ pub fn run() {
             commands::readerx_source_login_supported,
             commands::readerx_source_login_webview,
             commands::readerx_source_login_clear,
+            data_transfer::commands::readerx_data_export,
+            data_transfer::commands::readerx_data_import_pick,
+            data_transfer::commands::readerx_data_import,
             logging::readerx_log_write,
             logging::readerx_log_tail,
             logging::readerx_log_clear,
