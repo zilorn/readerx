@@ -315,6 +315,14 @@ export default function SettingsPage() {
           </h2>
           <div class="divide-y divide-border overflow-hidden rounded-[14px] border border-border bg-surface">
             <Row
+              icon={<PackageIcon size={18} />}
+              label={t("settings.data.backup")}
+              desc={t("settings.data.backupDesc")}
+              onClick={() => navigate("/data-backup")}
+            >
+              <ChevronRightIcon size={18} class="flex-none text-text-3" />
+            </Row>
+            <Row
               icon={<HeadphonesIcon size={18} />}
               label={t("settings.data.ttsCache")}
               desc={t("settings.data.ttsCacheDesc")}

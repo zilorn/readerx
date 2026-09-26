@@ -28,6 +28,7 @@ import { webdav } from "./en/webdav";
 import { library } from "./en/library";
 import { misc } from "./en/misc";
 import { sync } from "./en/sync";
+import { backup } from "./en/backup";
 import type { MessageKey } from "./zh-CN";
 
 export const en: Record<MessageKey, string> & Record<string, string> = {
@@ -48,4 +49,5 @@ export const en: Record<MessageKey, string> & Record<string, string> = {
   ...library,
   ...misc,
   ...sync,
+  ...backup,
 };

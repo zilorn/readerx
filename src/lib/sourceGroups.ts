@@ -55,6 +55,23 @@ function isStoredGroup(value: unknown): value is SourceGroup {
 export async function ensureSourceGroupsLoaded(): Promise<void> {
   if (initialized) return;
   initialized = true;
+  await loadSourceGroups();
+}
+
+/**
+ * 强制从后端重读分组清单（**数据导入**后调用，见 `lib/backup.ts`）。
+ *
+ * 导入可能新增 / 覆盖分组，内存里那份已经不是磁盘的样子了；先等本机未落盘的写入
+ * 排队落定，再整表替换。
+ */
+export async function reloadSourceGroups(): Promise<void> {
+  initialized = true;
+  await writeQueue;
+  await loadSourceGroups();
+}
+
+/** 从后端读回分组清单并归一化（幂等入口与强制重载共用） */
+async function loadSourceGroups(): Promise<void> {
   const stored = await readState<unknown>(SOURCE_GROUPS_KEY);
   if (!Array.isArray(stored)) return;
   const seen = new Set<string>();

@@ -23,6 +23,7 @@ const DiscoverPage = lazy(() => import("./pages/Discover"));
 const SettingsPage = lazy(() => import("./pages/Settings"));
 const ChapterRulesPage = lazy(() => import("./pages/ChapterRules"));
 const TtsCachePage = lazy(() => import("./pages/TtsCache"));
+const DataBackupPage = lazy(() => import("./pages/DataBackup"));
 const ReaderPage = lazy(() => import("./pages/Reader"));
 const BookSourcesPage = lazy(() => import("./pages/BookSources"));
 const SourceEditorPage = lazy(() => import("./pages/SourceEditor"));
@@ -125,6 +126,7 @@ function App() {
       <Route path="/shelf-search" component={ShelfSearchPage} />
       <Route path="/chapter-rules" component={ChapterRulesPage} />
       <Route path="/tts-cache" component={TtsCachePage} />
+      <Route path="/data-backup" component={DataBackupPage} />
       <Route path="/book/:id" component={ReaderPage} />
       <Route path="/sources" component={BookSourcesPage} />
       <Route path="/source-editor" component={SourceEditorPage} />

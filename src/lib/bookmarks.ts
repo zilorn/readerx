@@ -158,6 +158,19 @@ function mergeBookmarks(stored: Bookmark[], local: Bookmark[]): Bookmark[] {
 }
 
 /**
+ * 丢掉内存里的书签缓存（**数据导入 / 覆盖恢复**后调用，见 `lib/backup.ts`）。
+ *
+ * 书签是按书懒加载的：本进程里读过的书会一直用内存那一份，导入后不整批作废就会
+ * 一直显示导入前的旧书签。只清内存缓存，不写盘 —— 下次打开那本书时按磁盘重读。
+ */
+export function invalidateBookmarkCache(): void {
+  loadedBooks.clear();
+  loadingBooks.clear();
+  dirtyBooks.clear();
+  setBookmarkMap({});
+}
+
+/**
  * 把某本书的书签落盘：先等这本书读完（否则可能用半份列表覆盖磁盘），
  * 再写当前内存值；写入按调用顺序排队。
  */

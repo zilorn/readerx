@@ -41,6 +41,8 @@ export const settings = {
   "settings.shelf.sourceFilterToggle": "书架来源筛选",
 
   // 数据
+  "settings.data.backup": "数据备份",
+  "settings.data.backupDesc": "导出全部数据或从备份恢复",
   "settings.data.ttsCache": "管理听书缓存",
   "settings.data.ttsCacheDesc": "查看并删除各书籍的合成音频缓存",
   "settings.data.resetProgress": "重置全部阅读进度",

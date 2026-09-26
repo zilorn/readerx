@@ -40,6 +40,8 @@ export const settings = {
   "settings.shelf.sourceFilterToggle": "Bookshelf source filter",
 
   // Data
+  "settings.data.backup": "Data backup",
+  "settings.data.backupDesc": "Export everything or restore from a backup",
   "settings.data.ttsCache": "Manage TTS cache",
   "settings.data.ttsCacheDesc": "View and delete the synthesized audio cached for each book",
   "settings.data.resetProgress": "Reset all reading progress",

@@ -24,6 +24,7 @@ import { webdav } from "./zh-CN/webdav";
 import { library } from "./zh-CN/library";
 import { misc } from "./zh-CN/misc";
 import { sync } from "./zh-CN/sync";
+import { backup } from "./zh-CN/backup";
 
 export const zhCN = {
   ...common,
@@ -43,6 +44,7 @@ export const zhCN = {
   ...library,
   ...misc,
   ...sync,
+  ...backup,
 };
 
 /** 全部文案 key */
