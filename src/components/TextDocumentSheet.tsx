@@ -11,7 +11,7 @@ import { t } from "../lib/i18n";
 export interface TextDocumentSheetProps {
   open: boolean;
   onClose: () => void;
-  /** 头部标题，如 “MIT License” */
+  /** 头部标题，如 “GNU General Public License v3.0” */
   title: string;
   /** 标题下的一行说明 */
   subtitle: string;

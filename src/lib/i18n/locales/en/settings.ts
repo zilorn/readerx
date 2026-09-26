@@ -56,7 +56,7 @@ export const settings = {
   "settings.about.githubDesc": "Browse the source code and releases",
   "settings.about.builtWith": "ReaderX {version} · Built with Tauri 2",
 
-  // Open source license (the sheet title is the license name "MIT License" and stays as is)
+  // Open source license (the sheet title is the license name "GNU General Public License v3.0" and stays as is)
   "settings.license.title": "Open source license",
   "settings.license.subtitle": "ReaderX open source license",
   "settings.license.close": "Close open source license",

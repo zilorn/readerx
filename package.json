@@ -12,7 +12,7 @@
     "bump": "node scripts/bump-version.mjs",
     "i18n:check": "node scripts/i18n-check.mjs"
   },
-  "license": "MIT",
+  "license": "GPL-3.0-only",
   "dependencies": {
     "@solidjs/router": "^1.0.0",
     "@tauri-apps/api": "^2",

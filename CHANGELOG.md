@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **许可证由 MIT 换成 GPL-3.0**：设置页「关于 → 开源许可」显示的许可名改为
+  **GNU General Public License v3.0**（GPLv3）。名称只在 `src/components/LicenseSheet.tsx` 的
+  `LICENSE_NAME` 写一份，设置项说明与弹层标题共用，中英一致、不进词典；`package.json` 的
+  `license` 字段改为 `GPL-3.0-only`，随包的 Android 资源副本
+  （`src-tauri/gen/android/app/src/main/assets/LICENSE`）同步为 GPLv3 全文。第三方库声明
+  （`THIRD-PARTY-NOTICES.md`）不受影响。
 - **桌面端阅读页通栏铺满窗口**：此前桌面外壳把整块阅读区限宽在「放得下并排两页」的宽度上居中，
   宽窗口里顶栏 / 底栏 / 状态栏与背景都停在正文列那一块，两侧留出大片空档。现在外壳不再限宽，
   阅读页铺满整个内容区：顶栏 / 底栏 / 状态栏与背景通栏铺满窗口，目录侧栏与贴边热区随之落到窗口的

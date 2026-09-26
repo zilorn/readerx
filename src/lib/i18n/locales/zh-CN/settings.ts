@@ -57,7 +57,7 @@ export const settings = {
   "settings.about.githubDesc": "查看源码与发布动态",
   "settings.about.builtWith": "ReaderX {version} · 基于 Tauri 2 构建",
 
-  // 开源许可（弹层标题是许可名 “MIT License”，保持原样）
+  // 开源许可（弹层标题是许可名 “GNU General Public License v3.0”，保持原样）
   "settings.license.title": "开源许可",
   "settings.license.subtitle": "ReaderX 开源许可",
   "settings.license.close": "关闭开源许可",

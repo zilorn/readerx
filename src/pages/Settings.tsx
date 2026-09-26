@@ -15,7 +15,7 @@ import {
   TrashIcon,
 } from "../components/icons";
 import { PageHeader } from "../components/PageHeader";
-import { LicenseSheet } from "../components/LicenseSheet";
+import { LICENSE_NAME, LicenseSheet } from "../components/LicenseSheet";
 import { LogSheet } from "../components/LogSheet";
 import { ThirdPartyNoticesSheet } from "../components/ThirdPartyNoticesSheet";
 import { ToggleSwitch } from "../components/ToggleSwitch";
@@ -350,7 +350,7 @@ export default function SettingsPage() {
             <Row
               icon={<FileTextIcon size={18} />}
               label={t("settings.license.title")}
-              desc="MIT License"
+              desc={LICENSE_NAME}
               onClick={() => setLicenseOpen(true)}
             >
               <ChevronRightIcon size={18} class="flex-none text-text-3" />
