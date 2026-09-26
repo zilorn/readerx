@@ -99,6 +99,14 @@ pub fn chapter_rule_uid(name: &str, pattern: &str) -> String {
     )
 }
 
+/// 书籍结构（章节目录）实体 id：一本书一份，跟随书身份。
+///
+/// 目录是**派生数据**（正文的章节头），因此不做逐字段合并：整份目录按 LWW 走，
+/// 并发改目录会在冲突队列里留一条记录（正文本身由内容通道对账，不受这里影响）。
+pub fn book_structure_uid(book_uid: &str) -> String {
+    format!("bs-{book_uid}")
+}
+
 /// URL 归一化：只做「同一条地址的不同写法」这一层，不猜重定向。
 /// 两台设备上同一个书源的地址写法应当一致，这里只兜掉大小写与末尾斜杠的差别。
 fn normalize_url(url: &str) -> String {

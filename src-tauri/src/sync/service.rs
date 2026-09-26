@@ -35,6 +35,7 @@ use readerx_sync::net::{
 };
 use readerx_sync::{Conflict, ConflictStatus, SyncEngine, SyncError};
 
+use crate::book_store;
 use crate::storage;
 
 use super::bridge::{self, AppliedChanges, BookIndex, PublishMode};
@@ -910,7 +911,7 @@ impl<R: tauri::Runtime> SyncService<R> {
     //
     // 未启用同步时全部是空操作（引擎都没建），因此本地写路径可以无条件调用。
 
-    /// 书籍元信息变了（导入 / 改名 / 换分组 / 改标签）。
+    /// 书籍元信息变了（改名 / 换分组 / 改标签；只动元信息，不碰目录）。
     pub fn on_book_changed(&self, book_id: &str, mode: PublishMode) {
         let Some(engine) = self.engine() else {
             return;
@@ -922,6 +923,31 @@ impl<R: tauri::Runtime> SyncService<R> {
         let mut inner = self.lock();
         let uid = bridge::local_uid(&self.app, book_id);
         inner.index.insert(book_id, &uid);
+    }
+
+    /// 整本书被写入（导入 / 在线书整本替换）：元信息与**章节目录**一起发布。
+    ///
+    /// 目录直接来自刚写入内存的那本书（不必再读盘扫一遍）：这是「新导入的书 /
+    /// 重新拉取的目录」进入同步的那条路。目录以本机这份为准 —— 重新导入换了文件，
+    /// 目录就该跟着新文件走，对端下次同步会收到新目录。
+    pub fn on_book_written(&self, book: &crate::models::LocalBook, mode: PublishMode) {
+        self.on_book_changed(&book.id, mode);
+        let Some(engine) = self.engine() else {
+            return;
+        };
+        let chapters = book_store::chapter_refs(&book.chapters);
+        if chapters.is_empty() {
+            return;
+        }
+        let mut index = {
+            let mut inner = self.lock();
+            std::mem::take(&mut inner.index)
+        };
+        let result = bridge::publish_structure(&self.app, &engine, &mut index, &book.id, &chapters);
+        self.lock().index = index;
+        if let Err(error) = result {
+            log::warn!("同步发布书籍目录失败（{}）：{error}", book.id);
+        }
     }
 
     /// 书籍被删除（**必须在本地删文件之前调用**：定位书身份要读 `bookdetail.json`）。

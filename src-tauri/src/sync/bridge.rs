@@ -31,7 +31,7 @@ use tauri::AppHandle;
 use readerx_sync::net::{lock_engine, SharedEngine};
 use readerx_sync::{Entity, SyncEngine, SyncError};
 
-use crate::book_store::{self, BookSyncMeta};
+use crate::book_store::{self, BookSyncMeta, ChapterRef};
 use crate::models::BookSource;
 use crate::storage;
 
@@ -75,6 +75,8 @@ pub struct AppliedChanges {
     pub text_replaces: bool,
     /// 分章规则有变化 → 重新读回规则清单
     pub chapter_rules: bool,
+    /// 章节结构 / 正文有变化的本机书 id → 重载这几本的正文缓存
+    pub chapters: Vec<String>,
     /// 本次落地删掉的本机书 id（对端删了它们）
     pub deleted_books: Vec<String>,
 }
@@ -88,6 +90,7 @@ impl AppliedChanges {
             && !self.text_replaces
             && !self.chapter_rules
             && self.bookmarks.is_empty()
+            && self.chapters.is_empty()
             && self.deleted_books.is_empty()
     }
 }
@@ -587,6 +590,43 @@ pub fn publish_chapter_rules<R: tauri::Runtime>(
     Ok(())
 }
 
+/// 发布一本书的章节目录（结构）。
+///
+/// 目录是派生数据（正文的章节头），以「一本书一份、整份 LWW」的方式同步：
+/// 不拆成逐章实体，免得一次目录刷新写下上千条操作。空目录不发布（没有章节的书
+/// 没有结构可言，发布出去只会给对端一个空壳）。
+pub fn publish_structure<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    engine: &SharedEngine,
+    index: &mut BookIndex,
+    book_id: &str,
+    chapters: &[ChapterRef],
+) -> Result<(), SyncError> {
+    if chapters.is_empty() {
+        return Ok(());
+    }
+    let uid = index.uid_for(app, book_id);
+    let id = identity::book_structure_uid(&uid);
+    let value = serde_json::to_value(chapters).map_err(|e| SyncError::Protocol(e.to_string()))?;
+    let mut guard = lock_engine(engine);
+    match guard.entity(&id) {
+        None => {
+            guard.create_entity(
+                "book_structure",
+                Some(id),
+                [("book_id", json!(uid)), ("chapters", value)],
+            )?;
+        }
+        // 书曾被删过（目录跟着进了墓碑）后又在本机重新导入：视为有意恢复
+        Some(entity) if entity.is_deleted() => {
+            guard.restore_entity(&id)?;
+            publish_value(&mut guard, &id, "chapters", value)?;
+        }
+        Some(_) => publish_value(&mut guard, &id, "chapters", value)?,
+    }
+    Ok(())
+}
+
 /// 启动对账：本地有、引擎里没有的记录补进去。
 ///
 /// 覆盖三种情况：首次启用同步（引擎是空的）、引擎数据被清过、上次运行到这里就退出了。
@@ -632,6 +672,16 @@ pub fn reconcile<R: tauri::Runtime>(
     }
     if let Ok(Some(rules)) = storage::read_state(app, CHAPTER_RULES_KEY) {
         publish_chapter_rules(app, engine, &rules)?;
+    }
+    // 目录（结构）：只扫 content.json 的章节头，不解析正文 —— 首次启用同步时
+    // 要把现有书库的目录一起灌进引擎，不能按「读整本」的代价来
+    match book_store::list_sync_structures(app) {
+        Ok(structures) => {
+            for (book_id, chapters) in &structures {
+                publish_structure(app, engine, index, book_id, chapters)?;
+            }
+        }
+        Err(error) => log::warn!("同步对账未能读取书籍目录：{error}"),
     }
     if let Ok(sources) = readerx_source::store::list_sources() {
         for source in &sources {
@@ -710,6 +760,26 @@ fn apply_snapshots<R: tauri::Runtime>(
     if changes.books {
         if apply_text_replaces(app, engine, index).map_err(SyncError::Io)? {
             changes.text_replaces = true;
+        }
+    }
+    // 目录排在书之后：书被删掉时目录的落地会自然跳过（本机已经没有这本书了）。
+    // 本机没有这本书时也跳过 —— 目录本身不带正文，光有目录的书打开是空白；
+    // 等正文（内容通道）到了再连目录一起建书。
+    for snapshot in &snapshots {
+        if let Snapshot::Structure { book_uid, deleted: false, chapters: Some(chapters) } = snapshot {
+            let Some(local_id) = index.resolve(app, book_uid).map_err(SyncError::Io)? else {
+                continue;
+            };
+            match book_store::apply_sync_structure(app, &local_id, chapters) {
+                Ok(true) => {
+                    changes.books = true;
+                    if !changes.chapters.contains(&local_id) {
+                        changes.chapters.push(local_id);
+                    }
+                }
+                Ok(false) => {}
+                Err(error) => log::warn!("同步落地书籍目录失败（{local_id}）：{error}"),
+            }
         }
     }
     for snapshot in &snapshots {
@@ -850,6 +920,15 @@ fn collect_snapshots(
             // 本地清单（规则条数少，重建比逐条对账更好推理，也不会漏掉删除）
             "text_replace" => snapshots.push(Snapshot::TextReplace),
             "chapter_rule" => snapshots.push(Snapshot::ChapterRule),
+            // 目录：整份落到本地 content.json（按 cid 复用原有正文）
+            "book_structure" => snapshots.push(Snapshot::Structure {
+                book_uid: book_ref_of(entity),
+                deleted,
+                chapters: (!deleted)
+                    .then(|| entity.field("chapters"))
+                    .flatten()
+                    .and_then(|value| serde_json::from_value::<Vec<ChapterRef>>(value).ok()),
+            }),
             _ => {}
         }
     }
@@ -887,6 +966,13 @@ enum Snapshot {
     TextReplace,
     /// 分章规则有变化（同上）
     ChapterRule,
+    /// 书籍目录（结构）快照
+    Structure {
+        /// 书实体 id（uid）
+        book_uid: String,
+        deleted: bool,
+        chapters: Option<Vec<ChapterRef>>,
+    },
 }
 
 /// 引擎里书籍实体的字段快照（只看同步关心的那些）。

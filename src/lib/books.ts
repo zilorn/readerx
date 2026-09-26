@@ -302,8 +302,25 @@ export async function reloadLocalBooks(): Promise<void> {
   log.info("书库已按同步结果刷新", `n=${metas.length}`);
 }
 
-/** 用元数据里的字段更新一本全量书（章节正文保持不动） */
-function withMeta(book: LocalBook, meta: BookMeta): LocalBook {
+/**
+ * 重新载入几本书的正文（**同步改了章节目录 / 正文**时调用）。
+ *
+ * 与 [`reloadLocalBooks`] 的区别：那边只换元信息字段、刻意不动正文（阅读页正拿着
+ * 那份对象）；这里是真的换了正文，必须把「已物化」的全量缓存丢掉，让下次打开阅读页
+ * 从后端重新读回（不然用户看到的还是同步前的那份）。
+ */
+export async function reloadBookContent(ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  const drop = new Set(ids);
+  setFullsState((prev) => {
+    const next = prev.filter((book) => !drop.has(book.id));
+    return next.length === prev.length ? prev : next;
+  });
+  await reloadLocalBooks();
+  log.info("已按同步结果刷新书籍正文", `n=${ids.length}`);
+}
+
+/** 用元数据里的字段更新一本全量书（章节正文保持不动） */function withMeta(book: LocalBook, meta: BookMeta): LocalBook {
   return {
     ...book,
     title: meta.title,

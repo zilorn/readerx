@@ -12,7 +12,7 @@
  */
 import { createSignal } from "solid-js";
 import { invoke, isTauri } from "@tauri-apps/api/core";
-import { reloadLocalBooks } from "./books";
+import { reloadBookContent, reloadLocalBooks } from "./books";
 import { reloadBookBookmarks } from "./bookmarks";
 import { reloadChapterRules } from "./chapterRules";
 import { refreshBookSources } from "./bookSources";
@@ -96,6 +96,8 @@ export interface AppliedChanges {
   textReplaces: boolean;
   /** 分章规则有变化 → 重新读回规则清单 */
   chapterRules: boolean;
+  /** 章节目录 / 正文有变化的本机书 id → 重载这几本的正文缓存 */
+  chapters: string[];
   bookmarks: string[];
   deletedBooks: string[];
 }
@@ -280,6 +282,7 @@ async function applyChanges(changes: AppliedChanges): Promise<void> {
     `sources=${changes.sources}`,
     `textReplaces=${changes.textReplaces}`,
     `chapterRules=${changes.chapterRules}`,
+    `chapters=${changes.chapters.length}`,
     `bookmarks=${changes.bookmarks.length}`,
     `deleted=${changes.deletedBooks.length}`,
   );
@@ -287,6 +290,8 @@ async function applyChanges(changes: AppliedChanges): Promise<void> {
     // 分组必须排在书库前面：书的分组归属要按本机分组 id 落
     if (changes.groups) await reloadGroups();
     if (changes.books || changes.deletedBooks.length > 0) await reloadLocalBooks();
+    // 目录 / 正文变了：丢掉这几本的物化缓存，下次打开阅读页重新读回
+    if (changes.chapters.length > 0) await reloadBookContent(changes.chapters);
     if (changes.progress) await reloadReadingProgress();
     if (changes.bookmarks.length > 0) {
       for (const bookId of changes.bookmarks) await reloadBookBookmarks(bookId);

@@ -1030,6 +1030,192 @@ fn apply_sync_meta_in_dir(dir: &Path, want: &BookSyncMeta) -> Result<bool, Strin
     Ok(true)
 }
 
+// ---------------------------------------------------------------------------
+// 同步桥接视图：章节目录（结构）
+// ---------------------------------------------------------------------------
+
+/// 同步用的章节目录项：只有「这一章是谁、叫什么、从哪来」，**不含正文与字数**。
+///
+/// 字数（[`ChapterHead::chars`]）是正文的派生值：对端把目录落到本地后字数仍由本地
+/// 正文算出来（没有正文的章节就是 0），同步过去只会在两端口径不完全一致时反复触发
+/// 「目录变了」的重写。因此目录实体里只带定位信息。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChapterRef {
+    #[serde(default)]
+    pub cid: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+/// 整本书章节 → 同步用的目录项（从内存里的书建，导入 / 写整本时用）。
+pub(crate) fn chapter_refs(chapters: &[LocalBookChapter]) -> Vec<ChapterRef> {
+    chapters
+        .iter()
+        .map(|chapter| ChapterRef {
+            cid: chapter.cid.clone(),
+            title: chapter.title.clone(),
+            url: chapter.url.clone(),
+        })
+        .collect()
+}
+
+/// `content.json` 的目录扫描视图：**只取章节头**，段落与结构化块一律不解析
+/// （serde 对未声明字段走忽略语义：字符串只扫描、不分配），因此扫一本几百 MB 的书
+/// 也不会把正文读进内存 —— 对账要为每本书算一份目录，不能按「读整本」的代价来。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChapterRefScan {
+    #[serde(default)]
+    cid: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ContentRefScan {
+    #[serde(default)]
+    chapters: Vec<ChapterRefScan>,
+}
+
+fn scan_chapter_refs(path: &Path) -> Result<Vec<ChapterRef>, String> {
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+    let scan: ContentRefScan = scan_json_file(path)?;
+    Ok(scan
+        .chapters
+        .into_iter()
+        .map(|chapter| ChapterRef {
+            cid: chapter.cid,
+            title: chapter.title,
+            url: chapter.url,
+        })
+        .collect())
+}
+
+/// 列出全部本地书的目录（同步对账用；两种布局都认）。
+///
+/// 只读 `content.json` 的章节头，**不解析正文**，也不统计字数：这是「启动时把书库
+/// 目录灌进引擎」的那一步，不能按读整本的代价来。
+pub(crate) fn list_sync_structures<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<Vec<(String, Vec<ChapterRef>)>, String> {
+    migrate_legacy_layout(app);
+    let dir = books_root(app)?;
+    let mut books = Vec::new();
+    for entry in fs::read_dir(&dir).map_err(|e| format!("读取书库失败: {e}"))?.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if !path.join(BOOKDETAIL_FILE).is_file() {
+                continue;
+            }
+            let Some(id) = path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            match scan_chapter_refs(&path.join(CONTENT_FILE)) {
+                Ok(chapters) if !chapters.is_empty() => books.push((id.to_string(), chapters)),
+                Ok(_) => {}
+                Err(error) => log::warn!("同步对账跳过无法解析的目录 {}：{error}", path.display()),
+            }
+            continue;
+        }
+        // 旧布局（迁移没成功）：整书文件里直接带 chapters
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if dir.join(id).join(BOOKDETAIL_FILE).is_file() {
+            continue;
+        }
+        let scan: Result<BookScan, String> = scan_json_file(&path);
+        match scan {
+            Ok(scan) => {
+                let chapters: Vec<ChapterRef> = scan
+                    .chapters
+                    .into_iter()
+                    .map(|chapter| ChapterRef {
+                        cid: chapter.cid,
+                        title: chapter.title,
+                        url: chapter.url,
+                    })
+                    .collect();
+                if !chapters.is_empty() {
+                    books.push((scan.id, chapters));
+                }
+            }
+            Err(error) => log::warn!("同步对账跳过无法解析的目录 {}：{error}", path.display()),
+        }
+    }
+    Ok(books)
+}
+
+/// 把同步来的目录落到本地 `content.json`：**按 cid 复用原有正文**，只更新标题 / 地址、
+/// 增删章节并重排顺序。正文本身由内容通道单独搬运（见 docs/sync.md），这里一个字节
+/// 都不改，因此「目录变了」不会顺带把谁读了一半的正文弄丢。
+///
+/// 返回是否真的改动了磁盘；目录（cid / 标题 / 地址）本来就一致时直接返回 false，
+/// 连整本 `content.json` 都不解析。
+pub(crate) fn apply_sync_structure<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+    want: &[ChapterRef],
+) -> Result<bool, String> {
+    migrate_legacy_layout(app);
+    let dir = book_dir(app, id)?;
+    if !dir.join(BOOKDETAIL_FILE).is_file() {
+        // 书已经不在本机了：目录跟着书的删除一起没了，不是错误
+        return Ok(false);
+    }
+    apply_sync_structure_in_dir(&dir, want)
+}
+
+/// [`apply_sync_structure`] 的纯路径版本（便于单测）。
+fn apply_sync_structure_in_dir(dir: &Path, want: &[ChapterRef]) -> Result<bool, String> {
+    let content_path = dir.join(CONTENT_FILE);
+    let current = scan_chapter_refs(&content_path)?;
+    if current == want {
+        return Ok(false);
+    }
+    let content: BookContent = if content_path.is_file() {
+        read_json_file(&content_path, "书籍正文")?
+    } else {
+        BookContent { schema_version: SCHEMA_VERSION, chapters: Vec::new() }
+    };
+    let mut by_cid: HashMap<String, LocalBookChapter> = content
+        .chapters
+        .into_iter()
+        .map(|chapter| (chapter.cid.clone(), chapter))
+        .collect();
+    let chapters: Vec<LocalBookChapter> = want
+        .iter()
+        .map(|entry| match by_cid.remove(&entry.cid) {
+            Some(mut chapter) => {
+                // 正文留用，只把目录里的元信息对齐（标题 / 地址可能在对端改过）
+                chapter.title = entry.title.clone();
+                chapter.url = entry.url.clone();
+                chapter
+            }
+            None => LocalBookChapter {
+                cid: entry.cid.clone(),
+                title: entry.title.clone(),
+                paragraphs: Vec::new(),
+                blocks: None,
+                url: entry.url.clone(),
+            },
+        })
+        .collect();
+    write_book_content(dir, &chapters)?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1178,6 +1364,48 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         assert!(sync_meta_from_dir(&dir).unwrap().is_none());
         assert!(!apply_sync_meta_in_dir(&dir, &BookSyncMeta::default()).unwrap());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 目录落地：按 cid 复用正文，目录没变一个字节都不写。
+    #[test]
+    fn sync_structure_keeps_chapter_bodies() {
+        let dir = temp_dir("sync-structure");
+        let paths = dir.join("b1");
+        fs::create_dir_all(&paths).unwrap();
+        write_book_files(&paths, sample_book("b1")).unwrap();
+
+        // 目录一致 → 不写盘（更不解析整本正文）
+        let current = scan_chapter_refs(&paths.join(CONTENT_FILE)).unwrap();
+        assert!(!apply_sync_structure_in_dir(&paths, &current).unwrap());
+
+        // 改名 + 加一章：第一章正文留用，新章没有正文
+        let want = vec![
+            ChapterRef {
+                cid: "c0001".to_string(),
+                title: "第一章（改名）".to_string(),
+                url: Some("https://example.com/c1".to_string()),
+            },
+            ChapterRef {
+                cid: "c0002".to_string(),
+                title: "第二章".to_string(),
+                url: None,
+            },
+        ];
+        assert!(apply_sync_structure_in_dir(&paths, &want).unwrap());
+        let book = read_book_from_dir(&paths).unwrap().unwrap();
+        assert_eq!(book.chapters.len(), 2);
+        assert_eq!(book.chapters[0].title, "第一章（改名）");
+        assert_eq!(book.chapters[0].url.as_deref(), Some("https://example.com/c1"));
+        assert_eq!(book.chapters[0].paragraphs, vec!["正文".to_string()]);
+        assert!(book.chapters[1].paragraphs.is_empty());
+
+        // 去掉一章：目录以同步结果为准
+        assert!(apply_sync_structure_in_dir(&paths, &want[..1]).unwrap());
+        let book = read_book_from_dir(&paths).unwrap().unwrap();
+        assert_eq!(book.chapters.len(), 1);
+        assert_eq!(book.chapters[0].cid, "c0001");
+
         let _ = fs::remove_dir_all(&dir);
     }
 

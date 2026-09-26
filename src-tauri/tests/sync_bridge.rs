@@ -660,6 +660,73 @@ fn removed_peer_cannot_sync_into_the_app_anymore() {
     let _ = data_root;
 }
 
+/// 书籍结构（章节目录）：本机目录发布成一份结构实体；对端改了目录后落回本地时
+/// **按 cid 复用原有正文**（改标题 / 加章不该把已经下载的正文弄丢）。
+#[test]
+fn book_structure_lands_and_keeps_chapter_bodies() {
+    let _serial = SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (handle, app_data) = setup();
+
+    seed_local_book(&app_data, "local-1", "三体");
+    let local = local_engine(&app_data);
+    let mut index = BookIndex::default();
+    bridge::reconcile(&handle, &local, &mut index).unwrap();
+
+    let uid = {
+        let guard = lock_engine(&local);
+        let structures = guard.entities_of_kind("book_structure", false);
+        assert_eq!(structures.len(), 1, "一本书一份结构实体");
+        let chapters = structures[0].field("chapters").expect("结构里应有目录");
+        assert_eq!(chapters[0]["cid"], json!("c0001"));
+        assert_eq!(chapters[0]["title"], json!("第一章"));
+        guard.entities_of_kind("book", false)[0].id.clone()
+    };
+    assert_eq!(
+        identity::book_structure_uid(&uid),
+        lock_engine(&local).entities_of_kind("book_structure", false)[0].id,
+        "结构实体 id 跟书身份绑定"
+    );
+
+    // 对端拿到目录后改了它：第一章改名 + 换地址，另加一章（还没有正文）
+    let peer = peer_engine("structure-peer", Some(&lock_engine(&local).pairing_code()));
+    sync_once(&local, &peer);
+    let structure_id = lock_engine(&peer).entities_of_kind("book_structure", false)[0]
+        .id
+        .clone();
+    {
+        let mut guard = lock_engine(&peer);
+        guard
+            .set_field(
+                &structure_id,
+                "chapters",
+                json!([
+                    { "cid": "c0001", "title": "第一章（对端改名）", "url": "https://example.com/c1" },
+                    { "cid": "c0002", "title": "新增章" },
+                ]),
+            )
+            .unwrap();
+        guard.flush().unwrap();
+    }
+
+    sync_once(&peer, &local);
+    let changes = bridge::materialize(&handle, &local, 0, &mut index).unwrap();
+    assert_eq!(changes.chapters, vec!["local-1".to_string()], "{changes:?}");
+    assert!(changes.books, "目录变了，书架元信息（章节头）也要刷新");
+
+    let content = read_json(&app_data.join("books").join("local-1").join("content.json"));
+    let chapters = content["chapters"].as_array().unwrap();
+    assert_eq!(chapters.len(), 2, "目录以同步结果为准：{content}");
+    assert_eq!(chapters[0]["cid"], json!("c0001"));
+    assert_eq!(chapters[0]["title"], json!("第一章（对端改名）"));
+    assert_eq!(chapters[0]["url"], json!("https://example.com/c1"));
+    assert_eq!(chapters[0]["paragraphs"][0], json!("正文"), "已有正文按 cid 留用");
+    assert_eq!(chapters[1]["cid"], json!("c0002"));
+    assert!(
+        chapters[1]["paragraphs"].as_array().unwrap().is_empty(),
+        "新加的章节暂时没有正文（等正文通道搬过来）"
+    );
+}
+
 /// 文本替换规则与分章规则：本机发布 → 对端拿到；对端增删 → 本机落回状态文件。
 ///
 /// 两条容易踩的坑都在这里挡住：

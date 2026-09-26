@@ -279,8 +279,19 @@ impl SchemaRegistry {
                 .field("file_name", MergeKind::Frozen)
                 .cascade(CascadeRule::cascade("reading_progress", "book_id"))
                 .cascade(CascadeRule::cascade("bookmark", "book_id"))
+                // 目录与书同生共死：书没了，它的章节目录也没有意义
+                .cascade(CascadeRule::cascade("book_structure", "book_id"))
                 // 只对某本书生效的文本替换规则跟随书一起删（全局规则没有 book_id，不受影响）
                 .cascade(CascadeRule::cascade("text_replace", "book_id")),
+        );
+
+        // 书籍结构（章节目录）：一本书一份，整份目录是一个 LWW 值 —— 目录是正文的
+        // 派生数据（cid / 标题 / 地址），逐章拆成实体只会让操作日志为「一次性刷新目录」
+        // 写上千条操作；并发改目录进冲突队列即可。正文不在这个实体里（见 docs/sync.md）。
+        registry.register(
+            Schema::new("book_structure")
+                .field("book_id", MergeKind::Frozen)
+                .field("chapters", MergeKind::Lww),
         );
 
         // 阅读进度（App 的精确进度：章节序号 + 章节 cid + 章内字符偏移 + 上下文快照）。
@@ -402,6 +413,7 @@ mod tests {
             "book_source",
             "text_replace",
             "chapter_rule",
+            "book_structure",
         ] {
             assert!(registry.contains(kind), "{kind} 应有默认 schema");
         }
