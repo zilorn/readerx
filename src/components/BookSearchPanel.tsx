@@ -18,6 +18,7 @@ import { HighlightText } from "./HighlightText";
 import { ScrollArea } from "./ScrollArea";
 import type { LocalBook } from "../lib/booksTypes";
 import { t, type MessageKey } from "../lib/i18n";
+import { centerInScroller } from "../lib/scrollWithin";
 import {
   searchBookText,
   type BookSearchHit,
@@ -140,6 +141,8 @@ export function BookSearchPanel(props: BookSearchPanelProps) {
   const [scope, setScope] = createSignal<BookSearchScope>("all");
   let inputRef: HTMLInputElement | undefined;
   let resultListRef: HTMLDivElement | undefined;
+  /** 结果列表真正的滚动容器（ScrollArea 内层），定位当前结果只滚它一个 */
+  let resultScrollerRef: HTMLDivElement | undefined;
   let debounceTimer: number | undefined;
   let focusTimer: number | undefined;
   let scrollTimer: number | undefined;
@@ -197,7 +200,9 @@ export function BookSearchPanel(props: BookSearchPanelProps) {
       const el = resultListRef?.querySelector<HTMLElement>(
         `[data-hit-index="${props.activeIndex}"]`,
       );
-      el?.scrollIntoView({ block: "center" });
+      // 只滚结果列表：scrollIntoView 会连阅读区一起滚，面板入场动画期间表现为整屏抖动
+      // （见 lib/scrollWithin.ts）
+      if (el && resultScrollerRef) centerInScroller(resultScrollerRef, el);
     }, 120);
   });
 
@@ -276,7 +281,12 @@ export function BookSearchPanel(props: BookSearchPanelProps) {
           </div>
         </div>
 
-        <ScrollArea class="min-h-0 flex-1">
+        <ScrollArea
+          class="min-h-0 flex-1"
+          onEl={(el) => {
+            resultScrollerRef = el;
+          }}
+        >
           <div
             ref={resultListRef}
             class="px-[18px] pb-[max(env(safe-area-inset-bottom),12px)] pt-1"

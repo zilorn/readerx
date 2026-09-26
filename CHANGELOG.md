@@ -39,6 +39,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   实际显示的那几页下方。几何口径集中在 `src/lib/readerLayout.ts`，桌面外壳据此给出阅读页最大
   宽度（`src/shell/DesktopStage.tsx`）；分页引擎仍按单页列宽排版，双页只是把相邻两页并排显示。
 
+### Fixed
+
+- **打开目录时整屏抖一下**：目录打开后要把当前章节滚到可视区，此前用
+  `scrollIntoView({ block: "center" })` —— 它顺着包含块链把**每一层**可滚动祖先一起滚，
+  `overflow-hidden` 的阅读区也不例外。目录的入场动画是 transform 位移（`sheet-up` /
+  `sheet-in-right`，见 `src/index.css`），动画期间面板会临时探出阅读区 24px，阅读区因此多出
+  24px 可滚动溢出：scrollIntoView 顺手把这个量滚掉，等动画结束、溢出消失，滚动位置又被夹回 0，
+  看起来就是打开目录时整屏上下（手机底部抽屉）/ 左右（桌面右侧栏）抖一下，桌面端连外壳也会
+  被带着偏一下。现在只滚目录列表自身：按容器与条目的矩形差定位（`src/lib/scrollWithin.ts` 的
+  `centerInScroller`），入场动画的位移同时加在两者上、相减抵消，动画没跑完也定位得准，
+  最终位置与原先完全一致；阅读器内的全书搜索面板（回列表时定位当前结果）同样换成它。
+
 ## [0.2.1] - 2026-09-25
 
 ### Added

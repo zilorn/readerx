@@ -156,6 +156,7 @@ import {
 } from "../lib/readerLayout";
 import { createEdgeHoverReveal } from "../lib/readerEdgeHover";
 import { sameRenderWindow } from "../lib/renderWindow";
+import { centerInScroller } from "../lib/scrollWithin";
 import { showToast } from "../lib/toast";
 import {
   caretRangeAtGlobalOffset,
@@ -3779,13 +3780,15 @@ export default function ReaderPage() {
     showToast(t("reader.tapCenterHint"));
   });
 
-  // 目录抽屉打开后滚动定位当前章节
+  // 目录抽屉打开后滚动定位当前章节。
+  // 只滚目录列表本身（不能用 scrollIntoView：入场动画期间的位移会让阅读区
+  // 多出可滚动溢出，被它顺手滚掉再夹回，表现为整屏抖动，见 lib/scrollWithin.ts）
   let listRef: HTMLDivElement | undefined;
   createEffect(
     on(tocOpen, (open) => {
       if (!open || !listRef) return;
       const current = listRef.querySelector<HTMLElement>('[data-current="true"]');
-      current?.scrollIntoView({ block: "center" });
+      if (current) centerInScroller(listRef, current);
     }),
   );
 
