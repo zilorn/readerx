@@ -1767,6 +1767,57 @@ export default function ReaderPage() {
     if (followEnabled() && ttsActive()) setFollowEnabled(false);
   }
 
+  /** 朗读句在本视图章节分页结果中的页号（分页模式）；无正文位置 / 不在本视图章 / 未就绪 → -1 */
+  function speakPageIndex(f: TtsFocus): number {
+    if (!isPaged() || f.item.start < 0 || f.cid !== chapter()?.cid) return -1;
+    const mir = mirror();
+    const pg = paged();
+    if (!mir || mir.text.length === 0 || !pg) return -1;
+    return pageIndexOfChar(pg.pages, mir, f.item.start);
+  }
+
+  /** 朗读句是否正显示在当前屏 —— 分页模式下用户口中的「跟读页」（双页模式含右页） */
+  function speakOnCurrentScreen(): boolean {
+    const f = ttsPlayer.focus();
+    if (!f) return false;
+    const page = speakPageIndex(f);
+    if (page < 0) return false;
+    const first = snapPage(pageIdx());
+    return page >= first && page < first + pageColumns();
+  }
+
+  /**
+   * 挂起的「切页落点」判定：用户手动翻页 / 跳页 / 取消选中后置位。
+   * 跨章翻页或整章重排时分页结果还没就绪，判定要等视图就绪（见下方 effect）再补做。
+   */
+  let followPageCheckPending = false;
+
+  /** 用户刚把视图切到某一处：稍后判定这一屏是不是朗读句所在屏（跟读页） */
+  function armFollowPageCheck(): void {
+    followPageCheckPending = true;
+  }
+
+  /**
+   * 判定挂起的切页是否落回「跟读页」：是则恢复跟读跟随。
+   * 视图未就绪（跨章正文 / 分页结果还没到）时保持挂起，由补判 effect 在就绪后重来。
+   */
+  function checkFollowPage(): void {
+    if (!followPageCheckPending) return;
+    if (followEnabled() || !ttsActive()) {
+      followPageCheckPending = false;
+      return;
+    }
+    const f = ttsPlayer.focus();
+    // 滚动模式不判定「跟读页」；朗读句不在本视图章节时当前屏也不可能是跟读页
+    if (!isPaged() || !f || f.item.start < 0 || f.cid !== chapter()?.cid) {
+      followPageCheckPending = false;
+      return;
+    }
+    if (speakPageIndex(f) < 0) return; // 分页未就绪：保持挂起
+    followPageCheckPending = false;
+    if (speakOnCurrentScreen()) setFollowEnabled(true);
+  }
+
   /** 「返回跟读」：恢复跟随，并把视图跳回当前正在朗读的句子。
    *  朗读已读到其它章节（用户浏览/手动翻页把视图停在了旧章）时，仅恢复跟随无效：
    *  上方跟读跟随 effect 与 ensureSpeakVisible 都要求朗读句落在“本视图章节”内，
@@ -1916,9 +1967,7 @@ export default function ReaderPage() {
     const mir = mirror();
     if (!mir || mir.text.length === 0) return false;
     if (isPaged()) {
-      const pg = paged();
-      if (!pg) return false;
-      const page = pageIndexOfChar(pg.pages, mir, f.item.start);
+      const page = speakPageIndex(f);
       if (page < 0) return false;
       // 朗读句落在本屏（含右页）就算已可见，不翻页
       const first = snapPage(pageIdx());
@@ -2151,6 +2200,27 @@ export default function ReaderPage() {
     return count * geo.columnWidth + (count - 1) * geo.gap;
   });
 
+  // 用户手动翻页 / 跳页 / 切章后落回朗读句所在屏（跟读页）→ 恢复跟读跟随。
+  // 判定要等视图就绪：跨章翻页时新章正文与分页结果都还没到，先挂着由本 effect 补判。
+  createEffect(
+    on(
+      [() => chapter()?.cid ?? null, paged, pageIdx, pageColumns],
+      () => checkFollowPage(),
+      { defer: true },
+    ),
+  );
+
+  // 选取文本会暂时关闭跟读（见各起选处）；取消选中（轻点收起 / 拖选取消 / 切章清空）后
+  // 若视图仍在朗读句所在屏，恢复跟读跟随。
+  createEffect(
+    on(selSpan, (span, prev) => {
+      if (span === null && prev != null) {
+        armFollowPageCheck();
+        checkFollowPage();
+      }
+    }),
+  );
+
   /** 页码文案：单页用 single，双页（一屏两页）用 range；两套 key 中英各一条 */
   function pageProgressText(single: MessageKey, range: MessageKey): string {
     const p = pageCounter();
@@ -2168,6 +2238,7 @@ export default function ReaderPage() {
     cancelFollowIfActive();
     offerJumpBack();
     setPageIdx(next);
+    armFollowPageCheck(); // 跳到的这一屏是朗读句所在屏时恢复跟读跟随
   }
 
   // 单页 ↔ 双页切换（窗口宽度跨过阈值）：一屏页数、列宽、总页数全变了，同一个页码不再对应
@@ -2643,6 +2714,7 @@ export default function ReaderPage() {
     cancelFollowIfActive();
     setTocOpen(false);
     setMenuOpen(false);
+    armFollowPageCheck(); // 跳到的章节首页若正是朗读句所在屏，恢复跟读跟随
   }
 
   // -------------------------------------------------------------------
@@ -2804,7 +2876,12 @@ export default function ReaderPage() {
   function userFlip(dir: 1 | -1): void {
     animDir = dir;
     animTriggered = true;
-    if (!turnPage(dir)) animTriggered = false;
+    if (turnPage(dir)) {
+      // 翻到的这一屏若正是朗读句所在屏（跟读页），恢复跟读跟随（判定见 checkFollowPage）
+      armFollowPageCheck();
+    } else {
+      animTriggered = false;
+    }
   }
 
   function goBack(): void {
@@ -4110,6 +4187,7 @@ export default function ReaderPage() {
                         onClick={() => {
                           goToChapter(chapterIdx() + 1);
                           cancelFollowIfActive();
+                          armFollowPageCheck();
                         }}
                       >
                         {t("reader.nextChapter")}
@@ -4545,6 +4623,7 @@ export default function ReaderPage() {
                       setViewOffset(0);
                     }
                     cancelFollowIfActive();
+                    armFollowPageCheck();
                   }}
                 >
                   <ChevronLeftIcon size={16} />
@@ -4578,6 +4657,7 @@ export default function ReaderPage() {
                       setViewOffset(0);
                     }
                     cancelFollowIfActive();
+                    armFollowPageCheck();
                   }}
                 >
                   {t("reader.nextChapter")}
