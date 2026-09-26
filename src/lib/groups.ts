@@ -52,6 +52,15 @@ export async function initGroups(): Promise<void> {
   if (Array.isArray(stored)) setGroupsSignal(stored);
 }
 
+/**
+ * 重新从后端读回分组清单（**同步改了分组**时调用）。
+ * 后端落地时会按名字补齐对端的分组，这里只负责把结果取回内存。
+ */
+export async function reloadGroups(): Promise<void> {
+  const stored = await readState<Group[]>(GROUPS_KEY);
+  if (Array.isArray(stored)) setGroupsSignal(stored);
+}
+
 function persist(): void {
   const snapshot = [...groups()];
   void writeState(GROUPS_KEY, snapshot);

@@ -11,6 +11,7 @@ import {
   PackageIcon,
   RegexIcon,
   SourceIcon,
+  SyncIcon,
   TerminalIcon,
   TrashIcon,
 } from "../components/icons";
@@ -21,6 +22,7 @@ import { ThirdPartyNoticesSheet } from "../components/ThirdPartyNoticesSheet";
 import { ToggleSwitch } from "../components/ToggleSwitch";
 import { openDevTools } from "../lib/backend";
 import { isDesktopPlatform } from "../lib/platform";
+import { syncStatus } from "../lib/sync";
 import {
   SOURCE_PARALLEL_MAX,
   SOURCE_PARALLEL_MIN,
@@ -264,6 +266,45 @@ export default function SettingsPage() {
                 }
               />
             </div>
+          </div>
+        </section>
+
+        {/* 同步 */}
+        <section class="mb-6">
+          <h2 class="mx-1 mb-2 text-[12.5px] font-medium tracking-[0.04em] text-text-3">
+            {t("settings.section.sync")}
+          </h2>
+          <div class="overflow-hidden rounded-[14px] border border-border bg-surface">
+            <Row
+              icon={<SyncIcon size={18} />}
+              label={t("settings.sync.title")}
+              desc={
+                syncStatus().enabled
+                  ? syncStatus().pendingConflicts > 0
+                    ? t("sync.conflict.pending", { count: syncStatus().pendingConflicts })
+                    : t("settings.sync.onDesc")
+                  : t("settings.sync.desc")
+              }
+              onClick={() => navigate("/sync")}
+            >
+              <span
+                class="flex-none rounded-full px-2 py-[3px] text-[11px] font-semibold"
+                classList={{
+                  "bg-danger text-white": syncStatus().pendingConflicts > 0,
+                  "bg-accent-weak text-accent":
+                    syncStatus().pendingConflicts === 0 && syncStatus().enabled,
+                  "bg-surface-2 text-text-3":
+                    syncStatus().pendingConflicts === 0 && !syncStatus().enabled,
+                }}
+              >
+                {syncStatus().pendingConflicts > 0
+                  ? syncStatus().pendingConflicts
+                  : syncStatus().enabled
+                    ? t("settings.sync.stateOn")
+                    : t("settings.sync.stateOff")}
+              </span>
+              <ChevronRightIcon size={18} class="flex-none text-text-3" />
+            </Row>
           </div>
         </section>
 

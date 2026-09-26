@@ -1,0 +1,24 @@
+[package]
+name = "readerx-sync"
+version = "0.1.0"
+description = "ReaderX 局域网同步框架：HLC + 版本向量 + 操作日志 + 字段级合并（App 与 CLI 共用）"
+edition = "2021"
+publish = false
+
+[features]
+default = []
+cli = []
+
+[[bin]]
+name = "readerx-sync"
+path = "src/bin/readerx_sync/main.rs"
+required-features = ["cli"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"
+readerx-log = { path = "../readerx-log" }
+hmac = "0.12"
+sha2 = "0.10"
+getrandom = "0.2"

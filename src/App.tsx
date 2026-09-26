@@ -1,6 +1,6 @@
 import { lazy, onMount, onCleanup, Show, createEffect } from "solid-js";
 import type { Component } from "solid-js";
-import { Router, Route, type RouteSectionProps } from "@solidjs/router";
+import { Router, Route, useNavigate, type RouteSectionProps } from "@solidjs/router";
 import { Toasts } from "./components/Toasts";
 import { GroupPicker } from "./components/GroupPicker";
 import { MobileStage } from "./shell/MobileStage";
@@ -12,6 +12,7 @@ import {
   groupAssignBookId,
 } from "./lib/groups";
 import { isDesktopShell } from "./lib/platform";
+import { attachSyncNavigator } from "./lib/sync";
 import { t } from "./lib/i18n";
 
 // ---- 路由页面全部走代码分割 + 懒加载（配合页面栈内 Suspense） ----
@@ -27,6 +28,8 @@ const BookSourcesPage = lazy(() => import("./pages/BookSources"));
 const SourceEditorPage = lazy(() => import("./pages/SourceEditor"));
 const OnlineBookPage = lazy(() => import("./pages/OnlineBook"));
 const BookDetailPage = lazy(() => import("./pages/BookDetail.tsx"));
+const SyncPage = lazy(() => import("./pages/Sync"));
+const SyncConflictsPage = lazy(() => import("./pages/SyncConflicts"));
 const NotFoundPage = lazy(() => import("./pages/NotFound"));
 
 /**
@@ -50,6 +53,11 @@ const KEPT_PAGES: Record<string, Component> = {
  * 书架，故不能挂在发起入架的组件里）。
  */
 const AppShell: Component<RouteSectionProps> = (props) => {
+  // 同步冲突的提示条可能在任何页面弹出，而 useNavigate 只能在组件里取：
+  // 这里把导航能力交给同步模块（见 lib/sync.ts 的 attachSyncNavigator）
+  const navigate = useNavigate();
+  onMount(() => attachSyncNavigator((path) => navigate(path)));
+
   return (
     <div
       class="relative mx-auto flex h-screen w-full flex-col overflow-hidden bg-bg"
@@ -122,6 +130,8 @@ function App() {
       <Route path="/source-editor" component={SourceEditorPage} />
       <Route path="/online/:key" component={OnlineBookPage} />
       <Route path="/detail/:id" component={BookDetailPage} />
+      <Route path="/sync" component={SyncPage} />
+      <Route path="/sync-conflicts" component={SyncConflictsPage} />
       <Route path="*404" component={NotFoundPage} />
     </Router>
   );

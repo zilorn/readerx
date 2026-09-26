@@ -12,6 +12,7 @@ export const settings = {
   "settings.section.sources": "Sources",
   "settings.section.import": "Import",
   "settings.section.data": "Data",
+  "settings.section.sync": "Sync",
   "settings.section.debug": "Debug",
   "settings.section.about": "About",
 
@@ -92,6 +93,13 @@ export const settings = {
 
   /** Two-step confirmation, shared by clearing the TTS cache and clearing the logs */
   "settings.action.clearConfirm": "Tap again to confirm",
+
+  // LAN sync
+  "settings.sync.title": "LAN sync",
+  "settings.sync.desc": "Sync book info and reading position across your devices",
+  "settings.sync.onDesc": "On — syncing with devices on this network",
+  "settings.sync.stateOn": "On",
+  "settings.sync.stateOff": "Off",
 
   // App logs (sheet)
   "settings.logs.title": "App logs",

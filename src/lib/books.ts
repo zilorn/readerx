@@ -269,6 +269,62 @@ export function ensureLocalBooksLoaded(): Promise<void> {
 }
 
 /**
+ * 重新从后端拉一遍书库元数据（**同步改了书籍元信息 / 删了书**时调用）。
+ *
+ * - 元数据整表替换成后端那份（后端已经把同步结果写进 `bookdetail.json`）；
+ * - 已物化的全量书（含正文）只在元信息真的变了时更新，且**只换元信息字段**，
+ *   不碰正文 —— 阅读页正拿着这份对象，整批丢弃会让正在读的书重新加载；
+ * - 同步删掉的书在这里从两处缓存里消失（本地文件已由后端删除）。
+ */
+export async function reloadLocalBooks(): Promise<void> {
+  const metas = await listRemoteBookMetas();
+  setMetasState(sortByImportedAt(metas));
+
+  const byId = new Map(metas.map((meta) => [meta.id, meta]));
+  setFullsState((prev) => {
+    let changed = false;
+    const next: LocalBook[] = [];
+    for (const book of prev) {
+      const meta = byId.get(book.id);
+      if (!meta) {
+        changed = true;
+        continue; // 书已被同步删除
+      }
+      if (sameMetaFields(meta, book)) {
+        next.push(book);
+        continue;
+      }
+      changed = true;
+      next.push(withMeta(book, meta));
+    }
+    return changed ? next : prev;
+  });
+  log.info("书库已按同步结果刷新", `n=${metas.length}`);
+}
+
+/** 用元数据里的字段更新一本全量书（章节正文保持不动） */
+function withMeta(book: LocalBook, meta: BookMeta): LocalBook {
+  return {
+    ...book,
+    title: meta.title,
+    author: meta.author,
+    intro: meta.intro,
+    format: meta.format,
+    fileName: meta.fileName,
+    size: meta.size,
+    hue: meta.hue,
+    cover: meta.cover,
+    splitDesc: meta.splitDesc,
+    groupId: meta.groupId,
+    source: meta.source,
+    bookSourceId: meta.bookSourceId,
+    bookUrl: meta.bookUrl,
+    tags: meta.tags,
+    sourceTags: meta.sourceTags,
+  };
+}
+
+/**
  * 把某本书的「全量内容（含正文）」按需取回并进入响应式缓存。
  * 返回该书的全量对象；书不存在 / 已被删除时返回 null。
  * 同 id 并发调用共享同一次后端读取。

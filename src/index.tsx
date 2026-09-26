@@ -8,6 +8,7 @@ import { ensureLocalBooksLoaded } from "./lib/books";
 import { initGroups } from "./lib/groups";
 import { initI18n, t } from "./lib/i18n";
 import { installGlobalErrorReporting, listenBackendErrors, reportFailure } from "./lib/errorReport";
+import { initSync } from "./lib/sync";
 import { createLogger } from "./lib/logger";
 import { initFrontendLogLevel } from "./lib/logs";
 import "./index.css";
@@ -25,6 +26,8 @@ async function start() {
   // 处理不了的异常（未捕获错误 / 未处理的 Promise 拒绝 / 后端内部异常）都要提示用户
   installGlobalErrorReporting();
   void listenBackendErrors();
+  // 同步服务在 Rust 侧启动时就绪，这里只订阅它的状态与落地事件（订阅失败不影响同步）
+  void initSync();
 
   log.info("开始载入本地偏好");
   const startedAt = performance.now();
