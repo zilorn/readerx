@@ -16,6 +16,7 @@
 //! 每个用例开始时清空它。
 
 use readerx_lib::sync::bridge::{self, BookIndex, PublishMode};
+use readerx_lib::sync::content as tcontent;
 use readerx_lib::sync::identity;
 use readerx_lib::sync::SyncService;
 use readerx_sync::net::{
@@ -23,8 +24,9 @@ use readerx_sync::net::{
 };
 use readerx_sync::{EngineOptions, SchemaRegistry, SyncEngine};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use tauri::Manager;
 
 /// 用例串行锁（见文件头说明）。
@@ -150,19 +152,90 @@ fn seed_local_progress(data_root: &Path, book_id: &str, chapter: i64, offset: i6
 }
 
 /// 本机引擎（就是 App 在 `<应用数据目录>/sync` 下开的那个）。
-fn local_engine(data_root: &Path) -> SharedEngine {
-    let mut options = EngineOptions::new("本机");
-    options.schemas = SchemaRegistry::readerx_defaults();
+///
+/// 与 App 一样注册**正文来源**：正文通道的落地方向（对端推来的正文写进书库、
+/// 本机书库里的正文能发给对端）要靠它跑起来。
+fn local_engine(handle: &tauri::AppHandle<tauri::test::MockRuntime>, data_root: &Path) -> SharedEngine {
+    let options = EngineOptions::new("本机")
+        .with_schemas(SchemaRegistry::readerx_defaults())
+        .with_content(tcontent::AppContent::new(handle.clone()));
     shared(SyncEngine::open(data_root.join("sync"), options).unwrap())
+}
+
+/// 对端的正文来源（内存版）：模拟「另一台设备书库里有正文」。
+#[derive(Default)]
+struct PeerContent {
+    books: Mutex<HashMap<String, Vec<readerx_sync::content::ChapterContent>>>,
+}
+
+impl PeerContent {
+    fn put(&self, book: &str, cid: &str, title: &str, text: &str) {
+        let chapter = readerx_sync::content::ChapterContent {
+            cid: cid.to_string(),
+            title: title.to_string(),
+            url: Some(format!("https://example.com/{cid}")),
+            paragraphs: vec![text.to_string()],
+            blocks: None,
+        };
+        self.books
+            .lock()
+            .unwrap()
+            .entry(book.to_string())
+            .or_default()
+            .push(chapter);
+    }
+}
+
+impl readerx_sync::content::ContentSource for PeerContent {
+    fn digests(&self, book: &str) -> Vec<readerx_sync::content::ChapterDigest> {
+        self.books
+            .lock()
+            .unwrap()
+            .get(book)
+            .map(|chapters| {
+                chapters
+                    .iter()
+                    .map(|chapter| readerx_sync::content::ChapterDigest {
+                        cid: chapter.cid.clone(),
+                        hash: chapter.fingerprint(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn load(&self, book: &str, cids: &[String]) -> Vec<readerx_sync::content::ChapterContent> {
+        let all = self.books.lock().unwrap();
+        let chapters = all.get(book);
+        cids.iter()
+            .filter_map(|cid| {
+                chapters?
+                    .iter()
+                    .find(|chapter| &chapter.cid == cid)
+                    .cloned()
+            })
+            .collect()
+    }
 }
 
 /// 另一台设备的引擎（数据目录在临时区，直接开）。
 fn peer_engine(tag: &str, pairing_code: Option<&str>) -> SharedEngine {
+    peer_engine_with_content(tag, pairing_code, None)
+}
+
+/// 同上，但给对端注册一个正文来源（验证正文通道）。
+fn peer_engine_with_content(
+    tag: &str,
+    pairing_code: Option<&str>,
+    content: Option<Arc<PeerContent>>,
+) -> SharedEngine {
     let dir =
         std::env::temp_dir().join(format!("readerx-sync-e2e-peer-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    let mut options = EngineOptions::new(tag);
-    options.schemas = SchemaRegistry::readerx_defaults();
+    let mut options = EngineOptions::new(tag).with_schemas(SchemaRegistry::readerx_defaults());
+    if let Some(content) = content {
+        options = options.with_content(content);
+    }
     let mut engine = SyncEngine::open(dir, options).unwrap();
     if let Some(code) = pairing_code {
         engine.join_group(code).unwrap();
@@ -170,10 +243,10 @@ fn peer_engine(tag: &str, pairing_code: Option<&str>) -> SharedEngine {
     shared(engine)
 }
 
-fn sync_once(client: &SharedEngine, server: &SharedEngine) {
+fn sync_once(client: &SharedEngine, server: &SharedEngine) -> readerx_sync::SyncReport {
     let mut transport = LoopbackTransport::new(server.clone());
     let mut guard = lock_engine(client);
-    readerx_sync::sync_with(&mut guard, &mut transport).expect("同步应成功");
+    readerx_sync::sync_with(&mut guard, &mut transport).expect("同步应成功")
 }
 
 /// 集合字段（标签）比较：顺序由引擎的键序决定，比较时按集合看。
@@ -212,7 +285,7 @@ fn local_library_is_published_and_remote_changes_land_back() {
     );
 
     // ---- 本机引擎 + 本地对账 ----
-    let local = local_engine(&app_data);
+    let local = local_engine(&handle, &app_data);
     let mut index = BookIndex::default();
     bridge::reconcile(&handle, &local, &mut index).unwrap();
 
@@ -340,7 +413,7 @@ fn second_device_import_of_the_same_file_keeps_synced_metadata() {
     let (handle, app_data) = setup();
 
     seed_local_book(&app_data, "local-1", "三体");
-    let local = local_engine(&app_data);
+    let local = local_engine(&handle, &app_data);
     let mut index = BookIndex::default();
     bridge::reconcile(&handle, &local, &mut index).unwrap();
     let uid = lock_engine(&local).entities_of_kind("book", false)[0].id.clone();
@@ -384,7 +457,7 @@ fn deleted_book_on_the_peer_removes_the_local_copy() {
 
     seed_local_book(&app_data, "local-1", "三体");
     seed_local_progress(&app_data, "local-1", 3, 300);
-    let local = local_engine(&app_data);
+    let local = local_engine(&handle, &app_data);
     let mut index = BookIndex::default();
     bridge::reconcile(&handle, &local, &mut index).unwrap();
 
@@ -419,7 +492,7 @@ fn concurrent_title_edit_is_reported_for_review_without_losing_either_side() {
     let (handle, app_data) = setup();
 
     seed_local_book(&app_data, "local-1", "三体");
-    let local = local_engine(&app_data);
+    let local = local_engine(&handle, &app_data);
     let mut index = BookIndex::default();
     bridge::reconcile(&handle, &local, &mut index).unwrap();
     let peer = peer_engine("conflict-peer", Some(&lock_engine(&local).pairing_code()));
@@ -461,7 +534,7 @@ fn local_edit_is_published_without_duplicating_operations() {
     let (handle, app_data) = setup();
 
     seed_local_book(&app_data, "local-1", "三体");
-    let local = local_engine(&app_data);
+    let local = local_engine(&handle, &app_data);
     let mut index = BookIndex::default();
     bridge::reconcile(&handle, &local, &mut index).unwrap();
     let after_reconcile = lock_engine(&local).op_count();
@@ -496,19 +569,15 @@ fn local_edit_is_published_without_duplicating_operations() {
 
 /// App 侧的网络接线：**服务端握手时要把「连我用的端口」记成对方声明的监听端口**。
 ///
-/// 等后台的「开启同步后的首轮同步」跑完。
+/// 等后台的「开启同步后的首轮同步」跑完（见 `SyncService::wait_startup_sync`）。
 ///
-/// `SyncService::set_enabled(true)` 会在后台线程里做首次对账 + 首轮同步（用户点开关
-/// 不该干等书库灌进引擎），而那期间 `syncing` 是置位的 —— 测试紧接着手动同步就会拿到
-/// 「正在同步中」。这里等它落定，让用例与调度时机无关。
+/// 不等它落定就手动同步，会和首轮撞成「正在同步中」；而首轮的会话又握着引擎锁，
+/// 让被测服务的握手应答慢到超时 —— 用例应该与线程调度时机无关。
 fn wait_until_idle(service: &SyncService<tauri::test::MockRuntime>) {
-    for _ in 0..600 {
-        if !service.status().syncing {
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    panic!("开启同步后的首轮同步迟迟没有结束");
+    assert!(
+        service.wait_startup_sync(std::time::Duration::from_secs(30)),
+        "开启同步后的首轮同步迟迟没有结束"
+    );
 }
 
 /// 回归：曾经把 TCP 连接的源端口当成对端地址记下来，那个端口一断就回收，
@@ -668,7 +737,7 @@ fn book_structure_lands_and_keeps_chapter_bodies() {
     let (handle, app_data) = setup();
 
     seed_local_book(&app_data, "local-1", "三体");
-    let local = local_engine(&app_data);
+    let local = local_engine(&handle, &app_data);
     let mut index = BookIndex::default();
     bridge::reconcile(&handle, &local, &mut index).unwrap();
 
@@ -754,7 +823,7 @@ fn rules_sync_in_both_directions() {
     );
 
     // ---- 本机引擎 + 对账：规则发布成实体 ----
-    let local = local_engine(&app_data);
+    let local = local_engine(&handle, &app_data);
     let mut index = BookIndex::default();
     bridge::reconcile(&handle, &local, &mut index).unwrap();
 
@@ -851,4 +920,155 @@ fn rules_sync_in_both_directions() {
     );
     let after = read_json(&app_data.join("state").join("readerx.textReplacements.json"));
     assert_eq!(after.as_array().unwrap().len(), 1, "对账不该改动本地清单：{after}");
+}
+
+/// 正文同步的落地方向：对端有这本书（元信息 + 目录 + 正文），本机什么都没有 ——
+/// 同步之后本机应该**多出一本可读的书**（而不是只有一条元信息）。
+#[test]
+fn synced_content_creates_the_book_locally() {
+    let _serial = SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (handle, app_data) = setup();
+
+    let local = local_engine(&handle, &app_data);
+    let mut index = BookIndex::default();
+
+    // 书实体 id 必须是对端按内容特征算出来的那个（这里是导入书：文件名 + 字节数）
+    let uid = readerx_lib::sync::identity::book_uid(&readerx_lib::sync::identity::BookKey {
+        file_name: "三体.epub",
+        size: 2048,
+        ..Default::default()
+    });
+    let content = Arc::new(PeerContent::default());
+    content.put(&uid, "c0001", "第一章", "正文一");
+    content.put(&uid, "c0002", "第二章", "正文二");
+    let peer = peer_engine_with_content(
+        "content-peer",
+        Some(&lock_engine(&local).pairing_code()),
+        Some(content),
+    );
+    {
+        let mut guard = lock_engine(&peer);
+        guard
+            .create_entity(
+                "book",
+                Some(uid.clone()),
+                [
+                    ("title", json!("三体")),
+                    ("author", json!("刘慈欣")),
+                    ("format", json!("epub")),
+                    ("file_name", json!("三体.epub")),
+                    ("size", json!(2048)),
+                    ("split_desc", json!("按章")),
+                ],
+            )
+            .unwrap();
+        guard
+            .create_entity(
+                "book_structure",
+                Some(identity::book_structure_uid(&uid)),
+                [
+                    ("book_id", json!(uid)),
+                    (
+                        "chapters",
+                        json!([
+                            { "cid": "c0001", "title": "第一章" },
+                            { "cid": "c0002", "title": "第二章" },
+                            { "cid": "c0003", "title": "第三章（对端还没下正文）" },
+                        ]),
+                    ),
+                ],
+            )
+            .unwrap();
+        guard.flush().unwrap();
+    }
+
+    // 同步一轮：操作先到，正文随后进暂存区
+    sync_once(&peer, &local);
+    assert_eq!(
+        lock_engine(&local).staged_bodies(&uid).len(),
+        2,
+        "对端的正文应先落在暂存区"
+    );
+
+    // 落地：本机按引擎里的元信息建书，并把正文写进 content.json
+    let changes = bridge::materialize(&handle, &local, 0, &mut index).unwrap();
+    assert!(changes.books, "新书落地要刷新书架：{changes:?}");
+    assert_eq!(changes.chapters.len(), 1, "{changes:?}");
+
+    let book_ids: Vec<String> = std::fs::read_dir(app_data.join("books"))
+        .unwrap()
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .map(|entry| entry.file_name().to_string_lossy().to_string())
+        .collect();
+    assert_eq!(book_ids.len(), 1, "应该正好新建一本：{book_ids:?}");
+    let book_id = &book_ids[0];
+
+    let detail = read_json(&app_data.join("books").join(book_id).join("bookdetail.json"));
+    assert_eq!(detail["title"], json!("三体"));
+    assert_eq!(detail["fileName"], json!("三体.epub"));
+    assert_eq!(detail["size"], json!(2048));
+    assert_eq!(detail["importedAt"].as_u64().unwrap() > 0, true, "导入时间由本机生成");
+
+    let content_file = read_json(&app_data.join("books").join(book_id).join("content.json"));
+    let chapters = content_file["chapters"].as_array().unwrap();
+    assert_eq!(chapters.len(), 3, "目录三章都在（没下正文的章是空的）：{content_file}");
+    assert_eq!(chapters[0]["cid"], json!("c0001"));
+    assert_eq!(chapters[0]["paragraphs"][0], json!("正文一"));
+    assert_eq!(chapters[1]["paragraphs"][0], json!("正文二"));
+    assert!(chapters[2]["paragraphs"].as_array().unwrap().is_empty());
+
+    assert!(
+        app_data.join("books").join(book_id).join("digest.json").is_file(),
+        "正文落地要顺手写下章节指纹缓存"
+    );
+    assert!(
+        lock_engine(&local).staged_bodies(&uid).is_empty(),
+        "落地完成后暂存区要清干净"
+    );
+
+    // 身份一致：本机算出来的书实体 id 必须还是对端那个，否则进度 / 书签 / 目录都对不上
+    assert_eq!(bridge::local_uid(&handle, book_id), uid);
+
+    // 再落地一次不该重复建书
+    let again = bridge::materialize(&handle, &local, usize::MAX, &mut index).unwrap();
+    assert!(again.chapters.is_empty() && !again.books, "重复落地应无事发生：{again:?}");
+    let still: Vec<String> = std::fs::read_dir(app_data.join("books"))
+        .unwrap()
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .map(|entry| entry.file_name().to_string_lossy().to_string())
+        .collect();
+    assert_eq!(still, book_ids);
+}
+
+/// 反向：本机书库里的正文能发给对端（App 的正文来源接在书库上）。
+#[test]
+fn local_book_content_is_published_to_the_peer() {
+    let _serial = SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (handle, app_data) = setup();
+
+    seed_local_book(&app_data, "local-1", "三体");
+    let local = local_engine(&handle, &app_data);
+    let mut index = BookIndex::default();
+    bridge::reconcile(&handle, &local, &mut index).unwrap();
+
+    let content = Arc::new(PeerContent::default());
+    let peer = peer_engine_with_content(
+        "outgoing-peer",
+        Some(&lock_engine(&local).pairing_code()),
+        Some(content),
+    );
+
+    let report = sync_once(&local, &peer);
+    assert!(report.content_pushed > 0, "本机的正文应推给对端：{report:?}");
+
+    let uid = {
+        let guard = lock_engine(&local);
+        guard.entities_of_kind("book", false)[0].id.clone()
+    };
+    let staged = lock_engine(&peer).staged_bodies(&uid);
+    assert_eq!(staged.len(), 1, "对端应收到本机那一章");
+    assert_eq!(staged[0].paragraphs, vec!["正文".to_string()]);
+    assert_eq!(staged[0].title, "第一章");
 }

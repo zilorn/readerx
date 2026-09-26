@@ -214,8 +214,9 @@ fn book_uid_of_id<R: tauri::Runtime>(app: &AppHandle<R>, book_id: &str) -> Strin
     }
 }
 
-/// [`book_uid_of_id`] 的对外版本：本地写入钩子维护书身份索引时用。
-pub(crate) fn local_uid<R: tauri::Runtime>(app: &AppHandle<R>, book_id: &str) -> String {
+/// [`book_uid_of_id`] 的对外版本：本地写入钩子维护书身份索引时用（集成测试也用它
+/// 验证「本机算出来的书身份与对端一致」）。
+pub fn local_uid<R: tauri::Runtime>(app: &AppHandle<R>, book_id: &str) -> String {
     book_uid_of_id(app, book_id)
 }
 
@@ -342,6 +343,10 @@ pub fn publish_book_delete<R: tauri::Runtime>(
     let progress = identity::progress_uid(&uid);
     if guard.entity(&progress).is_some() {
         guard.delete_entity(&progress, Some("书籍已删除".to_string()))?;
+    }
+    // 暂存区里还没落地的正文跟着书一起丢掉：书都没了，正文留着只会占地方
+    if let Err(error) = guard.drop_staged(&uid) {
+        log::warn!("清理书籍暂存正文失败（{book_id}）：{error}");
     }
     log::info!("书籍删除已记入同步 book={book_id}");
     Ok(())
@@ -708,7 +713,9 @@ pub fn materialize<R: tauri::Runtime>(
     index: &mut BookIndex,
 ) -> Result<AppliedChanges, SyncError> {
     let snapshots = collect_snapshots(engine, from, &[])?;
-    apply_snapshots(app, engine, index, snapshots)
+    let mut changes = apply_snapshots(app, engine, index, snapshots)?;
+    apply_staged_content(app, engine, index, &mut changes)?;
+    Ok(changes)
 }
 
 /// 落地**指定实体**的当前状态（不看操作来源）。
@@ -722,7 +729,215 @@ pub fn materialize_entities<R: tauri::Runtime>(
     ids: &[String],
 ) -> Result<AppliedChanges, SyncError> {
     let snapshots = collect_snapshots(engine, usize::MAX, ids)?;
-    apply_snapshots(app, engine, index, snapshots)
+    let mut changes = apply_snapshots(app, engine, index, snapshots)?;
+    apply_staged_content(app, engine, index, &mut changes)?;
+    Ok(changes)
+}
+
+// ---------------------------------------------------------------------------
+// 正文落地：暂存区 → 书库（必要时建书）
+// ---------------------------------------------------------------------------
+
+/// 把引擎暂存区里的正文写进书库。
+///
+/// 本机还没有这本书时**按引擎里的元信息建一本**：正文同步的意义就是「这台设备也要能读
+/// 这本书」。建书需要几样东西凑齐，缺一不可（缺了就先把正文留在暂存区，等下次）：
+///
+/// - 书实体（书名 / 格式 / 文件名 / 字节数 / 书源地址）—— 元信息都没同步过来时建不了；
+/// - 在线书还要求本机有对应的**书源**：书身份由「书源地址 + 书籍地址」派生，
+///   书源缺失时算出来的身份与引擎里的对不上，建出来的书会变成同步不到的孤儿；
+/// - PDF 不建：阅读要读原始文件，而文件不同步。
+fn apply_staged_content<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    engine: &SharedEngine,
+    index: &mut BookIndex,
+    changes: &mut AppliedChanges,
+) -> Result<(), SyncError> {
+    let books = lock_engine(engine).staged_books();
+    for book_uid in books {
+        let bodies = lock_engine(engine).staged_bodies(&book_uid);
+        if bodies.is_empty() {
+            continue;
+        }
+        let (local_id, created) = match index.resolve(app, &book_uid).map_err(SyncError::Io)? {
+            Some(local_id) => (local_id, false),
+            None => match create_local_book_from_sync(app, engine, index, &book_uid)? {
+                Some(local_id) => (local_id, true),
+                None => continue,
+            },
+        };
+        match book_store::apply_sync_chapters(app, &local_id, &bodies) {
+            // 重建书时正文已经随书一次写齐（`put_book`），这里返回 0 是正常的；
+            // 已有书返回 0 说明内容与本地一致（重复推送）：两种情况都该清掉暂存
+            Ok(0) => {
+                clear_staged(engine, &book_uid, &bodies)?;
+                if created {
+                    changes.books = true;
+                    changes.chapters.push(local_id);
+                }
+            }
+            Ok(applied) => {
+                changes.books = true;
+                if !changes.chapters.contains(&local_id) {
+                    changes.chapters.push(local_id.clone());
+                }
+                clear_staged(engine, &book_uid, &bodies)?;
+                log::info!("同步正文已落地 book={local_id} 章节={applied}");
+            }
+            Err(error) => {
+                // 写盘失败：暂存留着，下次同步 / 下次落地再试（不能当成已经落地）
+                log::warn!("同步正文落地失败（{local_id}）：{error}");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 清掉刚刚落地的那些暂存章。
+fn clear_staged(
+    engine: &SharedEngine,
+    book_uid: &str,
+    bodies: &[readerx_sync::content::ChapterContent],
+) -> Result<(), SyncError> {
+    let cids: Vec<String> = bodies.iter().map(|body| body.cid.clone()).collect();
+    lock_engine(engine).clear_staged(book_uid, &cids)
+}
+
+/// 按引擎里的元信息 + 目录 + 暂存正文新建本地书。
+///
+/// 返回新建的本机书 id；条件不满足（见 [`apply_staged_content`]）时返回 `None`。
+fn create_local_book_from_sync<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    engine: &SharedEngine,
+    index: &mut BookIndex,
+    book_uid: &str,
+) -> Result<Option<String>, SyncError> {
+    let (fields, structure) = {
+        let guard = lock_engine(engine);
+        let Some(entity) = guard.entity(book_uid) else {
+            return Ok(None);
+        };
+        if guard.is_effectively_deleted(entity) {
+            return Ok(None);
+        }
+        let fields = book_snapshot_fields(entity);
+        let structure = guard
+            .entity(&identity::book_structure_uid(book_uid))
+            .filter(|entity| !guard.is_effectively_deleted(entity))
+            .and_then(|entity| entity.field("chapters"))
+            .and_then(|value| serde_json::from_value::<Vec<ChapterRef>>(value).ok())
+            .unwrap_or_default();
+        (fields, structure)
+    };
+
+    if fields.format == "pdf" {
+        log::info!("对端有这本 PDF 的正文，但本机没有原文件：暂不建书（阅读要读原文件）");
+        return Ok(None);
+    }
+    // 在线书：书身份含书源地址，本机没有对应书源时建出来的书与引擎对不上
+    let book_source_id = if fields.book_url.is_some() {
+        match fields.source_url.as_deref().and_then(local_source_id_by_url) {
+            Some(id) => Some(id),
+            None => {
+                log::debug!("对端的在线书还没有对应书源，暂不建书 uid={book_uid}");
+                return Ok(None);
+            }
+        }
+    } else {
+        None
+    };
+
+    let bodies = lock_engine(engine).staged_bodies(book_uid);
+    let chapters = merge_structure_with_bodies(&structure, &bodies);
+    if chapters.is_empty() {
+        return Ok(None);
+    }
+    let group_id = local_group_id(app, fields.group.as_deref()).map_err(SyncError::Io)?;
+    let local_id = new_local_id("local");
+    let book = crate::models::LocalBook {
+        id: local_id.clone(),
+        title: fields.title.clone(),
+        author: fields.author.clone(),
+        intro: fields.intro.clone(),
+        format: fields.format.clone(),
+        file_name: fields.file_name.clone(),
+        size: fields.size,
+        imported_at: now_ms(),
+        hue: hue_from_uid(book_uid),
+        split_desc: fields.split_desc.clone(),
+        // 封面不在同步范围（data URL 会把操作日志撑爆）：新书先没有封面
+        cover: None,
+        chapters,
+        group_id,
+        source: fields.source.clone(),
+        book_source_id,
+        book_url: fields.book_url.clone(),
+        tags: (!fields.tags.is_empty()).then(|| fields.tags.clone()),
+        source_tags: (!fields.source_tags.is_empty()).then(|| fields.source_tags.clone()),
+    };
+    book_store::put_book(app, book).map_err(SyncError::Io)?;
+    index.insert(&local_id, book_uid);
+    log::info!("同步新建本地书 id={local_id}（对端同步来的正文）");
+    Ok(Some(local_id))
+}
+
+/// 按目录排出章节顺序，并把暂存正文填进对应章节。
+fn merge_structure_with_bodies(
+    structure: &[ChapterRef],
+    bodies: &[readerx_sync::content::ChapterContent],
+) -> Vec<crate::models::LocalBookChapter> {
+    let mut chapters: Vec<crate::models::LocalBookChapter> = structure
+        .iter()
+        .map(|entry| crate::models::LocalBookChapter {
+            cid: entry.cid.clone(),
+            title: entry.title.clone(),
+            paragraphs: Vec::new(),
+            blocks: None,
+            url: entry.url.clone(),
+        })
+        .collect();
+    for body in bodies {
+        let blocks = body
+            .blocks
+            .as_ref()
+            .and_then(|value| serde_json::from_value(value.clone()).ok());
+        match chapters.iter_mut().find(|chapter| chapter.cid == body.cid) {
+            Some(chapter) => {
+                chapter.paragraphs = body.paragraphs.clone();
+                chapter.blocks = blocks;
+                if chapter.title.is_empty() {
+                    chapter.title = body.title.clone();
+                }
+                if chapter.url.is_none() {
+                    chapter.url = body.url.clone();
+                }
+            }
+            None => chapters.push(crate::models::LocalBookChapter {
+                cid: body.cid.clone(),
+                title: body.title.clone(),
+                paragraphs: body.paragraphs.clone(),
+                blocks,
+                url: body.url.clone(),
+            }),
+        }
+    }
+    chapters
+}
+
+/// 本机书源 id（按同步来的书源地址找；找不到返回 None —— 在线书的身份就缺一块）。
+fn local_source_id_by_url(url: &str) -> Option<String> {
+    let wanted = identity::source_uid(url);
+    readerx_source::store::list_sources()
+        .ok()?
+        .into_iter()
+        .find(|source| identity::source_uid(&source.book_source_url) == wanted)
+        .map(|source| source.id)
+}
+
+/// 由书实体 id 派生一个稳定的色相（0–359）：封面不同步，新书也要有个可辨的底色。
+fn hue_from_uid(uid: &str) -> u32 {
+    let hex: String = uid.chars().filter(|c| c.is_ascii_hexdigit()).take(4).collect();
+    u32::from_str_radix(&hex, 16).unwrap_or(0) % 360
 }
 
 /// 把一批实体快照写回本地文件（顺序：分组 → 书 → 进度 → 书签 → 书源）。
@@ -748,6 +963,10 @@ fn apply_snapshots<R: tauri::Runtime>(
                     changes.books = true;
                     if *deleted {
                         changes.deleted_books.push(local_id);
+                        // 对端删了这本书：它还没落地的正文也没意义了
+                        if let Err(error) = lock_engine(engine).drop_staged(uid) {
+                            log::warn!("清理已删书籍的暂存正文失败（{uid}）：{error}");
+                        }
                     }
                 }
                 Ok(None) => {}
@@ -856,6 +1075,7 @@ fn apply_book_fields<R: tauri::Runtime>(
         source_tags: fields.source_tags.clone(),
         group_id: local_group_id(app, fields.group.as_deref())?,
         book_source_id: book_store::get_sync_meta(app, local_id)?.and_then(|m| m.book_source_id),
+        // source_url 只是同步载荷（对端建书时用它找回自己的书源），不落进本机元信息
     };
     book_store::apply_sync_meta(app, local_id, &want)
 }
@@ -988,6 +1208,8 @@ struct BookEntityFields {
     size: u64,
     source: Option<String>,
     book_url: Option<String>,
+    /// 书源地址（在线书建书时要用它找回本机的书源；导入书为空）
+    source_url: Option<String>,
     source_tags: Vec<String>,
     split_desc: String,
 }
@@ -1013,6 +1235,7 @@ fn book_snapshot_fields(entity: &Entity) -> BookEntityFields {
         size: entity.field("size").and_then(|v| v.as_u64()).unwrap_or(0),
         source: text("source"),
         book_url: text("book_url"),
+        source_url: text("source_url"),
         source_tags: list("source_tags"),
         split_desc: text("split_desc").unwrap_or_default(),
     }
@@ -1396,7 +1619,7 @@ fn local_group_id<R: tauri::Runtime>(
 // ---------------------------------------------------------------------------
 
 /// 本机书籍元信息 → 引擎字段。
-fn book_values(facts: &LocalFacts, meta: &BookSyncMeta) -> BTreeMap<String, Value> {
+fn book_values(facts: &mut LocalFacts, meta: &BookSyncMeta) -> BTreeMap<String, Value> {
     let mut fields = BTreeMap::new();
     fields.insert("title".to_string(), json!(meta.title));
     fields.insert("author".to_string(), json!(meta.author));
@@ -1411,6 +1634,11 @@ fn book_values(facts: &LocalFacts, meta: &BookSyncMeta) -> BTreeMap<String, Valu
     fields.insert("size".to_string(), json!(meta.size));
     fields.insert("source".to_string(), option_json(meta.source.as_deref()));
     fields.insert("book_url".to_string(), option_json(meta.book_url.as_deref()));
+    // 书源地址：对端建这本书时要靠它找回自己那边的书源（书身份含书源地址）
+    fields.insert(
+        "source_url".to_string(),
+        option_json(facts.source_url(meta.book_source_id.as_deref()).as_deref()),
+    );
     fields.insert("source_tags".to_string(), json!(meta.source_tags));
     fields.insert("split_desc".to_string(), json!(meta.split_desc));
     fields

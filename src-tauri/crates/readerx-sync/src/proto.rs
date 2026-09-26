@@ -9,6 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::content::{BookDigest, ChapterContent, ChapterDigest};
 use crate::id::{DeviceId, OpId};
 use crate::model::Operation;
 use crate::version::VersionVector;
@@ -21,6 +22,13 @@ pub const MAX_HANDSHAKE_BYTES: usize = 64 * 1024;
 
 /// 一次 Pull / Push 的默认批量条数。
 pub const DEFAULT_BATCH: usize = 200;
+
+/// 一批正文的字节上限（协议帧上限 8 MiB，留出 JSON 包装与其它字段的余量）。
+/// 两端都用它装箱：客户端决定推多少、服务端决定回多少。
+pub const CONTENT_BATCH_BYTES: usize = 4 * 1024 * 1024;
+
+/// 一批正文最多几章（避免一堆极短章节把 JSON 数组本身撑大）。
+pub const CONTENT_BATCH_CHAPTERS: usize = 100;
 
 /// 客户端 → 服务端。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -41,6 +49,13 @@ pub enum Request {
         /// `default` 让不带该字段的旧对端仍能握手（按「没在监听」处理）。
         #[serde(default)]
         port: u16,
+        /// 本机是否参与**正文**同步（注册了正文来源）。
+        ///
+        /// 缺字段的旧对端按 `false` 处理：新版本因此既不会向旧版本发起正文对账
+        /// （它会把未知请求当协议错误断连接），也不会收到旧版本发来的正文请求 ——
+        /// 版本不一致时数据照旧同步，只是正文这条通道不启用。
+        #[serde(default)]
+        content: bool,
     },
     /// 鉴权应答：`proof = HMAC(密钥, 握手文本)`
     Auth { proof: String },
@@ -48,6 +63,14 @@ pub enum Request {
     Pull { since: VersionVector, limit: usize },
     /// 推送：我这边有你缺的操作
     Push { ops: Vec<Operation> },
+    /// 正文对账：这是我的逐本总览（先比总量，没必要为每本没变的书都传清单）
+    ContentIndex { books: Vec<BookDigest> },
+    /// 正文对账：某本书的逐章指纹
+    ChapterDigests { book: String },
+    /// 推正文：这几章的正文给你
+    PushChapters { book: String, items: Vec<ChapterContent> },
+    /// 拉正文：把这几章的正文给我
+    PullChapters { book: String, cids: Vec<String> },
     /// 查询对端状态（CLI `discover` / 状态页用）
     Stat,
     Ping,
@@ -61,6 +84,10 @@ impl Request {
             Request::Auth { .. } => "auth",
             Request::Pull { .. } => "pull",
             Request::Push { .. } => "push",
+            Request::ContentIndex { .. } => "content_index",
+            Request::ChapterDigests { .. } => "chapter_digests",
+            Request::PushChapters { .. } => "push_chapters",
+            Request::PullChapters { .. } => "pull_chapters",
             Request::Stat => "stat",
             Request::Ping => "ping",
         }
@@ -84,6 +111,9 @@ pub enum Response {
         /// 拒绝原因码（见 [`HandshakeCode`]）；旧对端不带该字段，按纯提示文本处理
         #[serde(default, skip_serializing_if = "Option::is_none")]
         code: Option<String>,
+        /// 本机是否参与正文同步（与 [`Request::Hello`] 同一口径；旧对端缺字段 = false）
+        #[serde(default)]
+        content: bool,
     },
     /// 对 Auth 的回应（含服务端自己的 proof，做双向认证）
     Auth {
@@ -123,6 +153,23 @@ pub enum Response {
         pending_conflicts: u64,
         knowledge: VersionVector,
     },
+    /// 正文对账的应答：本机对这几本书的逐本总览（只回本机有正文的那些书）
+    ContentIndex { books: Vec<BookDigest> },
+    /// 某本书的逐章指纹。`known` = 本机有这本书（没有时对端不该把正文推过来：
+    /// 推过来也无处可落）
+    ChapterDigests {
+        book: String,
+        #[serde(default)]
+        known: bool,
+        chapters: Vec<ChapterDigest>,
+    },
+    /// 拉正文的应答：按帧预算装得下的章节（装不下的下次同步再来）
+    Chapters { book: String, items: Vec<ChapterContent> },
+    /// 推正文的应答
+    ContentAck {
+        /// 真正写进暂存区的章数（内容重复的章节不算）
+        stored: usize,
+    },
     Pong {
         at_ms: u64,
     },
@@ -141,6 +188,10 @@ impl Response {
             Response::Ops { .. } => "ops",
             Response::Ack { .. } => "ack",
             Response::Stat { .. } => "stat",
+            Response::ContentIndex { .. } => "content_index",
+            Response::ChapterDigests { .. } => "chapter_digests",
+            Response::Chapters { .. } => "chapters",
+            Response::ContentAck { .. } => "content_ack",
             Response::Pong { .. } => "pong",
             Response::Error { .. } => "error",
         }

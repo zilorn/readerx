@@ -82,6 +82,15 @@ pub struct ServerOptions {
     /// 放在这里而不是让宿主轮询：地址只有服务端知道（来源 IP + 对端自报的监听端口），
     /// 而界面要在对端连进来的那一刻就刷新设备列表。
     pub on_peer_seen: Option<Arc<dyn Fn(&PeerInfo) + Send + Sync>>,
+    /// 对端推来的**正文**进了暂存区之后的回调。
+    ///
+    /// 宿主据此把暂存正文落到自己的书库里（App：materialize）。放在服务端而不是让宿主
+    /// 轮询：对端连进来推送完就断了，不通知的话本机要等到下一次自己发起同步才会落地 ——
+    /// 用户看到的是「同步完成了，但另一台设备上的书还是没出现」。
+    ///
+    /// 回调在**引擎锁之外**执行（服务端处理完一条请求、写回应答之后才调用），
+    /// 宿主可以安全地去拿引擎锁；耗时操作应由宿主自己丢到后台线程。
+    pub on_applied: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl std::fmt::Debug for ServerOptions {
@@ -96,6 +105,7 @@ impl std::fmt::Debug for ServerOptions {
             .field("timeout", &self.timeout)
             .field("max_connections", &self.max_connections)
             .field("on_peer_seen", &self.on_peer_seen.is_some())
+            .field("on_applied", &self.on_applied.is_some())
             .finish()
     }
 }
@@ -113,6 +123,7 @@ impl ServerOptions {
             timeout: Duration::from_secs(20),
             max_connections: 8,
             on_peer_seen: None,
+            on_applied: None,
         })
     }
 
@@ -123,6 +134,12 @@ impl ServerOptions {
 
     pub fn with_trust(mut self, trust: TrustPolicy) -> ServerOptions {
         self.trust = trust;
+        self
+    }
+
+    /// 引擎里的数据被对端改变后通知宿主（见字段说明）。
+    pub fn with_applied(mut self, callback: Arc<dyn Fn() + Send + Sync>) -> ServerOptions {
+        self.on_applied = Some(callback);
         self
     }
 
@@ -243,6 +260,7 @@ fn notify_peer_seen(
     device: &str,
     name: &str,
     addr: Option<String>,
+    content: bool,
 ) {
     let Some(callback) = &options.on_peer_seen else {
         return;
@@ -251,6 +269,7 @@ fn notify_peer_seen(
         device_id: device.to_string(),
         name: name.to_string(),
         addr,
+        content,
     });
 }
 
@@ -271,10 +290,18 @@ fn serve_connection(
     // 1) Hello
     let hello: Request = read_message(&mut reader, MAX_HANDSHAKE_BYTES)?
         .ok_or_else(|| SyncError::Transport("对端未打招呼就断开".to_string()))?;
-    let (protocol, group, client_device, client_name, client_knowledge, client_nonce, client_port) =
-        match hello {
-        Request::Hello { protocol, group, device, name, knowledge, nonce, port } => {
-            (protocol, group, device, name, knowledge, nonce, port)
+    let (
+        protocol,
+        group,
+        client_device,
+        client_name,
+        client_knowledge,
+        client_nonce,
+        client_port,
+        client_content,
+    ) = match hello {
+        Request::Hello { protocol, group, device, name, knowledge, nonce, port, content } => {
+            (protocol, group, device, name, knowledge, nonce, port, content)
         }
         other => {
             let _ = write_message(
@@ -290,6 +317,8 @@ fn serve_connection(
     };
 
     let server_nonce = nonce();
+    // 本机是否参与正文同步：握手时如实告诉对端（旧对端不认识这个字段，按 false 处理）
+    let has_content = lock_engine(&engine).has_content_source();
     let reject = |writer: &mut TcpStream, code: HandshakeCode, reason: &str| -> Result<()> {
         write_message(
             writer,
@@ -302,6 +331,7 @@ fn serve_connection(
                 nonce: server_nonce.clone(),
                 message: Some(reason.to_string()),
                 code: Some(code.as_str().to_string()),
+                content: has_content,
             },
             MAX_HANDSHAKE_BYTES,
         )
@@ -347,6 +377,7 @@ fn serve_connection(
             nonce: server_nonce.clone(),
             message: None,
             code: None,
+            content: has_content,
         },
         MAX_HANDSHAKE_BYTES,
     )?;
@@ -445,7 +476,7 @@ fn serve_connection(
     }
     // 地址 / 名字刚更新过：通知宿主刷一次界面（推送与自动同步是后台线程，
     // 界面不主动查就看不到新设备与新地址）
-    notify_peer_seen(&options, &client_device, &client_name, peer_addr.clone());
+    notify_peer_seen(&options, &client_device, &client_name, peer_addr.clone(), client_content);
 
     // 3) 请求循环
     let mut recv_seq = 0u64;
@@ -460,8 +491,20 @@ fn serve_connection(
             let mut engine = lock_engine(&engine);
             handle_request(&mut engine, Some(&client_device), &request)
         };
+        // 对端推来的**正文**真的写进了暂存区 → 通知宿主落地（放在引擎锁之外：
+        // 宿主落地时要重新拿这把锁）。
+        //
+        // 只有正文触发：操作本身在下一次同步 / 下一次启动时会被常规落地，
+        // 而正文没有别的触发点 —— 不通知的话，对端明明把书推过来了，本机却要等到
+        // 下一轮同步才「看见」这本书。少通知也能少给宿主添后台线程。
+        let applied = matches!(&response, Response::ContentAck { stored } if *stored > 0);
         send_seq += 1;
         write_secure(&mut writer, &keys.server_to_client, send_seq, &response, MAX_FRAME_BYTES)?;
+        if applied {
+            if let Some(callback) = &options.on_applied {
+                callback();
+            }
+        }
 
         // 推送之后把对端进度落盘（它下次连接就能只发差集）
         if let Response::Ack { knowledge, .. } = &response {

@@ -25,8 +25,10 @@
 
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use crate::content::{book_digest, BookDigest, ChapterContent, ChapterDigest, ContentSource};
 use crate::error::{Result, SyncError};
 use crate::hlc::{HlcClock, HlcState};
 use crate::id::{new_id, now_ms, DeviceId, EntityId, OpId};
@@ -65,7 +67,7 @@ pub(crate) fn unusable_peer_addr(addr: &str) -> bool {
 }
 
 /// 打开引擎时的选项。
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct EngineOptions {
     /// 设备展示名（「手机」「客厅台式机」）；空串表示沿用已保存的名字
     pub device_name: String,
@@ -80,6 +82,25 @@ pub struct EngineOptions {
     pub read_only: bool,
     /// 强行接管残留的目录锁（确认没有别的实例在跑时用；见 [`crate::store::LockGuard`]）
     pub force_unlock: bool,
+    /// 正文来源（宿主提供：App 读书库，CLI 不提供）。
+    ///
+    /// `None` = 本机没有正文可给：握手时会告诉对端「这边不参与正文同步」，
+    /// 对端因此不会发起正文对账（也就不会把正文搬到一个永远不会落地的地方）。
+    pub content: Option<Arc<dyn ContentSource>>,
+}
+
+impl std::fmt::Debug for EngineOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EngineOptions")
+            .field("device_name", &self.device_name)
+            .field("schemas", &self.schemas)
+            .field("schema_version", &self.schema_version)
+            .field("read_only", &self.read_only)
+            .field("force_unlock", &self.force_unlock)
+            // 正文来源是 trait object（不要求 Debug）：只记有没有
+            .field("content", &self.content.is_some())
+            .finish()
+    }
 }
 
 impl EngineOptions {
@@ -91,7 +112,14 @@ impl EngineOptions {
             schema_version: SCHEMA_VERSION,
             read_only: false,
             force_unlock: false,
+            content: None,
         }
+    }
+
+    /// 注册正文来源（见 [`crate::content::ContentSource`]）。
+    pub fn with_content(mut self, content: Arc<dyn ContentSource>) -> EngineOptions {
+        self.content = Some(content);
+        self
     }
 
     /// 强行接管残留目录锁（进程被强杀后可能留下；确认没有别的实例在跑再用）。
@@ -189,6 +217,8 @@ pub struct SyncEngine {
     /// 内存状态是否有未落盘的改动（操作日志是即时落盘的）
     dirty: bool,
     knowledge_cache: Option<VersionVector>,
+    /// 正文来源（宿主提供；`None` = 本机不参与正文同步）
+    content: Option<Arc<dyn ContentSource>>,
 }
 
 impl SyncEngine {
@@ -252,6 +282,7 @@ impl SyncEngine {
             next_seq,
             dirty: false,
             knowledge_cache: None,
+            content: options.content,
         };
 
         // 所有操作的 HLC 都要「见过」：否则重启后本地时间可能落后于历史
@@ -833,6 +864,185 @@ impl SyncEngine {
         (picked, false)
     }
 
+    // ------------------------------------------------------------ 正文通道
+    //
+    // 正文（书籍正文）不进操作日志：它按「指纹对账 + 按章搬运」走单独一条通道
+    // （见 [`crate::content`]）。引擎在这里只做两件事：
+    // 1. 回答「本机有哪些章、指纹是什么」（宿主书库 + 暂存区）；
+    // 2. 把对端发来的正文**暂存**下来，等宿主在落地时写进书库。
+    //
+    // 暂存区在 `<同步目录>/content/<书实体 id>/`：一个数据目录里的一份派生数据，
+    // 落地完成即删除；进程被杀留下的暂存文件下次落地会重新拾起。
+
+    /// 本机是否参与正文同步（宿主注册了正文来源）。
+    pub fn has_content_source(&self) -> bool {
+        self.content.is_some()
+    }
+
+    /// 暂存区根目录。
+    fn content_root(&self) -> PathBuf {
+        self.store.root().join("content")
+    }
+
+    /// 某本书的暂存目录（`None` = 书实体 id 不能当目录名）。
+    fn content_dir(&self, book: &str) -> Option<PathBuf> {
+        safe_component(book).map(|name| self.content_root().join(name))
+    }
+
+    /// 一本书本机**有正文**的章节摘要：宿主书库里的 + 暂存区里（对端刚发来、还没落地）。
+    ///
+    /// 暂存区优先：同一章在暂存区与书库里都有时，以暂存区那份为准 —— 它是本轮刚谈好的
+    /// 内容，落地后书库才追上。
+    pub fn content_digests(&self, book: &str) -> Vec<ChapterDigest> {
+        let mut by_cid: BTreeMap<String, ChapterDigest> = BTreeMap::new();
+        if let Some(source) = &self.content {
+            for digest in source.digests(book) {
+                by_cid.insert(digest.cid.clone(), digest);
+            }
+        }
+        for chapter in self.staged_bodies(book) {
+            by_cid.insert(
+                chapter.cid.clone(),
+                ChapterDigest { cid: chapter.cid.clone(), hash: chapter.fingerprint() },
+            );
+        }
+        by_cid.into_values().collect()
+    }
+
+    /// 一本书的正文总览（先比总量，没必要为每本没变的书都传逐章清单）。
+    pub fn content_index(&self, book: &str) -> BookDigest {
+        book_digest(book, &self.content_digests(book))
+    }
+
+    /// 取若干章正文：暂存区优先，其次宿主书库。取不到的章节不出现在结果里。
+    pub fn content_bodies(&self, book: &str, cids: &[String]) -> Vec<ChapterContent> {
+        let wanted: HashSet<&str> = cids.iter().map(String::as_str).collect();
+        let mut out: Vec<ChapterContent> = Vec::new();
+        let mut found: HashSet<String> = HashSet::new();
+        for chapter in self.staged_bodies(book) {
+            if wanted.contains(chapter.cid.as_str()) {
+                found.insert(chapter.cid.clone());
+                out.push(chapter);
+            }
+        }
+        if let Some(source) = &self.content {
+            let missing: Vec<String> = cids
+                .iter()
+                .filter(|cid| !found.contains(cid.as_str()))
+                .cloned()
+                .collect();
+            if !missing.is_empty() {
+                out.extend(source.load(book, &missing));
+            }
+        }
+        out
+    }
+
+    /// 收下对端的正文：写进暂存区（宿主下次落地时写进书库）。返回真正写下的章数。
+    ///
+    /// 已经暂存过同样内容的章节会被跳过：重复请求（网络重试 / 两端同时发起）不会反复写盘。
+    pub fn stage_content(&mut self, book: &str, items: &[ChapterContent]) -> Result<usize> {
+        if self.read_only {
+            return Err(SyncError::Io("只读打开不能写正文暂存区".to_string()));
+        }
+        let Some(dir) = self.content_dir(book) else {
+            log::warn!("对端要暂存的书籍 id 不能作为目录名，已跳过");
+            return Ok(0);
+        };
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| SyncError::Io(format!("创建正文暂存目录失败: {e}")))?;
+        let mut stored = 0usize;
+        for item in items {
+            if !item.has_body() {
+                continue;
+            }
+            let path = dir.join(format!("{}.json", cid_file_name(&item.cid)));
+            let fingerprint = item.fingerprint();
+            if let Ok(existing) = read_staged(&path) {
+                if existing.fingerprint() == fingerprint {
+                    continue;
+                }
+            }
+            let text = serde_json::to_string(item)
+                .map_err(|e| SyncError::Io(format!("正文序列化失败: {e}")))?;
+            write_atomic(&path, text.as_bytes())
+                .map_err(|e| SyncError::Io(format!("写入正文暂存文件失败: {e}")))?;
+            stored += 1;
+        }
+        Ok(stored)
+    }
+
+    /// 暂存区里有正文的书（宿主落地时按这个列表走）。
+    pub fn staged_books(&self) -> Vec<String> {
+        let mut books = Vec::new();
+        let Ok(entries) = std::fs::read_dir(self.content_root()) else {
+            return books;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
+                    books.push(name.to_string());
+                }
+            }
+        }
+        books.sort();
+        books
+    }
+
+    /// 某本书暂存区里的全部正文（按 cid 排序：落地顺序稳定，便于复现问题）。
+    pub fn staged_bodies(&self, book: &str) -> Vec<ChapterContent> {
+        let Some(dir) = self.content_dir(book) else {
+            return Vec::new();
+        };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        let mut chapters: Vec<ChapterContent> = entries
+            .flatten()
+            .filter_map(|entry| read_staged(&entry.path()).ok())
+            .collect();
+        chapters.sort_by(|a, b| a.cid.cmp(&b.cid));
+        chapters
+    }
+
+    /// 落地完成后清掉这些暂存章（按 cid）。
+    pub fn clear_staged(&mut self, book: &str, cids: &[String]) -> Result<()> {
+        if self.read_only {
+            return Ok(());
+        }
+        let Some(dir) = self.content_dir(book) else {
+            return Ok(());
+        };
+        for cid in cids {
+            let path = dir.join(format!("{}.json", cid_file_name(cid)));
+            if path.is_file() {
+                std::fs::remove_file(&path)
+                    .map_err(|e| SyncError::Io(format!("清理正文暂存文件失败: {e}")))?;
+            }
+        }
+        // 目录空了就一起收掉，别在同步目录里留下几十个空目录
+        if std::fs::read_dir(&dir).map(|mut it| it.next().is_none()).unwrap_or(false) {
+            let _ = std::fs::remove_dir(&dir);
+        }
+        Ok(())
+    }
+
+    /// 丢掉某本书的全部暂存正文（书被删掉 / 被对端删除时）。
+    pub fn drop_staged(&mut self, book: &str) -> Result<()> {
+        if self.read_only {
+            return Ok(());
+        }
+        let Some(dir) = self.content_dir(book) else {
+            return Ok(());
+        };
+        if dir.is_dir() {
+            std::fs::remove_dir_all(&dir)
+                .map_err(|e| SyncError::Io(format!("清理正文暂存目录失败: {e}")))?;
+        }
+        Ok(())
+    }
+
     // ------------------------------------------------------------ 持久化
 
     /// 把快照 / 冲突 / 缓冲 / 对端状态刷到磁盘。
@@ -1327,6 +1537,53 @@ impl SyncEngine {
                 .map(|(key, _)| key.clone())
                 .collect(),
             _ => Vec::new(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 正文暂存区的小工具
+// ---------------------------------------------------------------------------
+
+/// 合法的目录名（书实体 id 可能来自对端，绝不能拿它直接拼路径）。
+fn safe_component(text: &str) -> Option<String> {
+    if text.is_empty() || text.len() > 128 || text == "." || text == ".." {
+        return None;
+    }
+    let ok = text
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.');
+    ok.then(|| text.to_string())
+}
+
+/// 暂存文件名：cid 的 sha256（cid 可能含任意字符，映射成定长十六进制既安全又无碰撞歧义）。
+fn cid_file_name(cid: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(cid.as_bytes());
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(64);
+    for byte in digest.iter() {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
+/// 读一个暂存文件（内容就是一份 [`ChapterContent`]）。
+fn read_staged(path: &Path) -> std::io::Result<ChapterContent> {
+    let text = std::fs::read_to_string(path)?;
+    serde_json::from_str(&text).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
+/// 原子写（临时文件 + rename）：半截文件不会被当成一份正文读出来。
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, bytes)?;
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(error)
         }
     }
 }

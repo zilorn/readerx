@@ -82,6 +82,10 @@ export interface SyncOutcome {
   failed: string[];
   pulled: number;
   pushed: number;
+  /** 本次推给对端的正文章节数 */
+  contentPushed: number;
+  /** 本次从对端取回的正文章节数 */
+  contentPulled: number;
   conflicts: number;
   applied: AppliedChanges | null;
 }

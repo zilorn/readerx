@@ -54,6 +54,9 @@ pub struct PeerInfo {
     pub name: String,
     /// 连接地址（进程内直连为空）
     pub addr: Option<String>,
+    /// 对端是否参与**正文**同步（握手时自报；旧对端 / CLI 为 false）。
+    /// false 时同步会话不发起正文对账 —— 对端会把未知请求当协议错误断连接。
+    pub content: bool,
 }
 
 /// 一次同步所需的传输抽象。

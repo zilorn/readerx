@@ -40,6 +40,8 @@ pub struct ClientIdentity<'a> {
     /// **不要传这条连接的源端口**：那是内核临时分配的，连接一结束就回收，
     /// 对端拿它当地址会在下一次连接时被拒。
     pub listen_port: u16,
+    /// 本机是否参与**正文**同步（注册了正文来源）：对端据此决定要不要发起正文对账。
+    pub content: bool,
 }
 
 /// 一次同步连接。
@@ -70,7 +72,7 @@ impl TcpTransport {
         let mut reader = BufReader::new(stream);
 
         // 1) Hello
-        let ClientIdentity { group, device, name, knowledge, listen_port } = identity;
+        let ClientIdentity { group, device, name, knowledge, listen_port, content } = identity;
         let client_nonce = nonce();
         write_message(
             &mut writer,
@@ -82,6 +84,7 @@ impl TcpTransport {
                 knowledge: knowledge.clone(),
                 nonce: client_nonce.clone(),
                 port: *listen_port,
+                content: *content,
             },
             MAX_HANDSHAKE_BYTES,
         )?;
@@ -90,10 +93,10 @@ impl TcpTransport {
             // 连上了、一句话没说就断：多半不是 ReaderX 的同步端口
             SyncError::from(WireError::NotReaderx)
         })?;
-        let (ok, server_device, server_name, server_nonce, message, protocol, peer_group, code) =
+        let (ok, server_device, server_name, server_nonce, message, protocol, peer_group, code, content) =
             match hello {
-                Response::Hello { ok, protocol, group: peer_group, device, name, nonce, message, code } => {
-                    (ok, device, name, nonce, message, protocol, peer_group, code)
+                Response::Hello { ok, protocol, group: peer_group, device, name, nonce, message, code, content } => {
+                    (ok, device, name, nonce, message, protocol, peer_group, code, content)
                 }
                 Response::Error { code, message } => {
                     return Err(SyncError::from(WireError::from_wire(&code))
@@ -175,6 +178,7 @@ impl TcpTransport {
                 device_id: server_device,
                 name: server_name,
                 addr: Some(addr.to_string()),
+                content,
             },
             keys,
             send_seq: 0,

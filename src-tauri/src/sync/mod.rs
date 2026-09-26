@@ -21,6 +21,8 @@
 #[doc(hidden)]
 pub mod bridge;
 #[doc(hidden)]
+pub mod content;
+#[doc(hidden)]
 pub mod identity;
 mod lan;
 mod service;

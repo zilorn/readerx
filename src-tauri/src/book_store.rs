@@ -5,6 +5,7 @@
 //!   bookdetail.json   元信息（书名、作者、封面、分组、标签…，不含正文）
 //!   content.json      章节正文
 //!   bookmarks.json    该书书签
+//!   digest.json       章节正文指纹缓存（同步对账用；派生数据，删了会自动重建）
 //! ```
 //!
 //! **为什么拆开**：原先整本只有一个 `books/<id>.json`，改一个分组名也要把几百 MB 的
@@ -24,8 +25,10 @@
 //! 不会因为一次写盘失败就从书架上凭空消失。
 
 use crate::models::{
-    BookChapterPatch, BookMeta, BookMetaPatch, ChapterHead, LocalBook, LocalBookChapter,
+    BookChapterPatch, BookMeta, BookMetaPatch, ChapterBlock, ChapterHead, LocalBook,
+    LocalBookChapter,
 };
+use readerx_sync::content::{ChapterContent, ChapterDigest};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -422,16 +425,41 @@ fn write_book_files(dir: &Path, book: LocalBook) -> Result<(), String> {
         chapters: book.chapters,
     };
     write_json_atomic(&dir.join(CONTENT_FILE), &content, "书籍正文")?;
+    write_digest_file(dir, &content.chapters)?;
     write_json_atomic(&dir.join(BOOKDETAIL_FILE), &detail, "书籍元信息")
 }
 
 /// 只回写正文（逐章回写用）
 fn write_book_content(dir: &Path, chapters: &[LocalBookChapter]) -> Result<(), String> {
+    write_book_content_with_digests(dir, chapters, None)
+}
+
+/// 写正文 + 章节指纹缓存：`digests` 为 `Some` 时直接用调用方算好的（逐章回写路径
+/// 只重算改动的那几章），`None` 时整本重算。
+fn write_book_content_with_digests(
+    dir: &Path,
+    chapters: &[LocalBookChapter],
+    digests: Option<Vec<ChapterDigest>>,
+) -> Result<(), String> {
     let content = BookContent {
         schema_version: SCHEMA_VERSION,
         chapters: chapters.to_vec(),
     };
-    write_json_atomic(&dir.join(CONTENT_FILE), &content, "书籍正文")
+    write_json_atomic(&dir.join(CONTENT_FILE), &content, "书籍正文")?;
+    match digests {
+        Some(digests) => {
+            // 指纹文件写在正文之后：时间戳按刚写下的正文算，下次读取才认为缓存有效
+            let (mtime, size) = content_stamp(&dir.join(CONTENT_FILE));
+            let file = BookDigestFile {
+                schema_version: SCHEMA_VERSION,
+                content_mtime_ms: mtime,
+                content_size: size,
+                chapters: digests,
+            };
+            write_json_atomic(&dir.join(DIGEST_FILE), &file, "章节指纹")
+        }
+        None => write_digest_file(dir, chapters),
+    }
 }
 
 /// 读整本书（不含图片迁移；调用方按需再迁移）
@@ -685,6 +713,15 @@ pub(crate) fn put_book_chapters<R: tauri::Runtime>(
     }
     stream_migrate_if_large(app, id, &path);
     let mut content: BookContent = read_json_file(&path, "书籍正文")?;
+    // 章节指纹缓存：这里只更新被回写的这几章（整本重算 = 把几百 MB 正文重新哈希一遍，
+    // 在线书逐批下载会一批调用一次）；缓存对不上号时退回整本重算。
+    let mut digests = read_digest_file(&dir).ok().filter(|digests| {
+        digests.len() == content.chapters.len()
+            && digests
+                .iter()
+                .zip(content.chapters.iter())
+                .all(|(digest, chapter)| digest.cid == chapter.cid)
+    });
     for update in updates {
         if update.index >= content.chapters.len() {
             return Err(format!("章节下标越界: {}", update.index));
@@ -695,7 +732,12 @@ pub(crate) fn put_book_chapters<R: tauri::Runtime>(
     if let Ok(root) = crate::book_images::images_root(app) {
         crate::book_images::migrate_chapters(&root, id, &mut content.chapters);
     }
-    write_book_content(&dir, &content.chapters)
+    if let Some(digests) = digests.as_mut() {
+        for update in updates {
+            digests[update.index] = chapter_digest(&content.chapters[update.index]);
+        }
+    }
+    write_book_content_with_digests(&dir, &content.chapters, digests)
 }
 
 /// 只改元信息（分组 / 书名 / 封面 / 标签…）：只读写 `bookdetail.json`，
@@ -1216,9 +1258,310 @@ fn apply_sync_structure_in_dir(dir: &Path, want: &[ChapterRef]) -> Result<bool, 
     Ok(true)
 }
 
+// ---------------------------------------------------------------------------
+// 同步桥接视图：正文（指纹缓存 / 按需取章 / 落地）
+// ---------------------------------------------------------------------------
+
+/// 章节正文指纹缓存文件（`books/<id>/digest.json`）。
+///
+/// **派生缓存**：内容完全由 `content.json` 决定，删掉会自动重建（也能被旧版本忽略）。
+/// 为什么要有它：正文同步每次会话都要问「这本书本机有哪些章、指纹是什么」，
+/// 每次都把整本 `content.json` 解析一遍（几百 MB）不可接受 —— 写正文时顺手把指纹
+/// 落在这个小文件里，读的时候只读它。
+const DIGEST_FILE: &str = "digest.json";
+
+/// 指纹文件格式：章节顺序与 `content.json` 一一对应（`hash` 为空串 = 该章没有正文）。
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BookDigestFile {
+    #[serde(default = "schema_version")]
+    schema_version: u32,
+    /// 生成这份指纹时 `content.json` 的修改时间（毫秒）与字节数：对不上说明有人在
+    /// 外面改过正文，缓存作废、重建一次。
+    #[serde(default)]
+    content_mtime_ms: u64,
+    #[serde(default)]
+    content_size: u64,
+    #[serde(default)]
+    chapters: Vec<ChapterDigest>,
+}
+
+fn content_stamp(path: &Path) -> (u64, u64) {
+    let Ok(metadata) = fs::metadata(path) else {
+        return (0, 0);
+    };
+    let mtime = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|delta| delta.as_millis() as u64)
+        .unwrap_or(0);
+    (mtime, metadata.len())
+}
+
+/// 一章正文的指纹（与引擎同一口径：只算正文，标题 / 地址 / 字数不参与）。
+fn chapter_digest(chapter: &LocalBookChapter) -> ChapterDigest {
+    let blocks = chapter
+        .blocks
+        .as_ref()
+        .and_then(|blocks| serde_json::to_value(blocks).ok());
+    let hash = if chapter.paragraphs.iter().any(|text| !text.trim().is_empty())
+        || blocks.is_some()
+    {
+        readerx_sync::content::body_fingerprint(&chapter.paragraphs, blocks.as_ref())
+    } else {
+        // 没有正文的章节：占位（保持与 content.json 的下标一致），同步时不参与搬运
+        String::new()
+    };
+    ChapterDigest { cid: chapter.cid.clone(), hash }
+}
+
+/// 写指纹缓存（正文写完之后调用；写失败只记日志，不影响正文本身）。
+fn write_digest_file(dir: &Path, chapters: &[LocalBookChapter]) -> Result<(), String> {
+    let (mtime, size) = content_stamp(&dir.join(CONTENT_FILE));
+    let file = BookDigestFile {
+        schema_version: SCHEMA_VERSION,
+        content_mtime_ms: mtime,
+        content_size: size,
+        chapters: chapters.iter().map(chapter_digest).collect(),
+    };
+    write_json_atomic(&dir.join(DIGEST_FILE), &file, "章节指纹")
+}
+
+/// 读指纹缓存；缓存缺失 / 过期时**从正文重建**（一次整本解析，之后都走缓存）。
+fn read_digest_file(dir: &Path) -> Result<Vec<ChapterDigest>, String> {
+    let content_path = dir.join(CONTENT_FILE);
+    let (mtime, size) = content_stamp(&content_path);
+    if let Ok(file) = read_json_file::<BookDigestFile>(&dir.join(DIGEST_FILE), "章节指纹") {
+        if file.content_mtime_ms == mtime && file.content_size == size {
+            return Ok(file.chapters);
+        }
+    }
+    let chapters = if content_path.is_file() {
+        read_json_file::<BookContent>(&content_path, "书籍正文")?.chapters
+    } else {
+        Vec::new()
+    };
+    let digests: Vec<ChapterDigest> = chapters.iter().map(chapter_digest).collect();
+    if dir.is_dir() {
+        if let Err(error) = write_digest_file(dir, &chapters) {
+            log::debug!("章节指纹缓存写入失败（下次重建）：{error}");
+        } else {
+            log::info!("已按正文重建章节指纹缓存 dir={}", dir.display());
+        }
+    }
+    Ok(digests)
+}
+
+/// 同步对账用：某本书**有正文**的章节摘要（没有正文的章节不返回）。
+pub(crate) fn read_sync_digests<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+) -> Result<Vec<ChapterDigest>, String> {
+    migrate_legacy_layout(app);
+    let dir = book_dir(app, id)?;
+    if !dir.join(BOOKDETAIL_FILE).is_file() {
+        return Ok(Vec::new());
+    }
+    Ok(read_digest_file(&dir)?
+        .into_iter()
+        .filter(|digest| !digest.hash.is_empty())
+        .collect())
+}
+
+/// 按 cid 取章节正文（对端要哪几章就取哪几章）。
+///
+/// 实现是**顺序扫一遍** `content.json`，只留下命中的章节：内存占用与单章同级，
+/// 不会因为对端只要一章就把整本正文读进内存。代价是要扫完整份文件（图片载荷字段
+/// 会被完整解析，但只保留命中的那一章）。
+pub(crate) fn read_chapters_by_cid<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+    cids: &[String],
+) -> Result<Vec<LocalBookChapter>, String> {
+    migrate_legacy_layout(app);
+    let path = book_dir(app, id)?.join(CONTENT_FILE);
+    if !path.is_file() || cids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let wanted: HashSet<String> = cids.iter().cloned().collect();
+    let file = fs::File::open(&path).map_err(|e| format!("读取书籍正文失败: {e}"))?;
+    let mut deserializer = serde_json::Deserializer::from_reader(BufReader::new(file));
+    let picked = serde::de::DeserializeSeed::deserialize(
+        PickChapters { wanted: &wanted },
+        &mut deserializer,
+    )
+    .map_err(|e| format!("解析书籍正文失败: {e}"))?;
+    Ok(picked)
+}
+
+/// 只挑出指定 cid 的章节（`chapters` 数组逐项反序列化，未命中的读完即丢）。
+struct PickChapters<'a> {
+    wanted: &'a HashSet<String>,
+}
+
+impl<'de, 'a> serde::de::DeserializeSeed<'de> for PickChapters<'a> {
+    type Value = Vec<LocalBookChapter>;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_map(PickTop { wanted: self.wanted })
+    }
+}
+
+/// `content.json` 的顶层对象：只关心 `chapters`，其余字段跳过。
+struct PickTop<'a> {
+    wanted: &'a HashSet<String>,
+}
+
+impl<'de, 'a> serde::de::Visitor<'de> for PickTop<'a> {
+    type Value = Vec<LocalBookChapter>;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("书籍正文对象")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::MapAccess<'de>,
+    {
+        let mut picked = Vec::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if key == "chapters" {
+                picked = map.next_value_seed(PickList { wanted: self.wanted })?;
+            } else {
+                map.next_value::<serde::de::IgnoredAny>()?;
+            }
+        }
+        Ok(picked)
+    }
+}
+
+/// `chapters` 数组：逐项反序列化成章节，未命中 cid 的直接丢掉。
+struct PickList<'a> {
+    wanted: &'a HashSet<String>,
+}
+
+impl<'de, 'a> serde::de::DeserializeSeed<'de> for PickList<'a> {
+    type Value = Vec<LocalBookChapter>;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_seq(PickListVisitor { wanted: self.wanted })
+    }
+}
+
+struct PickListVisitor<'a> {
+    wanted: &'a HashSet<String>,
+}
+
+impl<'de, 'a> serde::de::Visitor<'de> for PickListVisitor<'a> {
+    type Value = Vec<LocalBookChapter>;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("章节数组")
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::SeqAccess<'de>,
+    {
+        let mut out = Vec::new();
+        while let Some(chapter) = seq.next_element::<LocalBookChapter>()? {
+            if self.wanted.contains(&chapter.cid) {
+                out.push(chapter);
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// 把同步来的正文写进某本书（按 cid 合并：更新已有章的正文，缺的补在后面）。
+///
+/// 标题 / 地址只在本地缺失时采用对端那份：目录（结构）实体才是它们的权威来源，
+/// 这里不该用一份可能过时的正文载荷把刚同步好的目录改回去。
+pub(crate) fn apply_sync_chapters<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+    bodies: &[ChapterContent],
+) -> Result<usize, String> {
+    migrate_legacy_layout(app);
+    let dir = book_dir(app, id)?;
+    if !dir.join(BOOKDETAIL_FILE).is_file() {
+        return Err("书籍不在本机".to_string());
+    }
+    let content_path = dir.join(CONTENT_FILE);
+    let mut chapters = if content_path.is_file() {
+        read_json_file::<BookContent>(&content_path, "书籍正文")?.chapters
+    } else {
+        Vec::new()
+    };
+    let mut applied = 0usize;
+    for body in bodies {
+        if !has_body(body) {
+            continue;
+        }
+        let paragraphs = body.paragraphs.clone();
+        let blocks = body
+            .blocks
+            .as_ref()
+            .and_then(|value| serde_json::from_value::<Vec<ChapterBlock>>(value.clone()).ok());
+        match chapters.iter_mut().find(|chapter| chapter.cid == body.cid) {
+            Some(chapter) => {
+                // 正文完全一样就不动它（同步会话可能重复推到同一章）
+                let same_blocks = match (&chapter.blocks, &body.blocks) {
+                    (None, None) => true,
+                    (Some(existing), Some(incoming)) => {
+                        serde_json::to_value(existing).ok().as_ref() == Some(incoming)
+                    }
+                    _ => false,
+                };
+                if chapter.paragraphs == paragraphs && same_blocks {
+                    continue;
+                }
+                chapter.paragraphs = paragraphs;
+                chapter.blocks = blocks;
+                if chapter.title.is_empty() {
+                    chapter.title = body.title.clone();
+                }
+                if chapter.url.is_none() {
+                    chapter.url = body.url.clone();
+                }
+            }
+            None => chapters.push(LocalBookChapter {
+                cid: body.cid.clone(),
+                title: body.title.clone(),
+                paragraphs,
+                blocks,
+                url: body.url.clone(),
+            }),
+        }
+        applied += 1;
+    }
+    if applied == 0 {
+        return Ok(0);
+    }
+    write_book_content(&dir, &chapters)?;
+    log::debug!("同步正文已写入 id={id} 章节={applied}");
+    Ok(applied)
+}
+
+/// 与引擎 `ChapterContent::has_body` 同一口径：空章节不算正文。
+fn has_body(body: &ChapterContent) -> bool {
+    body.paragraphs.iter().any(|text| !text.trim().is_empty())
+        || body
+            .blocks
+            .as_ref()
+            .and_then(|value| value.as_array())
+            .is_some_and(|items| !items.is_empty())
+}
+
 #[cfg(test)]
-mod tests {
-    use super::*;
+mod tests {    use super::*;
     use crate::models::ChapterBlock;
 
     fn temp_dir(name: &str) -> PathBuf {

@@ -29,6 +29,8 @@ impl LoopbackTransport {
                 device_id: engine.device_id().to_string(),
                 name: engine.device_name().to_string(),
                 addr: None,
+                // 与真 TCP 握手同一口径：对端能不能收正文，看它有没有注册正文来源
+                content: engine.has_content_source(),
             }
         };
         LoopbackTransport { engine, peer }

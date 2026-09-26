@@ -39,12 +39,15 @@ of pages and the same local library.
   (follow system / Simplified Chinese / English); chapter-splitting rules live on their own
   subpage
 - **Sync** `/sync` (Settings → Sync): two devices on the same local network sync **book info,
-  reading position, bookmarks, groups and book sources** directly with each other (book files and
-  covers stay on each device); turn it on or off, pair with a code, discover devices on the
-  network, sync manually or automatically at a fixed interval; paired devices can be removed from
-  the list (the removed device is no longer synced with and is refused when it connects — accept it
-  again from "Find devices"); when both devices change the same thing, it lands in a conflict list
-  where you pick which copy to keep. No cloud service, no account
+  book text, reading position, bookmarks, chapter structure, groups, book sources, text
+  replacements and chapter-splitting rules** directly with each other (covers stay on each
+  device); missing chapters are transferred on demand, and a book the other device has but this
+  one does not is created locally with its metadata and text; turn it on or off, pair with a
+  code, discover devices on the network, sync manually or automatically at a fixed interval;
+  paired devices can be removed from the list (the removed device is no longer synced with and is
+  refused when it connects — accept it again from "Find devices"); when both devices change the
+  same thing, it lands in a conflict list where you pick which copy to keep. No cloud service,
+  no account (see `docs/sync.md`, section 7.1)
 - **Reading** `/book/:id`: chapter reading, previous / next chapter, table-of-contents drawer,
   reading progress synced across pages; on a wide desktop window the text is laid out as two
   side-by-side pages (one page on phones and narrow windows; the column width adapts to the

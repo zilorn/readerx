@@ -127,6 +127,10 @@ pub struct SyncOutcome {
     pub failed: Vec<String>,
     pub pulled: usize,
     pub pushed: usize,
+    /// 本次推给对端的正文章节数
+    pub content_pushed: usize,
+    /// 本次从对端取回的正文章节数
+    pub content_pulled: usize,
     /// 新产生的冲突数
     pub conflicts: usize,
     pub applied: Option<AppliedChanges>,
@@ -183,6 +187,10 @@ struct Inner {
     auto_failures: u32,
     /// 上次发布给引擎的 `readerx.shelf` 快照（用来只发布真正变了的条目）
     last_shelf: Option<Value>,
+    /// 「开启同步 / 加入群组后的首轮同步」是否已经跑完（没起那条线程时为 true）。
+    /// 首轮在后台跑（点开关不该干等书库灌进引擎），调用方靠它知道什么时候可以
+    /// 安全地手动同步 —— 否则会和首轮撞成「正在同步中」。
+    startup_sync_done: bool,
 }
 
 /// 同步服务。
@@ -195,6 +203,8 @@ pub struct SyncService<R: tauri::Runtime = tauri::Wry> {
     wake: Condvar,
     stop: AtomicBool,
     auto_started: AtomicBool,
+    /// 是否有一次「对端推送后的落地」正在跑（见 [`SyncService::materialize_soon`]）
+    materializing: AtomicBool,
 }
 
 impl<R: tauri::Runtime> SyncService<R> {
@@ -213,10 +223,12 @@ impl<R: tauri::Runtime> SyncService<R> {
                 next_auto_ms: 0,
                 auto_failures: 0,
                 last_shelf: None,
+                startup_sync_done: true,
             }),
             wake: Condvar::new(),
             stop: AtomicBool::new(false),
             auto_started: AtomicBool::new(false),
+            materializing: AtomicBool::new(false),
         })
     }
 
@@ -281,7 +293,9 @@ impl<R: tauri::Runtime> SyncService<R> {
         }
         let engine = SyncEngine::open(
             root,
-            readerx_sync::EngineOptions::new(default_device_name()),
+            readerx_sync::EngineOptions::new(default_device_name())
+                // 正文通道：App 把书库接到引擎上（对端据此才能取到 / 推来正文）
+                .with_content(super::content::AppContent::new(self.app.clone())),
         )
         .map_err(|e| e.to_string())?;
         let shared = net::shared(engine);
@@ -361,6 +375,7 @@ impl<R: tauri::Runtime> SyncService<R> {
             // 开关本身要立刻响应（用户也不必干等第一次自动同步）。首轮只与
             // **已配对设备**同步，不扫局域网。
             let service = Arc::clone(self);
+            self.lock().startup_sync_done = false;
             std::thread::Builder::new()
                 .name("readerx-sync-first".to_string())
                 .spawn(move || {
@@ -370,6 +385,7 @@ impl<R: tauri::Runtime> SyncService<R> {
                     if let Err(error) = service.sync_now() {
                         log::debug!("开启同步后的首轮同步未完成：{error}");
                     }
+                    service.finish_startup_sync();
                 })
                 .ok();
         } else {
@@ -465,6 +481,7 @@ impl<R: tauri::Runtime> SyncService<R> {
         log::info!("已加入同步群组");
         self.schedule_auto_soon();
         let service = Arc::clone(self);
+        self.lock().startup_sync_done = false;
         std::thread::Builder::new()
             .name("readerx-sync-join".to_string())
             .spawn(move || {
@@ -472,6 +489,7 @@ impl<R: tauri::Runtime> SyncService<R> {
                 if let Err(error) = service.sync_round(true) {
                     log::debug!("配对后的首轮同步未完成：{error}");
                 }
+                service.finish_startup_sync();
             })
             .ok();
         Ok(self.status())
@@ -499,6 +517,33 @@ impl<R: tauri::Runtime> SyncService<R> {
     }
 
     // ------------------------------------------------------------ 同步
+
+    /// 标记「首轮同步已跑完」（首轮线程的最后一步）。
+    fn finish_startup_sync(&self) {
+        self.lock().startup_sync_done = true;
+        self.wake.notify_all();
+    }
+
+    /// 等「开启同步 / 加入群组后的首轮同步」跑完（没在跑时立刻返回 true）。
+    ///
+    /// 首轮同步在后台线程里做（点开关不该干等书库灌进引擎），而这期间 `syncing`
+    /// 是置位的 —— 紧接着手动同步的一方会拿到「正在同步中」。等它落定再动手。
+    pub fn wait_startup_sync(&self, timeout: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut inner = self.lock();
+        while !inner.startup_sync_done {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            let (guard, _) = self
+                .wake
+                .wait_timeout(inner, left)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            inner = guard;
+        }
+        true
+    }
 
     /// 立即同步一次：**只与已配对的设备同步**。
     ///
@@ -530,6 +575,8 @@ impl<R: tauri::Runtime> SyncService<R> {
                 synced: vec![addr.to_string()],
                 pulled: report.pulled,
                 pushed: report.pushed,
+                content_pushed: report.content_pushed,
+                content_pulled: report.content_pulled,
                 conflicts: report.conflicts,
                 ..SyncOutcome::default()
             },
@@ -601,6 +648,8 @@ impl<R: tauri::Runtime> SyncService<R> {
                 Ok(report) => {
                     outcome.pulled += report.pulled;
                     outcome.pushed += report.pushed;
+                    outcome.content_pushed += report.content_pushed;
+                    outcome.content_pulled += report.content_pulled;
                     outcome.conflicts += report.conflicts;
                     outcome
                         .synced
@@ -687,6 +736,26 @@ impl<R: tauri::Runtime> SyncService<R> {
             log::debug!("同步有 {conflicts} 条待裁决冲突");
         }
         result.map_err(|e| e.to_string())
+    }
+
+    /// 落地并推事件（对端连进来推完就走的那条路：本机数据文件要立刻跟上）。
+    ///
+    /// 用 [`AtomicBool`] 串行化：一条连接一次会话可能推好几批，落地是幂等的，
+    /// 但两个落地线程同时跑会各自推进游标、互相看不见对方刚写下的东西。
+    /// 正忙时直接跳过 —— 在跑的那次会把这期间进来的改动一起落地。
+    pub(crate) fn materialize_soon(&self) -> Result<(), String> {
+        if self.materializing.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
+        let result = self.materialize_pending();
+        self.materializing.store(false, Ordering::Release);
+        match result {
+            Ok(changes) => {
+                self.emit_applied(&changes);
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// 落地指定实体（冲突裁决后用，见 [`SyncService::resolve_conflict`]）。
@@ -1148,7 +1217,24 @@ impl<R: tauri::Runtime> SyncService<R> {
                     service.emit_status();
                 }
             });
-            let options = options.with_peer_seen(peer_seen);
+            // 对端推来的操作 / 正文要先落进引擎，本机的数据文件不会自己变：
+            // 这里在后台线程里做一次落地（materialize 会重新拿引擎锁，不能在
+            // 服务端线程里同步做 —— 那条线程正要写应答）。
+            let applied = std::sync::Arc::new({
+                let service = Arc::clone(self);
+                move || {
+                    let service = Arc::clone(&service);
+                    std::thread::Builder::new()
+                        .name("readerx-sync-apply".to_string())
+                        .spawn(move || {
+                            if let Err(error) = service.materialize_soon() {
+                                log::debug!("对端推送后的落地未完成：{error}");
+                            }
+                        })
+                        .ok();
+                }
+            });
+            let options = options.with_peer_seen(peer_seen).with_applied(applied);
             match PeerServer::start(engine.clone(), options) {
                 Ok(server) => {
                     let port = server.local_addr().port();

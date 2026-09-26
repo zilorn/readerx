@@ -4,7 +4,9 @@
 //! 保证「本机自测」与「真局域网」走的是同一套语义——否则测试通过了线上仍可能出问题。
 
 use crate::engine::SyncEngine;
-use crate::proto::{RejectedOp, Request, Response};
+use crate::proto::{
+    RejectedOp, Request, Response, CONTENT_BATCH_BYTES, CONTENT_BATCH_CHAPTERS,
+};
 use crate::id::now_ms;
 use crate::PROTOCOL_VERSION;
 
@@ -73,6 +75,57 @@ pub fn handle_request(
                 knowledge: status.knowledge,
             }
         }
+        // ---- 正文通道（见 crate::content）----
+        Request::ContentIndex { books } => {
+            // 只回本机**有正文**的书：对端据此判断哪些书要逐章对账。
+            // 对端列出的书在本机没有正文时直接不出现在应答里（= 不一样）。
+            let theirs: Vec<_> = books
+                .iter()
+                .map(|entry| engine.content_index(&entry.book))
+                .filter(|digest| digest.chapters > 0)
+                .collect();
+            Response::ContentIndex { books: theirs }
+        }
+        Request::ChapterDigests { book } => {
+            let known = engine
+                .entity(book)
+                .is_some_and(|entity| !engine.is_effectively_deleted(entity));
+            Response::ChapterDigests {
+                book: book.clone(),
+                known,
+                chapters: engine.content_digests(book),
+            }
+        }
+        Request::PullChapters { book, cids } => {
+            // 按帧预算装箱：装不下的章节这次不给，对端下次同步会重新算差集
+            let bodies = engine.content_bodies(book, cids);
+            let mut items = Vec::new();
+            let mut bytes = 0usize;
+            for body in bodies {
+                let size = body.body_bytes() as usize;
+                if size > CONTENT_BATCH_BYTES {
+                    // 单章超过帧预算：这一章搬不过去（不静默丢，留下日志）
+                    log::warn!("章节正文超过单帧预算，跳过 book={book} bytes={size}");
+                    continue;
+                }
+                if items.len() >= CONTENT_BATCH_CHAPTERS || bytes + size > CONTENT_BATCH_BYTES {
+                    break;
+                }
+                bytes += size;
+                items.push(body);
+            }
+            if items.len() < cids.len() {
+                log::debug!("本次只回了 {} 章正文（其余留给下次同步）", items.len());
+            }
+            Response::Chapters { book: book.clone(), items }
+        }
+        Request::PushChapters { book, items } => match engine.stage_content(book, items) {
+            Ok(stored) => Response::ContentAck { stored },
+            Err(error) => {
+                log::warn!("暂存对端正文失败: {error}");
+                Response::error("content_failed", error.to_string())
+            }
+        },
         Request::Ping => Response::Pong { at_ms: now_ms() },
         Request::Hello { .. } | Request::Auth { .. } => {
             Response::error("unexpected", "握手阶段不允许的业务请求")
