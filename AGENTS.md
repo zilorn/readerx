@@ -37,6 +37,8 @@
 | `cargo build -p readerx-source --features "cli webkit"` | 追加 WebKitGTK 认证后端（需系统开发包）  |
 | `cargo test -p readerx-source`                          | 引擎 / 宿主 / 存储的单元测试             |
 
+> Rust侧测试请在src-tauri中运行，因为根目录无效。
+
 > 端口 1420 可能已被 `tauri android dev` 占用，勿再起第二个 dev server。
 
 如果需要grep可以使用rg（如果有），速度更快。
