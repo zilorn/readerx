@@ -166,6 +166,7 @@ import {
   dataAnchorOf,
   flashSpan,
   glyphRangeAtGlobalOffset,
+  glyphRectOf,
 } from "../lib/textAnchor";
 import {
   createTtsPlayer,
@@ -2836,6 +2837,10 @@ export default function ReaderPage() {
   const SEL_FLIP_HOLD_MS = 400;
   // 选区手柄按钮半宽（24px 触控目标 / 2）：选区菜单避让手柄时的圆形半径
   const SEL_HANDLE_R = 12;
+  // 单字排版框的宽度上限（em）：比这还宽的矩形就不是「这个字」的框，而是引擎在软换行处
+  // 多算进并集的一段（见 lib/textAnchor.ts 的 glyphRectOf）。全角字约 1em，余量留给字距
+  // 与两端对齐的拉伸。
+  const GLYPH_BOX_MAX_EM = 1.5;
   let colRef: HTMLDivElement | undefined;
 
   interface SelPressState {
@@ -2935,8 +2940,13 @@ export default function ReaderPage() {
       // 飞了」）；纵向语义（行盒顶 / 字形内容盒顶 / 高度甚至为 0）各引擎也不一致。字形框是
       // 实际画出来的那个字，横纵都稳：起点（lo）取首个选中字的左缘、终点（hi）取末个选中字
       // 的右缘，与 caret 在正常（非换行处）情形下的落点一致。
+      //
+      // 判框必须走 glyphRectOf（逐客户矩形挑），不能直接取并集：软换行处的那个位置同样会被
+      // 并进 getBoundingClientRect，行首起选时并集右缘会伸到上一行行尾，终点手柄照样横着飞。
       const glyph = glyphRangeAtGlobalOffset(col, mir.unitStart, off, fromStart);
-      const gr = glyph ? glyph.getBoundingClientRect() : null;
+      const gr = glyph
+        ? glyphRectOf(glyph, (layout()?.fontSize ?? 24) * GLYPH_BOX_MAX_EM)
+        : null;
       if (gr && gr.width > 0 && gr.height > 0) {
         // 圆心贴字形框底往下挪一截：避开字又不至于坠进下一行的字
         const below = Math.max(4, Math.round((layout()?.fontSize ?? 24) * 0.3));

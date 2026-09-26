@@ -246,10 +246,12 @@ export function caretRangeAtGlobalOffset(
 }
 
 /**
- * 在根容器内取「镜像文本全局偏移」紧贴边界处的单个字符 Range，供手柄做纵向锚定。
+ * 在根容器内取「镜像文本全局偏移」紧贴边界处的单个字符 Range，供手柄锚定到实际字符。
  * 折叠 caret 的 getBoundingClientRect 语义各引擎/各设备字体并不一致（top 有的指行盒顶、
  * 有的指字形内容盒顶、高度可能为 0），直接用会把选区手柄相对文字上下带偏；
  * 而单字符 Range 的矩形来自真实排版字形框，与实际画出来的字一致，跨引擎稳定。
+ *
+ * 取这个 Range 的排版框请走 [`glyphRectOf`]：它的并集在软换行处会带上上一行行尾那一段。
  *
  * 终点语义（默认）优先取边界**左侧**的字符（视觉上光标停在它之后，与选区端点的落点
  * 一致）；起点语义（fromStart）取边界**右侧**的字符（光标停在它之前，即选区首个字符）。
@@ -294,6 +296,43 @@ export function glyphRangeAtGlobalOffset(
     return range;
   }
   return null;
+}
+
+/**
+ * 取单字符 Range 的排版框：**逐客户矩形挑选**，不要直接拿 `getBoundingClientRect()` 的并集。
+ *
+ * `getBoundingClientRect()` 是所有客户矩形的并集，而**边界落在软换行处**时，部分引擎
+ * （Android WebView 实测）会把那个折行位置也算成一段：它落在**上一行的行尾**。于是
+ * 「段中某一行行首的那个字」的单字 Range，并集左缘是这个字、右缘却一路伸到上一行行尾 ——
+ * 手柄取 `right` 当落点时，终点手柄就横着飞到上一行末尾（行首选字时最明显）。
+ * 并集的高度同理会被撑到两行高。
+ *
+ * 这里只认「这个字自己的框」，两步挑：
+ * 1. 只留**底边最靠下**的那一行：折行位置永远落在上一行，而这个字在本行，两者底边差着一整个
+ *    行高（宽或高为 0 的折叠矩形在这一步自然也被滤掉）；
+ * 2. 同一行里再挑最窄的：比 `maxWidth` 还宽的（并集把本行尾部也算成一段时的那段）不认，
+ *    都不认时退回这一步的候选。
+ *
+ * 挑不出来（矩形全不可用）返回 null，交给调用方的兜底逻辑。
+ */
+export function glyphRectOf(range: Range, maxWidth: number): DOMRect | null {
+  const rects = Array.from(range.getClientRects()).filter(
+    (r) => r.width > 0.5 && r.height > 0.5,
+  );
+  if (rects.length === 0) return null;
+  let maxBottom = rects[0].bottom;
+  for (const r of rects) {
+    if (r.bottom > maxBottom) maxBottom = r.bottom;
+  }
+  // 容差 1px：同一行的矩形底边可能差着亚像素
+  const lowest = rects.filter((r) => r.bottom >= maxBottom - 1);
+  const plausible = lowest.filter((r) => r.width <= maxWidth);
+  const pool = plausible.length > 0 ? plausible : lowest;
+  let best = pool[0];
+  for (const r of pool) {
+    if (r.width < best.width) best = r;
+  }
+  return best;
 }
 
 /**
