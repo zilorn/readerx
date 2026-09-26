@@ -12,7 +12,7 @@ use crate::cli::Cli;
 use crate::engine::SyncEngine;
 use crate::error::{Result, SyncError};
 use crate::model::{Conflict, ConflictStatus, Entity, Resolution};
-use crate::net::{shared, DiscoveryService, PeerServer, ServerOptions, TrustPolicy};
+use crate::net::{lock_engine, shared, DiscoveryService, PeerServer, ServerOptions, TrustPolicy};
 use crate::session::sync_with_addr;
 
 /// 子命令分发。
@@ -417,8 +417,10 @@ fn cmd_serve(cli: &Cli) -> Result<()> {
     let name = engine.device_name().to_string();
 
     let shared = shared(engine);
-    let server = PeerServer::start(shared, options)?;
+    let server = PeerServer::start(shared.clone(), options)?;
     let sync_port = server.local_addr().port();
+    // 让引擎知道自己在监听哪个端口：握手时告诉对端，对端才能主动连回来
+    lock_engine(&shared).set_listen_port(sync_port);
 
     let discovery = if cli.flags.is_set("no-discovery") {
         None

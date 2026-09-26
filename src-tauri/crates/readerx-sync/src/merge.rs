@@ -450,7 +450,8 @@ fn apply_restore(entity: &mut Entity, op: &Operation, ctx: &MergeCtx, out: &mut 
 /// 字段级操作分发（按 schema 声明的字段策略）。
 fn apply_field_op(entity: &mut Entity, op: &Operation, ctx: &MergeCtx, out: &mut MergeOutcome) {
     match ctx.schema.field_kind(&op.field) {
-        MergeKind::Lww => apply_lww(entity, op, op_value(op), ctx, out),
+        MergeKind::Lww => apply_lww(entity, op, op_value(op), ctx, out, false),
+        MergeKind::LwwSilent => apply_lww(entity, op, op_value(op), ctx, out, true),
         MergeKind::MultiValue => apply_multi(entity, op, op_value(op), ctx, out),
         MergeKind::Frozen => apply_frozen(entity, op, op_value(op), ctx, out),
         MergeKind::Counter => apply_counter_op(entity, op, ctx, out),
@@ -486,7 +487,8 @@ fn seed_field(
     }
 
     match ctx.schema.field_kind(field) {
-        MergeKind::Lww => write_lww(entity, field, value, op, ctx, out),
+        MergeKind::Lww => write_lww(entity, field, value, op, ctx, out, false),
+        MergeKind::LwwSilent => write_lww(entity, field, value, op, ctx, out, true),
         MergeKind::Frozen => write_frozen(entity, field, value, op, ctx, out),
         MergeKind::MultiValue => push_multi(entity, field, value, op, ctx, out),
         MergeKind::Counter => {
@@ -500,7 +502,7 @@ fn seed_field(
                 })
             else {
                 // 该字段历史上不是计数器（schema 改过）：按 LWW 覆盖
-                write_lww(entity, field, value, op, ctx, out);
+                write_lww(entity, field, value, op, ctx, out, false);
                 return;
             };
             if op.hlc > *hlc {
@@ -520,7 +522,7 @@ fn seed_field(
                     add_set_element(entity, field, element_key(item), op, out);
                 }
             } else if !value.is_null() {
-                write_lww(entity, field, value, op, ctx, out);
+                write_lww(entity, field, value, op, ctx, out, false);
             }
         }
         MergeKind::List => {
@@ -537,23 +539,28 @@ fn seed_field(
                     insert_list_item(entity, field, key, item.clone(), position, op, out);
                 }
             } else if !value.is_null() {
-                write_lww(entity, field, value, op, ctx, out);
+                write_lww(entity, field, value, op, ctx, out, false);
             }
         }
     }
 }
 
 /// LWW 字段（含 MV / Counter 字段收到 `Set` 时的降级处理）。
+///
+/// `silent` 只影响**并发写入要不要记一条冲突**（见 [`MergeKind::LwwSilent`]）：
+/// 值语义（HLC 较晚者胜出）与冲突关闭行为完全一致。
 fn apply_lww(
     entity: &mut Entity,
     op: &Operation,
     value: Value,
     ctx: &MergeCtx,
     out: &mut MergeOutcome,
+    silent: bool,
 ) {
     match &op.op {
         OpKind::Set { .. } | OpKind::Unset => {
             if let Some(owner) = unique_owner(ctx, &op.field, &value, &entity.id) {
+                // 唯一键撞车是**真**冲突（两条记录抢同一个业务主键），静默策略也不例外
                 out.conflicts.push(ctx.conflict(
                     entity,
                     &op.field,
@@ -570,7 +577,7 @@ fn apply_lww(
                 out.reject = Some(Rejection::UniqueKey { field: op.field.clone(), owner });
                 return;
             }
-            write_lww(entity, &op.field, value, op, ctx, out);
+            write_lww(entity, &op.field, value, op, ctx, out, silent);
         }
         // 集合 / 计数器操作落在标量字段上：策略不匹配，拒绝并记一条（不静默）
         _ => {
@@ -590,6 +597,7 @@ fn write_lww(
     op: &Operation,
     ctx: &MergeCtx,
     out: &mut MergeOutcome,
+    silent: bool,
 ) {
     let incoming = FieldState::Value {
         value: value.clone(),
@@ -603,7 +611,7 @@ fn write_lww(
         }
         Some(FieldState::Value { value: current, hlc: current_hlc, origin: current_origin }) => {
             let concurrent = is_concurrent_write(op, &current_origin);
-            if concurrent && current != value {
+            if concurrent && current != value && !silent {
                 out.conflicts.push(ctx.conflict(
                     entity,
                     field,
@@ -691,7 +699,7 @@ fn push_multi(
         .entry(field.to_string())
         .or_insert_with(|| FieldState::Multi { values: Vec::new() })
     else {
-        write_lww(entity, field, value, op, ctx, out);
+        write_lww(entity, field, value, op, ctx, out, false);
         return;
     };
 
@@ -775,7 +783,7 @@ fn write_frozen(
             out.reject = Some(Rejection::Immutable { field: field.to_string() });
         }
         // 该字段历史上不是不可变字段（schema 改过）：按 LWW 覆盖并留档
-        Some(_) => write_lww(entity, field, value, op, ctx, out),
+        Some(_) => write_lww(entity, field, value, op, ctx, out, false),
     }
 }
 
@@ -819,7 +827,7 @@ fn apply_counter_op(entity: &mut Entity, op: &Operation, ctx: &MergeCtx, out: &m
                     hlc: Hlc::default(),
                 })
             else {
-                write_lww(entity, &op.field, op_value(op), op, ctx, out);
+                write_lww(entity, &op.field, op_value(op), op, ctx, out, false);
                 return;
             };
             if op.hlc > *hlc {
@@ -1189,6 +1197,10 @@ mod tests {
         OpKind::Set { value: Value::String(value.to_string()) }
     }
 
+    fn set_num(value: i64) -> OpKind {
+        OpKind::Set { value: Value::from(value) }
+    }
+
     fn schema_book() -> Schema {
         Schema::new("book")
             .field("title", MergeKind::Lww)
@@ -1254,6 +1266,44 @@ mod tests {
         assert_eq!(entity.field("title"), Some(Value::String("李四".into())));
         // 败方数据没丢
         assert_eq!(out.conflicts[0].local.value, Some(Value::String("张三".into())));
+    }
+
+    #[test]
+    fn silent_lww_picks_winner_without_recording_a_conflict() {
+        // 场景 4 的静默变体：值语义一样（HLC 较晚者胜），但不进冲突队列。
+        // 用在阅读进度这类「位置」字段上：败方只是过时的位置，不值得人裁决。
+        let schema = Schema::new("reading_location")
+            .field("char_offset", MergeKind::LwwSilent)
+            .field("chapter_cid", MergeKind::LwwSilent);
+        let mut entity = Entity::new("book-1", "reading_location", Hlc::default(), 1);
+        let mut a = OpBuilder::device("A").wall(1_000);
+        let mut b = OpBuilder::device("B").wall(2_000).offline();
+
+        let op_a = a.op(&entity, ("reading_location", "char_offset"), set_num(120));
+        apply_op(&mut entity, &op_a, &schema);
+        let op_b = b.op(&entity, ("reading_location", "char_offset"), set_num(900));
+        let out = apply_op(&mut entity, &op_b, &schema);
+
+        assert!(out.conflicts.is_empty(), "静默 LWW 不应产生冲突：{:?}", out.conflicts);
+        assert_eq!(entity.field("char_offset"), Some(Value::from(900)), "仍按 HLC 选较晚的一次");
+        assert!(entity.conflicted.is_empty(), "静默字段不该被标记为待裁决");
+    }
+
+    #[test]
+    fn silent_lww_still_reports_unique_key_conflicts() {
+        // 静默只针对「同一字段并发写成不同值」；两条记录抢同一个唯一键是真冲突，
+        // 必须留档并拒绝写入（否则书架里会出现两条同键记录，谁也发现不了）
+        let schema = Schema::new("book").unique("isbn").field("isbn", MergeKind::LwwSilent);
+        let mut entity = book_entity();
+        let mut a = OpBuilder::device("A");
+        let op = a.op(&entity, ("book", "isbn"), set("978-7"));
+        let lookup = |_field: &str, _value: &Value, _self_id: &str| Some("book-2".to_string());
+        let ctx = MergeCtx::new(&schema, "local", 0).with_unique_lookup(&lookup);
+
+        let out = apply(&mut entity, &op, &ctx);
+        assert!(matches!(out.reject, Some(Rejection::UniqueKey { .. })));
+        assert!(entity.field("isbn").is_none(), "唯一键冲突时两边都不写");
+        assert!(out.has_pending(), "唯一键冲突必须进冲突队列");
     }
 
     #[test]

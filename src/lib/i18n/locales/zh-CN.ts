@@ -23,6 +23,7 @@ import { tts } from "./zh-CN/tts";
 import { webdav } from "./zh-CN/webdav";
 import { library } from "./zh-CN/library";
 import { misc } from "./zh-CN/misc";
+import { sync } from "./zh-CN/sync";
 
 export const zhCN = {
   ...common,
@@ -41,6 +42,7 @@ export const zhCN = {
   ...webdav,
   ...library,
   ...misc,
+  ...sync,
 };
 
 /** 全部文案 key */

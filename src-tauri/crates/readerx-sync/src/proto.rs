@@ -34,6 +34,13 @@ pub enum Request {
         name: String,
         knowledge: VersionVector,
         nonce: String,
+        /// 本机同步服务的**监听端口**；`0` = 本机没有在监听。
+        ///
+        /// 对端据此记住「怎么主动连回来」。**不能用 TCP 连接的源端口**：那是内核
+        /// 临时分配的，连接一断就回收，拿它当地址会让对方下次连到一个不存在的服务。
+        /// `default` 让不带该字段的旧对端仍能握手（按「没在监听」处理）。
+        #[serde(default)]
+        port: u16,
     },
     /// 鉴权应答：`proof = HMAC(密钥, 握手文本)`
     Auth { proof: String },

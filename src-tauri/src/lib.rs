@@ -8,6 +8,9 @@ mod models;
 #[cfg(desktop)]
 mod single_instance;
 mod storage;
+// 局域网同步：引擎生命周期 / 本地数据桥接 / 冲突队列都收在 sync 模块里
+// （对外可见是为了让集成测试直接验证桥接，见 sync/mod.rs 的说明）
+pub mod sync;
 mod webview_login;
 
 // 书源引擎（Boa 沙箱 + 宿主 API）与书源持久化实现在 readerx-source crate：
@@ -16,7 +19,7 @@ mod webview_login;
 use readerx_source::{engine, host, panic_guard};
 
 use std::panic::AssertUnwindSafe;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use tauri::{AppHandle, Emitter, Manager};
 
 /// 章节插图的自定义协议名：前端用 `convertFileSrc(local, "readerx-img")` 得到
@@ -111,6 +114,15 @@ pub fn run() {
             // 那是磁盘 I/O，跟着调用它的 blocking 线程跑，不占用启动线程。
             // 网页登录后端：把「插件（Android 原生浮层 / 桌面独立登录窗口）」注册为引擎的认证实现
             webview_login::install(app.handle().clone());
+            // 局域网同步：建服务并交给界面；启用过的用户在这里开引擎、补齐落地、拉起监听。
+            // 引擎与网络都在后台线程上跑，不占启动线程。
+            let sync_service = sync::SyncService::new(app.handle().clone());
+            app.manage(sync::SyncState(Arc::clone(&sync_service)));
+            let bootstrap = Arc::clone(&sync_service);
+            std::thread::Builder::new()
+                .name("readerx-sync-boot".to_string())
+                .spawn(move || bootstrap.bootstrap())
+                .ok();
             log::info!("后端就绪，等待界面调用");
             Ok(())
         })
@@ -156,16 +168,44 @@ pub fn run() {
             logging::readerx_log_write,
             logging::readerx_log_tail,
             logging::readerx_log_clear,
-            logging::readerx_log_set_level
+            logging::readerx_log_set_level,
+            sync::commands::readerx_sync_status,
+            sync::commands::readerx_sync_enable,
+            sync::commands::readerx_sync_set_auto,
+            sync::commands::readerx_sync_set_device_name,
+            sync::commands::readerx_sync_pairing_code,
+            sync::commands::readerx_sync_join,
+            sync::commands::readerx_sync_now,
+            sync::commands::readerx_sync_sync_addr,
+            sync::commands::readerx_sync_discover,
+            sync::commands::readerx_sync_peers,
+            sync::commands::readerx_sync_conflicts,
+            sync::commands::readerx_sync_resolve,
+            sync::commands::readerx_sync_reset
         ])
-        .run(tauri::generate_context!());
+        .build(tauri::generate_context!());
 
-    // 启动 / 运行失败（窗口、插件、事件循环）：记进日志后退出，不 panic
-    if let Err(error) = result {
-        log::error!("应用启动失败: {error}");
-        if let Some(logger) = readerx_log::logger() {
-            logger.flush();
+    // 启动失败（窗口、插件、事件循环）：记进日志后退出，不 panic
+    let app = match result {
+        Ok(app) => app,
+        Err(error) => {
+            log::error!("应用启动失败: {error}");
+            if let Some(logger) = readerx_log::logger() {
+                logger.flush();
+            }
+            std::process::exit(1);
         }
-        std::process::exit(1);
-    }
+    };
+
+    app.run(|handle, event| {
+        // 退出：停掉同步网络与自动同步线程，并把引擎快照 / 设置刷盘
+        if matches!(event, tauri::RunEvent::Exit) {
+            if let Some(state) = handle.try_state::<sync::SyncState>() {
+                state.0.shutdown();
+            }
+            if let Some(logger) = readerx_log::logger() {
+                logger.flush();
+            }
+        }
+    });
 }

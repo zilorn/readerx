@@ -261,6 +261,19 @@ export function removeShelfEntry(bookId: string): void {
   persistShelf();
 }
 
+/**
+ * 重新从后端读回阅读进度（**同步改了进度**时调用）。
+ *
+ * 先等本地尚未落盘的写入排队落定，再读回合并结果 —— 否则会把刚翻的那一页当成
+ * 「同步前的位置」覆盖回去。落盘的真相在 Rust 侧（同步引擎合并后的进度），
+ * 这里只是把它取回内存 signal。
+ */
+export async function reloadReadingProgress(): Promise<void> {
+  await shelfWriteQueue;
+  const stored = await readState<Record<string, ShelfEntry>>(SHELF_KEY);
+  if (stored && typeof stored === "object") setShelfMap(stored);
+}
+
 /** 重置全部阅读进度（书籍本身保留），清空章节内偏移定位 */
 export function resetReadingProgress(): void {
   const next: Record<string, ShelfEntry> = {};

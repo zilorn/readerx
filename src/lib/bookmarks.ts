@@ -134,6 +134,23 @@ export function ensureBookmarksLoaded(bookId: string): Promise<void> {
   return task;
 }
 
+/**
+ * 重新从磁盘读回某本书的书签（**同步改了书签**时调用）。
+ *
+ * 先等本地写入排队落定，再整表替换：同步合并后的书签是两边并集，磁盘上那份已经
+ * 是最终结果，内存里再留一份「本地未落盘的」只会重复。读失败（返回 null）时保持
+ * 内存现状，绝不把读失败当成「这本书没有书签」。
+ */
+export async function reloadBookBookmarks(bookId: string): Promise<void> {
+  if (!bookId) return;
+  await writeQueue;
+  const stored = await readRemoteBookmarks<Bookmark>(bookId);
+  if (stored === null) return;
+  dirtyBooks.delete(bookId);
+  loadedBooks.add(bookId);
+  setBookmarkMap((prev) => ({ ...prev, [bookId]: stored }));
+}
+
 /** 按 id 合并两份书签：磁盘上的在前，本地新增（磁盘上还没有的）补在后面 */
 function mergeBookmarks(stored: Bookmark[], local: Bookmark[]): Bookmark[] {
   const known = new Set(stored.map((bm) => bm.id));

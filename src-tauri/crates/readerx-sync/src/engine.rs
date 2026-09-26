@@ -158,6 +158,9 @@ pub struct SyncEngine {
     conflicts: Vec<Conflict>,
     deferred: Vec<Operation>,
     peers: BTreeMap<String, PeerState>,
+    /// 本机同步服务的监听端口（0 = 没在监听）。运行期状态，不落盘：
+    /// 握手时告诉对端，对端据此记住「怎么主动连回来」。
+    listen_port: u16,
     /// 本设备下一条操作的序号
     next_seq: u64,
     /// 内存状态是否有未落盘的改动（操作日志是即时落盘的）
@@ -222,6 +225,7 @@ impl SyncEngine {
             conflicts,
             deferred,
             peers,
+            listen_port: 0,
             next_seq,
             dirty: false,
             knowledge_cache: None,
@@ -263,6 +267,20 @@ impl SyncEngine {
     pub fn join_group(&mut self, code: &str) -> Result<()> {
         let store = SyncStore::join(self.store.root(), code, &self.store.device().device_name)?;
         self.store = store;
+        self.dirty = true;
+        self.flush()
+    }
+
+    /// 改设备展示名（对端在发现应答与握手里看到的名字）。
+    ///
+    /// 只改身份里的名字，设备 id、群组、密钥与全部数据都不动 —— 改名不能让这台设备
+    /// 在群组里变成「另一台设备」。
+    pub fn rename_device(&mut self, name: &str) -> Result<()> {
+        if self.store.device().device_name == name {
+            return Ok(());
+        }
+        self.store = SyncStore::open(self.store.root(), name)?;
+        log::info!("同步设备名已更新: {name}");
         self.dirty = true;
         self.flush()
     }
@@ -837,6 +855,53 @@ impl SyncEngine {
             entry.last_sync_ms = now_ms();
             entry.sync_count += 1;
         }
+        self.dirty = true;
+    }
+
+    /// 设置本机同步服务的监听端口（`0` = 停止监听）。
+    ///
+    /// 由持有 [`crate::net::PeerServer`] 的一方（App / CLI `serve`）在启停时同步进来，
+    /// 下一次握手就会告诉对端。
+    pub fn set_listen_port(&mut self, port: u16) {
+        self.listen_port = port;
+    }
+
+    /// 本机同步服务的监听端口（0 = 没在监听）。
+    pub fn listen_port(&self) -> u16 {
+        self.listen_port
+    }
+
+    /// 忘掉某台对端的地址（对端告诉我们它没在监听 / 地址已失效时用）。
+    ///
+    /// 只清地址，保留这台设备本身（版本向量与同步计数还在，下次连上接着用）。
+    pub fn forget_peer_addr(&mut self, peer_device: &str) {
+        if let Some(entry) = self.peers.get_mut(peer_device) {
+            if entry.addr.take().is_some() {
+                log::info!(
+                    "已清掉对端地址（对端未在监听） peer={}",
+                    crate::version::short_device(peer_device)
+                );
+                self.dirty = true;
+            }
+        }
+    }
+
+    /// 刷新某台**已知对端**的地址（局域网里 DHCP 换 IP / 换网卡后用）。
+    ///
+    /// 只改地址，不动同步计数与对方已知版本 —— 它不是一次同步，只是「记下新门牌号」。
+    /// 不认识的设备 id 一律忽略（配对是显式动作，发现只服务于已配对的连接）。
+    pub fn update_peer_addr(&mut self, peer_device: &str, addr: &str) {
+        let Some(entry) = self.peers.get_mut(peer_device) else {
+            return;
+        };
+        if entry.addr.as_deref() == Some(addr) {
+            return;
+        }
+        log::info!(
+            "对端地址已更新 peer={} addr={addr}",
+            crate::version::short_device(peer_device)
+        );
+        entry.addr = Some(addr.to_string());
         self.dirty = true;
     }
 

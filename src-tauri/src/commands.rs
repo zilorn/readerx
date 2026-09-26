@@ -18,6 +18,7 @@ use crate::models::{
 };
 use crate::panic_guard;
 use crate::storage;
+use crate::sync;
 use crate::webview_login;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
@@ -61,7 +62,18 @@ pub async fn readerx_state_get(app: AppHandle, key: String) -> Result<Option<Val
 
 #[tauri::command]
 pub async fn readerx_state_set(app: AppHandle, key: String, value: Value) -> Result<(), String> {
-    blocking("状态写入", move || storage::write_state(&app, &key, &value)).await
+    blocking("状态写入", move || {
+        storage::write_state(&app, &key, &value)?;
+        // 同步钩子：阅读进度与分组清单要在落盘后发布给引擎。
+        // 未启用同步时这两个调用是空操作（见 sync::SyncService）。
+        match key.as_str() {
+            "readerx.shelf" => sync::service_hook(&app).on_shelf_changed(&value),
+            "readerx.groups" => sync::service_hook(&app).on_groups_changed(&value),
+            _ => {}
+        }
+        Ok(())
+    })
+    .await
 }
 
 #[tauri::command]
@@ -71,7 +83,14 @@ pub async fn readerx_state_remove(app: AppHandle, key: String) -> Result<(), Str
 
 #[tauri::command]
 pub async fn readerx_book_put(app: AppHandle, book: LocalBook) -> Result<(), String> {
-    blocking("书籍写入", move || book_store::put_book(&app, book)).await
+    let book_id = book.id.clone();
+    blocking("书籍写入", move || {
+        book_store::put_book(&app, book)?;
+        // 导入同一本书的另一台设备可能改过书名 / 标签：同步里已有记录时以它为准
+        sync::service_hook(&app).on_book_changed(&book_id, sync::PublishMode::Imported);
+        Ok(())
+    })
+    .await
 }
 
 /// 只回写一本书的若干章节（在线书逐批下载正文用）：正文仍在 Rust 侧读写，
@@ -109,14 +128,21 @@ pub async fn readerx_book_patch_meta(
     patch: crate::models::BookMetaPatch,
 ) -> Result<(), String> {
     blocking("书籍元信息写入", move || {
-        book_store::patch_book_meta(&app, &id, &patch)
+        book_store::patch_book_meta(&app, &id, &patch)?;
+        sync::service_hook(&app).on_book_changed(&id, sync::PublishMode::Edited);
+        Ok(())
     })
     .await
 }
 
 #[tauri::command]
 pub async fn readerx_book_delete(app: AppHandle, id: String) -> Result<(), String> {
-    blocking("书籍删除", move || book_store::delete_book(&app, &id)).await
+    blocking("书籍删除", move || {
+        // 先记同步删除（要读元信息定位书身份），再删本地文件
+        sync::service_hook(&app).on_book_deleted(&id);
+        book_store::delete_book(&app, &id)
+    })
+    .await
 }
 
 /// 读取某本书的书签（books/<id>/bookmarks.json）；没有书签返回空列表。
@@ -134,7 +160,9 @@ pub async fn readerx_bookmarks_put(
     bookmarks: Vec<Value>,
 ) -> Result<(), String> {
     blocking("书签写入", move || {
-        book_store::put_bookmarks(&app, &book_id, &bookmarks)
+        book_store::put_bookmarks(&app, &book_id, &bookmarks)?;
+        sync::service_hook(&app).on_bookmarks_changed(&book_id, &bookmarks);
+        Ok(())
     })
     .await
 }
@@ -354,7 +382,9 @@ fn validate_source(source: &BookSource) -> Result<(), String> {
 pub async fn readerx_source_put(app: AppHandle, source: BookSource) -> Result<(), String> {
     blocking("书源写入", move || {
         validate_source(&source)?;
-        storage::put_book_source(&app, &source)
+        storage::put_book_source(&app, &source)?;
+        sync::service_hook(&app).on_source_changed(&source);
+        Ok(())
     })
     .await
 }
@@ -362,7 +392,14 @@ pub async fn readerx_source_put(app: AppHandle, source: BookSource) -> Result<()
 /// 删除一个书源
 #[tauri::command]
 pub async fn readerx_source_delete(app: AppHandle, id: String) -> Result<(), String> {
-    blocking("书源删除", move || storage::delete_book_source(&app, &id)).await
+    blocking("书源删除", move || {
+        // 先取地址（同步按书源地址定位实体），再删本地文件
+        if let Some(source) = storage::get_book_source(&app, &id)? {
+            sync::service_hook(&app).on_source_deleted(&source);
+        }
+        storage::delete_book_source(&app, &id)
+    })
+    .await
 }
 
 /// 书源分组被删除：把全部书源上指向该分组的归属清空，返回受影响的书源数量

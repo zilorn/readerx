@@ -14,7 +14,7 @@ use std::time::SystemTime;
 use tauri::{AppHandle, Manager};
 
 /// 应用数据根目录（书籍 / 状态 / 听书缓存 / 书源共用的那一层）
-pub(crate) fn data_root(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn data_root<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     let dir = app
         .path()
         .app_data_dir()
@@ -27,7 +27,7 @@ pub(crate) fn ensure_dir(dir: &Path) -> Result<(), String> {
 }
 
 /// 状态文件目录（`state/`，不存在时创建）
-pub(crate) fn state_dir(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn state_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     let dir = data_root(app)?.join("state");
     ensure_dir(&dir)?;
     Ok(dir)
@@ -53,7 +53,9 @@ pub(crate) fn valid_component(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
-pub(crate) fn read_state(app: &AppHandle, key: &str) -> Result<Option<Value>, String> {
+pub(crate) fn read_state<R: tauri::Runtime>(
+    app: &AppHandle<R>, key: &str,
+) -> Result<Option<Value>, String> {
     if !valid_state_key(key) {
         return Err("非法的状态 key".to_string());
     }
@@ -66,7 +68,9 @@ pub(crate) fn read_state(app: &AppHandle, key: &str) -> Result<Option<Value>, St
     Ok(Some(value))
 }
 
-pub(crate) fn write_state(app: &AppHandle, key: &str, value: &Value) -> Result<(), String> {
+pub(crate) fn write_state<R: tauri::Runtime>(
+    app: &AppHandle<R>, key: &str, value: &Value,
+) -> Result<(), String> {
     if !valid_state_key(key) {
         return Err("非法的状态 key".to_string());
     }
@@ -75,7 +79,7 @@ pub(crate) fn write_state(app: &AppHandle, key: &str, value: &Value) -> Result<(
     fs::write(&path, text).map_err(|e| format!("写入状态失败: {e}"))
 }
 
-pub(crate) fn remove_state(app: &AppHandle, key: &str) -> Result<(), String> {
+pub(crate) fn remove_state<R: tauri::Runtime>(app: &AppHandle<R>, key: &str) -> Result<(), String> {
     if !valid_state_key(key) {
         return Err("非法的状态 key".to_string());
     }
@@ -123,7 +127,7 @@ pub(crate) fn normalize_tts_cache_limit(raw: Option<u64>) -> u64 {
 
 /// 生效的每本书音频条目上限（0 = 不限）。读不到偏好时用默认值。
 /// 写入与「改设置后立即收敛」两处共用，保证两边的上限口径一致。
-pub(crate) fn tts_cache_limit(app: &AppHandle) -> u64 {
+pub(crate) fn tts_cache_limit<R: tauri::Runtime>(app: &AppHandle<R>) -> u64 {
     let raw = read_state(app, TTS_CACHE_LIMIT_KEY)
         .ok()
         .flatten()
@@ -131,7 +135,7 @@ pub(crate) fn tts_cache_limit(app: &AppHandle) -> u64 {
     normalize_tts_cache_limit(raw)
 }
 
-fn tts_cache_dir(app: &AppHandle, book_id: &str) -> Result<PathBuf, String> {
+fn tts_cache_dir<R: tauri::Runtime>(app: &AppHandle<R>, book_id: &str) -> Result<PathBuf, String> {
     if !valid_component(book_id) {
         return Err("非法的书籍 id".to_string());
     }
@@ -139,7 +143,9 @@ fn tts_cache_dir(app: &AppHandle, book_id: &str) -> Result<PathBuf, String> {
 }
 
 /// 删除某本书的听书音频缓存目录（不存在也不报错）。删书时随书一起清理。
-pub(crate) fn remove_book_tts_cache(app: &AppHandle, book_id: &str) -> Result<(), String> {
+pub(crate) fn remove_book_tts_cache<R: tauri::Runtime>(
+    app: &AppHandle<R>, book_id: &str,
+) -> Result<(), String> {
     let dir = tts_cache_dir(app, book_id)?;
     if dir.exists() {
         fs::remove_dir_all(&dir).map_err(|e| format!("清理听书缓存失败: {e}"))?;
@@ -148,8 +154,8 @@ pub(crate) fn remove_book_tts_cache(app: &AppHandle, book_id: &str) -> Result<()
 }
 
 /// 写入一句缓存音频；条目数超限时淘汰最旧（按修改时间）。
-pub(crate) fn put_tts_audio(
-    app: &AppHandle,
+pub(crate) fn put_tts_audio<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     book_id: &str,
     key: &str,
     mime: &str,
@@ -168,8 +174,8 @@ pub(crate) fn put_tts_audio(
 }
 
 /// 读取一句缓存音频；不存在返回 None。
-pub(crate) fn get_tts_audio(
-    app: &AppHandle,
+pub(crate) fn get_tts_audio<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     book_id: &str,
     key: &str,
 ) -> Result<Option<(String, Vec<u8>)>, String> {
@@ -238,7 +244,7 @@ fn select_tts_cache_evictions(
 }
 
 /// 按当前偏好上限收敛**全部**书籍的听书缓存（改设置后立即生效，不必等下一次写入）。
-pub(crate) fn apply_tts_cache_limit(app: &AppHandle) -> Result<(), String> {
+pub(crate) fn apply_tts_cache_limit<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     let limit = tts_cache_limit(app);
     let root = data_root(app)?.join("tts-audio");
     if !root.exists() {
@@ -254,7 +260,9 @@ pub(crate) fn apply_tts_cache_limit(app: &AppHandle) -> Result<(), String> {
 }
 
 /// 各书籍的听书缓存统计（仅统计有缓存的书籍）
-pub(crate) fn list_tts_cache(app: &AppHandle) -> Result<Vec<TtsCacheStat>, String> {
+pub(crate) fn list_tts_cache<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<Vec<TtsCacheStat>, String> {
     let root = data_root(app)?.join("tts-audio");
     if !root.exists() {
         return Ok(Vec::new());
@@ -289,7 +297,9 @@ pub(crate) fn list_tts_cache(app: &AppHandle) -> Result<Vec<TtsCacheStat>, Strin
 }
 
 /// 清除听书缓存：book_id 为 None 清空全部书籍
-pub(crate) fn clear_tts_cache(app: &AppHandle, book_id: Option<&str>) -> Result<(), String> {
+pub(crate) fn clear_tts_cache<R: tauri::Runtime>(
+    app: &AppHandle<R>, book_id: Option<&str>,
+) -> Result<(), String> {
     match book_id {
         Some(id) => {
             let dir = tts_cache_dir(app, id)?;
@@ -322,21 +332,29 @@ pub(crate) fn clear_tts_cache(app: &AppHandle, book_id: Option<&str>) -> Result<
 // 这里只做一层薄转发：命令层签名不变，书源读写的唯一实现在核心 crate，
 // 避免 App 与 CLI 各写一套格式而互相读不懂。
 
-pub(crate) fn put_book_source(_app: &AppHandle, source: &BookSource) -> Result<(), String> {
+pub(crate) fn put_book_source<R: tauri::Runtime>(
+    _app: &AppHandle<R>, source: &BookSource,
+) -> Result<(), String> {
     readerx_source::store::put_source(source)
 }
 
 /// 读取单个书源；不存在返回 Ok(None)
-pub(crate) fn get_book_source(_app: &AppHandle, id: &str) -> Result<Option<BookSource>, String> {
+pub(crate) fn get_book_source<R: tauri::Runtime>(
+    _app: &AppHandle<R>, id: &str,
+) -> Result<Option<BookSource>, String> {
     readerx_source::store::get_source(id)
 }
 
 /// 列出全部书源（含 js，供引擎使用）；调用方需要摘要时再裁剪
-pub(crate) fn list_book_sources(_app: &AppHandle) -> Result<Vec<BookSource>, String> {
+pub(crate) fn list_book_sources<R: tauri::Runtime>(
+    _app: &AppHandle<R>,
+) -> Result<Vec<BookSource>, String> {
     readerx_source::store::list_sources()
 }
 
-pub(crate) fn delete_book_source(app: &AppHandle, id: &str) -> Result<(), String> {
+pub(crate) fn delete_book_source<R: tauri::Runtime>(
+    app: &AppHandle<R>, id: &str,
+) -> Result<(), String> {
     if !valid_component(id) {
         return Err("非法的书源 id".to_string());
     }
@@ -349,7 +367,9 @@ pub(crate) fn delete_book_source(app: &AppHandle, id: &str) -> Result<(), String
 /// 清除全部书源上指向该分组的归属（书源分组被删除时调用），返回受影响的书源数量。
 /// 组清单存在前端偏好里，源文件里的 `groupId` 必须在删组时一并清掉，
 /// 否则会留下指向已删分组的悬空引用。整批改写都在 Rust 侧完成，不走 IPC 往返。
-pub(crate) fn clear_book_source_group(_app: &AppHandle, group_id: &str) -> Result<u64, String> {
+pub(crate) fn clear_book_source_group<R: tauri::Runtime>(
+    _app: &AppHandle<R>, group_id: &str,
+) -> Result<u64, String> {
     let mut cleared = 0u64;
     for mut source in readerx_source::store::list_sources()? {
         if source.group_id.as_deref() != Some(group_id) {
@@ -363,8 +383,8 @@ pub(crate) fn clear_book_source_group(_app: &AppHandle, group_id: &str) -> Resul
 }
 
 /// 读取书源已保存的网页登录 Cookie；没有返回 Ok(None)。
-pub(crate) fn read_source_login_cookie(
-    _app: &AppHandle,
+pub(crate) fn read_source_login_cookie<R: tauri::Runtime>(
+    _app: &AppHandle<R>,
     id: &str,
 ) -> Result<Option<String>, String> {
     readerx_source::store::read_login_cookie(id)
@@ -375,8 +395,8 @@ pub(crate) fn read_source_login_cookie(
 /// 当前写入由 `readerx_source::auth::persist_login_outcome` 统一完成（App 与 CLI 共用），
 /// 这里保留同一入口供后续需要直接落盘的调用方使用，避免两处各写一套格式。
 #[allow(dead_code)]
-pub(crate) fn write_source_login_cookie(
-    _app: &AppHandle,
+pub(crate) fn write_source_login_cookie<R: tauri::Runtime>(
+    _app: &AppHandle<R>,
     id: &str,
     url: &str,
     cookie: &str,
@@ -385,7 +405,9 @@ pub(crate) fn write_source_login_cookie(
 }
 
 /// 删除书源保存的登录态（Cookie + 存储快照一并清掉；存在与否均 Ok）。
-pub(crate) fn remove_source_login_cookie(_app: &AppHandle, id: &str) -> Result<(), String> {
+pub(crate) fn remove_source_login_cookie<R: tauri::Runtime>(
+    _app: &AppHandle<R>, id: &str,
+) -> Result<(), String> {
     readerx_source::store::remove_login_cookie(id)
 }
 

@@ -18,6 +18,14 @@ use crate::model::SetPolicy;
 pub enum MergeKind {
     /// 单值：按 HLC 最后写入者胜出；并发且值不同时记一条冲突
     Lww,
+    /// 单值：按 HLC 最后写入者胜出，**并发时不记冲突**。
+    ///
+    /// 用于「位置」这类数据：阅读进度、播放位置、最后打开的章节。两台设备各读到
+    /// 不同位置时，落后的一方只是**过时的位置**，不是需要人裁决的内容——进冲突队列
+    /// 只会让用户面对一堆「保留哪个进度」的无意义选择，而真正的数据冲突被淹没。
+    /// 取舍是明确的：这里放弃了「败方留档」，代价可接受（位置本身没有信息量），
+    /// 因此只给这类字段用，不要拿它当「省事的 LWW」。
+    LwwSilent,
     /// 多值：并发值全部保留，进入冲突队列等裁决
     MultiValue,
     /// 不可变：只有创建时能写（改动会被记为冲突并保留原值）
@@ -33,6 +41,16 @@ pub enum MergeKind {
 impl MergeKind {
     pub fn lww() -> MergeKind {
         MergeKind::Lww
+    }
+
+    /// 静默 LWW（并发不记冲突，见 [`MergeKind::LwwSilent`]）。
+    pub fn lww_silent() -> MergeKind {
+        MergeKind::LwwSilent
+    }
+
+    /// 是否为「单值 LWW」家族（含静默变体）：值语义相同，只差要不要记冲突。
+    pub fn is_lww(&self) -> bool {
+        matches!(self, MergeKind::Lww | MergeKind::LwwSilent)
     }
 
     pub fn set() -> MergeKind {
@@ -241,13 +259,14 @@ impl SchemaRegistry {
     /// ReaderX 的默认同步语义。
     ///
     /// 这些类型对应 App 现有的本地数据（书架元信息 / 阅读进度 / 书签 / 分组 /
-    /// 设置 / 书源）。**当前没有接入使用**（见 `docs/sync.md`），
-    /// 这里先把策略定下来，接入时直接注册即可。
+    /// 书源），字段名与 App 桥接层（`src-tauri/src/sync/bridge.rs`）写入的一致。
+    /// 改这里的字段名或策略时，桥接层要一起改（`tests/sync_bridge.rs` 会挡住不一致）。
     pub fn readerx_defaults() -> SchemaRegistry {
         let mut registry = SchemaRegistry::new();
 
         // 书籍元信息：普通字段 LWW；标签是集合；文件本身（正文 / 封面）不同步，
         // 只同步「哪本书、元信息是什么」，避免局域网里搬几百兆文件。
+        // 删书连带删掉它的进度与书签：留着只会变成指不到书的孤儿记录。
         registry.register(
             Schema::new("book")
                 .field("title", MergeKind::Lww)
@@ -255,20 +274,24 @@ impl SchemaRegistry {
                 .field("intro", MergeKind::Lww)
                 .field("cover", MergeKind::Lww)
                 .field("tags", MergeKind::set())
-                .field("group_id", MergeKind::Lww)
+                .field("group", MergeKind::Lww)
                 .field("format", MergeKind::Frozen)
-                .field("file_name", MergeKind::Frozen),
+                .field("file_name", MergeKind::Frozen)
+                .cascade(CascadeRule::cascade("reading_progress", "book_id"))
+                .cascade(CascadeRule::cascade("bookmark", "book_id")),
         );
 
-        // 阅读进度：谁读得「更晚」听谁的，因此比的是写入时间而不是推进距离
+        // 阅读进度（App 的精确进度：章节序号 + 章节 cid + 章内字符偏移 + 上下文快照）。
+        // 这里用**静默 LWW**：两台设备各读到不同位置时，落后的一方只是过时的位置，
+        // 不该变成一条要人裁决的冲突（否则第一次同步就会堆一屏「保留哪个进度」）。
         registry.register(
             Schema::new("reading_progress")
                 .field("book_id", MergeKind::Frozen)
-                .field("chapter_index", MergeKind::Lww)
-                .field("chapter_title", MergeKind::Lww)
-                .field("offset", MergeKind::Lww)
-                .field("percent", MergeKind::Lww)
-                .field("updated_at", MergeKind::Lww),
+                .field("chapter", MergeKind::LwwSilent)
+                .field("chapter_cid", MergeKind::LwwSilent)
+                .field("char_offset", MergeKind::LwwSilent)
+                .field("context", MergeKind::LwwSilent)
+                .field("updated_at", MergeKind::LwwSilent),
         );
 
         // 书签：一条书签一旦存在就是「用户标记」，正文位置不可变；
@@ -300,11 +323,13 @@ impl SchemaRegistry {
                 .field("value", MergeKind::Lww),
         );
 
-        // 书源：整份 JSON 都可能被两边同时改，保留多值让人选
+        // 书源：整份 JSON 都可能被两边同时改，保留多值让人选。
+        // 不声明唯一键：实体 id 由书源地址派生（换设备也认得同一份源），
+        // 而「同名不同源」在现实里很常见，拿名字当唯一键会把合法的第二份源拒之门外。
         registry.register(
             Schema::new("book_source")
-                .unique("name")
                 .field("name", MergeKind::Lww)
+                .field("url", MergeKind::Frozen)
                 .field("json", MergeKind::MultiValue),
         );
 
@@ -342,15 +367,31 @@ mod tests {
     #[test]
     fn readerx_defaults_cover_app_types() {
         let registry = SchemaRegistry::readerx_defaults();
-        for kind in ["book", "reading_progress", "bookmark", "group", "shelf", "setting", "book_source"] {
+        for kind in [
+            "book",
+            "reading_progress",
+            "bookmark",
+            "group",
+            "shelf",
+            "setting",
+            "book_source",
+        ] {
             assert!(registry.contains(kind), "{kind} 应有默认 schema");
         }
         let book = registry.get("book");
         assert_eq!(book.field_kind("tags").set_policy(), Some(SetPolicy::AddWins));
         let source = registry.get("book_source");
         assert_eq!(source.field_kind("json"), MergeKind::MultiValue);
-        assert_eq!(source.unique_fields, vec!["name".to_string()]);
-        assert_eq!(registry.get("reading_progress").field_kind("updated_at"), MergeKind::Lww);
+        assert!(source.unique_fields.is_empty(), "书源不按名字做唯一键");
+        // 位置类字段一律静默 LWW：并发读到不同位置不是「数据冲突」
+        assert_eq!(
+            registry.get("reading_progress").field_kind("char_offset"),
+            MergeKind::LwwSilent
+        );
+        assert_eq!(
+            registry.get("reading_progress").field_kind("updated_at"),
+            MergeKind::LwwSilent
+        );
         assert_eq!(registry.get("shelf").field_kind("order"), MergeKind::List);
     }
 

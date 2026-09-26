@@ -567,6 +567,38 @@ export function SidebarExpandIcon(p: SvgIconProps) {
   );
 }
 
+/** 局域网同步（两台设备之间的双向箭头） */
+export function SyncIcon(p: SvgIconProps) {
+  return (
+    <Icon {...p}>
+      <path d="M4 8h13l-3-3" />
+      <path d="M20 16H7l3 3" />
+    </Icon>
+  );
+}
+
+/** 冲突 / 需要裁决（分叉再合并） */
+export function ConflictIcon(p: SvgIconProps) {
+  return (
+    <Icon {...p}>
+      <path d="M6 3v6a3 3 0 0 0 3 3h6" />
+      <path d="M18 21v-6a3 3 0 0 0-3-3H9" />
+      <polyline points="15 9 18 12 15 15" />
+      <polyline points="9 15 6 12 9 9" />
+    </Icon>
+  );
+}
+
+/** 设备（同步对端） */
+export function DeviceIcon(p: SvgIconProps) {
+  return (
+    <Icon {...p}>
+      <rect x="7" y="2.5" width="10" height="19" rx="2.5" />
+      <line x1="11" y1="18.5" x2="13" y2="18.5" />
+    </Icon>
+  );
+}
+
 /** 开发者工具（终端窗口） */
 export function TerminalIcon(p: SvgIconProps) {
   return (

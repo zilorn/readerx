@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 
 /// 用法说明。
-pub const USAGE_TEXT: &str = r#"readerx-sync —— ReaderX 局域网同步（独立运行器，App 尚未接入）
+pub const USAGE_TEXT: &str = r#"readerx-sync —— ReaderX 局域网同步（独立运行器，与 App 共用同一份数据目录）
 
 用法：
   readerx-sync [全局参数] <命令> [命令参数]

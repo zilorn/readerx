@@ -27,6 +27,21 @@ use crate::version::VersionVector;
 /// 默认连接 / 读写超时：局域网里超过这个时间基本就是对方没在跑。
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// 发起连接时自报的身份（对端据此认识我们、并记住怎么连回来）。
+#[derive(Clone, Debug)]
+pub struct ClientIdentity<'a> {
+    pub group: &'a str,
+    pub device: &'a str,
+    pub name: &'a str,
+    /// 我这边已有的操作（增量同步游标）
+    pub knowledge: VersionVector,
+    /// 本机同步服务的**监听端口**（`0` = 本机没在监听）：对端据此记住怎么主动连回来。
+    ///
+    /// **不要传这条连接的源端口**：那是内核临时分配的，连接一结束就回收，
+    /// 对端拿它当地址会在下一次连接时被拒。
+    pub listen_port: u16,
+}
+
 /// 一次同步连接。
 pub struct TcpTransport {
     reader: BufReader<TcpStream>,
@@ -42,10 +57,7 @@ impl TcpTransport {
     pub fn connect(
         addr: &str,
         secret: &[u8],
-        group: &str,
-        device: &str,
-        name: &str,
-        knowledge: VersionVector,
+        identity: &ClientIdentity<'_>,
         timeout: Duration,
     ) -> Result<TcpTransport> {
         let stream = TcpStream::connect(addr)
@@ -58,16 +70,18 @@ impl TcpTransport {
         let mut reader = BufReader::new(stream);
 
         // 1) Hello
+        let ClientIdentity { group, device, name, knowledge, listen_port } = identity;
         let client_nonce = nonce();
         write_message(
             &mut writer,
             &Request::Hello {
                 protocol: crate::PROTOCOL_VERSION.to_string(),
-                group: group.to_string(),
-                device: device.to_string(),
-                name: name.to_string(),
-                knowledge,
+                group: (*group).to_string(),
+                device: (*device).to_string(),
+                name: (*name).to_string(),
+                knowledge: knowledge.clone(),
                 nonce: client_nonce.clone(),
+                port: *listen_port,
             },
             MAX_HANDSHAKE_BYTES,
         )?;
@@ -95,7 +109,7 @@ impl TcpTransport {
                 crate::PROTOCOL_VERSION
             )));
         }
-        if peer_group != group {
+        if peer_group != *group {
             return Err(SyncError::Auth("群组不一致，无法同步".to_string()));
         }
 

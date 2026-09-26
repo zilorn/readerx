@@ -1,7 +1,7 @@
 [package]
 name = "readerx-sync"
 version = "0.1.0"
-description = "ReaderX 局域网同步框架：HLC + 版本向量 + 操作日志 + 字段级合并（暂未接入 App）"
+description = "ReaderX 局域网同步框架：HLC + 版本向量 + 操作日志 + 字段级合并（App 与 CLI 共用）"
 edition = "2021"
 publish = false
 

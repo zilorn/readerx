@@ -45,6 +45,9 @@ tauri-plugin-webview-login = { path = "plugins/tauri-plugin-webview-login" }
 # 同一份代码也编译成独立二进制（cargo build -p readerx-source --features cli），
 # 供不启动 App 的离线调试与带登录态的站点验证使用。
 readerx-source = { path = "crates/readerx-source" }
+# 局域网同步：HLC + 版本向量 + 操作日志 + 字段级合并（同一份代码也编译成 CLI）。
+# App 侧只做「本地数据 ↔ 同步实体」的桥接与界面（见 src/sync/）。
+readerx-sync = { path = "crates/readerx-sync" }
 # 统一日志设施：级别过滤 + 文件轮转 + 标准错误 / Android logcat。
 # 主 crate、书源引擎、独立二进制共用一份实现，业务代码只写 log::info! 这类门面宏。
 readerx-log = { path = "crates/readerx-log" }
@@ -53,10 +56,17 @@ log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
+# 跨设备书身份用 sha256 派生（见 src/sync/identity.rs）：同一个文件在两台设备上
+# 要算出同一个 id，不能用进程内随机种子的哈希。
+sha2 = "0.10"
 
 # 桌面端单实例：重复启动不再开出第二个进程，而是聚焦已在运行的那个窗口
 # （两个实例会同时写同一份书库与设置）。插件不支持移动端，那边由系统保证单实例，
 # 因此写进 target 段，Android / iOS 构建根本不编译它。
+# 集成测试要一个 mock AppHandle（真实的数据目录 / 文件布局，只把窗口换成假的）
+[dev-dependencies]
+tauri = { version = "2", features = ["test"] }
+
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-single-instance = "2"
 

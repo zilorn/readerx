@@ -13,6 +13,7 @@ export const settings = {
   "settings.section.sources": "书源",
   "settings.section.import": "导入",
   "settings.section.data": "数据",
+  "settings.section.sync": "同步",
   "settings.section.debug": "调试",
   "settings.section.about": "关于",
 
@@ -89,6 +90,13 @@ export const settings = {
 
   /** 两段式确认：清空听书缓存与清空日志共用同一句 */
   "settings.action.clearConfirm": "再点一次确认清空",
+
+  // 同步（局域网）
+  "settings.sync.title": "局域网同步",
+  "settings.sync.desc": "在多台设备之间同步书籍信息与阅读进度",
+  "settings.sync.onDesc": "已开启，与局域网内的设备互相同步",
+  "settings.sync.stateOn": "已开启",
+  "settings.sync.stateOff": "未开启",
 
   // 应用日志（弹层）
   "settings.logs.title": "应用日志",

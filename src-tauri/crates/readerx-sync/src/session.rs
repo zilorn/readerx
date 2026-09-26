@@ -239,7 +239,16 @@ pub fn sync_with_addr(
     let name = engine.device_name().to_string();
     let group = engine.group_id().to_string();
     let mut transport = crate::net::TcpTransport::connect(
-        addr, &secret, &group, &device, &name, knowledge, timeout,
+        addr,
+        &secret,
+        &crate::net::client::ClientIdentity {
+            group: &group,
+            device: &device,
+            name: &name,
+            knowledge,
+            listen_port: engine.listen_port(),
+        },
+        timeout,
     )?;
     sync_with(engine, &mut transport)
 }
@@ -404,6 +413,86 @@ mod tests {
         let err = sync_with_addr(&mut stranger, &addr, Duration::from_secs(5)).unwrap_err();
         assert!(matches!(err, SyncError::Auth(_)), "跨群组应被拒绝：{err}");
 
+        drop(server);
+    }
+
+
+    /// 服务端记下的对端地址必须是**对端自报的监听端口**。
+    ///
+    /// 回归：曾经把这条 TCP 连接的 `peer_addr()`（内核临时分配的源端口）当成对端地址记下来，
+    /// 连接一断那个端口就回收了 —— 下次主动连它必然「连接被拒绝」。
+    #[test]
+    fn server_records_the_advertised_listen_port_not_the_source_port() {
+        let a = engine("addr-a");
+        let mut b = engine("addr-b");
+        pair(&a, &mut b);
+
+        // B 声称自己在监听这个端口（真实场景由 App / CLI 在起 PeerServer 后写入）
+        b.set_listen_port(47_899);
+        assert_eq!(b.listen_port(), 47_899);
+
+        // A 起服务端
+        let shared_a = shared(a);
+        let options = {
+            let a = crate::net::lock_engine(&shared_a);
+            ServerOptions::from_engine(&a).unwrap().with_bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+        };
+        let server = PeerServer::start(shared_a.clone(), options).unwrap();
+        let addr = server.local_addr().to_string();
+
+        // B 连过去同步
+        sync_with_addr(&mut b, &addr, Duration::from_secs(5)).unwrap();
+
+        let recorded = {
+            let a = crate::net::lock_engine(&shared_a);
+            let peer = a
+                .peers()
+                .get(b.device_id())
+                .expect("服务端应记下这台对端")
+                .clone();
+            peer.addr.expect("对端在监听，就该记下可回连的地址")
+        };
+        assert!(
+            recorded.ends_with(":47899"),
+            "地址应是「来源 IP + 对端自报的监听端口」，实际 {recorded}"
+        );
+        // 端口一定不是这条连接的临时源端口（临时端口不会等于我们指定的 47899）
+        assert!(!recorded.contains(":0"), "{recorded}");
+        drop(server);
+    }
+
+    /// 对端没在监听时不留地址：留着只会让对方一直往一个死端口上重试。
+    #[test]
+    fn server_drops_the_address_when_the_peer_is_not_listening() {
+        let a = engine("nolisten-a");
+        let mut b = engine("nolisten-b");
+        pair(&a, &mut b);
+
+        let shared_a = shared(a);
+        let options = {
+            let a = crate::net::lock_engine(&shared_a);
+            ServerOptions::from_engine(&a).unwrap().with_bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+        };
+        let server = PeerServer::start(shared_a.clone(), options).unwrap();
+        let addr = server.local_addr().to_string();
+
+        // 先让 A 记下一个（此时是错的）地址：模拟历史数据 / 换过网络
+        {
+            let mut a = crate::net::lock_engine(&shared_a);
+            a.update_peer_addr(b.device_id(), "192.168.0.101:40010");
+        }
+        // B 没在监听（listen_port 仍是 0）→ 同步之后那个地址必须被清掉
+        b.set_listen_port(0);
+        sync_with_addr(&mut b, &addr, Duration::from_secs(5)).unwrap();
+
+        let a = crate::net::lock_engine(&shared_a);
+        let peer = a.peers().get(b.device_id()).expect("设备本身仍要留着");
+        assert!(
+            peer.addr.is_none(),
+            "对端没在监听：不该留着连不上的地址，实际 {:?}",
+            peer.addr
+        );
+        assert!(peer.sync_count > 0, "同步计数与地址是两回事，仍要记下同步过");
         drop(server);
     }
 

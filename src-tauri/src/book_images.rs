@@ -24,7 +24,7 @@ const HASH_LEN: usize = 40;
 
 /// 章节图片根目录：`<应用数据目录>/images`（所有函数都按「根目录 + 文件名」工作，
 /// 与 Tauri 解耦，便于单测直接用临时目录验证存储 / 迁移）
-pub(crate) fn images_root(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn images_root<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     let dir = app
         .path()
         .app_data_dir()

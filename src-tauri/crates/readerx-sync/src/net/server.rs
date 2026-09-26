@@ -50,6 +50,14 @@ impl TrustPolicy {
     }
 }
 
+/// 对端的**可回连地址**：`来源 IP + 对端自报的监听端口`。
+///
+/// 对端没在监听（`listen_port == 0`）时返回 `None` —— 调用方据此清掉旧地址，
+/// 而不是留着一个连不上的地址反复重试。
+fn peer_listen_addr(source: &SocketAddr, listen_port: u16) -> Option<String> {
+    (listen_port > 0).then(|| SocketAddr::new(source.ip(), listen_port).to_string())
+}
+
 /// 服务端选项。
 #[derive(Clone, Debug)]
 pub struct ServerOptions {
@@ -205,9 +213,10 @@ fn serve_connection(
     // 1) Hello
     let hello: Request = read_message(&mut reader, MAX_HANDSHAKE_BYTES)?
         .ok_or_else(|| SyncError::Transport("对端未打招呼就断开".to_string()))?;
-    let (protocol, group, client_device, client_name, client_knowledge, client_nonce) = match hello {
-        Request::Hello { protocol, group, device, name, knowledge, nonce } => {
-            (protocol, group, device, name, knowledge, nonce)
+    let (protocol, group, client_device, client_name, client_knowledge, client_nonce, client_port) =
+        match hello {
+        Request::Hello { protocol, group, device, name, knowledge, nonce, port } => {
+            (protocol, group, device, name, knowledge, nonce, port)
         }
         other => {
             let _ = write_message(
@@ -326,16 +335,22 @@ fn serve_connection(
         "对端已连接 addr={addr} device={} name={client_name}",
         crate::version::short_device(&client_device)
     );
-    // 记下「见过这台设备」（对端地址与它自称的已知版本，便于展示与下次主动连接）
+    // 记下「见过这台设备」。地址用**来源 IP + 对端自报的监听端口**：
+    // `addr` 的端口是这条连接的临时源端口，连接结束就回收，拿它当地址对方下次必然连不上。
+    // 对端没在监听（port = 0，或旧版本没带该字段）时清掉旧地址，免得一直往死地址上试。
+    let peer_addr = peer_listen_addr(&addr, client_port);
     {
         let mut engine = lock_engine(&engine);
         engine.record_peer_sync(
             &client_device,
             &client_name,
-            Some(addr.to_string()),
+            peer_addr.clone(),
             client_knowledge.clone(),
             None,
         );
+        if peer_addr.is_none() {
+            engine.forget_peer_addr(&client_device);
+        }
     }
 
     // 3) 请求循环
@@ -360,7 +375,7 @@ fn serve_connection(
             engine.record_peer_sync(
                 &client_device,
                 &client_name,
-                Some(addr.to_string()),
+                peer_addr.clone(),
                 knowledge.clone(),
                 None,
             );
