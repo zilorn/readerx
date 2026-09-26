@@ -67,6 +67,38 @@ pub fn progress_uid(book_uid: &str) -> String {
     format!("rp-{book_uid}")
 }
 
+/// 文本替换规则实体 id（`tr-<16 位十六进制>`）：规则内容即身份。
+///
+/// `scope` 取 `global` / `book`；全局规则的 `book_uid` 传空串。两台设备各自
+/// 添加同一条规则（同一本书、同样的查找 / 替换）会算出同一个 id，于是收敛成一条；
+/// 改规则内容等于换一个 id（旧实体被发布方按差集删掉），因此不会出现「一条规则
+/// 带着两边的半份内容」。`replace` 参与身份：同一处查找配两种替换是两条规则。
+pub fn text_replace_uid(
+    scope: &str,
+    book_uid: &str,
+    find: &str,
+    replace: &str,
+    regex: bool,
+) -> String {
+    format!(
+        "tr-{}",
+        short_hash(&format!(
+            "text_replace\n{scope}\n{book_uid}\n{regex}\n{find}\n{replace}"
+        ))
+    )
+}
+
+/// 分章规则实体 id（`cr-<16 位十六进制>`）：名称 + 正则即身份。
+///
+/// 名称参与身份是刻意的：用户给规则起的名字是它的一部分，改名等于新建一条
+/// （保持与 UI 上一个名字对应一份规则），而不是两条同名规则互相当成对方。
+pub fn chapter_rule_uid(name: &str, pattern: &str) -> String {
+    format!(
+        "cr-{}",
+        short_hash(&format!("chapter_rule\n{}\n{}", name.trim(), pattern.trim()))
+    )
+}
+
 /// URL 归一化：只做「同一条地址的不同写法」这一层，不猜重定向。
 /// 两台设备上同一个书源的地址写法应当一致，这里只兜掉大小写与末尾斜杠的差别。
 fn normalize_url(url: &str) -> String {
@@ -140,5 +172,36 @@ mod tests {
     fn progress_uid_is_derived_from_book() {
         let book = book_uid(&file_key("a.epub", 1));
         assert_eq!(progress_uid(&book), format!("rp-{book}"));
+    }
+
+    #[test]
+    fn rule_uids_are_content_derived() {
+        // 同一条规则在两台设备上算出同一个 id（名字 / 查找内容两端一致即可）
+        assert_eq!(
+            text_replace_uid("global", "", "的", "之", false),
+            text_replace_uid("global", "", "的", "之", false)
+        );
+        // 作用域、书、替换内容、是否正则任一不同 → 不同规则
+        assert_ne!(
+            text_replace_uid("global", "", "的", "之", false),
+            text_replace_uid("book", "", "的", "之", false)
+        );
+        assert_ne!(
+            text_replace_uid("book", "b-1", "的", "之", false),
+            text_replace_uid("book", "b-2", "的", "之", false)
+        );
+        assert_ne!(
+            text_replace_uid("global", "", "的", "之", false),
+            text_replace_uid("global", "", "的", "地", false)
+        );
+        assert_ne!(
+            text_replace_uid("global", "", "的", "之", false),
+            text_replace_uid("global", "", "的", "之", true)
+        );
+
+        assert_eq!(chapter_rule_uid("卷首", "^卷"), chapter_rule_uid(" 卷首 ", "^卷"));
+        assert_ne!(chapter_rule_uid("卷首", "^卷"), chapter_rule_uid("卷首", "^第"));
+        assert!(chapter_rule_uid("卷首", "^卷").starts_with("cr-"));
+        assert!(text_replace_uid("global", "", "a", "b", false).starts_with("tr-"));
     }
 }

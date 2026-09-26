@@ -22,6 +22,11 @@ export interface ChapterRule {
    * 把简介独立成章置于最前（见 trySplitFrontIntro）。
    */
   frontIntro?: boolean;
+  /**
+   * 用户自定义规则的创建时间（毫秒）。内置规则与旧数据没有这个字段。
+   * 同步按它排列自定义规则的先后，两台设备上的显示顺序因此一致。
+   */
+  createdAt?: number;
 }
 
 export interface SplitChapter {
@@ -159,6 +164,25 @@ export function chapterRuleList(): ChapterRule[] {
   return rulesSignal();
 }
 
+/**
+ * 重新从后端读回用户自定义规则（**同步改了规则**时调用）。
+ *
+ * 内置规则是代码常量，永远重新拼在内置列表之后；先等本地写入排队落定再整表替换。
+ * 读失败时保持内存现状（不把读失败当成「没有规则」）。
+ */
+export async function reloadChapterRules(): Promise<void> {
+  await rulesWriteQueue;
+  try {
+    const stored = await readState<unknown>(RULES_KEY);
+    const custom = Array.isArray(stored)
+      ? stored.filter((item): item is ChapterRule => isValidRule(item) && !item.builtin)
+      : [];
+    setRulesSignal([...BUILTIN_RULES, ...custom]);
+  } catch {
+    /* 读不出来时保持现状 */
+  }
+}
+
 function persistRules(next: ChapterRule[]): void {
   setRulesSignal(next);
   const custom = next.filter((rule) => !rule.builtin);
@@ -186,6 +210,7 @@ export function addChapterRule(name: string, pattern: string): AddRuleResult {
     name: trimmedName,
     pattern: normalized,
     builtin: false,
+    createdAt: Date.now(),
   };
   persistRules([...rulesSignal(), rule]);
   return { ok: true, rule };

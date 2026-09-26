@@ -14,10 +14,12 @@ import { createSignal } from "solid-js";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { reloadLocalBooks } from "./books";
 import { reloadBookBookmarks } from "./bookmarks";
+import { reloadChapterRules } from "./chapterRules";
 import { refreshBookSources } from "./bookSources";
 import { describeError, reportFailure } from "./errorReport";
 import { reloadGroups } from "./groups";
 import { reloadReadingProgress } from "./store";
+import { reloadTextReplacements } from "./textReplacements";
 import { t, type MessageKey } from "./i18n";
 import { createLogger } from "./logger";
 import { showActionToast } from "./toast";
@@ -90,6 +92,10 @@ export interface AppliedChanges {
   progress: boolean;
   groups: boolean;
   sources: boolean;
+  /** 文本替换规则有变化 → 重新读回规则清单 */
+  textReplaces: boolean;
+  /** 分章规则有变化 → 重新读回规则清单 */
+  chapterRules: boolean;
   bookmarks: string[];
   deletedBooks: string[];
 }
@@ -272,6 +278,8 @@ async function applyChanges(changes: AppliedChanges): Promise<void> {
     `progress=${changes.progress}`,
     `groups=${changes.groups}`,
     `sources=${changes.sources}`,
+    `textReplaces=${changes.textReplaces}`,
+    `chapterRules=${changes.chapterRules}`,
     `bookmarks=${changes.bookmarks.length}`,
     `deleted=${changes.deletedBooks.length}`,
   );
@@ -284,6 +292,8 @@ async function applyChanges(changes: AppliedChanges): Promise<void> {
       for (const bookId of changes.bookmarks) await reloadBookBookmarks(bookId);
     }
     if (changes.sources) await refreshBookSources();
+    if (changes.textReplaces) await reloadTextReplacements();
+    if (changes.chapterRules) await reloadChapterRules();
     setAppliedTick((n) => n + 1);
   } catch (error) {
     reportFailure(t("sync.applied.reloadFailed"), error);

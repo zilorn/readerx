@@ -20,7 +20,8 @@
 // 能直接验证双向搬运的落盘结果；应用代码请走 SyncService（它有引擎与生命周期）。
 #[doc(hidden)]
 pub mod bridge;
-mod identity;
+#[doc(hidden)]
+pub mod identity;
 mod lan;
 mod service;
 mod settings;

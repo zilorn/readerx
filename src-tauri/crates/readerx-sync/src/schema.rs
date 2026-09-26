@@ -278,7 +278,9 @@ impl SchemaRegistry {
                 .field("format", MergeKind::Frozen)
                 .field("file_name", MergeKind::Frozen)
                 .cascade(CascadeRule::cascade("reading_progress", "book_id"))
-                .cascade(CascadeRule::cascade("bookmark", "book_id")),
+                .cascade(CascadeRule::cascade("bookmark", "book_id"))
+                // 只对某本书生效的文本替换规则跟随书一起删（全局规则没有 book_id，不受影响）
+                .cascade(CascadeRule::cascade("text_replace", "book_id")),
         );
 
         // 阅读进度（App 的精确进度：章节序号 + 章节 cid + 章内字符偏移 + 上下文快照）。
@@ -321,6 +323,29 @@ impl SchemaRegistry {
                 .unique("key")
                 .field("key", MergeKind::Frozen)
                 .field("value", MergeKind::Lww),
+        );
+
+        // 文本替换规则（App 的「阅读时显示级替换」）：实体 id 由规则内容派生
+        // （作用域 + 书 + 查找 + 替换 + 是否正则），因此字段本身不可变 ——
+        // 改一条规则等于删掉旧实体、新建一条，两台设备各自编辑也不会写出半新半旧的值。
+        // `book_id` 是**书实体 id**（uid），与进度 / 书签同一口径；书被删时规则一起删。
+        registry.register(
+            Schema::new("text_replace")
+                .field("scope", MergeKind::Frozen)
+                .field("book_id", MergeKind::Frozen)
+                .field("find", MergeKind::Frozen)
+                .field("replace", MergeKind::Frozen)
+                .field("regex", MergeKind::Frozen)
+                .field("created_at", MergeKind::LwwSilent),
+        );
+
+        // 分章规则（用户自定义的章节标题正则）：名称 + 正则即身份。
+        // 与文本替换同理：规则内容就是它的身份，字段不可变。
+        registry.register(
+            Schema::new("chapter_rule")
+                .field("name", MergeKind::Frozen)
+                .field("pattern", MergeKind::Frozen)
+                .field("created_at", MergeKind::LwwSilent),
         );
 
         // 书源：整份 JSON 都可能被两边同时改，保留多值让人选。
@@ -375,11 +400,29 @@ mod tests {
             "shelf",
             "setting",
             "book_source",
+            "text_replace",
+            "chapter_rule",
         ] {
             assert!(registry.contains(kind), "{kind} 应有默认 schema");
         }
         let book = registry.get("book");
         assert_eq!(book.field_kind("tags").set_policy(), Some(SetPolicy::AddWins));
+        // 只对某本书生效的替换规则要跟着书一起删（否则会留下指不到书的孤儿规则）
+        assert!(
+            book.cascade
+                .iter()
+                .any(|rule| rule.child_kind == "text_replace" && rule.on_delete == CascadeAction::Cascade),
+            "书籍删除应级联删除该书的文本替换规则"
+        );
+        // 规则类数据：实体 id 由内容派生，字段一律不可变（改规则 = 删旧建新）
+        assert_eq!(
+            registry.get("text_replace").field_kind("replace"),
+            MergeKind::Frozen
+        );
+        assert_eq!(
+            registry.get("chapter_rule").field_kind("pattern"),
+            MergeKind::Frozen
+        );
         let source = registry.get("book_source");
         assert_eq!(source.field_kind("json"), MergeKind::MultiValue);
         assert!(source.unique_fields.is_empty(), "书源不按名字做唯一键");

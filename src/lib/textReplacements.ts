@@ -75,6 +75,26 @@ export function replaceRuleList(): TextReplaceRule[] {
   return ruleListSignal();
 }
 
+/**
+ * 重新从后端读回替换规则（**同步改了规则**时调用）。
+ *
+ * 先等本地写入排队落定，再整表替换：同步合并后的规则是两台设备的并集，
+ * 磁盘上那份已经是最终结果（引擎是真相，状态文件是物化视图）。
+ * 读失败 / 后端不可用时保持内存现状，不把读失败当成「没有规则」。
+ */
+export async function reloadTextReplacements(): Promise<void> {
+  await writeQueue;
+  try {
+    const stored = await readState<unknown>(STORAGE_KEY);
+    const rules = Array.isArray(stored)
+      ? stored.filter((item): item is TextReplaceRule => isValidRule(item))
+      : [];
+    setRuleListSignal(rules);
+  } catch {
+    /* 读不出来时保持现状 */
+  }
+}
+
 /** 对某本书生效的规则子集（保持创建顺序；规则为空返回 []） */
 export function effectiveReplaceRules(bookId: string): TextReplaceRule[] {
   const list = ruleListSignal();

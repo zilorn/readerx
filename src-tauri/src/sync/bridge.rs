@@ -41,6 +41,10 @@ use super::identity::{self, BookKey};
 const SHELF_KEY: &str = "readerx.shelf";
 /// 书架分组所在的偏好 key（前端 `groups.ts` 的 `GROUPS_KEY`）
 const GROUPS_KEY: &str = "readerx.groups";
+/// 文本替换规则所在的偏好 key（前端 `textReplacements.ts` 的 `STORAGE_KEY`）
+const TEXT_REPLACES_KEY: &str = "readerx.textReplacements";
+/// 分章规则所在的偏好 key（前端 `chapterRules.ts` 的 `RULES_KEY`）
+const CHAPTER_RULES_KEY: &str = "readerx.chapterRules";
 
 /// 发布时机：引擎里已经有这本书时，以谁为准。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,6 +71,10 @@ pub struct AppliedChanges {
     pub sources: bool,
     /// 书签有变化的本机书 id → 只重载这几本
     pub bookmarks: Vec<String>,
+    /// 文本替换规则有变化 → 重新读回规则清单
+    pub text_replaces: bool,
+    /// 分章规则有变化 → 重新读回规则清单
+    pub chapter_rules: bool,
     /// 本次落地删掉的本机书 id（对端删了它们）
     pub deleted_books: Vec<String>,
 }
@@ -77,6 +85,8 @@ impl AppliedChanges {
             && !self.progress
             && !self.groups
             && !self.sources
+            && !self.text_replaces
+            && !self.chapter_rules
             && self.bookmarks.is_empty()
             && self.deleted_books.is_empty()
     }
@@ -152,6 +162,20 @@ impl BookIndex {
 
     pub(crate) fn len(&self) -> usize {
         self.by_id.len()
+    }
+
+    /// 索引里已知的本机书籍 uid（索引还没建过就先扫一遍本地书库）。
+    ///
+    /// 发布「按书生效」的规则时要用它判断「这本书本机到底有没有」：本机没有的书，
+    /// 它那些规则是从对端同步来的，本地清单里自然看不到，不能当成用户删掉了。
+    pub(crate) fn local_uids<R: tauri::Runtime>(
+        &mut self,
+        app: &AppHandle<R>,
+    ) -> Result<std::collections::BTreeSet<String>, String> {
+        if !self.built {
+            *self = BookIndex::rebuild(app)?;
+        }
+        Ok(self.by_uid.keys().cloned().collect())
     }
 }
 
@@ -458,6 +482,111 @@ pub fn publish_source_delete<R: tauri::Runtime>(
     Ok(())
 }
 
+/// 发布文本替换规则（`readerx.textReplacements` 的整个数组）。
+///
+/// 规则 id 由**规则内容**派生（见 [`identity::text_replace_uid`]）：两台设备各自添加
+/// 同一条规则会收敛成同一条；改规则内容等于删旧建新。按书生效的规则把本机书 id
+/// 翻译成书实体 id，因此规则跟着书走、不跟着设备走。
+pub fn publish_text_replaces<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    engine: &SharedEngine,
+    index: &mut BookIndex,
+    rules: &Value,
+) -> Result<(), SyncError> {
+    let local_uids = index.local_uids(app).map_err(SyncError::Io)?;
+    let mut guard = lock_engine(engine);
+    let mut live: Vec<String> = Vec::new();
+    for rule in rules.as_array().map(Vec::as_slice).unwrap_or_default() {
+        let Some(find) = rule.get("find").and_then(Value::as_str) else {
+            continue;
+        };
+        let scope = match rule.get("scope").and_then(Value::as_str) {
+            Some("book") => "book",
+            _ => "global",
+        };
+        let replace = rule.get("replace").and_then(Value::as_str).unwrap_or_default();
+        let regex = rule.get("regex").and_then(Value::as_bool).unwrap_or(false);
+        let book_uid = match scope {
+            "book" => match rule.get("bookId").and_then(Value::as_str) {
+                Some(book_id) if !book_id.is_empty() => index.uid_for(app, book_id),
+                // 没有书 id 的「按书规则」无处生效：当成全局规则发布会改变它的语义，
+                // 直接跳过（保持本地现状，不写出一条语义错误的实体）
+                _ => continue,
+            },
+            _ => String::new(),
+        };
+        let uid = identity::text_replace_uid(scope, &book_uid, find, replace, regex);
+        live.push(uid.clone());
+        let values = text_replace_values(scope, &book_uid, find, replace, regex, rule);
+        if guard.entity(&uid).is_none() {
+            guard.create_entity("text_replace", Some(uid), values)?;
+        } else {
+            publish_fields(&mut guard, &uid, &values)?;
+        }
+    }
+
+    // 引擎里有、本地清单里没有的规则：只把**能确定是本机删掉的那部分**入墓碑 ——
+    // 指向本机没有的书的规则是从对端同步来的（本机还没导入那本书），删了它就等于
+    // 用一次本地发布抹掉对端的规则。
+    let stale: Vec<String> = guard
+        .entities_of_kind("text_replace", false)
+        .into_iter()
+        .filter(|entity| !live.iter().any(|uid| uid == &entity.id))
+        .filter(|entity| {
+            let book = book_ref_of(entity);
+            book.is_empty() || local_uids.contains(&book)
+        })
+        .map(|entity| entity.id.clone())
+        .collect();
+    for id in stale {
+        guard.delete_entity(&id, Some("文本替换规则已删除".to_string()))?;
+    }
+    Ok(())
+}
+
+/// 发布分章规则（`readerx.chapterRules` 里的用户自定义规则）。
+///
+/// 内置规则是代码常量、不在状态文件里，因此这里只发布自定义规则；
+/// 规则身份 = 名称 + 正则（见 [`identity::chapter_rule_uid`]）。
+pub fn publish_chapter_rules<R: tauri::Runtime>(
+    _app: &AppHandle<R>,
+    engine: &SharedEngine,
+    rules: &Value,
+) -> Result<(), SyncError> {
+    let mut guard = lock_engine(engine);
+    let mut live: Vec<String> = Vec::new();
+    for rule in rules.as_array().map(Vec::as_slice).unwrap_or_default() {
+        let (Some(name), Some(pattern)) = (
+            rule.get("name").and_then(Value::as_str),
+            rule.get("pattern").and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        if name.trim().is_empty() || pattern.trim().is_empty() {
+            continue;
+        }
+        let uid = identity::chapter_rule_uid(name, pattern);
+        live.push(uid.clone());
+        let created_at = rule.get("createdAt").and_then(Value::as_i64).unwrap_or(0);
+        let values = chapter_rule_values(name, pattern, created_at);
+        if guard.entity(&uid).is_none() {
+            guard.create_entity("chapter_rule", Some(uid), values)?;
+        } else {
+            publish_fields(&mut guard, &uid, &values)?;
+        }
+    }
+    let stale: Vec<String> = guard
+        .entities_of_kind("chapter_rule", false)
+        .into_iter()
+        .map(|entity| entity.id.clone())
+        .filter(|id| !live.iter().any(|uid| uid == id))
+        .collect();
+    for id in stale {
+        guard.delete_entity(&id, Some("分章规则已删除".to_string()))?;
+    }
+    Ok(())
+}
+
 /// 启动对账：本地有、引擎里没有的记录补进去。
 ///
 /// 覆盖三种情况：首次启用同步（引擎是空的）、引擎数据被清过、上次运行到这里就退出了。
@@ -496,6 +625,13 @@ pub fn reconcile<R: tauri::Runtime>(
     // 分组与书源
     if let Ok(Some(groups)) = storage::read_state(app, GROUPS_KEY) {
         publish_groups(app, engine, &groups)?;
+    }
+    // 规则类数据（文本替换 / 分章规则）
+    if let Ok(Some(rules)) = storage::read_state(app, TEXT_REPLACES_KEY) {
+        publish_text_replaces(app, engine, index, &rules)?;
+    }
+    if let Ok(Some(rules)) = storage::read_state(app, CHAPTER_RULES_KEY) {
+        publish_chapter_rules(app, engine, &rules)?;
     }
     if let Ok(sources) = readerx_source::store::list_sources() {
         for source in &sources {
@@ -569,6 +705,13 @@ fn apply_snapshots<R: tauri::Runtime>(
             }
         }
     }
+    // 书落到本机后补一次「按书生效」的文本替换规则：对端可能先同步来规则，
+    // 那时候本书还没导入（规则无处可落），书一到就得把它们落到本地清单里。
+    if changes.books {
+        if apply_text_replaces(app, engine, index).map_err(SyncError::Io)? {
+            changes.text_replaces = true;
+        }
+    }
     for snapshot in &snapshots {
         if let Snapshot::Progress { book_uid, deleted, entry } = snapshot {
             if apply_progress(app, index, book_uid, *deleted, entry.as_ref())
@@ -606,6 +749,17 @@ fn apply_snapshots<R: tauri::Runtime>(
             if apply_source(&sources, uid, *deleted, payload.as_ref()).map_err(SyncError::Io)? {
                 changes.sources = true;
             }
+        }
+    }
+    // 规则类数据：整表重写（引擎实体是真相，本地状态文件是给界面读的物化视图）
+    if snapshots.iter().any(|s| matches!(s, Snapshot::TextReplace)) {
+        if apply_text_replaces(app, engine, index).map_err(SyncError::Io)? {
+            changes.text_replaces = true;
+        }
+    }
+    if snapshots.iter().any(|s| matches!(s, Snapshot::ChapterRule)) {
+        if apply_chapter_rules(app, engine).map_err(SyncError::Io)? {
+            changes.chapter_rules = true;
         }
     }
     Ok(changes)
@@ -692,6 +846,10 @@ fn collect_snapshots(
                 deleted,
                 payload: (!deleted).then(|| entity.field("json")).flatten(),
             }),
+            // 规则类数据：一条规则变没变不改变落地动作 —— 每次都由引擎实体**整表重写**
+            // 本地清单（规则条数少，重建比逐条对账更好推理，也不会漏掉删除）
+            "text_replace" => snapshots.push(Snapshot::TextReplace),
+            "chapter_rule" => snapshots.push(Snapshot::ChapterRule),
             _ => {}
         }
     }
@@ -725,6 +883,10 @@ enum Snapshot {
         deleted: bool,
         payload: Option<Value>,
     },
+    /// 文本替换规则有变化（落地时整表重写本地清单）
+    TextReplace,
+    /// 分章规则有变化（同上）
+    ChapterRule,
 }
 
 /// 引擎里书籍实体的字段快照（只看同步关心的那些）。
@@ -895,6 +1057,124 @@ fn apply_bookmarks<R: tauri::Runtime>(
     }
     book_store::put_bookmarks(app, local_id, &values)?;
     Ok(true)
+}
+
+/// 按引擎里的规则实体重写本地文本替换清单（`readerx.textReplacements`）。
+///
+/// - 全局规则直接落地；按书生效的规则要先把书实体 id 翻回本机书 id，翻不出来
+///   （本机还没导入那本书）的**留在引擎里不落地**，等书落到本机后再补一次；
+/// - 顺序按创建时间、其次实体 id（两台设备看到同一个顺序，不会各排各的）；
+/// - 写之前先比一遍，值没变不写盘（避免每次同步都无谓地敲一次状态文件）。
+fn apply_text_replaces<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    engine: &SharedEngine,
+    index: &mut BookIndex,
+) -> Result<bool, String> {
+    // 先把实体拷出来再开锁：落地要读 / 写状态文件，不能抱着引擎锁做 I/O
+    let entities: Vec<Entity> = lock_engine(engine)
+        .entities_of_kind("text_replace", false)
+        .into_iter()
+        .cloned()
+        .collect();
+    let mut items: Vec<(i64, String, Value)> = Vec::new();
+    for entity in entities {
+        let find = text_field(&entity, "find");
+        if find.is_empty() {
+            continue;
+        }
+        let scope = match text_field(&entity, "scope").as_str() {
+            "book" => "book",
+            _ => "global",
+        };
+        let book_uid = book_ref_of(&entity);
+        let book_id = if scope == "book" {
+            match index.resolve(app, &book_uid)? {
+                Some(local_id) => local_id,
+                // 书还没到本机：规则留在引擎里，等书落地时补
+                None => continue,
+            }
+        } else {
+            String::new()
+        };
+        let created_at = entity.field("created_at").and_then(|v| v.as_i64()).unwrap_or(0);
+        items.push((
+            created_at,
+            entity.id.clone(),
+            json!({
+                "id": entity.id,
+                "scope": scope,
+                "bookId": book_id,
+                "find": find,
+                "replace": text_field(&entity, "replace"),
+                "regex": entity.field("regex").and_then(|v| v.as_bool()).unwrap_or(false),
+                "createdAt": created_at,
+            }),
+        ));
+    }
+    items.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    let next = Value::Array(items.into_iter().map(|(_, _, value)| value).collect());
+    write_state_if_changed(app, TEXT_REPLACES_KEY, &next)
+}
+
+/// 按引擎里的规则实体重写本地分章规则清单（`readerx.chapterRules` 的用户自定义部分）。
+///
+/// 内置规则是代码常量、不进状态文件，因此这里写出来的每一条都带 `builtin: false`。
+fn apply_chapter_rules<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    engine: &SharedEngine,
+) -> Result<bool, String> {
+    let entities: Vec<Entity> = lock_engine(engine)
+        .entities_of_kind("chapter_rule", false)
+        .into_iter()
+        .cloned()
+        .collect();
+    let mut items: Vec<(i64, String, Value)> = entities
+        .into_iter()
+        .filter_map(|entity| {
+            let name = text_field(&entity, "name");
+            let pattern = text_field(&entity, "pattern");
+            if name.is_empty() || pattern.is_empty() {
+                return None;
+            }
+            let created_at = entity.field("created_at").and_then(|v| v.as_i64()).unwrap_or(0);
+            Some((
+                created_at,
+                entity.id.clone(),
+                json!({
+                    "id": entity.id,
+                    "name": name,
+                    "pattern": pattern,
+                    "builtin": false,
+                    "createdAt": created_at,
+                }),
+            ))
+        })
+        .collect();
+    items.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    let next = Value::Array(items.into_iter().map(|(_, _, value)| value).collect());
+    write_state_if_changed(app, CHAPTER_RULES_KEY, &next)
+}
+
+/// 状态文件只在值真的变了时重写（同步落地路径会被反复调用）。
+fn write_state_if_changed<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    key: &str,
+    next: &Value,
+) -> Result<bool, String> {
+    let current = storage::read_state(app, key)?;
+    if current.as_ref() == Some(next) {
+        return Ok(false);
+    }
+    storage::write_state(app, key, next)?;
+    Ok(true)
+}
+
+/// 实体上的字符串字段（缺省空串）。
+fn text_field(entity: &Entity, field: &str) -> String {
+    entity
+        .field(field)
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_default()
 }
 
 /// 落地分组：同步来的分组在本机按**名字**对应，缺的补上，删掉的移除。
@@ -1124,6 +1404,37 @@ fn bookmark_value(id: &str, local_book_id: &str, entity: &Entity) -> Value {
         "after": text("after"),
         "createdAt": text("created_at"),
     })
+}
+
+/// 文本替换规则的引擎字段。`book_id` 存书实体 id（uid），全局规则为空串。
+fn text_replace_values(
+    scope: &str,
+    book_uid: &str,
+    find: &str,
+    replace: &str,
+    regex: bool,
+    rule: &Value,
+) -> BTreeMap<String, Value> {
+    let mut fields = BTreeMap::new();
+    fields.insert("scope".to_string(), json!(scope));
+    fields.insert("book_id".to_string(), json!(book_uid));
+    fields.insert("find".to_string(), json!(find));
+    fields.insert("replace".to_string(), json!(replace));
+    fields.insert("regex".to_string(), json!(regex));
+    fields.insert(
+        "created_at".to_string(),
+        json!(rule.get("createdAt").and_then(Value::as_i64).unwrap_or(0)),
+    );
+    fields
+}
+
+/// 分章规则的引擎字段：名称 + 正则即身份，另带创建时间（只用来稳定显示顺序）。
+fn chapter_rule_values(name: &str, pattern: &str, created_at: i64) -> BTreeMap<String, Value> {
+    let mut fields = BTreeMap::new();
+    fields.insert("name".to_string(), json!(name.trim()));
+    fields.insert("pattern".to_string(), json!(pattern.trim()));
+    fields.insert("created_at".to_string(), json!(created_at));
+    fields
 }
 
 fn source_payload(source: &BookSource) -> Value {

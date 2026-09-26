@@ -16,6 +16,7 @@
 //! 每个用例开始时清空它。
 
 use readerx_lib::sync::bridge::{self, BookIndex, PublishMode};
+use readerx_lib::sync::identity;
 use readerx_lib::sync::SyncService;
 use readerx_sync::net::{
     lock_engine, shared, LoopbackTransport, PeerServer, ServerOptions, SharedEngine,
@@ -495,6 +496,21 @@ fn local_edit_is_published_without_duplicating_operations() {
 
 /// App 侧的网络接线：**服务端握手时要把「连我用的端口」记成对方声明的监听端口**。
 ///
+/// 等后台的「开启同步后的首轮同步」跑完。
+///
+/// `SyncService::set_enabled(true)` 会在后台线程里做首次对账 + 首轮同步（用户点开关
+/// 不该干等书库灌进引擎），而那期间 `syncing` 是置位的 —— 测试紧接着手动同步就会拿到
+/// 「正在同步中」。这里等它落定，让用例与调度时机无关。
+fn wait_until_idle(service: &SyncService<tauri::test::MockRuntime>) {
+    for _ in 0..600 {
+        if !service.status().syncing {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("开启同步后的首轮同步迟迟没有结束");
+}
+
 /// 回归：曾经把 TCP 连接的源端口当成对端地址记下来，那个端口一断就回收，
 /// 下次主动连它必然「连接被拒绝」（用户日志里的 `192.168.0.101:40010` 就是它）。
 #[test]
@@ -537,6 +553,7 @@ fn app_advertises_its_listen_port_to_the_peer() {
     let peer_addr = server.local_addr().to_string();
 
     // 让 App 侧主动连过去（这就是「点某台设备同步」走的那条路）
+    wait_until_idle(&service);
     service
         .sync_with_addr_now(&peer_addr)
         .expect("与对端同步应成功");
@@ -603,6 +620,7 @@ fn removed_peer_cannot_sync_into_the_app_anymore() {
     let server = PeerServer::start(peer.clone(), options).unwrap();
     let peer_addr = server.local_addr().to_string();
 
+    wait_until_idle(&service);
     service
         .sync_with_addr_now(&peer_addr)
         .expect("与对端同步应成功");
@@ -626,8 +644,10 @@ fn removed_peer_cannot_sync_into_the_app_anymore() {
         readerx_sync::sync_with_addr(&mut guard, &app_loopback, std::time::Duration::from_secs(5))
             .expect_err("被移除的设备不该还能连进来")
     };
+    // 按**稳定错误码**断言，而不是某句提示文案：文案会随界面措辞调整（客户端按码
+    // 出「本机已被对端从同步设备里移除」），码才是线协议的一部分
     assert!(
-        error.to_string().contains("已被对端移除"),
+        error.code() == "removed_by_peer" && error.to_string().contains("移除"),
         "错误应说明是被移除（实际：{error}）"
     );
     assert!(
@@ -638,4 +658,130 @@ fn removed_peer_cannot_sync_into_the_app_anymore() {
     drop(server);
     service.shutdown();
     let _ = data_root;
+}
+
+/// 文本替换规则与分章规则：本机发布 → 对端拿到；对端增删 → 本机落回状态文件。
+///
+/// 两条容易踩的坑都在这里挡住：
+/// - 按书生效的替换规则必须按**书实体 id** 走（本机书 id 每台设备都不一样），
+///   落回本地时再翻回本机的书 id；
+/// - 对端为「本机还没有的书」建的规则不能被本机的一次发布当成「用户删掉了」抹掉。
+#[test]
+fn rules_sync_in_both_directions() {
+    let _serial = SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (handle, app_data) = setup();
+
+    seed_local_book(&app_data, "local-1", "三体");
+    write_json(
+        &app_data.join("state").join("readerx.textReplacements.json"),
+        &json!([
+            { "id": "rep-a", "scope": "global", "bookId": "", "find": "的", "replace": "之", "regex": false, "createdAt": 100 },
+            { "id": "rep-b", "scope": "book", "bookId": "local-1", "find": "他", "replace": "她", "regex": false, "createdAt": 200 },
+        ]),
+    );
+    write_json(
+        &app_data.join("state").join("readerx.chapterRules.json"),
+        &json!([
+            { "id": "user-a", "name": "卷首", "pattern": "^卷", "builtin": false, "createdAt": 100 },
+        ]),
+    );
+
+    // ---- 本机引擎 + 对账：规则发布成实体 ----
+    let local = local_engine(&app_data);
+    let mut index = BookIndex::default();
+    bridge::reconcile(&handle, &local, &mut index).unwrap();
+
+    let global_uid = {
+        let guard = lock_engine(&local);
+        let rules = guard.entities_of_kind("text_replace", false);
+        assert_eq!(rules.len(), 2, "两条替换规则都应发布");
+        let book_rule = rules
+            .iter()
+            .find(|entity| entity.field("scope") == Some(json!("book")))
+            .expect("按书生效的那条应在");
+        let book_uid = book_rule.field("book_id").unwrap().as_str().unwrap().to_string();
+        assert!(book_uid.starts_with("b-"), "按书规则指向书实体 id，实际 {book_uid}");
+        assert_eq!(guard.entities_of_kind("chapter_rule", false).len(), 1);
+        let global = rules
+            .iter()
+            .find(|entity| entity.field("scope") == Some(json!("global")))
+            .expect("全局规则应在");
+        global.id.clone()
+    };
+
+    // ---- 对端同步一轮：拿到规则，然后删掉全局替换、补一条分章规则 ----
+    let peer = peer_engine("rules-peer", Some(&lock_engine(&local).pairing_code()));
+    sync_once(&local, &peer);
+    {
+        let guard = lock_engine(&peer);
+        assert_eq!(guard.entities_of_kind("text_replace", false).len(), 2);
+        assert_eq!(guard.entities_of_kind("chapter_rule", false).len(), 1);
+    }
+    let peer_uid = identity::text_replace_uid("book", "b-unknown", "甲", "乙", false);
+    {
+        let mut guard = lock_engine(&peer);
+        guard.delete_entity(&global_uid, Some("对端删除".to_string())).unwrap();
+        guard
+            .create_entity(
+                "chapter_rule",
+                Some(identity::chapter_rule_uid("英文卷", "^Volume")),
+                [
+                    ("name", json!("英文卷")),
+                    ("pattern", json!("^Volume")),
+                    ("created_at", json!(300)),
+                ],
+            )
+            .unwrap();
+        // 对端为「本机还没导入的书」建一条规则：本机不该因为看不到它就把它删掉
+        guard
+            .create_entity(
+                "text_replace",
+                Some(peer_uid.clone()),
+                [
+                    ("scope", json!("book")),
+                    ("book_id", json!("b-unknown")),
+                    ("find", json!("甲")),
+                    ("replace", json!("乙")),
+                    ("regex", json!(false)),
+                    ("created_at", json!(300)),
+                ],
+            )
+            .unwrap();
+        guard.flush().unwrap();
+    }
+
+    // ---- 反向同步 + 落地 ----
+    sync_once(&peer, &local);
+    let changes = bridge::materialize(&handle, &local, 0, &mut index).unwrap();
+    assert!(changes.text_replaces, "替换规则应被落地：{changes:?}");
+    assert!(changes.chapter_rules, "分章规则应被落地：{changes:?}");
+
+    let replaces = read_json(&app_data.join("state").join("readerx.textReplacements.json"));
+    let items = replaces.as_array().unwrap();
+    assert_eq!(items.len(), 1, "全局那条被对端删了，只剩按书的一条：{replaces}");
+    assert_eq!(items[0]["bookId"], json!("local-1"), "书实体 id 要翻回本机书 id");
+    assert_eq!(items[0]["find"], json!("他"));
+    assert!(items[0]["id"].as_str().unwrap().starts_with("tr-"));
+
+    let chapter_rules = read_json(&app_data.join("state").join("readerx.chapterRules.json"));
+    let names: Vec<String> = chapter_rules
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|rule| rule["name"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(names, vec!["卷首".to_string(), "英文卷".to_string()]);
+    assert_eq!(chapter_rules[0]["builtin"], json!(false));
+
+    // 落地后再对账一次（等价于「下次启动」：先落地，再把本地清单发布回去）。
+    // 本地清单里没有那条「未知书的规则」，它必须活着 —— 否则一次发布就抹掉了对端的规则。
+    bridge::reconcile(&handle, &local, &mut index).unwrap();
+    assert!(
+        lock_engine(&local)
+            .entity(&peer_uid)
+            .is_some_and(|entity| !entity.is_deleted()),
+        "指向本机没有的书的规则不该被本地发布删掉"
+    );
+    let after = read_json(&app_data.join("state").join("readerx.textReplacements.json"));
+    assert_eq!(after.as_array().unwrap().len(), 1, "对账不该改动本地清单：{after}");
 }

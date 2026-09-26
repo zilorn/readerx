@@ -64,11 +64,13 @@ pub async fn readerx_state_get(app: AppHandle, key: String) -> Result<Option<Val
 pub async fn readerx_state_set(app: AppHandle, key: String, value: Value) -> Result<(), String> {
     blocking("状态写入", move || {
         storage::write_state(&app, &key, &value)?;
-        // 同步钩子：阅读进度与分组清单要在落盘后发布给引擎。
-        // 未启用同步时这两个调用是空操作（见 sync::SyncService）。
+        // 同步钩子：阅读进度 / 分组清单 / 规则类数据要在落盘后发布给引擎。
+        // 未启用同步时这些调用是空操作（见 sync::SyncService）。
         match key.as_str() {
             "readerx.shelf" => sync::service_hook(&app).on_shelf_changed(&value),
             "readerx.groups" => sync::service_hook(&app).on_groups_changed(&value),
+            "readerx.textReplacements" => sync::service_hook(&app).on_text_replaces_changed(&value),
+            "readerx.chapterRules" => sync::service_hook(&app).on_chapter_rules_changed(&value),
             _ => {}
         }
         Ok(())

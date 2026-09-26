@@ -897,6 +897,8 @@ impl<R: tauri::Runtime> SyncService<R> {
         changes.progress |= extra.progress;
         changes.groups |= extra.groups;
         changes.sources |= extra.sources;
+        changes.text_replaces |= extra.text_replaces;
+        changes.chapter_rules |= extra.chapter_rules;
         changes.bookmarks.extend(extra.bookmarks);
         changes.deleted_books.extend(extra.deleted_books);
         self.emit_applied(&changes);
@@ -1002,6 +1004,32 @@ impl<R: tauri::Runtime> SyncService<R> {
         };
         if let Err(error) = bridge::publish_groups(&self.app, &engine, groups) {
             log::warn!("同步发布分组失败：{error}");
+        }
+    }
+
+    /// 文本替换规则整表被写入（`readerx.textReplacements`）。
+    pub fn on_text_replaces_changed(&self, rules: &Value) {
+        let Some(engine) = self.engine() else {
+            return;
+        };
+        let mut index = {
+            let mut inner = self.lock();
+            std::mem::take(&mut inner.index)
+        };
+        let result = bridge::publish_text_replaces(&self.app, &engine, &mut index, rules);
+        self.lock().index = index;
+        if let Err(error) = result {
+            log::warn!("同步发布文本替换规则失败：{error}");
+        }
+    }
+
+    /// 分章规则整表被写入（`readerx.chapterRules` 的用户自定义部分）。
+    pub fn on_chapter_rules_changed(&self, rules: &Value) {
+        let Some(engine) = self.engine() else {
+            return;
+        };
+        if let Err(error) = bridge::publish_chapter_rules(&self.app, &engine, rules) {
+            log::warn!("同步发布分章规则失败：{error}");
         }
     }
 
@@ -1345,12 +1373,14 @@ impl<R: tauri::Runtime> SyncService<R> {
             return;
         }
         log::info!(
-            "同步落地: 书籍={} 进度={} 分组={} 书源={} 书签={} 删除={}",
+            "同步落地: 书籍={} 进度={} 分组={} 书源={} 书签={} 替换规则={} 分章规则={} 删除={}",
             changes.books,
             changes.progress,
             changes.groups,
             changes.sources,
             changes.bookmarks.len(),
+            changes.text_replaces,
+            changes.chapter_rules,
             changes.deleted_books.len()
         );
         if let Err(error) = self.app.emit(SYNC_APPLIED_EVENT, changes) {
