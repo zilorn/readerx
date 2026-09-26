@@ -255,13 +255,57 @@ export default function DiscoverPage() {
     void onSearch(kw);
   });
 
-  // 搜索请求序号：防止上一次未跑完的搜索在完成时把新搜索的进度/结果覆盖掉
+  // 搜索请求序号：每发起一轮搜索自增一次；上一轮的 worker 与回调据此立刻作废 ——
+  // 不再向剩余书源发请求，已经在飞的那几次调用回来时结果也被丢弃。
   let searchSeq = 0;
+
+  /**
+   * 取消正在进行的搜索（没有搜索在跑时什么都不做）；返回是否真的取消了一轮。
+   * 已上屏的结果保留（用户看到的是「停在这里」，不是被清空）；
+   * 已经在飞的书源调用会自己跑完（引擎侧单次调用有预算），由这里丢弃其结果。
+   */
+  function cancelRunningSearch(): boolean {
+    if (!searching()) return false;
+    searchSeq += 1;
+    setSearching(false);
+    setSearchProgress(0);
+    return true;
+  }
+
+  /** 搜索结果区的「停止」：只取消本轮搜索，不重新搜 */
+  function stopSearch(): void {
+    const done = searchProgress();
+    if (!cancelRunningSearch()) return;
+    // 用户主动停止：这是需要留痕的动作，记下停在哪个书源（关键词在开始那条 info 里）
+    log.info("搜索取消", `doneSources=${done}`, `total=${searchTotal()}`);
+  }
+
+  /**
+   * 搜索框提交（点搜索按钮 / 回车）：
+   * - 有词：按该词重新搜索 —— 正在跑的那一轮被接管（立刻作废），用户不必等它跑完；
+   * - 无词：正在搜索时等价于「停止」。
+   */
+  function submitSearch(): void {
+    const kw = keyword().trim();
+    if (kw) {
+      void onSearch(kw);
+      return;
+    }
+    stopSearch();
+  }
 
   async function onSearch(rawKw?: string) {
     const kw = (rawKw ?? keyword()).trim();
     if (!kw) return;
     const sources = searchSources();
+    // 上一轮还没跑完（换词重搜 / 快速搜索入口接管）：自增序号即作废它
+    if (searching()) {
+      log.info(
+        "搜索被新搜索接管",
+        `doneSources=${searchProgress()}`,
+        `total=${searchTotal()}`,
+      );
+    }
     const seq = ++searchSeq;
     const searchStarted = performance.now();
     // 关键词是用户主动发起的搜索动作，排错必需，可以记
@@ -321,7 +365,8 @@ export default function DiscoverPage() {
       setSearchProgress(doneSources);
     }
     async function worker(): Promise<void> {
-      while (cursor < sources.length) {
+      // 取消 / 被新搜索接管后立刻收工：只剩已经在飞的那几次调用，不会再压后面的书源
+      while (cursor < sources.length && seq === searchSeq) {
         const idx = cursor;
         cursor += 1;
         await runOne(sources[idx]);
@@ -529,16 +574,20 @@ export default function DiscoverPage() {
                     placeholder={t("discover.search.placeholder")}
                     value={keyword()}
                     onKeyDown={(e) => {
-                      if (e.key === "Enter") void onSearch();
+                      if (e.key === "Enter") submitSearch();
                     }}
                     onInput={(e) => setKeyword(e.currentTarget.value)}
                   />
                 </div>
                 <button
                   class="grid h-[42px] w-[42px] flex-none place-items-center rounded-[10px] bg-accent text-on-accent active:scale-[0.95] disabled:opacity-50"
-                  aria-label={t("common.search")}
-                  disabled={searching() || !canSearch()}
-                  onClick={() => void onSearch()}
+                  aria-label={
+                    searching()
+                      ? t("discover.search.restart")
+                      : t("common.search")
+                  }
+                  disabled={!canSearch()}
+                  onClick={submitSearch}
                 >
                   <SearchIcon size={19} />
                 </button>
@@ -559,6 +608,13 @@ export default function DiscoverPage() {
                     total: searchTotal() || "…",
                     parallel: currentSourceParallel(),
                   })}
+                  <button
+                    type="button"
+                    class="flex-none rounded-full border border-border bg-surface px-2.5 py-[3px] text-[11.5px] font-medium text-text-2 transition-colors active:bg-surface-2"
+                    onClick={stopSearch}
+                  >
+                    {t("discover.search.stop")}
+                  </button>
                 </div>
               </Show>
               <Show when={!searching() && searchDone() && results().length === 0}>
