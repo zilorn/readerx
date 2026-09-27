@@ -19,13 +19,15 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::assets::{self, AssetDigest, BookAssets};
 use crate::content::ChapterContent;
 use crate::engine::SyncEngine;
 use crate::error::{Result, SyncError};
 use crate::id::now_ms;
 use crate::net::{PeerInfo, Transport};
 use crate::proto::{
-    Request, Response, CONTENT_BATCH_BYTES, CONTENT_BATCH_CHAPTERS, DEFAULT_BATCH,
+    Request, Response, ASSET_BATCH_BYTES, ASSET_BATCH_ITEMS, CONTENT_BATCH_BYTES,
+    CONTENT_BATCH_CHAPTERS, DEFAULT_BATCH,
 };
 use crate::version::VersionVector;
 
@@ -40,6 +42,15 @@ pub const MAX_CONTENT_CHAPTERS: usize = 200;
 
 /// 一次会话最多搬运的**正文字节数**（约 32 MiB，与章节数上限取先到者）。
 pub const MAX_CONTENT_BYTES: u64 = 32 * 1024 * 1024;
+
+/// 一次会话最多搬运的**资源份数**（封面 + 章节插图）。
+///
+/// 与正文同样的理由：资源通道要抱着引擎锁走。漫画书动辄几百张图，
+/// 因此在多次同步里慢慢搬完 —— 差集每次重算，断点续传天然成立。
+pub const MAX_ASSETS: usize = 200;
+
+/// 一次会话最多搬运的**资源字节数**（约 32 MiB，与份数上限取先到者）。
+pub const MAX_ASSET_BYTES: u64 = 32 * 1024 * 1024;
 
 /// 同步结果（CLI 输出 / 日志 / 状态页）。
 #[derive(Clone, Debug, Default)]
@@ -64,6 +75,10 @@ pub struct SyncReport {
     pub content_pushed: usize,
     /// 本次会话从对端取回并存进暂存区的正文章节数
     pub content_pulled: usize,
+    /// 本次会话推给对端的资源份数（封面 + 插图）
+    pub assets_pushed: usize,
+    /// 本次会话从对端取回并存进暂存区的资源份数
+    pub assets_pulled: usize,
     /// 对端同步后的版本向量
     pub peer_knowledge: VersionVector,
     pub finished_at_ms: u64,
@@ -83,7 +98,7 @@ impl SyncReport {
     /// 一行摘要（日志 / CLI 输出）。
     pub fn summary(&self) -> String {
         format!(
-            "拉取 {} 推送 {}（重复 {} 缓冲 {} 拒绝 {}）冲突 {} 轮次 {} 正文推 {} 取 {}",
+            "拉取 {} 推送 {}（重复 {} 缓冲 {} 拒绝 {}）冲突 {} 轮次 {} 正文推 {} 取 {} 资源推 {} 取 {}",
             self.pulled,
             self.pushed,
             self.duplicates,
@@ -92,7 +107,9 @@ impl SyncReport {
             self.conflicts,
             self.rounds,
             self.content_pushed,
-            self.content_pulled
+            self.content_pulled,
+            self.assets_pushed,
+            self.assets_pulled
         )
     }
 }
@@ -248,6 +265,12 @@ fn run_session(
     // （旧对端握手时 content=false，这一步直接跳过，不会向它发未知请求。）
     if let Err(error) = content_pass(engine, transport, report) {
         log::warn!("正文同步未完成（下次同步继续）：{error}");
+    }
+
+    // ---- 4) 资源：封面 / 章节插图（同样的对账思路，见 crate::assets）----
+    // 排在正文之后：本机要先知道「正文块引用了哪些图」（正文刚落进暂存区）。
+    if let Err(error) = asset_pass(engine, transport, report) {
+        log::warn!("资源同步未完成（下次同步继续）：{error}");
     }
 
     // 一次会话只拉一轮：局域网里对端的数据在一次会话内不会变（它要么在等我们，
@@ -479,6 +502,225 @@ fn fit_batch(items: Vec<ChapterContent>) -> (Vec<ChapterContent>, u64) {
         out.push(item);
     }
     (out, bytes)
+}
+
+/// 资源对账与搬运（封面 / 章节插图，见 [`crate::assets`]）。
+///
+/// 与正文通道同样的前置条件（双方都注册了来源），并额外遵守一条**方向规则**：
+///
+/// - **封面**：两边都有且指纹不同时，设备 id 大的一方为准（封面是可改的数据，
+///   谁后改说不清，只能定一个稳定的赢家）；只有一边有时，「有」的一方推给「没有」的一方。
+/// - **插图**：只在**正文的赢家**那一侧推、另一侧取。
+///   插图的名字写在正文块里，块整体按「设备 id 大的一方为准」收敛，因此插图也必须
+///   跟着同一个赢家走：否则败方把自己的图推过去，会留下正文根本不引用的孤儿文件，
+///   而赢家的引用仍然是断的。
+fn asset_pass(
+    engine: &mut SyncEngine,
+    transport: &mut dyn Transport,
+    report: &mut SyncReport,
+) -> Result<()> {
+    let peer = transport.peer();
+    if !engine.has_asset_source() || !peer.content {
+        return Ok(());
+    }
+
+    // 本机的逐本总览：只列**在正文里被引用**的资源（含只有引用、字节还没到的名字）
+    let books: Vec<String> = engine
+        .entities_of_kind("book", false)
+        .into_iter()
+        .map(|entity| entity.id.clone())
+        .collect();
+    let my_index: Vec<BookAssets> = books
+        .iter()
+        .map(|book| engine.asset_index_of(book))
+        .filter(|index| index.assets > 0)
+        .collect();
+
+    let response = transport.request(&Request::AssetIndex { books: my_index })?;
+    let theirs = match response {
+        Response::AssetIndex { books } => books,
+        Response::Error { code, message } => {
+            return Err(SyncError::Protocol(format!("对端拒绝资源对账（{code}）：{message}")))
+        }
+        other => {
+            return Err(SyncError::Protocol(format!(
+                "资源对账期望 asset_index，收到 {}",
+                other.kind()
+            )))
+        }
+    };
+    let mut their_map: HashMap<String, BookAssets> = theirs
+        .into_iter()
+        .map(|index| (index.book.clone(), index))
+        .collect();
+
+    let i_win = engine.device_id() > peer.device_id.as_str();
+    let mut moved = 0usize;
+    let mut bytes = 0u64;
+
+    for book in books {
+        if moved >= MAX_ASSETS || bytes >= MAX_ASSET_BYTES {
+            log::debug!("本次会话的资源预算用尽，剩余资源下次同步继续");
+            break;
+        }
+        let mine = engine.asset_index_of(&book);
+        let theirs = their_map.remove(&book);
+        let same = match (&theirs, mine.assets) {
+            (Some(their), _) if their == &mine => true,
+            (None, 0) => true,
+            _ => false,
+        };
+        if same {
+            continue;
+        }
+
+        let response = transport.request(&Request::AssetDigests { book: book.clone() })?;
+        let (known, peer_assets) = match response {
+            Response::AssetDigests { known, assets, .. } => (known, assets),
+            Response::Error { code, message } => {
+                return Err(SyncError::Protocol(format!("对端拒绝资源清单（{code}）：{message}")))
+            }
+            other => {
+                return Err(SyncError::Protocol(format!(
+                    "资源清单期望 asset_digests，收到 {}",
+                    other.kind()
+                )))
+            }
+        };
+        // 对端还没有这本书：资源推过去也无处可落，下一轮再说
+        if !known {
+            continue;
+        }
+
+        let mine_assets = engine.asset_index_full(&book);
+        let (my_cover, peer_cover) = (cover_of(&mine_assets), cover_of(&peer_assets));
+        let cover_differs = match (&my_cover, &peer_cover) {
+            (Some(mine), Some(theirs)) => mine.hash != theirs.hash,
+            _ => false,
+        };
+
+        // 推：封面（对端没有 / 两边不同且我赢）+ 插图（只在对端缺失，且正文是我赢）
+        let mut wanted: Vec<String> = Vec::new();
+        match &my_cover {
+            Some(cover) if peer_cover.is_none() => wanted.push(cover.name.clone()),
+            Some(cover) if cover_differs && i_win => wanted.push(cover.name.clone()),
+            _ => {}
+        }
+        if i_win {
+            for asset in &mine_assets {
+                if asset.name == assets::COVER_ASSET {
+                    continue;
+                }
+                if !present(&peer_assets, &asset.name) {
+                    wanted.push(asset.name.clone());
+                }
+            }
+        }
+        // 取：封面（我没有，或者两边不同且对端赢）+ 插图（只在正文是对端赢时）
+        let mut pull: Vec<String> = Vec::new();
+        match &peer_cover {
+            Some(cover) if my_cover.is_none() => pull.push(cover.name.clone()),
+            Some(cover) if cover_differs && !i_win => pull.push(cover.name.clone()),
+            _ => {}
+        }
+        if !i_win {
+            for asset in &peer_assets {
+                if asset.name == assets::COVER_ASSET || !asset.present() {
+                    continue;
+                }
+                if !present(&mine_assets, &asset.name) {
+                    pull.push(asset.name.clone());
+                }
+            }
+        }
+
+        // 推与取按同一个预算装箱，一次请求一起发（见 Request::ExchangeAssets）
+        let mut push_iter = wanted.chunks(ASSET_BATCH_ITEMS);
+        let mut pull_iter = pull.chunks(ASSET_BATCH_ITEMS);
+        loop {
+            if moved >= MAX_ASSETS || bytes >= MAX_ASSET_BYTES {
+                break;
+            }
+            let room = MAX_ASSET_BYTES.saturating_sub(bytes).min(ASSET_BATCH_BYTES as u64);
+            let push_batch = push_iter.next();
+            let pull_batch = pull_iter.next();
+            if push_batch.is_none() && pull_batch.is_none() {
+                break;
+            }
+            let pushed = match push_batch {
+                Some(batch) => {
+                    let (items, size) = assets::fit_batch(
+                        engine.asset_bodies(&book, batch),
+                        room,
+                        ASSET_BATCH_ITEMS.min(MAX_ASSETS - moved),
+                    );
+                    (items, size)
+                }
+                None => (Vec::new(), 0),
+            };
+            let requested: Vec<String> = pull_batch.map(<[String]>::to_vec).unwrap_or_default();
+
+            let response = transport.request(&Request::ExchangeAssets {
+                book: book.clone(),
+                push: pushed.0.clone(),
+                pull: requested.clone(),
+            })?;
+            let (stored, items) = match response {
+                Response::Assets { stored, items, .. } => (stored, items),
+                Response::Error { code, message } => {
+                    return Err(SyncError::Protocol(format!(
+                        "对端拒绝资源交换（{code}）：{message}"
+                    )))
+                }
+                other => {
+                    return Err(SyncError::Protocol(format!(
+                        "资源交换期望 assets，收到 {}",
+                        other.kind()
+                    )))
+                }
+            };
+            report.assets_pushed += stored;
+            moved += pushed.0.len();
+            bytes += pushed.1;
+
+            if !items.is_empty() {
+                let size: u64 = items.iter().map(|item| item.size()).sum();
+                let count = items.len();
+                match engine.stage_assets(&book, &items) {
+                    Ok(_) => {
+                        moved += count;
+                        bytes += size;
+                        report.assets_pulled += count;
+                    }
+                    Err(error) => {
+                        log::warn!("资源暂存失败（{book}）：{error}");
+                        return Err(error);
+                    }
+                }
+            }
+        }
+    }
+
+    if report.assets_pushed > 0 || report.assets_pulled > 0 {
+        log::info!(
+            "资源同步完成：推送 {} 份 / 取回 {} 份",
+            report.assets_pushed,
+            report.assets_pulled
+        );
+    }
+    Ok(())
+}
+
+/// 一份摘要清单里的封面（没有封面 / 名字对不上时返回 `None`）。
+fn cover_of(assets: &[AssetDigest]) -> Option<&AssetDigest> {
+    assets
+        .iter()
+        .find(|asset| asset.name == assets::COVER_ASSET && asset.present())
+}
+
+/// 清单里有没有这个名字（且真的有内容）。
+fn present(assets: &[AssetDigest], name: &str) -> bool {
+    assets.iter().any(|asset| asset.name == name && asset.present())
 }
 
 /// 连接指定地址并同步一次（CLI / 定时任务用）。

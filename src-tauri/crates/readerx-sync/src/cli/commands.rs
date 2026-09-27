@@ -42,12 +42,90 @@ pub fn dispatch(cli: &Cli) -> Result<()> {
         "serve" => cmd_serve(cli),
         "discover" => cmd_discover(cli),
         "sync" => cmd_sync(cli),
+        "ls-assets" => cmd_ls_assets(cli),
+        "get-asset" => cmd_get_asset(cli),
         "remove-peer" => cmd_remove_peer(cli),
         "accept-peer" => cmd_accept_peer(cli),
         other => Err(SyncError::Invalid(format!(
             "未知命令：{other}（用 --help 看用法）"
         ))),
     }
+}
+
+/// 资源暂存区：对端发来、还没落地的封面 / 插图（见 `crate::assets`）。
+///
+/// CLI 没有书库（不注册 `ContentSource`），因此这里看到的是**收下的那一侧**；
+/// 落地的语义在宿主（App）那边，CLI 只负责把暂存区摊开给人看 / 导出字节核对。
+fn cmd_ls_assets(cli: &Cli) -> Result<()> {
+    let engine = cli.open_engine_read_only()?;
+    let books: Vec<String> = match cli.positional.first() {
+        Some(book) => vec![book.clone()],
+        None => engine.staged_asset_books(),
+    };
+    let mut rows: Vec<serde_json::Value> = Vec::new();
+    for book in &books {
+        for asset in engine.staged_assets(book) {
+            rows.push(json!({
+                "book": book,
+                "name": asset.name,
+                "kind": asset.kind.as_str(),
+                "mime": asset.mime,
+                "bytes": asset.bytes.len(),
+                "digest": asset.digest,
+            }));
+        }
+    }
+    if cli.flags.is_set("json") {
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+    if rows.is_empty() {
+        println!("（资源暂存区是空的）");
+        return Ok(());
+    }
+    for row in rows {
+        println!(
+            "· {:<16} {:<12} {:<12} {:>8} B  {}",
+            row["book"].as_str().unwrap_or_default(),
+            row["kind"].as_str().unwrap_or_default(),
+            row["name"].as_str().unwrap_or_default(),
+            row["bytes"].as_u64().unwrap_or(0),
+            row["digest"].as_str().unwrap_or_default(),
+        );
+    }
+    Ok(())
+}
+
+/// 取一份暂存资源的字节：`--out` 写文件，不给就只打印信息（字节不进标准输出）。
+fn cmd_get_asset(cli: &Cli) -> Result<()> {
+    let engine = cli.open_engine_read_only()?;
+    let book = cli.arg(0, "书实体 id")?;
+    let name = cli.arg(1, "资源名")?;
+    let asset = engine
+        .staged_assets(&book)
+        .into_iter()
+        .find(|asset| asset.name == name)
+        .ok_or_else(|| SyncError::NotFound(format!("资源 {name}（书 {book}）")))?;
+    match cli.flags.get("out") {
+        Some(path) => {
+            std::fs::write(&path, &asset.bytes)
+                .map_err(|e| SyncError::Io(format!("写入 {path} 失败：{e}")))?;
+            println!(
+                "已写出 {} 字节 → {path}（kind={} mime={}）",
+                asset.bytes.len(),
+                asset.kind.as_str(),
+                asset.mime
+            );
+        }
+        None => {
+            println!("资源    : {}", asset.name);
+            println!("类别    : {}", asset.kind.as_str());
+            println!("MIME    : {}", asset.mime);
+            println!("字节数  : {}", asset.bytes.len());
+            println!("指纹    : {}", asset.digest);
+        }
+    }
+    Ok(())
 }
 
 fn cmd_init(cli: &Cli) -> Result<()> {

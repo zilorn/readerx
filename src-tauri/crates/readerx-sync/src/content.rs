@@ -16,7 +16,11 @@
 //!
 //! 指纹只覆盖**正文**（段落与结构化块），不含标题 / 地址 / 字数：那些是目录（结构）
 //! 实体的职责，改标题不该触发一次正文重传。
+//!
+//! 二进制资源（封面 / 章节插图）走同一层里的 [`crate::assets`]：它们连「一章一份 JSON」
+//! 都不适合，因此只共用这里的「指纹对账 + 按需搬运」思路与书实体 id 口径。
 
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -177,16 +181,164 @@ pub fn book_digest(book: &str, chapters: &[ChapterDigest]) -> BookDigest {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 章节插图：设备无关的资源名
+//
+// 插图字节存在宿主自己的目录里，章节块只留一个文件引用。**这个引用是跨设备传输的**
+// （它在正文块里），因此它必须是设备无关的：本机书 id 进不了名字，否则两台设备对
+// 同一段正文算出两个指纹，正文通道会一直认为「两边正文不一样」而反复重传。
+//
+//   identity = 插图地址（`remote`，旧数据用 data URL 自身）
+//   name     = sha256(identity) 前 40 位 hex + 扩展名
+//
+// 主机用同一个 name 定位本地文件（见 `ContentSource::resolve_asset` 的实际实现），
+// 于是「正文里的引用」与「资源通道里的名字」是同一个字符串，落地时不需要额外翻译。
+// ---------------------------------------------------------------------------
+
+/// 插图地址 → 设备无关的资源名（`<40 位 hex>.<ext>`）。
+///
+/// `ext` 是**地址上的扩展名**（不带点）：同一张图在两台设备上从同一个地址推导出
+/// 同一个扩展名，因此名字一致；认不出来时留空，两端也一样。
+pub fn image_asset_name(identity: &str) -> String {
+    // 查询串 / 片段先剥掉：同一张图常带不同的追踪参数，不该被当成两张
+    let path = identity.split(['?', '#']).next().unwrap_or(identity);
+    let (ext, key) = match image_ext(path) {
+        Some(ext) => {
+            // 扩展名大小写不参与身份（`B.JPG` 与 `B.jpg` 是同一张图）：
+            // 哈希输入换成小写扩展名，长度与路径一致，不会与别的地址撞
+            let stem = &path[..path.len() - ext.len()];
+            (ext.clone(), format!("{stem}{ext}"))
+        }
+        None => (String::new(), path.to_string()),
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(key.as_bytes());
+    let digest = hasher.finalize();
+    let mut hash = String::with_capacity(40);
+    for byte in digest.iter().take(20) {
+        hash.push_str(&format!("{byte:02x}"));
+    }
+    if ext.is_empty() {
+        hash
+    } else {
+        format!("{hash}.{ext}")
+    }
+}
+
+/// 地址里认得出的图片扩展名（小写、不含点）。
+fn image_ext(path: &str) -> Option<String> {
+    let ext = path.rsplit_once('.')?.1.to_ascii_lowercase();
+    if ext.is_empty() || ext.len() > 5 || !ext.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    Some(ext)
+}
+
+/// 一个资源引用映射出的身份与资源名。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AssetRef {
+    /// 资源名（[`image_asset_name`] 的结果）
+    pub name: String,
+    /// 身份（在线图是地址；旧数据是 data URL 自身）
+    pub identity: String,
+}
+
+/// 一个章节块里的图片引用 → 资源引用（不是图片 / 认不出身份时返回 `None`）。
+///
+/// 块是宿主的结构化正文（引擎不认识业务字段，只按约定取 `kind` / `remote` / `src`）：
+/// 整行图是 `{"kind":"img",…}`，段内插图是 `imgs` 数组里与它同口径的对象。
+fn asset_ref_of(block: &Value, inline: bool) -> Option<AssetRef> {
+    if !inline && block.get("kind").and_then(Value::as_str) != Some("img") {
+        return None;
+    }
+    let text = |key: &str| block.get(key).and_then(Value::as_str).filter(|v| !v.is_empty());
+    // 身份优先取网络地址：它有内容以外的语义（旧数据里 src 可能只是 data URL）
+    let identity = text("remote").or_else(|| text("src"))?;
+    Some(AssetRef { name: image_asset_name(identity), identity: identity.to_string() })
+}
+
+/// 遍历一段结构化正文块，收集其中的资源引用（按名字去重，顺序稳定）。
+pub fn collect_asset_refs(blocks: &Value) -> Vec<AssetRef> {
+    let mut refs: Vec<AssetRef> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut push = |entry: AssetRef| {
+        if seen.insert(entry.name.clone()) {
+            refs.push(entry);
+        }
+    };
+    if let Value::Array(items) = blocks {
+        for item in items {
+            if let Some(entry) = asset_ref_of(item, false) {
+                push(entry);
+            }
+            if let Some(Value::Array(inline)) = item.get("imgs") {
+                for image in inline {
+                    if let Some(entry) = asset_ref_of(image, true) {
+                        push(entry);
+                    }
+                }
+            }
+        }
+    }
+    refs
+}
+
+/// 一章正文里的资源引用（引擎按书请求正文时用同一套口径）。
+pub fn chapter_asset_refs(chapter: &ChapterContent) -> Vec<AssetRef> {
+    chapter.blocks.as_ref().map(collect_asset_refs).unwrap_or_default()
+}
+
+/// 资源内容的指纹（sha256）：两台设备上同一张图算出同一个值。
+pub fn asset_digest(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex(&hasher.finalize())
+}
+
+/// base64 编码（资源字节上线协议时用）
+pub fn encode_base64(bytes: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// 见 [`encode_base64`]；非法载荷返回 `None`。
+pub fn decode_base64(payload: &str) -> Option<Vec<u8>> {
+    base64::engine::general_purpose::STANDARD.decode(payload.trim()).ok()
+}
+
 /// 宿主提供的正文来源（App 实现：读 `books/<id>/content.json`，只读）。
 ///
 /// 引擎不问「正文存在哪」，只问「有哪些章、拿一章的正文给我」；CLI 没有书库，
 /// 注册为空实现即可（能力协商见 [`crate::net::PeerInfo::content`]）。
+///
+/// 二进制资源（封面 / 插图）也挂在这里：它们与正文一样「引擎不认识宿主的目录布局」，
+/// 只是多了一个「按名字取字节」的入口（[`ContentSource::load_assets`]）。
 pub trait ContentSource: Send + Sync + 'static {
     /// 某本书本机**有正文**的章节摘要。
     fn digests(&self, book: &str) -> Vec<ChapterDigest>;
 
     /// 取若干章的正文（对端要的、或本机要推的）。取不到的章节直接不出现在结果里。
     fn load(&self, book: &str, cids: &[String]) -> Vec<ChapterContent>;
+
+    // ---- 资源通道（默认空实现：不参与 = 这台设备既不推也不收资源）----
+
+    /// 本机有内容的资源（封面 + 插图）。**没有的不要列进来**：缺了就是缺了。
+    fn assets(&self, _book: &str) -> Vec<crate::assets::AssetDigest> {
+        Vec::new()
+    }
+
+    /// 取若干资源的字节 / 内容。取不到的直接不出现在结果里。
+    fn load_assets(&self, _book: &str, _names: &[String]) -> Vec<crate::assets::Asset> {
+        Vec::new()
+    }
+
+    /// 本机这本书**在正文里引用到的**资源名（不管字节在不在手里）。
+    ///
+    /// 与 [`ContentSource::assets`] 的差别是「引用」与「内容」：换设备后本机可能
+    /// 已经引用了某张图却还没有它的字节（正文先到、图后到），这种名字也要能被对端知道，
+    /// 否则资源通道永远不知道本机缺什么。默认空实现 = 不参与。
+    fn names(&self, _book: &str) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 #[cfg(test)]
@@ -248,6 +400,71 @@ mod tests {
             ..ChapterContent::default()
         };
         assert!(!image_only.has_body(), "纯图片块不算正文");
+    }
+
+    /// 插图资源名必须**设备无关**：只有地址进名字，本机书 id / 章节号都不进 ——
+    /// 两台设备对同一段正文才会算出同一个名字。
+    #[test]
+    fn image_names_depend_on_the_address_only() {
+        let name = image_asset_name("https://img.example.com/a/b.jpg");
+        assert_eq!(name.len(), 40 + 4, "40 位 hex + 扩展名：{name}");
+        assert!(name.ends_with(".jpg"));
+        assert_eq!(name, image_asset_name("https://img.example.com/a/b.jpg"));
+        assert_ne!(name, image_asset_name("https://img.example.com/a/c.jpg"), "地址不同即不同");
+
+        // 查询串 / 片段不进名字（同一张图带不同的追踪参数不该当成两张）
+        assert_eq!(
+            image_asset_name("https://img.example.com/a/b.jpg?token=1"),
+            image_asset_name("https://img.example.com/a/b.jpg#x")
+        );
+        // 扩展名归一：大小写不同仍是同一张图
+        assert_eq!(
+            image_asset_name("https://img.example.com/a/b.JPG"),
+            image_asset_name("https://img.example.com/a/b.jpg")
+        );
+        // 认不出扩展名时不留尾巴，两端一致
+        let bare = image_asset_name("https://img.example.com/a/b");
+        assert_eq!(bare.len(), 40);
+        assert!(bare.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn asset_refs_cover_block_and_inline_images() {
+        let blocks = json!([
+            { "kind": "p", "text": "正文" },
+            { "kind": "h", "text": "标题" },
+            { "kind": "img", "remote": "https://img/1.png", "local": "book-1_aaaa.png" },
+            { "kind": "img", "src": "https://img/2.png" },
+            // 没有身份（既无 remote 也无 src）：认不出是哪张图，不进通道
+            { "kind": "img", "local": "book-1_bbbb.png" },
+            { "kind": "p", "text": "他指着说道", "imgs": [
+                { "at": 3, "remote": "https://img/3.png" },
+                { "at": 5, "remote": "https://img/1.png" },
+            ]},
+        ]);
+        let refs = collect_asset_refs(&blocks);
+        let names: Vec<&str> = refs.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names.len(), 3, "段内图与整行图同一口径，且按名字去重：{names:?}");
+        assert!(names.contains(&image_asset_name("https://img/1.png").as_str()));
+        assert!(names.contains(&image_asset_name("https://img/2.png").as_str()));
+        assert!(names.contains(&image_asset_name("https://img/3.png").as_str()));
+        assert_eq!(refs[0].identity, "https://img/1.png", "身份是地址本身");
+
+        // 纯文字 / 空块没有资源
+        assert!(collect_asset_refs(&json!([{ "kind": "p", "text": "正文" }])).is_empty());
+        assert!(collect_asset_refs(&json!({})).is_empty());
+    }
+
+    /// 旧数据：图片只有 data URL（没有网络地址）时，身份取 data URL 自身 ——
+    /// 两台设备迁移出来的名字仍然一致。
+    #[test]
+    fn legacy_data_url_images_still_get_a_stable_name() {
+        let data_url = "data:image/png;base64,AAAA";
+        let blocks = json!([{ "kind": "img", "src": data_url }]);
+        let refs = collect_asset_refs(&blocks);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].identity, data_url);
+        assert_eq!(refs[0].name, image_asset_name(data_url));
     }
 
     #[test]

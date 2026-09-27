@@ -3,9 +3,11 @@
 //! 服务端（TCP）与进程内直连（[`super::loopback`]）共用这一份实现，
 //! 保证「本机自测」与「真局域网」走的是同一套语义——否则测试通过了线上仍可能出问题。
 
+use crate::assets;
 use crate::engine::SyncEngine;
 use crate::proto::{
-    RejectedOp, Request, Response, CONTENT_BATCH_BYTES, CONTENT_BATCH_CHAPTERS,
+    RejectedOp, Request, Response, ASSET_BATCH_BYTES, ASSET_BATCH_ITEMS, CONTENT_BATCH_BYTES,
+    CONTENT_BATCH_CHAPTERS,
 };
 use crate::id::now_ms;
 use crate::PROTOCOL_VERSION;
@@ -126,6 +128,52 @@ pub fn handle_request(
                 Response::error("content_failed", error.to_string())
             }
         },
+        // ---- 资源通道（封面 / 章节插图，见 crate::assets）----
+        Request::AssetIndex { books } => {
+            // 与正文对账同一口径：只回本机**有资源**的书
+            let theirs: Vec<_> = books
+                .iter()
+                .map(|entry| engine.asset_index_of(&entry.book))
+                .filter(|index| index.assets > 0)
+                .collect();
+            Response::AssetIndex { books: theirs }
+        }
+        Request::AssetDigests { book } => {
+            let known = engine
+                .entity(book)
+                .is_some_and(|entity| !engine.is_effectively_deleted(entity));
+            Response::AssetDigests {
+                book: book.clone(),
+                known,
+                // 用「引用 + 内容」的并集：本机引用了但还没有字节的名字（空指纹）也要
+                // 让对端看见 —— 否则对端不知道本机缺哪一张图
+                assets: engine.asset_index_full(book),
+            }
+        }
+        Request::ExchangeAssets { book, push, pull } => {
+            let stored = if push.is_empty() {
+                0
+            } else {
+                match engine.stage_assets(book, push) {
+                    Ok(stored) => stored,
+                    Err(error) => {
+                        log::warn!("暂存对端资源失败: {error}");
+                        return Response::error("asset_failed", error.to_string());
+                    }
+                }
+            };
+            // 按帧预算装箱：装不下的资源这次不给，对端下次同步会重新算差集
+            let bodies = engine.asset_bodies(book, pull);
+            let (items, bytes) =
+                assets::fit_batch(bodies, ASSET_BATCH_BYTES as u64, ASSET_BATCH_ITEMS);
+            if items.len() < pull.len() {
+                log::debug!(
+                    "本次只回了 {} 份资源（其余留给下次同步）book={book} bytes={bytes}",
+                    items.len()
+                );
+            }
+            Response::Assets { book: book.clone(), stored, items }
+        }
         Request::Ping => Response::Pong { at_ms: now_ms() },
         Request::Hello { .. } | Request::Auth { .. } => {
             Response::error("unexpected", "握手阶段不允许的业务请求")

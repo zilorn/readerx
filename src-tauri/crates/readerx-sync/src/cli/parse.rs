@@ -42,6 +42,8 @@ pub const USAGE_TEXT: &str = r#"readerx-sync —— ReaderX 局域网同步（�
   ops [--limit <n>]        最近的操作日志
   conflicts [--all]        冲突队列（默认只看待处理）
   resolve <冲突id> --keep local|remote | --value <json> | --dismiss
+  ls-assets [<书实体id>] [--json]             资源暂存区（对端发来、还没落地的封面 / 插图）
+  get-asset <书实体id> <名字> [--out <文件>]  取一份暂存资源的字节（缺 --out 时只打印信息）
   serve [--port <端口>] [--no-discovery]      启动同步服务（前台运行）
   discover                 广播发现局域网内的对端
   sync <地址|auto>         与对端同步一次（auto = 先发现再逐个同步）

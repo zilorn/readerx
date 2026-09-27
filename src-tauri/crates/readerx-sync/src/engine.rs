@@ -28,7 +28,11 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::content::{book_digest, BookDigest, ChapterContent, ChapterDigest, ContentSource};
+use crate::assets::{self, Asset, AssetDigest, AssetKind, BookAssets};
+use crate::content::{
+    asset_digest, book_digest, chapter_asset_refs, BookDigest, ChapterContent, ChapterDigest,
+    ContentSource,
+};
 use crate::error::{Result, SyncError};
 use crate::hlc::{HlcClock, HlcState};
 use crate::id::{new_id, now_ms, DeviceId, EntityId, OpId};
@@ -1043,6 +1047,235 @@ impl SyncEngine {
         Ok(())
     }
 
+    // ------------------------------------------------------------ 资源通道
+    //
+    // 封面 / 章节插图与正文同一套路子（见 [`crate::assets`]）：不进操作日志，
+    // 按「指纹对账 + 按需搬运」走单独一条通道。引擎在这里做两件事：
+    // 1. 回答「本机这本书有哪些资源、指纹是什么」（宿主书库 + 暂存区）；
+    // 2. 把对端发来的资源**暂存**下来，等宿主在落地时写进书库。
+    //
+    // 暂存区在 `<同步目录>/assets/<书实体 id>/`：与正文暂存区并列，落地完成即删除。
+
+    /// 本机是否参与资源同步（宿主注册了正文来源 —— 资源挂同一份来源上）。
+    pub fn has_asset_source(&self) -> bool {
+        self.content.is_some()
+    }
+
+    /// 资源暂存区根目录。
+    fn asset_root(&self) -> PathBuf {
+        self.store.root().join("assets")
+    }
+
+    /// 某本书的资源暂存目录（`None` = 书实体 id 不能当目录名）。
+    fn asset_dir(&self, book: &str) -> Option<PathBuf> {
+        safe_component(book).map(|name| self.asset_root().join(name))
+    }
+
+    /// 一本书本机**有内容**的资源摘要：宿主给的 + 暂存区里（对端刚发来、还没落地）。
+    ///
+    /// 名字冲突时暂存区优先：它是本轮刚谈好的内容，落地后书库才追上。
+    pub fn asset_digests(&self, book: &str) -> Vec<AssetDigest> {
+        let mut by_name: BTreeMap<String, AssetDigest> = BTreeMap::new();
+        if let Some(source) = &self.content {
+            for digest in source.assets(book) {
+                if digest.present() {
+                    by_name.insert(digest.name.clone(), digest);
+                }
+            }
+        }
+        for asset in self.staged_assets(book) {
+            by_name.insert(
+                asset.name.clone(),
+                AssetDigest { name: asset.name.clone(), hash: asset.digest.clone() },
+            );
+        }
+        by_name.into_values().collect()
+    }
+
+    /// 一本书的资源总览（先比总量，没必要为每本没变的书都传清单）。
+    pub fn asset_index(&self, book: &str) -> BookAssets {
+        assets::book_assets(book, &self.asset_digests(book))
+    }
+
+    /// 取若干资源：暂存区优先，其次宿主书库。取不到的不出现在结果里。
+    pub fn asset_bodies(&self, book: &str, names: &[String]) -> Vec<Asset> {
+        let wanted: HashSet<&str> = names.iter().map(String::as_str).collect();
+        let mut out: Vec<Asset> = Vec::new();
+        let mut found: HashSet<String> = HashSet::new();
+        for asset in self.staged_assets(book) {
+            if wanted.contains(asset.name.as_str()) {
+                found.insert(asset.name.clone());
+                out.push(asset);
+            }
+        }
+        if let Some(source) = &self.content {
+            let missing: Vec<String> = names
+                .iter()
+                .filter(|name| !found.contains(name.as_str()))
+                .cloned()
+                .collect();
+            if !missing.is_empty() {
+                for mut asset in source.load_assets(book, &missing) {
+                    // 宿主给的指纹不采信：按本机实际拿到的字节现算
+                    asset.digest = asset_digest(&asset.bytes);
+                    out.push(asset);
+                }
+            }
+        }
+        out
+    }
+
+    /// 收下对端的资源：写进暂存区（宿主下次落地时写进书库）。返回真正写下的份数。
+    ///
+    /// 已经暂存过同样内容的资源会被跳过：重复请求（网络重试 / 两端同时发起）不会反复写盘。
+    pub fn stage_assets(&mut self, book: &str, items: &[Asset]) -> Result<usize> {
+        if self.read_only {
+            return Err(SyncError::Io("只读打开不能写资源暂存区".to_string()));
+        }
+        let Some(dir) = self.asset_dir(book) else {
+            log::warn!("对端要暂存的书籍 id 不能作为目录名，已跳过");
+            return Ok(0);
+        };
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| SyncError::Io(format!("创建资源暂存目录失败: {e}")))?;
+        let mut stored = 0usize;
+        for item in items {
+            if !assets::valid_name(&item.name) || item.bytes.is_empty() {
+                log::warn!("对端推来的资源不合法，已跳过 name={}", item.name);
+                continue;
+            }
+            let key = asset_file_key(item);
+            let path = dir.join(format!("{}.json", cid_file_name(&key)));
+            let mut incoming = item.clone();
+            incoming.digest = asset_digest(&item.bytes);
+            if let Ok(existing) = read_staged_asset(&path) {
+                if existing.same_data(&incoming) {
+                    continue;
+                }
+            }
+            let text = serde_json::to_string(&incoming)
+                .map_err(|e| SyncError::Io(format!("资源序列化失败: {e}")))?;
+            write_atomic(&path, text.as_bytes())
+                .map_err(|e| SyncError::Io(format!("写入资源暂存文件失败: {e}")))?;
+            stored += 1;
+        }
+        Ok(stored)
+    }
+
+    /// 暂存区里有资源的书（宿主落地时按这个列表走）。
+    pub fn staged_asset_books(&self) -> Vec<String> {
+        let mut books = Vec::new();
+        let Ok(entries) = std::fs::read_dir(self.asset_root()) else {
+            return books;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
+                    books.push(name.to_string());
+                }
+            }
+        }
+        books.sort();
+        books
+    }
+
+    /// 某本书暂存区里的全部资源（按名字排序：落地顺序稳定，便于复现问题）。
+    pub fn staged_assets(&self, book: &str) -> Vec<Asset> {
+        let Some(dir) = self.asset_dir(book) else {
+            return Vec::new();
+        };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        let mut items: Vec<Asset> = entries
+            .flatten()
+            .filter_map(|entry| read_staged_asset(&entry.path()).ok())
+            .collect();
+        items.sort_by(|a, b| a.name.cmp(&b.name));
+        items
+    }
+
+    /// 落地完成后清掉这些暂存资源（按「类别 + 名字」，与 [`asset_file_key`] 同一口径）。
+    pub fn clear_staged_assets(&mut self, book: &str, items: &[(AssetKind, String)]) -> Result<()> {
+        if self.read_only {
+            return Ok(());
+        }
+        let Some(dir) = self.asset_dir(book) else {
+            return Ok(());
+        };
+        for (kind, name) in items {
+            let key = asset_file_key_parts(*kind, name);
+            let path = dir.join(format!("{}.json", cid_file_name(&key)));
+            if path.is_file() {
+                std::fs::remove_file(&path)
+                    .map_err(|e| SyncError::Io(format!("清理资源暂存文件失败: {e}")))?;
+            }
+        }
+        // 目录空了就一起收掉，别在同步目录里留下几十个空目录
+        if std::fs::read_dir(&dir).map(|mut it| it.next().is_none()).unwrap_or(false) {
+            let _ = std::fs::remove_dir(&dir);
+        }
+        Ok(())
+    }
+
+    /// 丢掉某本书的全部暂存资源（书被删掉 / 被对端删除时）。
+    pub fn drop_staged_assets(&mut self, book: &str) -> Result<()> {
+        if self.read_only {
+            return Ok(());
+        }
+        let Some(dir) = self.asset_dir(book) else {
+            return Ok(());
+        };
+        if dir.is_dir() {
+            std::fs::remove_dir_all(&dir)
+                .map_err(|e| SyncError::Io(format!("清理资源暂存目录失败: {e}")))?;
+        }
+        Ok(())
+    }
+
+    /// 一本书**在正文里被引用**的资源清单（缺的直接以空指纹出现）。
+    ///
+    /// 宿主给的「在用的名字」（含只有引用、本机还没有字节的那些）+ 暂存区里的资源：
+    /// 资源通道据此知道「对端可能需要什么」，也据此知道本机缺哪些（空指纹）。
+    /// 名字两边都有时以本机手里的指纹为准。
+    pub fn asset_index_full(&self, book: &str) -> Vec<AssetDigest> {
+        let mut by_name: BTreeMap<String, String> = BTreeMap::new();
+        if let Some(source) = &self.content {
+            for name in source.names(book) {
+                by_name.entry(name).or_default();
+            }
+        }
+        for chapter in self.staged_bodies(book) {
+            for entry in chapter_asset_refs(&chapter) {
+                by_name.entry(entry.name).or_default();
+            }
+        }
+        for digest in self.asset_digests(book) {
+            if digest.present() {
+                by_name.insert(digest.name, digest.hash);
+            }
+        }
+        by_name
+            .into_iter()
+            .map(|(name, hash)| AssetDigest { name, hash })
+            .collect()
+    }
+
+    /// 见 [`SyncEngine::asset_index_full`]：汇总（先比总量，避免为每本没变的书都传清单）。
+    pub fn asset_index_of(&self, book: &str) -> BookAssets {
+        assets::book_assets(book, &self.asset_index_full(book))
+    }
+
+    /// 本机所有书的资源总览（资源通道的「我有什么」）。
+    pub fn asset_index_all(&self) -> Vec<BookAssets> {
+        self.entities_of_kind("book", false)
+            .into_iter()
+            .map(|entity| self.asset_index_of(&entity.id))
+            .filter(|index| index.assets > 0)
+            .collect()
+    }
+
     // ------------------------------------------------------------ 持久化
 
     /// 把快照 / 冲突 / 缓冲 / 对端状态刷到磁盘。
@@ -1573,6 +1806,25 @@ fn cid_file_name(cid: &str) -> String {
 fn read_staged(path: &Path) -> std::io::Result<ChapterContent> {
     let text = std::fs::read_to_string(path)?;
     serde_json::from_str(&text).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
+/// 暂存资源的文件名键：名字 + 类别（`cover` 与某张插图撞名字时也不会互相覆盖）。
+fn asset_file_key(asset: &Asset) -> String {
+    asset_file_key_parts(asset.kind, &asset.name)
+}
+
+fn asset_file_key_parts(kind: AssetKind, name: &str) -> String {
+    format!("{}:{}", kind.as_str(), name)
+}
+
+/// 读一个暂存资源文件（内容就是一份 [`Asset`]）。
+fn read_staged_asset(path: &Path) -> std::io::Result<Asset> {
+    let text = std::fs::read_to_string(path)?;
+    let mut asset: Asset = serde_json::from_str(&text)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    // 指纹按字节现算：暂存文件是「派生数据」，被改坏 / 版本对不上时也只信字节
+    asset.digest = asset_digest(&asset.bytes);
+    Ok(asset)
 }
 
 /// 原子写（临时文件 + rename）：半截文件不会被当成一份正文读出来。
@@ -2140,6 +2392,77 @@ mod tests {
         let order_b = b.field(&id, "order").unwrap();
         assert_eq!(order_a, order_b, "并发插入后顺序必须一致");
         assert_eq!(order_a.as_array().unwrap().len(), 3, "两个新元素都要保留");
+    }
+
+    /// 资源暂存：收下对端的封面 / 插图 → 指纹按字节现算 → 重复推送不重复写盘。
+    #[test]
+    fn staged_assets_are_deduplicated_and_digested() {
+        let mut engine = engine("assets-stage");
+        let book = engine
+            .create_entity("book", Some("b-1".into()), [("title", serde_json::json!("三体"))])
+            .unwrap();
+        let cover = Asset::new(assets::COVER_ASSET, AssetKind::Cover, "image/jpeg", "", b"cover".to_vec());
+        let picture = Asset::new("0123456789abcdef0123456789abcdef01234567.png", AssetKind::Illustration, "image/png", "png", b"png".to_vec());
+
+        assert_eq!(engine.stage_assets(&book, &[cover.clone(), picture.clone()]).unwrap(), 2);
+        // 同样的内容再推一次：不算新写入（否则每次同步都要重写一遍暂存区）
+        assert_eq!(engine.stage_assets(&book, &[cover.clone(), picture.clone()]).unwrap(), 0);
+        // 同名的封面换了内容：算一次更新
+        let other = Asset::new(assets::COVER_ASSET, AssetKind::Cover, "image/png", "", b"other".to_vec());
+        assert_eq!(engine.stage_assets(&book, std::slice::from_ref(&other)).unwrap(), 1);
+
+        let staged = engine.staged_assets(&book);
+        assert_eq!(staged.len(), 2);
+        let by_name: std::collections::HashMap<_, _> =
+            staged.iter().map(|item| (item.name.as_str(), item)).collect();
+        assert_eq!(by_name["cover"].bytes, b"other");
+        assert_eq!(by_name["cover"].digest, crate::content::asset_digest(b"other"));
+        assert_eq!(by_name[picture.name.as_str()].bytes, b"png");
+        assert_eq!(engine.staged_asset_books(), vec![book.clone()]);
+
+        // 落地后清掉两份；目录空了会一起收掉
+        engine
+            .clear_staged_assets(
+                &book,
+                &[(AssetKind::Cover, "cover".to_string()), (AssetKind::Illustration, picture.name.clone())],
+            )
+            .unwrap();
+        assert!(engine.staged_assets(&book).is_empty());
+        assert!(engine.staged_asset_books().is_empty());
+        fs::remove_dir_all(engine.data_dir()).ok();
+    }
+
+    /// 非法名字 / 空内容一律不收：对端不能用一个 `../` 决定本机往哪写。
+    #[test]
+    fn staged_assets_reject_bad_names_and_empty_payloads() {
+        let mut engine = engine("assets-bad");
+        let book = engine
+            .create_entity("book", Some("b-1".into()), Vec::<(String, Value)>::new())
+            .unwrap();
+        let bad = vec![
+            Asset::new("../escape.png", AssetKind::Illustration, "image/png", "png", b"x".to_vec()),
+            Asset::new("a/b.png", AssetKind::Illustration, "image/png", "png", b"x".to_vec()),
+            Asset::new("empty.png", AssetKind::Illustration, "image/png", "png", Vec::new()),
+        ];
+        assert_eq!(engine.stage_assets(&book, &bad).unwrap(), 0);
+        assert!(engine.staged_assets(&book).is_empty());
+        fs::remove_dir_all(engine.data_dir()).ok();
+    }
+
+    /// 只读打开不能写暂存区（CLI 的 `status` / `show` 这类命令）。
+    #[test]
+    fn staged_assets_refuse_read_only_engines() {
+        let dir = temp_dir("assets-ro");
+        let mut engine = SyncEngine::open(&dir, EngineOptions::new("A")).unwrap();
+        let book = engine
+            .create_entity("book", Some("b-1".into()), Vec::<(String, Value)>::new())
+            .unwrap();
+        engine.flush().unwrap();
+        drop(engine);
+        let mut reader = SyncEngine::open(&dir, EngineOptions::new("A").read_only()).unwrap();
+        let item = Asset::new(assets::COVER_ASSET, AssetKind::Cover, "image/png", "", b"x".to_vec());
+        assert!(reader.stage_assets(&book, &[item]).is_err());
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

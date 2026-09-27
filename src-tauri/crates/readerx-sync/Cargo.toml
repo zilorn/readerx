@@ -21,4 +21,6 @@ log = "0.4"
 readerx-log = { path = "../readerx-log" }
 hmac = "0.12"
 sha2 = "0.10"
+# 资源通道（封面 / 章节插图）的字节上线协议：JSON 里只能放文本，二进制编 base64
+base64 = "0.22"
 getrandom = "0.2"

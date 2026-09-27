@@ -27,7 +27,8 @@
 //! | [`version`] | 版本向量：因果关系与增量同步游标 |
 //! | [`model`] | 操作、实体、字段状态、墓碑、冲突的数据结构 |
 //! | [`schema`] | 每种实体类型的字段合并策略与约束 |
-//! | [`content`] | 正文通道：指纹对账 + 按章搬运（正文不进操作日志） |
+//! | [`content`] | 正文来源与指纹：正文通道（指纹对账 + 按章搬运，不进操作日志） |
+//! | [`assets`] | 资源通道：封面 / 章节插图的指纹对账与按需搬运（比正文更适合二进制） |
 //! | [`merge`] | 把一条操作并进实体，按字段策略裁决冲突 |
 //! | [`order`] | 有序列表的位置键（分数索引） |
 //! | [`store`] | 数据目录、JSONL 操作日志、快照与格式迁移 |
@@ -55,6 +56,7 @@
 
 #[cfg(feature = "cli")]
 pub mod cli;
+pub mod assets;
 pub mod content;
 pub mod crypto;
 pub mod engine;
@@ -72,6 +74,7 @@ pub mod store;
 pub mod version;
 
 pub use engine::{ApplyResult, BatchOutcome, EngineOptions, EngineStatus, SyncEngine};
+pub use assets::{Asset, AssetDigest, AssetKind};
 pub use content::{BookDigest, ChapterContent, ChapterDigest, ContentSource};
 pub use error::{Result, SyncError};
 pub use hlc::{Hlc, HlcClock};

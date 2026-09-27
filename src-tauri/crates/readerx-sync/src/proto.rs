@@ -9,6 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::assets::{Asset, AssetDigest, BookAssets};
 use crate::content::{BookDigest, ChapterContent, ChapterDigest};
 use crate::id::{DeviceId, OpId};
 use crate::model::Operation;
@@ -29,6 +30,13 @@ pub const CONTENT_BATCH_BYTES: usize = 4 * 1024 * 1024;
 
 /// 一批正文最多几章（避免一堆极短章节把 JSON 数组本身撑大）。
 pub const CONTENT_BATCH_CHAPTERS: usize = 100;
+
+/// 一批资源（封面 / 插图）的字节上限。资源本来就是二进制的，编成 base64 还要涨三分之一，
+/// 因此比正文批次小一档，给 JSON 包装留出余量。
+pub const ASSET_BATCH_BYTES: usize = 3 * 1024 * 1024;
+
+/// 一批资源最多几份（避免一堆小图把 JSON 数组本身撑大）。
+pub const ASSET_BATCH_ITEMS: usize = 64;
 
 /// 客户端 → 服务端。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -71,6 +79,22 @@ pub enum Request {
     PushChapters { book: String, items: Vec<ChapterContent> },
     /// 拉正文：把这几章的正文给我
     PullChapters { book: String, cids: Vec<String> },
+    /// 资源对账：这是我的逐本总览（封面 / 章节插图，见 `crate::assets`）
+    AssetIndex { books: Vec<BookAssets> },
+    /// 资源对账：某本书的逐个资源指纹
+    AssetDigests { book: String },
+    /// 资源交换：把 `push` 里的资源收下，同时把 `pull` 点名的资源回给我。
+    ///
+    /// 推与取合成一条请求：一次会话里插图只朝一个方向走（见 `session::asset_pass`），
+    /// 但封面可能两个方向都要（我有你没有、你有我没有同时成立），拆成两条请求就要多跑
+    /// 一倍往返 —— 而这条通道本来就是整次同步里最占带宽的一段。
+    ExchangeAssets {
+        book: String,
+        #[serde(default)]
+        push: Vec<Asset>,
+        #[serde(default)]
+        pull: Vec<String>,
+    },
     /// 查询对端状态（CLI `discover` / 状态页用）
     Stat,
     Ping,
@@ -88,6 +112,9 @@ impl Request {
             Request::ChapterDigests { .. } => "chapter_digests",
             Request::PushChapters { .. } => "push_chapters",
             Request::PullChapters { .. } => "pull_chapters",
+            Request::AssetIndex { .. } => "asset_index",
+            Request::AssetDigests { .. } => "asset_digests",
+            Request::ExchangeAssets { .. } => "exchange_assets",
             Request::Stat => "stat",
             Request::Ping => "ping",
         }
@@ -170,6 +197,23 @@ pub enum Response {
         /// 真正写进暂存区的章数（内容重复的章节不算）
         stored: usize,
     },
+    /// 资源对账的应答：本机对这几本书的逐本总览（只回本机有资源的那些书）
+    AssetIndex { books: Vec<BookAssets> },
+    /// 某本书的逐个资源指纹。`known` 同 [`Response::ChapterDigests`]
+    AssetDigests {
+        book: String,
+        #[serde(default)]
+        known: bool,
+        assets: Vec<AssetDigest>,
+    },
+    /// 资源交换的应答：`stored` = 收下的份数，`items` = 按帧预算装得下的资源
+    /// （装不下的下次同步再来）
+    Assets {
+        book: String,
+        #[serde(default)]
+        stored: usize,
+        items: Vec<Asset>,
+    },
     Pong {
         at_ms: u64,
     },
@@ -192,6 +236,9 @@ impl Response {
             Response::ChapterDigests { .. } => "chapter_digests",
             Response::Chapters { .. } => "chapters",
             Response::ContentAck { .. } => "content_ack",
+            Response::AssetIndex { .. } => "asset_index",
+            Response::AssetDigests { .. } => "asset_digests",
+            Response::Assets { .. } => "assets",
             Response::Pong { .. } => "pong",
             Response::Error { .. } => "error",
         }
