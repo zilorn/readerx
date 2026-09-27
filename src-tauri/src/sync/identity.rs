@@ -11,6 +11,7 @@
 //! | 在线书 | 书源地址 + 书籍详情页地址 | 同一本书源的同一本书，两台设备指向同一份内容 |
 //! | 导入书 | 文件名（大小写归一）+ 字节数 | 同一个文件在两台设备上的稳定特征，且不需要读文件内容 |
 //! | 分组 | 分组名 | 分组是用户自己起的名字，名字就是它的身份 |
+//! | 书源分组 | 分组名 | 同上；与书架分组是两个命名空间，同名不会算成同一个实体 |
 //! | 书源 | 书源地址 | 书源 id 每台设备各自生成，地址才是它真正的主键 |
 //!
 //! **已知取舍**：导入书用「文件名 + 字节数」而不是内容哈希 —— 算内容哈希要把整本书
@@ -55,6 +56,14 @@ pub fn book_uid(key: &BookKey<'_>) -> String {
 /// 分组实体 id（`g-<16 位十六进制>`）：分组名即身份。
 pub fn group_uid(name: &str) -> String {
     format!("g-{}", short_hash(&format!("group\n{}", name.trim())))
+}
+
+/// 书源分组实体 id（`sg-<16 位十六进制>`）：书源分组名即身份。
+///
+/// 与书架分组同一口径（名字就是身份），但派生种子不同：两边的同名分组是**两个**
+/// 实体（用户完全可能既有书架分组「科幻」又有书源分组「科幻」）。
+pub fn source_group_uid(name: &str) -> String {
+    format!("sg-{}", short_hash(&format!("source_group\n{}", name.trim())))
 }
 
 /// 书源实体 id（`s-<16 位十六进制>`）：书源地址即身份。
@@ -174,6 +183,11 @@ mod tests {
         assert_ne!(group_uid("科幻"), group_uid("奇幻"));
         assert_eq!(source_uid("https://x.example.com/"), source_uid("https://x.example.com"));
         assert!(source_uid("https://x.example.com").starts_with("s-"));
+        // 书源分组与书架分组是两个命名空间：同名也是两个实体
+        assert_eq!(source_group_uid("科幻"), source_group_uid(" 科幻 "));
+        assert_ne!(source_group_uid("科幻"), source_group_uid("奇幻"));
+        assert_ne!(source_group_uid("科幻"), group_uid("科幻"));
+        assert!(source_group_uid("科幻").starts_with("sg-"));
     }
 
     #[test]

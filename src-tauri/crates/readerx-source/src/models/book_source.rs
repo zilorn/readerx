@@ -66,7 +66,8 @@ pub struct BookSource {
     #[serde(default = "yes")]
     pub auto_auth: bool,
     /// 所属书源分组 id（分组清单由前端偏好存 `readerx.sourceGroups`）。
-    /// 纯本机归属：导出时不带该 id，只带可读的 `groupName`（见 docs/book-source-spec.md）。
+    /// 纯本机 id：导出时不带它、只带可读的 `groupName`（见 docs/book-source-spec.md），
+    /// 同步时不带它、只带书源分组实体 id（见 docs/sync.md 第 7.1 节）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_id: Option<String>,
     /// 缺省请求 UA（空 = 使用内置默认）

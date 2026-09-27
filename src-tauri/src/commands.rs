@@ -69,6 +69,7 @@ pub async fn readerx_state_set(app: AppHandle, key: String, value: Value) -> Res
         match key.as_str() {
             "readerx.shelf" => sync::service_hook(&app).on_shelf_changed(&value),
             "readerx.groups" => sync::service_hook(&app).on_groups_changed(&value),
+            "readerx.sourceGroups" => sync::service_hook(&app).on_source_groups_changed(&value),
             "readerx.textReplacements" => sync::service_hook(&app).on_text_replaces_changed(&value),
             "readerx.chapterRules" => sync::service_hook(&app).on_chapter_rules_changed(&value),
             _ => {}
@@ -414,7 +415,14 @@ pub async fn readerx_source_group_clear(app: AppHandle, group_id: String) -> Res
         return Err("非法的书源分组 id".to_string());
     }
     blocking("书源分组清理", move || {
-        storage::clear_book_source_group(&app, &group_id)
+        let cleared = storage::clear_book_source_group(&app, &group_id)?;
+        // 分组归属也是同步载荷的一部分：清完把这几份书源重新发布一次，
+        // 否则对端那边还留着「这个源在那个分组里」的旧归属
+        let service = sync::service_hook(&app);
+        for source in &cleared {
+            service.on_source_changed(source);
+        }
+        Ok(cleared.len() as u64)
     })
     .await
 }

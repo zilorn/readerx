@@ -80,7 +80,7 @@ pub struct SyncStatus {
     pub last_error: Option<String>,
     /// 待裁决的冲突数
     pub pending_conflicts: usize,
-    /// 已入库的实体数（书 / 进度 / 书签 / 分组 / 书源）
+    /// 已入库的实体数（书 / 进度 / 书签 / 分组 / 书源分组 / 书源）
     pub entities: usize,
     /// 操作日志条数
     pub ops: usize,
@@ -325,7 +325,7 @@ impl<R: tauri::Runtime> SyncService<R> {
         Ok(())
     }
 
-    /// 与本地数据对账：把书库 / 进度 / 书签 / 分组 / 书源里引擎还没有的记录补进去。
+    /// 与本地数据对账：把书库 / 进度 / 书签 / 分组 / 书源分组 / 书源里引擎还没有的记录补进去。
     ///
     /// 首次启用时这一步要写几百条操作（每条都要 fsync），因此**放在后台线程**：
     /// 用户点开关必须立刻有反应，而不是等整个书库灌完。
@@ -980,6 +980,7 @@ impl<R: tauri::Runtime> SyncService<R> {
         changes.books |= extra.books;
         changes.progress |= extra.progress;
         changes.groups |= extra.groups;
+        changes.source_groups |= extra.source_groups;
         changes.sources |= extra.sources;
         changes.text_replaces |= extra.text_replaces;
         changes.chapter_rules |= extra.chapter_rules;
@@ -1113,6 +1114,23 @@ impl<R: tauri::Runtime> SyncService<R> {
         };
         if let Err(error) = bridge::publish_groups(&self.app, &engine, groups) {
             log::warn!("同步发布分组失败：{error}");
+        }
+    }
+
+    /// 书源分组清单被写入（`readerx.sourceGroups`）。
+    pub fn on_source_groups_changed(&self, groups: &Value) {
+        let Some(engine) = self.engine() else {
+            return;
+        };
+        if let Err(error) = bridge::publish_source_groups(&self.app, &engine, groups) {
+            log::warn!("同步发布书源分组失败：{error}");
+            return;
+        }
+        // 改名的话书源的归属也要跟着换（分组名即身份，旧名字派生出的实体 id 已作废）；
+        // 值没变的书源不会写出操作。删除分组时受影响的那几份书源由命令层另行发布
+        // （它们的 `groupId` 是另一条路径清掉的，见 `readerx_source_group_clear`）。
+        if let Err(error) = bridge::republish_grouped_sources(&self.app, &engine) {
+            log::warn!("同步重新发布分组书源失败：{error}");
         }
     }
 
@@ -1499,10 +1517,11 @@ impl<R: tauri::Runtime> SyncService<R> {
             return;
         }
         log::info!(
-            "同步落地: 书籍={} 进度={} 分组={} 书源={} 书签={} 替换规则={} 分章规则={} 删除={}",
+            "同步落地: 书籍={} 进度={} 分组={} 书源分组={} 书源={} 书签={} 替换规则={} 分章规则={} 删除={}",
             changes.books,
             changes.progress,
             changes.groups,
+            changes.source_groups,
             changes.sources,
             changes.bookmarks.len(),
             changes.text_replaces,
@@ -1551,7 +1570,7 @@ fn reason_code(conflict: &Conflict) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-/// 冲突涉及对象的显示名：书 / 分组 / 书源都尽量给出人看得懂的名字。
+/// 冲突涉及对象的显示名：书 / 分组（书架 / 书源）/ 书源都尽量给出人看得懂的名字。
 fn entity_title(engine: &SyncEngine, entity_id: &str, kind: &str) -> String {
     let named = |field: &str| {
         engine
@@ -1559,7 +1578,7 @@ fn entity_title(engine: &SyncEngine, entity_id: &str, kind: &str) -> String {
             .and_then(|v| v.as_str().map(str::to_string))
     };
     match kind {
-        "group" | "book_source" => named("name"),
+        "group" | "source_group" | "book_source" => named("name"),
         "book" => named("title"),
         "reading_progress" | "bookmark" => {
             let book = engine

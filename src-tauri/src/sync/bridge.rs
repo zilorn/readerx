@@ -42,6 +42,8 @@ use super::identity::{self, BookKey};
 const SHELF_KEY: &str = "readerx.shelf";
 /// 书架分组所在的偏好 key（前端 `groups.ts` 的 `GROUPS_KEY`）
 const GROUPS_KEY: &str = "readerx.groups";
+/// 书源分组所在的偏好 key（前端 `sourceGroups.ts` 的 `SOURCE_GROUPS_KEY`）
+const SOURCE_GROUPS_KEY: &str = "readerx.sourceGroups";
 /// 文本替换规则所在的偏好 key（前端 `textReplacements.ts` 的 `STORAGE_KEY`）
 const TEXT_REPLACES_KEY: &str = "readerx.textReplacements";
 /// 分章规则所在的偏好 key（前端 `chapterRules.ts` 的 `RULES_KEY`）
@@ -68,6 +70,8 @@ pub struct AppliedChanges {
     pub progress: bool,
     /// 分组有变化 → 重新读回分组
     pub groups: bool,
+    /// 书源分组有变化 → 重新读回书源分组
+    pub source_groups: bool,
     /// 书源有变化 → 重新拉书源列表
     pub sources: bool,
     /// 书签有变化的本机书 id → 只重载这几本
@@ -87,6 +91,7 @@ impl AppliedChanges {
         !self.books
             && !self.progress
             && !self.groups
+            && !self.source_groups
             && !self.sources
             && !self.text_replaces
             && !self.chapter_rules
@@ -226,29 +231,28 @@ pub fn local_uid<R: tauri::Runtime>(app: &AppHandle<R>, book_id: &str) -> String
 struct LocalFacts {
     /// 本机分组 id → 同步分组 id
     groups: HashMap<String, String>,
+    /// 本机书源分组 id → 同步书源分组 id
+    source_groups: HashMap<String, String>,
     /// 本机书源 id → 书源地址（在线书身份用）
     source_urls: HashMap<String, String>,
 }
 
 impl LocalFacts {
     fn load<R: tauri::Runtime>(app: &AppHandle<R>) -> LocalFacts {
-        let mut facts = LocalFacts::default();
-        if let Ok(Some(groups)) = storage::read_state(app, GROUPS_KEY) {
-            for group in groups.as_array().map(Vec::as_slice).unwrap_or_default() {
-                let (Some(id), Some(name)) = (
-                    group.get("id").and_then(Value::as_str),
-                    group.get("name").and_then(Value::as_str),
-                ) else {
-                    continue;
-                };
-                facts.groups.insert(id.to_string(), identity::group_uid(name));
-            }
+        LocalFacts {
+            groups: group_ids(app, GROUPS_KEY, identity::group_uid),
+            source_groups: group_ids(app, SOURCE_GROUPS_KEY, identity::source_group_uid),
+            source_urls: HashMap::new(),
         }
-        facts
     }
 
     fn group_sync_id(&self, local_group_id: Option<&str>) -> Option<String> {
         local_group_id.and_then(|id| self.groups.get(id).cloned())
+    }
+
+    /// 书源分组的同步 id（书源归属发布时用）。
+    fn source_group_sync_id(&self, local_group_id: Option<&str>) -> Option<String> {
+        local_group_id.and_then(|id| self.source_groups.get(id).cloned())
     }
 
     /// 书源地址（按需查一次并缓存：只有在线书才算得到身份）。
@@ -261,6 +265,28 @@ impl LocalFacts {
         self.source_urls.insert(id.to_string(), url.clone());
         Some(url)
     }
+}
+
+/// 读一份分组清单（`readerx.groups` / `readerx.sourceGroups` 同构），返回
+/// 「本机分组 id → 同步分组 id」。书源分组与书架分组只差 key 与身份派生函数。
+fn group_ids<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    key: &str,
+    uid_of: fn(&str) -> String,
+) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    if let Ok(Some(groups)) = storage::read_state(app, key) {
+        for group in groups.as_array().map(Vec::as_slice).unwrap_or_default() {
+            let (Some(id), Some(name)) = (
+                group.get("id").and_then(Value::as_str),
+                group.get("name").and_then(Value::as_str),
+            ) else {
+                continue;
+            };
+            map.insert(id.to_string(), uid_of(name));
+        }
+    }
+    map
 }
 
 // ---------------------------------------------------------------------------
@@ -438,27 +464,81 @@ pub fn publish_groups<R: tauri::Runtime>(
             publish_value(&mut guard, &uid, "name", json!(name))?;
         }
     }
-    // 已经不在本地清单里的分组 → 墓碑
-    let stale: Vec<String> = guard
-        .entities_of_kind("group", false)
+    tombstone_missing_groups(&mut guard, "group", &live)
+}
+
+/// 发布书源分组清单（`readerx.sourceGroups` 的整个数组）。
+///
+/// 与书架分组同构（名字即身份），只是实体类型与身份派生不同命名空间 ——
+/// 两个清单里各有一个「科幻」时它们是两个分组，不会互相认领。
+pub fn publish_source_groups<R: tauri::Runtime>(
+    _app: &AppHandle<R>,
+    engine: &SharedEngine,
+    groups: &Value,
+) -> Result<(), SyncError> {
+    let mut guard = lock_engine(engine);
+    let mut live: Vec<String> = Vec::new();
+    for group in groups.as_array().map(Vec::as_slice).unwrap_or_default() {
+        let Some(name) = group.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let uid = identity::source_group_uid(name);
+        live.push(uid.clone());
+        // 创建时间只用来稳定显示顺序（新建的分组排在后面），并发不一致不算冲突
+        let created_at = group.get("createdAt").and_then(Value::as_i64).unwrap_or(0);
+        let values = [("name", json!(name)), ("created_at", json!(created_at))];
+        if guard.entity(&uid).is_none() {
+            guard.create_entity("source_group", Some(uid), values)?;
+        } else {
+            for (field, value) in values {
+                publish_value(&mut guard, &uid, field, value)?;
+            }
+        }
+    }
+    tombstone_missing_groups(&mut guard, "source_group", &live)
+}
+
+/// 引擎里有、本地清单里没有的分组 → 墓碑（用户在本机删掉了它）。
+fn tombstone_missing_groups(
+    engine: &mut SyncEngine,
+    kind: &str,
+    live: &[String],
+) -> Result<(), SyncError> {
+    let stale: Vec<String> = engine
+        .entities_of_kind(kind, false)
         .into_iter()
         .map(|entity| entity.id.clone())
         .filter(|id| !live.iter().any(|uid| uid == id))
         .collect();
     for id in stale {
-        guard.delete_entity(&id, Some("分组已删除".to_string()))?;
+        engine.delete_entity(&id, Some("分组已删除".to_string()))?;
     }
     Ok(())
 }
 
-/// 发布一份书源（整份 JSON；`id` 与 `groupId` 是本机的，不进同步载荷）。
+/// 发布一份书源（整份 JSON；本机的 `id` 不进同步载荷，分组归属走独立的 `group` 字段）。
 pub fn publish_source<R: tauri::Runtime>(
-    _app: &AppHandle<R>,
+    app: &AppHandle<R>,
     engine: &SharedEngine,
+    source: &BookSource,
+) -> Result<(), SyncError> {
+    let facts = LocalFacts::load(app);
+    publish_source_with(engine, &facts, source)
+}
+
+/// 发布一份书源（调用方已有 [`LocalFacts`]，对账时批量发布用）。
+fn publish_source_with(
+    engine: &SharedEngine,
+    facts: &LocalFacts,
     source: &BookSource,
 ) -> Result<(), SyncError> {
     let uid = identity::source_uid(&source.book_source_url);
     let payload = source_payload(source);
+    let group = facts.source_group_sync_id(source.group_id.as_deref());
     let mut guard = lock_engine(engine);
     if guard.entity(&uid).is_none() {
         guard.create_entity(
@@ -468,11 +548,13 @@ pub fn publish_source<R: tauri::Runtime>(
                 ("name", json!(source.name)),
                 ("url", json!(source.book_source_url)),
                 ("json", payload),
+                ("group", option_json(group.as_deref())),
             ],
         )?;
         return Ok(());
     }
     publish_value(&mut guard, &uid, "name", json!(source.name))?;
+    publish_value(&mut guard, &uid, "group", option_json(group.as_deref()))?;
     publish_multi(&mut guard, &uid, "json", payload)?;
     Ok(())
 }
@@ -487,6 +569,23 @@ pub fn publish_source_delete<R: tauri::Runtime>(
     let mut guard = lock_engine(engine);
     if guard.entity(&uid).is_some() {
         guard.delete_entity(&uid, Some("书源已删除".to_string()))?;
+    }
+    Ok(())
+}
+
+/// 重新发布**已分组的书源**（书源分组清单改名后调用）。
+///
+/// 分组名就是它的身份：改名会让书源上那个「旧名字派生出的实体 id」作废，书源不跟着
+/// 重新发布，对端按名字就找不回分组，落地时会把它们退回未分组。归属没变的书源在这里
+/// 一条操作都不会写（见 [`publish_value`]），所以整批走一遍是廉价的。
+pub fn republish_grouped_sources<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    engine: &SharedEngine,
+) -> Result<(), SyncError> {
+    let sources = readerx_source::store::list_sources().map_err(SyncError::Io)?;
+    let facts = LocalFacts::load(app);
+    for source in sources.iter().filter(|source| source.group_id.is_some()) {
+        publish_source_with(engine, &facts, source)?;
     }
     Ok(())
 }
@@ -668,9 +767,12 @@ pub fn reconcile<R: tauri::Runtime>(
         }
     }
 
-    // 分组与书源
+    // 分组与书源（书源分组要排在书源前面：书源的归属按分组实体 id 发布）
     if let Ok(Some(groups)) = storage::read_state(app, GROUPS_KEY) {
         publish_groups(app, engine, &groups)?;
+    }
+    if let Ok(Some(groups)) = storage::read_state(app, SOURCE_GROUPS_KEY) {
+        publish_source_groups(app, engine, &groups)?;
     }
     // 规则类数据（文本替换 / 分章规则）
     if let Ok(Some(rules)) = storage::read_state(app, TEXT_REPLACES_KEY) {
@@ -691,7 +793,7 @@ pub fn reconcile<R: tauri::Runtime>(
     }
     if let Ok(sources) = readerx_source::store::list_sources() {
         for source in &sources {
-            publish_source(app, engine, source)?;
+            publish_source_with(engine, &facts, source)?;
         }
     }
     lock_engine(engine).flush()?;
@@ -1077,9 +1179,12 @@ fn apply_snapshots<R: tauri::Runtime>(
         return Ok(changes);
     }
 
-    // 分组排在最前：书要按本机分组 id 落归属
+    // 分组排在最前：书要按本机分组 id 落归属，书源也一样（按本机书源分组 id）
     if apply_groups(app, &snapshots).map_err(SyncError::Io)? {
         changes.groups = true;
+    }
+    if apply_source_groups(app, &snapshots).map_err(SyncError::Io)? {
+        changes.source_groups = true;
     }
     for snapshot in &snapshots {
         if let Snapshot::Book { uid, deleted, fields } = snapshot {
@@ -1159,8 +1264,10 @@ fn apply_snapshots<R: tauri::Runtime>(
         Vec::new()
     };
     for snapshot in &snapshots {
-        if let Snapshot::Source { uid, deleted, payload } = snapshot {
-            if apply_source(&sources, uid, *deleted, payload.as_ref()).map_err(SyncError::Io)? {
+        if let Snapshot::Source { uid, deleted, payload, group } = snapshot {
+            if apply_source(app, &sources, uid, *deleted, payload.as_ref(), group.as_deref())
+                .map_err(SyncError::Io)?
+            {
                 changes.sources = true;
             }
         }
@@ -1256,10 +1363,19 @@ fn collect_snapshots(
                     .and_then(|v| v.as_str().map(str::to_string))
                     .unwrap_or_default(),
             }),
+            "source_group" => snapshots.push(Snapshot::SourceGroup {
+                deleted,
+                name: entity
+                    .field("name")
+                    .and_then(|v| v.as_str().map(str::to_string))
+                    .unwrap_or_default(),
+            }),
             "book_source" => snapshots.push(Snapshot::Source {
                 uid: id,
                 deleted,
                 payload: (!deleted).then(|| entity.field("json")).flatten(),
+                // 分组归属（书源分组实体 id）；对端把书源移出分组时是 null
+                group: entity.field("group").and_then(|v| v.as_str().map(str::to_string)),
             }),
             // 规则类数据：一条规则变没变不改变落地动作 —— 每次都由引擎实体**整表重写**
             // 本地清单（规则条数少，重建比逐条对账更好推理，也不会漏掉删除）
@@ -1302,10 +1418,16 @@ enum Snapshot {
         deleted: bool,
         name: String,
     },
+    SourceGroup {
+        deleted: bool,
+        name: String,
+    },
     Source {
         uid: String,
         deleted: bool,
         payload: Option<Value>,
+        /// 书源分组实体 id（uid）：落地时按名字翻回本机分组 id
+        group: Option<String>,
     },
     /// 文本替换规则有变化（落地时整表重写本地清单）
     TextReplace,
@@ -1615,19 +1737,39 @@ fn text_field(entity: &Entity, field: &str) -> String {
 fn apply_groups<R: tauri::Runtime>(
     app: &AppHandle<R>, snapshots: &[Snapshot],
 ) -> Result<bool, String> {
-    let names: Vec<(bool, &str)> = snapshots
-        .iter()
-        .filter_map(|snapshot| match snapshot {
-            Snapshot::Group { deleted, name } if !name.is_empty() => {
-                Some((*deleted, name.as_str()))
-            }
-            _ => None,
-        })
-        .collect();
+    apply_group_list(app, GROUPS_KEY, "grp", snapshots, |snapshot| match snapshot {
+        Snapshot::Group { deleted, name } if !name.is_empty() => Some((*deleted, name.as_str())),
+        _ => None,
+    })
+}
+
+/// 落地书源分组：与书架分组同一套口径（按名字对应，缺的补、删的删）。
+///
+/// 必须在书源之前落地：书源的归属要按「本机分组 id」写进源文件。
+fn apply_source_groups<R: tauri::Runtime>(
+    app: &AppHandle<R>, snapshots: &[Snapshot],
+) -> Result<bool, String> {
+    apply_group_list(app, SOURCE_GROUPS_KEY, "sgrp", snapshots, |snapshot| match snapshot {
+        Snapshot::SourceGroup { deleted, name } if !name.is_empty() => {
+            Some((*deleted, name.as_str()))
+        }
+        _ => None,
+    })
+}
+
+/// 落地一份分组清单（书架 / 书源分组共用）：同步来的分组按名字对应，缺的补上，删掉的移除。
+fn apply_group_list<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    key: &str,
+    id_prefix: &str,
+    snapshots: &[Snapshot],
+    pick: impl Fn(&Snapshot) -> Option<(bool, &str)>,
+) -> Result<bool, String> {
+    let names: Vec<(bool, &str)> = snapshots.iter().filter_map(pick).collect();
     if names.is_empty() {
         return Ok(false);
     }
-    let mut groups = storage::read_state(app, GROUPS_KEY)?
+    let mut groups = storage::read_state(app, key)?
         .and_then(|value| value.as_array().cloned())
         .unwrap_or_default();
     let mut changed = false;
@@ -1640,7 +1782,7 @@ fn apply_groups<R: tauri::Runtime>(
             }
             (false, None) => {
                 groups.push(json!({
-                    "id": new_local_id("grp"),
+                    "id": new_local_id(id_prefix),
                     "name": name,
                     "createdAt": now_ms(),
                 }));
@@ -1650,7 +1792,7 @@ fn apply_groups<R: tauri::Runtime>(
         }
     }
     if changed {
-        storage::write_state(app, GROUPS_KEY, &Value::Array(groups))?;
+        storage::write_state(app, key, &Value::Array(groups))?;
     }
     Ok(changed)
 }
@@ -1660,11 +1802,13 @@ fn group_name(group: &Value) -> Option<&str> {
 }
 
 /// 落地书源：按地址对应本机书源，缺的建、删的删。
-fn apply_source(
+fn apply_source<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     existing: &[BookSource],
     uid: &str,
     deleted: bool,
     payload: Option<&Value>,
+    group: Option<&str>,
 ) -> Result<bool, String> {
     let found = existing
         .iter()
@@ -1692,10 +1836,11 @@ fn apply_source(
         .map(|source| source.id.clone())
         .unwrap_or_else(|| new_local_id("src"));
     object.insert("id".to_string(), json!(id));
-    // 书源分组是本机归属、不参与同步：本地已有就保留，新来的先不分组
-    match found.and_then(|source| source.group_id.clone()) {
-        Some(group) => {
-            object.insert("groupId".to_string(), json!(group));
+    // 分组归属以同步结果为准（组名 → 本机分组 id）：对端把书源移出分组、
+    // 或那个分组已被删掉时，源文件里的 groupId 一并清掉，不留悬空引用
+    match local_source_group_id(app, group)? {
+        Some(local) => {
+            object.insert("groupId".to_string(), json!(local));
         }
         None => {
             object.remove("groupId");
@@ -1723,17 +1868,37 @@ fn same_source(a: &BookSource, b: &BookSource) -> bool {
 fn local_group_id<R: tauri::Runtime>(
     app: &AppHandle<R>, sync_group: Option<&str>,
 ) -> Result<Option<String>, String> {
+    local_group_id_in(app, GROUPS_KEY, identity::group_uid, sync_group)
+}
+
+/// 同步书源分组 id → 本机书源分组 id（同步来的书源要落进本机已有的同名分组）。
+fn local_source_group_id<R: tauri::Runtime>(
+    app: &AppHandle<R>, sync_group: Option<&str>,
+) -> Result<Option<String>, String> {
+    local_group_id_in(app, SOURCE_GROUPS_KEY, identity::source_group_uid, sync_group)
+}
+
+/// 按「同步分组 id = 分组名派生值」在本地清单里找回本机分组 id。
+///
+/// 找不到（分组已被删 / 对端改名后留下的旧 id）时返回 `None`：调用方按「未分组」落地，
+/// 不留悬空引用。同步分组 id 与本地 id 的计算方式不同，因此要传身份派生函数。
+fn local_group_id_in<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    key: &str,
+    uid_of: fn(&str) -> String,
+    sync_group: Option<&str>,
+) -> Result<Option<String>, String> {
     let Some(sync_group) = sync_group else {
         return Ok(None);
     };
-    let groups = storage::read_state(app, GROUPS_KEY)?
+    let groups = storage::read_state(app, key)?
         .and_then(|value| value.as_array().cloned())
         .unwrap_or_default();
     Ok(groups
         .iter()
         .find(|group| {
             group_name(group)
-                .map(|name| identity::group_uid(name) == sync_group)
+                .map(|name| uid_of(name) == sync_group)
                 .unwrap_or(false)
         })
         .and_then(|group| group.get("id").and_then(Value::as_str).map(str::to_string)))
@@ -2084,6 +2249,8 @@ mod tests {
         assert_eq!(value["chapterIndex"], Value::Null);
     }
 
+    /// 载荷里不留本机字段：`id` 每台设备各自生成，`groupId` 是本机分组 id ——
+    /// 归属走实体的 `group` 字段（存书源分组实体 id），因此并发改分组与改 JS 不会互相盖掉。
     #[test]
     fn source_payload_drops_local_fields() {
         let source = BookSource {

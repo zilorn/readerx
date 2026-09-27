@@ -192,6 +192,7 @@ export const sync = {
   "sync.kind.book": "Book",
   "sync.kind.source": "Source",
   "sync.kind.group": "Group",
+  "sync.kind.sourceGroup": "Source group",
   "sync.kind.bookmark": "Bookmark",
   "sync.kind.progress": "Reading position",
 };

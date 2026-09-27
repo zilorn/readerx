@@ -259,7 +259,7 @@ impl SchemaRegistry {
     /// ReaderX 的默认同步语义。
     ///
     /// 这些类型对应 App 现有的本地数据（书架元信息 / 阅读进度 / 书签 / 分组 /
-    /// 书源），字段名与 App 桥接层（`src-tauri/src/sync/bridge.rs`）写入的一致。
+    /// 书源与书源分组），字段名与 App 桥接层（`src-tauri/src/sync/bridge.rs`）写入的一致。
     /// 改这里的字段名或策略时，桥接层要一起改（`tests/sync_bridge.rs` 会挡住不一致）。
     pub fn readerx_defaults() -> SchemaRegistry {
         let mut registry = SchemaRegistry::new();
@@ -325,6 +325,14 @@ impl SchemaRegistry {
                 .field("order", MergeKind::List),
         );
 
+        // 书源分组：与书架分组同构（名字即身份），但归属挂在书源上而不是书上，
+        // 因此是独立的一种实体（同名分组在两边互不影响）
+        registry.register(
+            Schema::new("source_group")
+                .field("name", MergeKind::Lww)
+                .field("created_at", MergeKind::LwwSilent),
+        );
+
         // 书架顺序：一个单例实体上的有序列表（元素 = 书籍 id）
         registry.register(Schema::new("shelf").field("order", MergeKind::List));
 
@@ -362,11 +370,14 @@ impl SchemaRegistry {
         // 书源：整份 JSON 都可能被两边同时改，保留多值让人选。
         // 不声明唯一键：实体 id 由书源地址派生（换设备也认得同一份源），
         // 而「同名不同源」在现实里很常见，拿名字当唯一键会把合法的第二份源拒之门外。
+        // `group` 是书源分组的实体 id（uid），与书源 JSON 分开走：并发时一台设备换分组、
+        // 另一台改 JS，两者互不覆盖（整份 JSON 在多值字段里）。
         registry.register(
             Schema::new("book_source")
                 .field("name", MergeKind::Lww)
                 .field("url", MergeKind::Frozen)
-                .field("json", MergeKind::MultiValue),
+                .field("json", MergeKind::MultiValue)
+                .field("group", MergeKind::Lww),
         );
 
         // 账号 / 登录态这类凭据不进同步（见 docs/sync.md 的「不做什么」），
@@ -408,6 +419,7 @@ mod tests {
             "reading_progress",
             "bookmark",
             "group",
+            "source_group",
             "shelf",
             "setting",
             "book_source",
@@ -438,6 +450,12 @@ mod tests {
         let source = registry.get("book_source");
         assert_eq!(source.field_kind("json"), MergeKind::MultiValue);
         assert!(source.unique_fields.is_empty(), "书源不按名字做唯一键");
+        // 书源的分组归属与整份 JSON 分开走，否则两边并发改会互相盖掉
+        assert_eq!(source.field_kind("group"), MergeKind::Lww);
+        assert_eq!(
+            registry.get("source_group").field_kind("name"),
+            MergeKind::Lww
+        );
         // 位置类字段一律静默 LWW：并发读到不同位置不是「数据冲突」
         assert_eq!(
             registry.get("reading_progress").field_kind("char_offset"),

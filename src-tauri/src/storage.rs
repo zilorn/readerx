@@ -425,20 +425,21 @@ pub(crate) fn delete_book_source<R: tauri::Runtime>(
     Ok(())
 }
 
-/// 清除全部书源上指向该分组的归属（书源分组被删除时调用），返回受影响的书源数量。
+/// 清除全部书源上指向该分组的归属（书源分组被删除时调用），返回被改写的书源。
 /// 组清单存在前端偏好里，源文件里的 `groupId` 必须在删组时一并清掉，
-/// 否则会留下指向已删分组的悬空引用。整批改写都在 Rust 侧完成，不走 IPC 往返。
+/// 否则会留下指向已删分组的悬空引用。整批改写都在 Rust 侧完成，不走 IPC 往返；
+/// 返回改写的书源是让调用方把它们重新发布给同步（归属变了，对端也要跟着变）。
 pub(crate) fn clear_book_source_group<R: tauri::Runtime>(
     _app: &AppHandle<R>, group_id: &str,
-) -> Result<u64, String> {
-    let mut cleared = 0u64;
+) -> Result<Vec<BookSource>, String> {
+    let mut cleared = Vec::new();
     for mut source in readerx_source::store::list_sources()? {
         if source.group_id.as_deref() != Some(group_id) {
             continue;
         }
         source.group_id = None;
         readerx_source::store::put_source(&source)?;
-        cleared += 1;
+        cleared.push(source);
     }
     Ok(cleared)
 }

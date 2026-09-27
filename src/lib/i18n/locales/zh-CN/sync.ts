@@ -157,6 +157,7 @@ export const sync = {
   "sync.kind.book": "书籍",
   "sync.kind.source": "书源",
   "sync.kind.group": "分组",
+  "sync.kind.sourceGroup": "书源分组",
   "sync.kind.bookmark": "书签",
   "sync.kind.progress": "阅读进度",
 };

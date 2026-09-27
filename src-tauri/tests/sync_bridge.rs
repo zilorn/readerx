@@ -1426,3 +1426,226 @@ fn illustration_follows_the_body_winner_and_normalizes_the_reference() {
     }
 
 }
+
+/// 书源分组：分组清单与**书源归属**双向同步。
+///
+/// 两处容易踩的坑都在这里挡住：
+/// - 归属不能塞进书源的整份 JSON（那份是多值字段：一边改分组、一边改 JS 会互相盖），
+///   它按书源分组实体 id 记在独立的 `group` 字段上，落地时再翻回本机分组 id；
+/// - 分组按**名字**对应：对端新建的分组要在本机补一个本机 id，对端删掉的分组要让
+///   本机书源退回未分组（源文件里不能留指向已删分组的悬空 groupId）。
+#[test]
+fn source_groups_sync_in_both_directions() {
+    let _serial = SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (handle, app_data) = setup();
+
+    // 本机：一个书源分组「科幻」、一份归在里面的书源；另有一个**同名**的书架分组
+    // （书架分组与书源分组是两个命名空间，同名也不能互相认领）
+    write_json(
+        &app_data.join("state").join("readerx.groups.json"),
+        &json!([{ "id": "grp-1", "name": "科幻", "createdAt": 1 }]),
+    );
+    write_json(
+        &app_data.join("state").join("readerx.sourceGroups.json"),
+        &json!([{ "id": "sg-local", "name": "科幻", "createdAt": 1 }]),
+    );
+    write_json(
+        &app_data.join("book_sources").join("src-1.json"),
+        &json!({
+            "schemaVersion": 1,
+            "id": "src-1",
+            "name": "示例源",
+            "bookSourceUrl": "https://example.com",
+            "enabled": true,
+            "groupId": "sg-local",
+            "js": "function searchBook(){}",
+        }),
+    );
+
+    // ---- 本机引擎 + 对账：分组与归属一起发布 ----
+    let local = local_engine(&handle, &app_data);
+    let mut index = BookIndex::default();
+    bridge::reconcile(&handle, &local, &mut index).unwrap();
+
+    let source_uid = identity::source_uid("https://example.com");
+    let scifi_uid = identity::source_group_uid("科幻");
+    {
+        let guard = lock_engine(&local);
+        let groups = guard.entities_of_kind("source_group", false);
+        assert_eq!(groups.len(), 1, "书源分组应被发布");
+        assert_eq!(groups[0].id, scifi_uid, "分组实体 id 由分组名派生");
+        assert_eq!(groups[0].field("name"), Some(json!("科幻")));
+        assert_eq!(
+            guard.entities_of_kind("group", false).len(),
+            1,
+            "同名书架分组该是另一个实体"
+        );
+        let source = guard.entity(&source_uid).expect("书源应被发布");
+        assert_eq!(
+            source.field("group"),
+            Some(json!(scifi_uid.clone())),
+            "归属按书源分组实体 id 走"
+        );
+        let payload = source.field("json").unwrap().to_string();
+        assert!(!payload.contains("groupId"), "本机分组 id 不进同步载荷：{payload}");
+    }
+
+    // ---- 对端：拿到分组后新建一个「网文」，并把书源移进去 ----
+    let peer = peer_engine("source-group-peer", Some(&lock_engine(&local).pairing_code()));
+    sync_once(&local, &peer);
+    let web_uid = identity::source_group_uid("网文");
+    {
+        let mut guard = lock_engine(&peer);
+        assert_eq!(guard.entities_of_kind("source_group", false).len(), 1, "对端应拿到书源分组");
+        assert_eq!(
+            guard.entity(&source_uid).and_then(|entity| entity.field("group")),
+            Some(json!(scifi_uid)),
+            "对端应拿到书源的归属"
+        );
+        guard
+            .create_entity(
+                "source_group",
+                Some(web_uid.clone()),
+                [("name", json!("网文")), ("created_at", json!(2))],
+            )
+            .unwrap();
+        guard.set_field(&source_uid, "group", json!(web_uid.clone())).unwrap();
+        guard.flush().unwrap();
+    }
+
+    // ---- 反向同步 + 落地：本机补出新分组，书源改归到它下面 ----
+    sync_once(&peer, &local);
+    let changes = bridge::materialize(&handle, &local, 0, &mut index).unwrap();
+    assert!(changes.source_groups, "书源分组应被落地：{changes:?}");
+    assert!(changes.sources, "书源归属应被落地：{changes:?}");
+
+    let groups = read_json(&app_data.join("state").join("readerx.sourceGroups.json"));
+    let items = groups.as_array().unwrap();
+    assert_eq!(items.len(), 2, "对端新建的分组应补进本机清单：{groups}");
+    let web_local_id = items
+        .iter()
+        .find(|group| group["name"] == json!("网文"))
+        .and_then(|group| group["id"].as_str())
+        .expect("新分组应在清单里")
+        .to_string();
+    assert_eq!(items[0]["id"], json!("sg-local"), "原有分组沿用本机 id");
+    let source = read_json(&app_data.join("book_sources").join("src-1.json"));
+    assert_eq!(source["id"], json!("src-1"), "落地不改本机书源 id");
+    assert_eq!(
+        source["groupId"],
+        json!(web_local_id),
+        "书源应改归到新分组下（用本机分组 id）：{source}"
+    );
+
+    // ---- 对端删掉那个分组，并把书源移出分组 ----
+    {
+        let mut guard = lock_engine(&peer);
+        guard.delete_entity(&web_uid, Some("对端删除分组".to_string())).unwrap();
+        guard.unset_field(&source_uid, "group").unwrap();
+        guard.flush().unwrap();
+    }
+    sync_once(&peer, &local);
+    let changes = bridge::materialize(&handle, &local, 0, &mut index).unwrap();
+    assert!(changes.source_groups, "删组也要落地：{changes:?}");
+    assert!(changes.sources, "书源退回未分组也要落地：{changes:?}");
+
+    let groups = read_json(&app_data.join("state").join("readerx.sourceGroups.json"));
+    let names: Vec<String> = groups
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|group| group["name"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert_eq!(names, vec!["科幻".to_string()], "被删的分组应从本机清单里消失：{groups}");
+    let source = read_json(&app_data.join("book_sources").join("src-1.json"));
+    assert!(
+        source.get("groupId").is_none(),
+        "书源应退回未分组，不留悬空引用：{source}"
+    );
+
+    // 再对账一次（等价于下次启动）：本地清单与引擎已经一致，不该产生多余操作
+    let before = lock_engine(&local).op_count();
+    bridge::reconcile(&handle, &local, &mut index).unwrap();
+    assert_eq!(lock_engine(&local).op_count(), before, "对账不该写多余的操作");
+}
+
+/// 书源分组改名：分组名就是身份，改名后**归属不能丢**。
+///
+/// 改名等于「旧名字入墓碑 + 新名字建实体」，书源必须跟着重新发布一次（`group` 换成新
+/// 名字派生出的实体 id）；否则对端按名字找不回分组，落地时会把它们退回未分组。
+#[test]
+fn renaming_a_source_group_keeps_source_membership() {
+    let _serial = SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (handle, app_data) = setup();
+
+    let state_key = |name: &str| json!([{ "id": "sg-local", "name": name, "createdAt": 1 }]);
+    write_json(
+        &app_data.join("state").join("readerx.sourceGroups.json"),
+        &state_key("科幻"),
+    );
+    write_json(
+        &app_data.join("book_sources").join("src-1.json"),
+        &json!({
+            "schemaVersion": 1,
+            "id": "src-1",
+            "name": "示例源",
+            "bookSourceUrl": "https://example.com",
+            "enabled": true,
+            "groupId": "sg-local",
+            "js": "function searchBook(){}",
+        }),
+    );
+
+    let local = local_engine(&handle, &app_data);
+    let mut index = BookIndex::default();
+    bridge::reconcile(&handle, &local, &mut index).unwrap();
+
+    let source_uid = identity::source_uid("https://example.com");
+    let old_uid = identity::source_group_uid("科幻");
+    let peer = peer_engine("rename-peer", Some(&lock_engine(&local).pairing_code()));
+    sync_once(&local, &peer);
+    assert_eq!(
+        lock_engine(&peer).entity(&source_uid).and_then(|entity| entity.field("group")),
+        Some(json!(old_uid.clone())),
+        "对端先拿到旧名字派生的归属"
+    );
+
+    // ---- 本机改名（清单整份重写 → 钩子重新发布清单与组内书源）----
+    let renamed = state_key("科幻小说");
+    write_json(
+        &app_data.join("state").join("readerx.sourceGroups.json"),
+        &renamed,
+    );
+    bridge::publish_source_groups(&handle, &local, &renamed).unwrap();
+    bridge::republish_grouped_sources(&handle, &local).unwrap();
+
+    sync_once(&local, &peer);
+    let new_uid = identity::source_group_uid("科幻小说");
+    {
+        let guard = lock_engine(&peer);
+        assert!(
+            guard.entity(&old_uid).is_some_and(|entity| entity.is_deleted()),
+            "旧名字应进墓碑"
+        );
+        assert_eq!(
+            guard.entity(&new_uid).and_then(|entity| entity.field("name")),
+            Some(json!("科幻小说"))
+        );
+        assert_eq!(
+            guard.entity(&source_uid).and_then(|entity| entity.field("group")),
+            Some(json!(new_uid)),
+            "书源的归属要跟着改名走"
+        );
+    }
+
+    // ---- 再同步回来：本机文件里的归属仍是同一个本机分组 id ----
+    sync_once(&peer, &local);
+    bridge::materialize(&handle, &local, 0, &mut index).unwrap();
+    let source = read_json(&app_data.join("book_sources").join("src-1.json"));
+    assert_eq!(source["groupId"], json!("sg-local"), "改名不改本机归属：{source}");
+
+    // 组内的书源重新发布后不该继续写重复操作（值没变就一条都不写）
+    let before = lock_engine(&local).op_count();
+    bridge::republish_grouped_sources(&handle, &local).unwrap();
+    assert_eq!(lock_engine(&local).op_count(), before, "归属没变时重发布应无操作");
+}

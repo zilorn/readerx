@@ -19,6 +19,7 @@ import { refreshBookSources } from "./bookSources";
 import { describeError, reportFailure } from "./errorReport";
 import { reloadGroups } from "./groups";
 import { reloadReadingProgress } from "./store";
+import { reloadSourceGroups } from "./sourceGroups";
 import { reloadTextReplacements } from "./textReplacements";
 import { t, type MessageKey } from "./i18n";
 import { createLogger } from "./logger";
@@ -95,6 +96,8 @@ export interface AppliedChanges {
   books: boolean;
   progress: boolean;
   groups: boolean;
+  /** 书源分组有变化 → 重新读回书源分组（必须排在书源前面） */
+  sourceGroups: boolean;
   sources: boolean;
   /** 文本替换规则有变化 → 重新读回规则清单 */
   textReplaces: boolean;
@@ -283,6 +286,7 @@ async function applyChanges(changes: AppliedChanges): Promise<void> {
     `books=${changes.books}`,
     `progress=${changes.progress}`,
     `groups=${changes.groups}`,
+    `sourceGroups=${changes.sourceGroups}`,
     `sources=${changes.sources}`,
     `textReplaces=${changes.textReplaces}`,
     `chapterRules=${changes.chapterRules}`,
@@ -291,8 +295,9 @@ async function applyChanges(changes: AppliedChanges): Promise<void> {
     `deleted=${changes.deletedBooks.length}`,
   );
   try {
-    // 分组必须排在书库前面：书的分组归属要按本机分组 id 落
+    // 分组必须排在各自的清单前面：书 / 书源的分组归属要按本机分组 id 落
     if (changes.groups) await reloadGroups();
+    if (changes.sourceGroups) await reloadSourceGroups();
     if (changes.books || changes.deletedBooks.length > 0) await reloadLocalBooks();
     // 目录 / 正文变了：丢掉这几本的物化缓存，下次打开阅读页重新读回
     if (changes.chapters.length > 0) await reloadBookContent(changes.chapters);
@@ -576,6 +581,8 @@ export function conflictKindLabel(kind: string): string {
       return t("sync.kind.source");
     case "group":
       return t("sync.kind.group");
+    case "source_group":
+      return t("sync.kind.sourceGroup");
     case "bookmark":
       return t("sync.kind.bookmark");
     case "reading_progress":
