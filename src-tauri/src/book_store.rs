@@ -313,10 +313,19 @@ fn books_root<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> 
 
 /// 单本书的目录路径。**不创建目录**：读路径不该给不存在的书留下空目录。
 fn book_dir<R: tauri::Runtime>(app: &AppHandle<R>, id: &str) -> Result<PathBuf, String> {
+    book_dir_at(app, None, id)
+}
+
+/// 同 [`book_dir`]，但允许指定数据根（见 `storage::data_root_at`）。
+fn book_dir_at<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    root: Option<&Path>,
+    id: &str,
+) -> Result<PathBuf, String> {
     if !crate::storage::valid_component(id) {
         return Err("非法的书籍 id".to_string());
     }
-    Ok(crate::storage::data_root(app)?.join("books").join(id))
+    Ok(crate::storage::data_root_at(app, root)?.join("books").join(id))
 }
 
 /// 旧布局的整书文件路径：`books/<id>.json`
@@ -448,15 +457,14 @@ fn write_book_content_with_digests(
     write_json_atomic(&dir.join(CONTENT_FILE), &content, "书籍正文")?;
     match digests {
         Some(digests) => {
-            // 指纹文件写在正文之后：时间戳按刚写下的正文算，下次读取才认为缓存有效
-            let (mtime, size) = content_stamp(&dir.join(CONTENT_FILE));
-            let file = BookDigestFile {
-                schema_version: SCHEMA_VERSION,
-                content_mtime_ms: mtime,
-                content_size: size,
-                chapters: digests,
-            };
-            write_json_atomic(&dir.join(DIGEST_FILE), &file, "章节指纹")
+            // 插图引用同样只在被回写的那几章上更新：其余章保持缓存里的原值
+            let mut assets = read_digest_assets(dir, chapters.len());
+            for (index, chapter) in chapters.iter().enumerate() {
+                if let Some(slot) = assets.get_mut(index) {
+                    *slot = ChapterAssets { locals: chapter_asset_locals(chapter) };
+                }
+            }
+            write_digest_file_with(dir, digests, assets)
         }
         None => write_digest_file(dir, chapters),
     }
@@ -996,8 +1004,19 @@ fn sync_meta_from_dir(dir: &Path) -> Result<Option<BookSyncMeta>, String> {
 pub(crate) fn list_sync_meta<R: tauri::Runtime>(
     app: &AppHandle<R>,
 ) -> Result<Vec<BookSyncMeta>, String> {
+    list_sync_meta_at(app, None)
+}
+
+/// 同 [`list_sync_meta`]，但读指定的数据根（同步夹具里的「另一台设备」用）。
+pub(crate) fn list_sync_meta_at<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    root: Option<&Path>,
+) -> Result<Vec<BookSyncMeta>, String> {
     migrate_legacy_layout(app);
-    let dir = books_root(app)?;
+    let dir = match root {
+        Some(root) => root.join("books"),
+        None => books_root(app)?,
+    };
     let mut books = Vec::new();
     for entry in fs::read_dir(&dir).map_err(|e| format!("读取书库失败: {e}"))?.flatten() {
         let path = entry.path();
@@ -1284,6 +1303,38 @@ struct BookDigestFile {
     content_size: u64,
     #[serde(default)]
     chapters: Vec<ChapterDigest>,
+    /// 各章正文里引用到的插图本地副本文件名（与 `chapters` 同下标）。
+    ///
+    /// 资源通道对账要的就是这个：**引用**（图上没下下来时也要算引用）与
+    /// 「`chapters` 里的正文指纹」共用一次整本扫描，因此不必为了同步再解析一遍正文。
+    #[serde(default)]
+    assets: Vec<ChapterAssets>,
+}
+
+/// 一章正文里引用到的插图（见 [`BookDigestFile::assets`]）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChapterAssets {
+    #[serde(default)]
+    locals: Vec<String>,
+}
+
+/// 一章正文里引用到的插图本地副本文件名（整行图 + 段内图，去掉重复）。
+fn chapter_asset_locals(chapter: &LocalBookChapter) -> Vec<String> {
+    let mut locals: Vec<String> = Vec::new();
+    for block in chapter.blocks.iter().flatten() {
+        if let Some(local) = block.local.as_ref() {
+            locals.push(local.clone());
+        }
+        for image in block.imgs.iter().flatten() {
+            if let Some(local) = image.local.as_ref() {
+                locals.push(local.clone());
+            }
+        }
+    }
+    locals.sort();
+    locals.dedup();
+    locals
 }
 
 fn content_stamp(path: &Path) -> (u64, u64) {
@@ -1318,14 +1369,52 @@ fn chapter_digest(chapter: &LocalBookChapter) -> ChapterDigest {
 
 /// 写指纹缓存（正文写完之后调用；写失败只记日志，不影响正文本身）。
 fn write_digest_file(dir: &Path, chapters: &[LocalBookChapter]) -> Result<(), String> {
+    write_digest_file_with(dir, chapter_digests(chapters), chapter_assets(chapters))
+}
+
+/// 整本重算：章节指纹 + 插图引用（两者共用一次遍历）。
+fn chapter_digests(chapters: &[LocalBookChapter]) -> Vec<ChapterDigest> {
+    chapters.iter().map(chapter_digest).collect()
+}
+
+/// 见 [`chapter_digests`]。
+fn chapter_assets(chapters: &[LocalBookChapter]) -> Vec<ChapterAssets> {
+    chapters
+        .iter()
+        .map(|chapter| ChapterAssets { locals: chapter_asset_locals(chapter) })
+        .collect()
+}
+
+/// 写指纹缓存（调用方已经算好两份清单，见 [`write_book_content_with_digests`] 的逐章路径）。
+fn write_digest_file_with(
+    dir: &Path,
+    chapters: Vec<ChapterDigest>,
+    assets: Vec<ChapterAssets>,
+) -> Result<(), String> {
     let (mtime, size) = content_stamp(&dir.join(CONTENT_FILE));
     let file = BookDigestFile {
         schema_version: SCHEMA_VERSION,
         content_mtime_ms: mtime,
         content_size: size,
-        chapters: chapters.iter().map(chapter_digest).collect(),
+        chapters,
+        assets,
     };
     write_json_atomic(&dir.join(DIGEST_FILE), &file, "章节指纹")
+}
+
+/// 读指纹缓存里的插图引用（逐章回写路径要保留没动过的那些章）。
+///
+/// 缓存缺失 / 过期 / 长度对不上时返回等长的空清单：那几章的引用会在下一次整本重算时补上，
+/// 资源通道据此把它们当成「还没落地」—— 宁可不搬，也不要把错的引用发出去。
+fn read_digest_assets(dir: &Path, chapters: usize) -> Vec<ChapterAssets> {
+    let cached = read_json_file::<BookDigestFile>(&dir.join(DIGEST_FILE), "章节指纹")
+        .ok()
+        .filter(|file| file.assets.len() == chapters)
+        .map(|file| file.assets)
+        .unwrap_or_default();
+    let mut assets = cached;
+    assets.resize_with(chapters, ChapterAssets::default);
+    assets
 }
 
 /// 读指纹缓存；缓存缺失 / 过期时**从正文重建**（一次整本解析，之后都走缓存）。
@@ -1337,12 +1426,13 @@ fn read_digest_file(dir: &Path) -> Result<Vec<ChapterDigest>, String> {
             return Ok(file.chapters);
         }
     }
+    // 缓存作废：整本重算（一次遍历同时补齐章节指纹与插图引用）
     let chapters = if content_path.is_file() {
         read_json_file::<BookContent>(&content_path, "书籍正文")?.chapters
     } else {
         Vec::new()
     };
-    let digests: Vec<ChapterDigest> = chapters.iter().map(chapter_digest).collect();
+    let digests: Vec<ChapterDigest> = chapter_digests(&chapters);
     if dir.is_dir() {
         if let Err(error) = write_digest_file(dir, &chapters) {
             log::debug!("章节指纹缓存写入失败（下次重建）：{error}");
@@ -1354,12 +1444,13 @@ fn read_digest_file(dir: &Path) -> Result<Vec<ChapterDigest>, String> {
 }
 
 /// 同步对账用：某本书**有正文**的章节摘要（没有正文的章节不返回）。
-pub(crate) fn read_sync_digests<R: tauri::Runtime>(
+pub(crate) fn read_sync_digests_at<R: tauri::Runtime>(
     app: &AppHandle<R>,
+    root: Option<&Path>,
     id: &str,
 ) -> Result<Vec<ChapterDigest>, String> {
     migrate_legacy_layout(app);
-    let dir = book_dir(app, id)?;
+    let dir = book_dir_at(app, root, id)?;
     if !dir.join(BOOKDETAIL_FILE).is_file() {
         return Ok(Vec::new());
     }
@@ -1369,18 +1460,101 @@ pub(crate) fn read_sync_digests<R: tauri::Runtime>(
         .collect())
 }
 
+/// 一本书的封面（`bookdetail.json` 里的 data URL）。只读元信息，不碰正文。
+///
+/// 封面同步走资源通道（见 `docs/sync.md` 第 7.10 节）：引擎要的是「这段 data URL 的
+/// 字节与指纹」，因此这里只提供只读入口，**不改存储形态** —— 封面仍然是元信息里的
+/// 一段 data URL，界面那一侧一个字节都不用动。
+pub(crate) fn get_cover_at<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    root: Option<&Path>,
+    id: &str,
+) -> Result<Option<String>, String> {
+    migrate_legacy_layout(app);
+    let path = book_dir_at(app, root, id)?.join(BOOKDETAIL_FILE);
+    if path.is_file() {
+        let detail: BookDetail = read_json_file(&path, "书籍元信息")?;
+        return Ok(detail.cover);
+    }
+    // 旧布局回退：与 `get_sync_meta` 同一口径（迁移没成功的书仍可读）
+    let legacy = legacy_book_file(app, id)?;
+    if !legacy.is_file() {
+        return Ok(None);
+    }
+    let scan: BookScan = scan_json_file(&legacy)?;
+    Ok(scan.cover)
+}
+
+/// 写一本书的封面（`Some` 写值，`None` / 空串清除）；返回是否真的改动了磁盘。
+///
+/// 与 [`apply_sync_meta`] 的区别只有一个：它只动 `cover` 一个字段 ——
+/// 「同步来一张封面」不该顺带把别的元信息按引擎里的旧值重写一遍。
+pub(crate) fn set_cover_at<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    root: Option<&Path>,
+    id: &str,
+    cover: Option<&str>,
+) -> Result<bool, String> {
+    migrate_legacy_layout(app);
+    let path = book_dir_at(app, root, id)?.join(BOOKDETAIL_FILE);
+    if !path.is_file() {
+        // 书已经不在了（对端刚同步来、本地却没这个文件）：不是错误，跳过即可
+        return Ok(false);
+    }
+    let mut detail: BookDetail = read_json_file(&path, "书籍元信息")?;
+    let want = cover.filter(|value| !value.is_empty()).map(str::to_string);
+    if detail.cover == want {
+        return Ok(false);
+    }
+    detail.cover = want;
+    write_json_atomic(&path, &detail, "书籍元信息")?;
+    Ok(true)
+}
+
+/// 同步对账用：某本书正文里引用到的插图（资源名 + 本地副本文件名）。
+///
+/// 与 [`read_sync_digests`] 同一份缓存、同一份来源（章节指纹），因此资源通道对账
+/// **不需要解析正文**。没有本地副本的引用（还没下载下来）不在这里 —— 资源通道会按
+/// 「引用 + 内容」的并集把它们当成「缺的那一份」。
+pub(crate) fn read_sync_asset_refs_at<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    root: Option<&Path>,
+    id: &str,
+) -> Result<Vec<(String, String)>, String> {
+    migrate_legacy_layout(app);
+    let dir = book_dir_at(app, root, id)?;
+    if !dir.join(BOOKDETAIL_FILE).is_file() {
+        return Ok(Vec::new());
+    }
+    // 先让缓存/正文对齐一次（`read_digest_file` 负责过期重建），再取引用清单
+    read_digest_file(&dir)?;
+    let file: BookDigestFile = read_json_file(&dir.join(DIGEST_FILE), "章节指纹")?;
+    let mut refs: Vec<(String, String)> = Vec::new();
+    for chapter in file.assets {
+        for local in chapter.locals {
+            if let Some(name) = crate::book_images::asset_name(&local) {
+                refs.push((name, local));
+            }
+        }
+    }
+    refs.sort();
+    refs.dedup();
+    Ok(refs)
+}
+
 /// 按 cid 取章节正文（对端要哪几章就取哪几章）。
 ///
 /// 实现是**顺序扫一遍** `content.json`，只留下命中的章节：内存占用与单章同级，
 /// 不会因为对端只要一章就把整本正文读进内存。代价是要扫完整份文件（图片载荷字段
 /// 会被完整解析，但只保留命中的那一章）。
-pub(crate) fn read_chapters_by_cid<R: tauri::Runtime>(
+pub(crate) fn read_chapters_by_cid_at<R: tauri::Runtime>(
     app: &AppHandle<R>,
+    root: Option<&Path>,
     id: &str,
     cids: &[String],
 ) -> Result<Vec<LocalBookChapter>, String> {
     migrate_legacy_layout(app);
-    let path = book_dir(app, id)?.join(CONTENT_FILE);
+    let path = book_dir_at(app, root, id)?.join(CONTENT_FILE);
     if !path.is_file() || cids.is_empty() {
         return Ok(Vec::new());
     }

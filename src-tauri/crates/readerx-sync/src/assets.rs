@@ -77,6 +77,15 @@ pub struct BookAssets {
     /// 逐个资源指纹的汇总（名字 + 指纹排序后哈希）
     #[serde(default)]
     pub digest: String,
+    /// 这份清单算过没有。
+    ///
+    /// 对账用的清单只列**有资源**的书（没必要为一本没图的书传一个大数），于是
+    /// 「应答里没有这本书」既可能是「对端也没资源」，也可能是「对端有资源但没在这份
+    /// 清单里」——**后者会把封面永远挡在门外**（封面没有任何正文引用可依）。
+    /// 双方各自把「我点过名的书」标成 `true` 发给对端，对端就能分清缺的那本该不该查。
+    /// 旧对端不带这个字段（= false），按「没算过」处理：多查一次，不会漏。
+    #[serde(default)]
+    pub indexed: bool,
 }
 
 /// 一本书的资源清单 → 汇总（顺序无关：按名字排序后再算）。
@@ -95,6 +104,7 @@ pub fn book_assets(book: &str, assets: &[AssetDigest]) -> BookAssets {
         book: book.to_string(),
         assets: items.len() as u32,
         digest: asset_digest(text.as_bytes()),
+        indexed: true,
     }
 }
 
@@ -262,6 +272,23 @@ mod tests {
     fn digest_tracks_the_bytes_not_the_name() {
         assert_eq!(asset("cover", b"real").digest, asset_digest(b"real"));
         assert_ne!(asset("cover", b"real").digest, asset("cover", b"other").digest);
+    }
+
+    /// 对账清单的原样 vs 只列有资源的书：`indexed` 是区分「没有」与「没问」的唯一线索。
+    #[test]
+    fn book_assets_marks_whether_it_was_computed() {
+        assert!(book_assets("b-1", &[]).indexed, "算过的清单要标 indexed");
+        let request = BookAssets {
+            book: "b-1".into(),
+            assets: 0,
+            digest: String::new(),
+            indexed: false,
+        };
+        assert!(!request.indexed);
+        // 旧对端不带这个字段：解析成 false（当作没算过，多查一次不会漏）
+        let legacy: BookAssets =
+            serde_json::from_str(r#"{"book":"b-1","assets":1,"digest":"aa"}"#).unwrap();
+        assert!(!legacy.indexed);
     }
 
     #[test]

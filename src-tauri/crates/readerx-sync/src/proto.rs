@@ -79,8 +79,18 @@ pub enum Request {
     PushChapters { book: String, items: Vec<ChapterContent> },
     /// 拉正文：把这几章的正文给我
     PullChapters { book: String, cids: Vec<String> },
-    /// 资源对账：这是我的逐本总览（封面 / 章节插图，见 `crate::assets`）
-    AssetIndex { books: Vec<BookAssets> },
+    /// 资源对账：**点名**这些书（不管本机有没有资源）+ 附带我算过的逐本总览。
+    ///
+    /// 两个字段分工不同，缺一不可：
+    /// - `books` 是名册：对端只回应答里点过名的书，漏报的书**永远**不会被对账到；
+    /// - `known` 是我算过的清单（只列有资源的书）：对端据此知道哪些书不用再算一遍。
+    ///
+    /// 封面正是「本机一点资源都没有、但要对端把它推过来」的情形，因此名册必须带全。
+    AssetIndex {
+        books: Vec<String>,
+        #[serde(default)]
+        known: Vec<BookAssets>,
+    },
     /// 资源对账：某本书的逐个资源指纹
     AssetDigests { book: String },
     /// 资源交换：把 `push` 里的资源收下，同时把 `pull` 点名的资源回给我。

@@ -129,13 +129,22 @@ pub fn handle_request(
             }
         },
         // ---- 资源通道（封面 / 章节插图，见 crate::assets）----
-        Request::AssetIndex { books } => {
-            // 与正文对账同一口径：只回本机**有资源**的书
-            let theirs: Vec<_> = books
-                .iter()
-                .map(|entry| engine.asset_index_of(&entry.book))
-                .filter(|index| index.assets > 0)
-                .collect();
+        Request::AssetIndex { books, known } => {
+            // 只回本机**有资源**、且与请求方算过的不一样的书：
+            // 请求方没算过的书（不在 `known` 里）一律现算 —— 那种情况下「它没报」
+            // 不能当成「它没有」，否则本机的封面永远推不出去。
+            let their_known: std::collections::HashMap<&str, &crate::assets::BookAssets> =
+                known.iter().map(|entry| (entry.book.as_str(), entry)).collect();
+            let mut theirs = Vec::new();
+            for book in books {
+                let index = match their_known.get(book.as_str()) {
+                    Some(their) if engine.asset_index_of(book) == **their => continue,
+                    _ => engine.asset_index_of(book),
+                };
+                if index.assets > 0 {
+                    theirs.push(index);
+                }
+            }
             Response::AssetIndex { books: theirs }
         }
         Request::AssetDigests { book } => {

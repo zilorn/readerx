@@ -1061,6 +1061,11 @@ impl SyncEngine {
         self.content.is_some()
     }
 
+    /// 宿主数据根（宿主落地时按它写回；见 [`ContentSource::data_root`]）。
+    pub fn content_data_root(&self) -> Option<PathBuf> {
+        self.content.as_ref().and_then(|source| source.data_root())
+    }
+
     /// 资源暂存区根目录。
     fn asset_root(&self) -> PathBuf {
         self.store.root().join("assets")

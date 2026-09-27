@@ -10,6 +10,15 @@ mod models;
 #[cfg(desktop)]
 mod single_instance;
 mod storage;
+
+/// 数据根覆盖入口（集成测试专用；见 `storage::pin_data_root`）。
+pub use storage::{pin_data_root, DataRootPin};
+
+/// 测试用的数据根覆盖变量名（见 `storage::data_root`）。
+///
+/// 集成测试是独立的 crate（库以 `cfg(not(test))` 编译），因此这里不加 `cfg(test)`；
+/// 它只是一个变量名常量，运行时**只有变量被设过才生效**，生产环境没人设它。
+pub const DATA_ROOT_ENV: &str = "READERX_DATA_ROOT";
 // 局域网同步：引擎生命周期 / 本地数据桥接 / 冲突队列都收在 sync 模块里
 // （对外可见是为了让集成测试直接验证桥接，见 sync/mod.rs 的说明）
 pub mod sync;

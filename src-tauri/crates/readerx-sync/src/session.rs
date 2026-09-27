@@ -524,7 +524,10 @@ fn asset_pass(
         return Ok(());
     }
 
-    // 本机的逐本总览：只列**在正文里被引用**的资源（含只有引用、字节还没到的名字）
+    // 名册带**每一本**书：对端只回应答里点过名的书，漏报就等于让对端手里的封面 /
+    // 插图永远过不来 —— 封面正是「本机一点资源都没有、却要对端推过来」的情形
+    // （正文通道没有这个问题：本机没正文时对端推过来也没用，资源则相反）。
+    // 清单只列有资源的书：对端据此知道哪些书不用再算一遍。
     let books: Vec<String> = engine
         .entities_of_kind("book", false)
         .into_iter()
@@ -536,7 +539,10 @@ fn asset_pass(
         .filter(|index| index.assets > 0)
         .collect();
 
-    let response = transport.request(&Request::AssetIndex { books: my_index })?;
+    let response = transport.request(&Request::AssetIndex {
+        books: books.clone(),
+        known: my_index,
+    })?;
     let theirs = match response {
         Response::AssetIndex { books } => books,
         Response::Error { code, message } => {
@@ -565,11 +571,9 @@ fn asset_pass(
         }
         let mine = engine.asset_index_of(&book);
         let theirs = their_map.remove(&book);
-        let same = match (&theirs, mine.assets) {
-            (Some(their), _) if their == &mine => true,
-            (None, 0) => true,
-            _ => false,
-        };
+        // 一致 = 对端把这本书算过、而且结果与本机相同。对端没算过（不在清单里）时
+        // **不能**按「本机也没有」跳过：那会把对端手里的封面永远挡在门外。
+        let same = theirs.as_ref().is_some_and(|their| their.indexed && their == &mine);
         if same {
             continue;
         }

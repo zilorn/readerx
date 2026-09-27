@@ -295,6 +295,16 @@ pub fn asset_digest(bytes: &[u8]) -> String {
     hex(&hasher.finalize())
 }
 
+/// 资源**身份**的指纹（sha256(名字)）：插图对账用。
+///
+/// 插图的字节在宿主手里（图片目录），为了对账把整库图片读一遍是不可接受的；
+/// 而插图的名字本身就是「图片地址的哈希」，因此名字相同 = 同一张图。
+/// 代价是**地址内的内容变了不会被发现**（同一个 URL 换图）——这类图本来也没有稳定的
+/// 内容语义，真要换就是换地址、名字跟着变（见 docs/sync.md 第 7.10 节）。
+pub fn identity_digest(name: &str) -> String {
+    asset_digest(name.as_bytes())
+}
+
 /// base64 编码（资源字节上线协议时用）
 pub fn encode_base64(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
@@ -329,6 +339,14 @@ pub trait ContentSource: Send + Sync + 'static {
     /// 取若干资源的字节 / 内容。取不到的直接不出现在结果里。
     fn load_assets(&self, _book: &str, _names: &[String]) -> Vec<crate::assets::Asset> {
         Vec::new()
+    }
+
+    /// 这份来源读的是哪个数据根（`None` = 宿主默认的那一份）。
+    ///
+    /// 宿主落地时要按**同一个根**写回去；一个进程里跑两台设备时（集成测试），
+    /// 没有这条信息就没法知道「这批资源属于哪台设备」。
+    fn data_root(&self) -> Option<std::path::PathBuf> {
+        None
     }
 
     /// 本机这本书**在正文里引用到的**资源名（不管字节在不在手里）。

@@ -10,16 +10,77 @@ use crate::models::{BookSource, TtsCacheStat};
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 use tauri::{AppHandle, Manager};
 
-/// 应用数据根目录（书籍 / 状态 / 听书缓存 / 书源共用的那一层）
+/// 测试用的数据根覆盖（见 [`pin_data_root`]）。
+///
+/// **不用环境变量**：`std::env::set_var` 在多线程进程里与并发的 `env::var` 是未定义行为
+/// （libtest 默认多线程跑用例），表现就是偶发的卡死。这里用一个带锁的进程内覆盖，
+/// 并由测试自己保证「同一时刻只有一台设备在读它」。
+fn data_root_override() -> &'static Mutex<Option<PathBuf>> {
+    static OVERRIDE: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+    OVERRIDE.get_or_init(|| Mutex::new(None))
+}
+
+/// 把数据根钉到 `root`，返回的守卫销毁时还原（集成测试专用，见 `lib.rs` 的再导出）。
+pub fn pin_data_root(root: Option<PathBuf>) -> DataRootPin {
+    let previous = {
+        let mut slot = data_root_override().lock().unwrap_or_else(|e| e.into_inner());
+        std::mem::replace(&mut *slot, root)
+    };
+    DataRootPin { previous }
+}
+
+/// [`pin_data_root`] 的守卫：销毁时把上一个值放回去。
+pub struct DataRootPin {
+    previous: Option<PathBuf>,
+}
+
+impl Drop for DataRootPin {
+    fn drop(&mut self) {
+        let mut slot = data_root_override().lock().unwrap_or_else(|e| e.into_inner());
+        *slot = self.previous.take();
+    }
+}
+
+/// 当前钉住的数据根（没有钉住时为 `None`）。
+fn pinned_data_root() -> Option<PathBuf> {
+    data_root_override()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// 应用数据根目录（书籍 / 状态 / 听书缓存 / 书源共用的那一层）。
+///
+/// 测试可以把它钉到别的目录（见 [`pin_data_root`]）：一个进程里要验「第二台设备」的
+/// 书库，而 `AppHandle` 只会指向本机那一份。
 pub(crate) fn data_root<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
+    if let Some(root) = pinned_data_root() {
+        return Ok(root);
+    }
     let dir = app
         .path()
         .app_data_dir()
         .map_err(|e| format!("无法定位应用数据目录: {e}"))?;
     Ok(dir)
+}
+
+/// 同上，但允许调用方**指定**一个数据根。
+///
+/// 给「一个进程里跑两台设备」用（集成测试的同步夹具）：书库读写的根必须是**这台设备**
+/// 的根，而 `AppHandle` 只会指向本机那一份 —— 用环境变量在调用时切换是不可靠的
+/// （引擎在任何时刻才去读对端的书库，读到哪一份取决于当时变量是什么）。
+pub(crate) fn data_root_at<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    root: Option<&Path>,
+) -> Result<PathBuf, String> {
+    match root {
+        Some(root) => Ok(root.to_path_buf()),
+        None => data_root(app),
+    }
 }
 
 pub(crate) fn ensure_dir(dir: &Path) -> Result<(), String> {

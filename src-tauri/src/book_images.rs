@@ -17,7 +17,7 @@ use std::fs;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use tauri::http;
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
 /// 图片文件名里的哈希长度（sha1 hex）：`<bookId>_<40 位 hex>.<ext>`
 const HASH_LEN: usize = 40;
@@ -25,11 +25,15 @@ const HASH_LEN: usize = 40;
 /// 章节图片根目录：`<应用数据目录>/images`（所有函数都按「根目录 + 文件名」工作，
 /// 与 Tauri 解耦，便于单测直接用临时目录验证存储 / 迁移）
 pub(crate) fn images_root<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("无法定位应用数据目录: {e}"))?
-        .join("images");
+    images_root_at(app, None)
+}
+
+/// 同 [`images_root`]，但允许指定数据根（同步夹具里的「另一台设备」用）。
+pub(crate) fn images_root_at<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    root: Option<&Path>,
+) -> Result<PathBuf, String> {
+    let dir = crate::storage::data_root_at(app, root)?.join("images");
     fs::create_dir_all(&dir).map_err(|e| format!("创建图片目录失败: {e}"))?;
     Ok(dir)
 }
@@ -135,6 +139,32 @@ pub(crate) fn exists(root: &Path, local: &str) -> bool {
         Ok(path) => path.is_file(),
         Err(_) => false,
     }
+}
+
+/// 读一张本地副本的字节（同步的资源通道要把图搬给对端）。
+pub(crate) fn read(root: &Path, local: &str) -> Result<(String, Vec<u8>), String> {
+    let path = resolve(root, local)?;
+    let bytes = fs::read(&path).map_err(|e| format!("读取图片失败: {e}"))?;
+    let ext = local.rsplit_once('.').map(|(_, ext)| ext).unwrap_or("");
+    Ok((mime_for_ext(ext).to_string(), bytes))
+}
+
+/// 本地副本文件名 → **设备无关的资源名**（`<sha1(图片地址)>.<ext>`，也就是同步通道里的
+/// 名字）。引用可能来自别的设备（名字已经归一），这时返回 `None`。
+///
+/// 旧布局的文件名是 `<本机书 id>_<sha1>.<ext>`：本机书 id 每台设备都不一样，
+/// 拿它当资源名会让两台设备对同一段正文算出两个指纹，因此**必须**在这里剥掉前缀。
+pub(crate) fn asset_name(local: &str) -> Option<String> {
+    let (stem, ext) = local.rsplit_once('.')?;
+    let (book_id, hash) = stem.rsplit_once('_')?;
+    if !valid_book_id(book_id) {
+        return None;
+    }
+    if hash.len() != HASH_LEN || !hash.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+    {
+        return None;
+    }
+    Some(format!("{hash}.{ext}"))
 }
 
 /// 读取若干本地副本的尺寸 / 体积（只读文件头，不解码整张图）
@@ -251,6 +281,22 @@ fn decode_data_url(data_url: &str) -> Option<(String, Vec<u8>)> {
         .decode(payload.trim())
         .ok()?;
     Some((mime, bytes))
+}
+
+/// 图片 data URL → (MIME, 字节)。与 [`decode_data_url`] 同一口径，供同步的资源通道
+/// （封面既是一段 data URL，也要以字节上线协议）与其它模块使用。
+pub(crate) fn image_data_url_bytes(data_url: &str) -> Option<(String, Vec<u8>)> {
+    decode_data_url(data_url)
+}
+
+/// (MIME, 字节) → 图片 data URL（与 [`split_data_url`] 认得的形态一致）。
+/// 资源通道收回来的封面要原样写回书籍元信息，因此**原文优先**，拼回来只作为兜底。
+pub(crate) fn image_data_url(mime: &str, bytes: &[u8]) -> String {
+    format!(
+        "data:{};base64,{}",
+        mime,
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    )
 }
 
 /// data URL → (MIME, base64 载荷)；非 base64 形式 / 非图片返回 None

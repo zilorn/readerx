@@ -28,6 +28,7 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use tauri::AppHandle;
 
+use readerx_sync::assets::AssetKind;
 use readerx_sync::net::{lock_engine, SharedEngine};
 use readerx_sync::{Entity, SyncEngine, SyncError};
 
@@ -715,6 +716,7 @@ pub fn materialize<R: tauri::Runtime>(
     let snapshots = collect_snapshots(engine, from, &[])?;
     let mut changes = apply_snapshots(app, engine, index, snapshots)?;
     apply_staged_content(app, engine, index, &mut changes)?;
+    apply_staged_assets(app, engine, index, &mut changes)?;
     Ok(changes)
 }
 
@@ -731,6 +733,7 @@ pub fn materialize_entities<R: tauri::Runtime>(
     let snapshots = collect_snapshots(engine, usize::MAX, ids)?;
     let mut changes = apply_snapshots(app, engine, index, snapshots)?;
     apply_staged_content(app, engine, index, &mut changes)?;
+    apply_staged_assets(app, engine, index, &mut changes)?;
     Ok(changes)
 }
 
@@ -788,6 +791,81 @@ fn apply_staged_content<R: tauri::Runtime>(
                 // 写盘失败：暂存留着，下次同步 / 下次落地再试（不能当成已经落地）
                 log::warn!("同步正文落地失败（{local_id}）：{error}");
             }
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 资源落地：暂存区 → 书库（封面写回元信息，插图写进图片目录）
+// ---------------------------------------------------------------------------
+
+/// 把引擎暂存区里的资源写进书库。
+///
+/// 与正文落地同一套边界：**本机没有这本书就不落地**（元信息还没同步过来的书，
+/// 资源留着等它）；书在就逐份写，写成功才清暂存（写失败留着下次再试）。
+fn apply_staged_assets<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    engine: &SharedEngine,
+    index: &mut BookIndex,
+    changes: &mut AppliedChanges,
+) -> Result<(), SyncError> {
+    // 这批资源属于**哪台设备**：来源自带的数据根（一个进程里跑两台设备时不能靠猜）
+    let root = {
+        let guard = lock_engine(engine);
+        guard.content_data_root()
+    };
+    // 先把清单取出来再逐本处理：**不能**边循环边加锁 —— `for x in lock_engine(..).foo()`
+    // 的临时守卫会活到整个循环体结束，循环体里再取一次锁就是自己等自己（死锁）
+    let books = {
+        let guard = lock_engine(engine);
+        guard.staged_asset_books()
+    };
+    for book_uid in books {
+        let assets = {
+            let guard = lock_engine(engine);
+            guard.staged_assets(&book_uid)
+        };
+        if assets.is_empty() {
+            continue;
+        }
+        let Some(local_id) = index.resolve(app, &book_uid).map_err(SyncError::Io)? else {
+            log::debug!("对端的资源到了本机还没有这本书，先留在暂存区 uid={book_uid}");
+            continue;
+        };
+        let mut landed: Vec<(AssetKind, String)> = Vec::new();
+        for asset in &assets {
+            match asset.kind {
+                AssetKind::Cover => {
+                    // 封面就是元信息里的一段 data URL：原文优先（字节拼回来的只要差一个
+                    // 字符就会被当成「又变了一次」而反复写盘）
+                    let value = asset
+                        .data_url
+                        .clone()
+                        .unwrap_or_else(|| crate::book_images::image_data_url(&asset.mime, &asset.bytes));
+                    match book_store::set_cover_at(app, root.as_deref(), &local_id, Some(&value)) {
+                        Ok(true) => {
+                            changes.books = true;
+                            log::info!("同步封面已落地 book={local_id}");
+                        }
+                        Ok(false) => {}
+                        Err(error) => {
+                            log::warn!("同步封面落地失败（{local_id}）：{error}");
+                            continue;
+                        }
+                    }
+                }
+                // 插图在下一步（要把正文块里的引用一起翻译成设备无关的名字）
+                AssetKind::Illustration => continue,
+            }
+            landed.push((asset.kind, asset.name.clone()));
+        }
+        if !landed.is_empty() {
+            let cleared = {
+                let mut guard = lock_engine(engine);
+                guard.clear_staged_assets(&book_uid, &landed)
+            };
+            cleared.map_err(|error| SyncError::Io(error.to_string()))?;
         }
     }
     Ok(())

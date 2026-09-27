@@ -31,18 +31,47 @@ use tauri::Manager;
 
 /// 用例串行锁（见文件头说明）。
 static SERIAL: Mutex<()> = Mutex::new(());
+/// 测试进程里「第二台设备」的目录前缀（见 [`RealPeer::start`]）。
+const PEER_DIR_PREFIX: &str = "peer-";
 /// mock 应用与它的数据目录（整个测试进程共用一份）。
 static SHARED: OnceLock<(tauri::AppHandle<tauri::test::MockRuntime>, PathBuf)> = OnceLock::new();
 
-/// 取共享的 mock 应用，并清掉上一个用例留下的数据。
+/// 取共享的 mock 应用，**并清掉上一个用例留下的数据**（每个用例开头调它）。
 fn setup() -> (tauri::AppHandle<tauri::test::MockRuntime>, PathBuf) {
+    let (handle, data_root) = shared_app();
+    for sub in [
+        "books",
+        "state",
+        "sync",
+        "book_sources",
+        "source_sessions",
+        "images",
+        "tts-audio",
+    ] {
+        let _ = std::fs::remove_dir_all(data_root.join(sub));
+    }
+    (handle, data_root)
+}
+
+/// 本机的数据根（**只取不清**）：[`RealPeer::start`] 要用它算出对端目录。
+///
+/// 不能顺手调 [`setup`] —— 那会把调用方刚种好的书库一起删掉。
+fn local_root() -> PathBuf {
+    shared_app().1
+}
+
+/// 共享的 mock 应用与本机数据根（进程内只初始化一次）。
+fn shared_app() -> (tauri::AppHandle<tauri::test::MockRuntime>, PathBuf) {
     let (handle, data_root) = SHARED
         .get_or_init(|| {
             let root =
                 std::env::temp_dir().join(format!("readerx-sync-e2e-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&root);
             std::fs::create_dir_all(&root).unwrap();
-            // Tauri 的 app_data_dir = $XDG_DATA_HOME/<identifier>
+            // Tauri 的 app_data_dir = $XDG_DATA_HOME/<identifier>。只在这里设一次，
+            // 之后**不再改**它：`std::env::set_var` 与别的线程并发读环境变量是未定义
+            // 行为（libtest 默认多线程跑用例），表现就是偶发卡死。要模拟第二台设备时
+            // 用 `readerx_lib::pin_data_root` 钉数据根，别动环境变量。
             std::env::set_var("XDG_DATA_HOME", &root);
             let app = tauri::test::mock_builder()
                 .build(tauri::test::mock_context(tauri::test::noop_assets()))
@@ -56,17 +85,6 @@ fn setup() -> (tauri::AppHandle<tauri::test::MockRuntime>, PathBuf) {
             (handle, data)
         })
         .clone();
-    for sub in [
-        "books",
-        "state",
-        "sync",
-        "book_sources",
-        "source_sessions",
-        "images",
-        "tts-audio",
-    ] {
-        let _ = std::fs::remove_dir_all(data_root.join(sub));
-    }
     (handle, data_root)
 }
 
@@ -83,27 +101,38 @@ fn read_json(path: &Path) -> Value {
 
 /// 造一本本地书（与 `book_store.rs` 的目录布局一致：书签单独一个文件）。
 fn seed_local_book(data_root: &Path, id: &str, title: &str) {
-    let dir = data_root.join("books").join(id);
-    std::fs::create_dir_all(&dir).unwrap();
-    write_json(
-        &dir.join("bookdetail.json"),
-        &json!({
-            "schemaVersion": 1,
-            "id": id,
-            "title": title,
-            "author": "刘慈欣",
-            "intro": "简介",
-            "format": "epub",
-            "fileName": "三体.epub",
-            "size": 1024,
-            "importedAt": 1_700_000_000u64,
-            "hue": 7,
-            "splitDesc": "按章",
-            "cover": "data:image/png;base64,AAAA",
-            "groupId": null,
-            "tags": ["科幻"],
-        }),
-    );
+    seed_book(&data_root.join("books").join(id), id, title, "三体.epub", true);
+}
+
+/// 另一台「设备」上的本地书：目录名与书 id 分开（本机书 id 每台设备各自生成），
+/// **文件名仍与 `fileName` 一致** —— 书身份由 `fileName + size` 派生，两边因此算出
+/// 同一个书实体 id，资源通道才认得是同一本书。
+fn seed_peer_book(data_root: &Path, dir: &str, id: &str, title: &str, with_cover: bool) {
+    seed_book(&data_root.join("books").join(dir), id, title, "三体.epub", with_cover);
+}
+
+/// 写一本本地书的三个文件；`with_cover` 控制有没有封面。
+fn seed_book(dir: &Path, id: &str, title: &str, file_name: &str, with_cover: bool) {
+    std::fs::create_dir_all(dir).unwrap();
+    let mut detail = json!({
+        "schemaVersion": 1,
+        "id": id,
+        "title": title,
+        "author": "刘慈欣",
+        "intro": "简介",
+        "format": "epub",
+        "fileName": file_name,
+        "size": 1024,
+        "importedAt": 1_700_000_000u64,
+        "hue": 7,
+        "splitDesc": "按章",
+        "groupId": null,
+        "tags": ["科幻"],
+    });
+    if with_cover {
+        detail["cover"] = json!("data:image/png;base64,AAAA");
+    }
+    write_json(&dir.join("bookdetail.json"), &detail);
     write_json(
         &dir.join("content.json"),
         &json!({ "schemaVersion": 1, "chapters": [
@@ -129,6 +158,11 @@ fn seed_local_book(data_root: &Path, id: &str, title: &str) {
             }
         ]}),
     );
+}
+
+/// 本机这本书没有封面（验证封面从对端落地）。
+fn seed_local_book_without_cover(data_root: &Path, id: &str, title: &str) {
+    seed_book(&data_root.join("books").join(id), id, title, "三体.epub", false);
 }
 
 fn seed_local_progress(data_root: &Path, book_id: &str, chapter: i64, offset: i64) {
@@ -163,6 +197,9 @@ fn local_engine(handle: &tauri::AppHandle<tauri::test::MockRuntime>, data_root: 
 }
 
 /// 对端的正文来源（内存版）：模拟「另一台设备书库里有正文」。
+///
+/// 资源（封面 / 插图）不在这里 —— 引擎要求「按名字取字节」与「报给对端的指纹」出自
+/// 同一个来源，内存与真实书库混用会让对账与取字节对不上，因此资源一律走 [`RealPeer`]。
 #[derive(Default)]
 struct PeerContent {
     books: Mutex<HashMap<String, Vec<readerx_sync::content::ChapterContent>>>,
@@ -216,6 +253,7 @@ impl readerx_sync::content::ContentSource for PeerContent {
             })
             .collect()
     }
+
 }
 
 /// 另一台设备的引擎（数据目录在临时区，直接开）。
@@ -241,6 +279,75 @@ fn peer_engine_with_content(
         engine.join_group(code).unwrap();
     }
     shared(engine)
+}
+
+/// 另一台**设备**：独立的应用数据目录 + 独立的 mock AppHandle + 独立引擎。
+///
+/// 与 [`peer_engine`]（内存版来源）的区别是它有一份真实书库：资源通道的两端都要能
+/// 「按名字读出字节」，因此验证资源落地时必须让对端也是一个真的 App 数据目录。
+struct RealPeer {
+    app: tauri::AppHandle<tauri::test::MockRuntime>,
+    data_root: PathBuf,
+    engine: SharedEngine,
+}
+
+impl RealPeer {
+    /// 起一台「对端设备」。
+    ///
+    /// **不建第二个 App**：Tauri 的 App 构建带进程级状态，同一个进程里建两次会卡住
+    /// （表现是所有用例都堵在串行锁上）。这里沿用同一个 App，把书库读写指向另一份数据根
+    /// —— 根固定在**来源实例**上（`AppContent::at`），引擎读到哪一份不取决于调用时机。
+    fn start(tag: &str, pairing_code: Option<&str>) -> RealPeer {
+        let (handle, local) = (shared_app().0, local_root());
+        // `app_data_dir()` 带尾斜杠，先归一再去父目录：否则 `parent()` 会把最后那段
+        // 空名字剥掉，跑到 `/tmp` 下面去建对端目录（两台设备就此算岔）
+        let base = local
+            .to_string_lossy()
+            .trim_end_matches(std::path::MAIN_SEPARATOR)
+            .to_string();
+        let data_root = Path::new(&base)
+            .parent()
+            .expect("数据根应有父目录")
+            .join(format!("{PEER_DIR_PREFIX}{tag}"));
+        assert_ne!(data_root, local, "对端目录不能等于本机数据根");
+        let _ = std::fs::remove_dir_all(&data_root);
+        std::fs::create_dir_all(&data_root).unwrap();
+
+        let options = EngineOptions::new(tag)
+            .with_schemas(SchemaRegistry::readerx_defaults())
+            .with_content(tcontent::AppContent::at(handle.clone(), &data_root));
+        let mut engine = SyncEngine::open(data_root.join("sync"), options).unwrap();
+        if let Some(code) = pairing_code {
+            engine.join_group(code).unwrap();
+        }
+        RealPeer { app: handle, data_root, engine: shared(engine) }
+    }
+
+    /// 这台设备自己算出来的书实体 id（书身份 = `fileName + size`，两边算出同一个）。
+    ///
+    /// **必须用它建实体**：`bridge::reconcile` 在本机算出的 uid 未必与对端那本对应
+    /// （两台设备上「同名同大小的书」本来就共用身份），拿错了就会去读另一本书。
+    fn book_uid(&self, local_id: &str) -> String {
+        bridge::local_uid(&self.app, local_id)
+    }
+
+    /// 把本机的书实体发布状态抄到对端（书元信息不经过网络也能对齐身份）。
+    fn publish_book(&self, uid: &str) {
+        let mut guard = lock_engine(&self.engine);
+        guard
+            .create_entity(
+                "book",
+                Some(uid.to_string()),
+                [
+                    ("title", json!("三体")),
+                    ("format", json!("epub")),
+                    ("file_name", json!("三体.epub")),
+                    ("size", json!(1024)),
+                ],
+            )
+            .unwrap();
+        guard.flush().unwrap();
+    }
 }
 
 fn sync_once(client: &SharedEngine, server: &SharedEngine) -> readerx_sync::SyncReport {
@@ -354,7 +461,9 @@ fn local_library_is_published_and_remote_changes_land_back() {
     sync_once(&local, &peer);
 
     // ---- 落地：远端结果写回本地文件 ----
+    eprintln!("PHASE 2 前：落地");
     let changes = bridge::materialize(&handle, &local, 0, &mut index).unwrap();
+    eprintln!("PHASE 2 后：落地完成");
     assert!(changes.books, "书元信息应被同步落地：{changes:?}");
     assert!(changes.progress, "阅读进度应被同步落地：{changes:?}");
 
@@ -1071,4 +1180,101 @@ fn local_book_content_is_published_to_the_peer() {
     assert_eq!(staged.len(), 1, "对端应收到本机那一章");
     assert_eq!(staged[0].paragraphs, vec!["正文".to_string()]);
     assert_eq!(staged[0].title, "第一章");
+}
+
+/// 封面（资源通道）：本机有、对端没有 → 推过去，对端拿到的是**原文**（data URL）。
+#[test]
+fn cover_is_pushed_to_the_peer_that_has_none() {
+    let _serial = SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (handle, app_data) = setup();
+    seed_local_book(&app_data, "local-1", "三体");
+    seed_local_progress(&app_data, "local-1", 0, 0);
+
+    let local = local_engine(&handle, &app_data);
+    let mut index = BookIndex::default();
+    bridge::reconcile(&handle, &local, &mut index).unwrap();
+
+    // 书身份（uid）取自本机引擎里那本真书：`local_uid` 走的是**本机**书库，
+    // 拿它去算对端另一份目录里的书会退化成兜底值（两边对不上）
+    let uid = {
+        let guard = lock_engine(&local);
+        guard.entities_of_kind("book", false)[0].id.clone()
+    };
+
+    // 对端（真实的第二台设备）：同一本书（同名同大小 = 同一个书身份）、没有封面
+    let peer = RealPeer::start("cover-push", Some(&lock_engine(&local).pairing_code()));
+    seed_peer_book(&peer.data_root, "peer-local", "peer-local", "三体", false);
+    peer.publish_book(&uid);
+
+    let mine = lock_engine(&local).asset_index_full(&uid);
+    assert!(
+        mine.iter().any(|asset| asset.name == readerx_sync::assets::COVER_ASSET && asset.present()),
+        "本机的封面应出现在资源清单里：{mine:?}"
+    );
+    let report = sync_once(&local, &peer.engine);
+    assert_eq!(report.assets_pushed, 1, "本机的封面应推给对端：{report:?}");
+    assert_eq!(report.assets_pulled, 0, "对端没有封面可给：{report:?}");
+
+    // 对端收到的是本机那份 data URL 的原文
+    let staged = lock_engine(&peer.engine).staged_assets(&uid);
+    let cover = staged
+        .iter()
+        .find(|asset| asset.name == readerx_sync::assets::COVER_ASSET)
+        .expect("对端应收到封面");
+    assert_eq!(cover.data_url.as_deref(), Some("data:image/png;base64,AAAA"));
+    assert_eq!(cover.bytes, vec![0, 0, 0], "data:image/png;base64,AAAA 的三个字节");
+
+    // 收敛：再同步一轮不该再搬
+    let again = sync_once(&local, &peer.engine);
+    assert_eq!((again.assets_pushed, again.assets_pulled), (0, 0), "{again:?}");
+}
+
+/// 封面落地：对端有、本机没有 → 写进 `bookdetail.json` 的 `cover` 并清掉暂存区。
+#[test]
+fn incoming_cover_lands_in_bookdetail_and_clears_staging() {
+    let _serial = SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (handle, app_data) = setup();
+    seed_local_book_without_cover(&app_data, "local-1", "三体");
+    seed_local_progress(&app_data, "local-1", 0, 0);
+
+    let local = local_engine(&handle, &app_data);
+    let mut index = BookIndex::default();
+    bridge::reconcile(&handle, &local, &mut index).unwrap();
+
+    // 对端（真实的第二台设备）：同一本书、有封面
+    let peer_cover = "data:image/jpeg;base64,cGVlci1jb3Zlcg==";
+    let peer = RealPeer::start("cover-land", Some(&lock_engine(&local).pairing_code()));
+    seed_peer_book(&peer.data_root, "peer-local", "peer-local", "三体", true);
+    {
+        let path = peer.data_root.join("books").join("peer-local").join("bookdetail.json");
+        let mut detail = read_json(&path);
+        detail["cover"] = json!(peer_cover);
+        write_json(&path, &detail);
+    }
+    let uid = {
+        let guard = lock_engine(&local);
+        guard.entities_of_kind("book", false)[0].id.clone()
+    };
+    peer.publish_book(&uid);
+
+    let report = sync_once(&local, &peer.engine);
+    assert_eq!(report.assets_pulled, 1, "本机没有封面，应取回对端那份：{report:?}");
+    assert_eq!(report.assets_pushed, 0, "对端有封面，不该被本机的「没有」覆盖：{report:?}");
+
+    // 落地：cover 写进元信息，暂存区清空
+    let changes = bridge::materialize(&handle, &local, 0, &mut index).unwrap();
+    assert!(changes.books, "封面属于书籍元信息：{changes:?}");
+    let detail = read_json(&app_data.join("books").join("local-1").join("bookdetail.json"));
+    assert_eq!(detail["cover"], json!(peer_cover), "封面应按对端原文落地");
+    assert!(
+        lock_engine(&local)
+            .staged_assets(&uid)
+            .iter()
+            .all(|asset| asset.name != readerx_sync::assets::COVER_ASSET),
+        "落地成功才清暂存：封面应已被清掉"
+    );
+
+    // 再次同步：两边封面已经一致，不该再来回搬
+    let again = sync_once(&local, &peer.engine);
+    assert_eq!((again.assets_pushed, again.assets_pulled), (0, 0), "{again:?}");
 }
