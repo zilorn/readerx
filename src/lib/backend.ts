@@ -6,6 +6,7 @@
 import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
 import { bookToMeta, type BookMeta, type LocalBook, type LocalBookChapter } from "./booksTypes";
 import { reportFailure } from "./errorReport";
+import { openExternal } from "./external";
 import { t } from "./i18n";
 import { createLogger } from "./logger";
 import type {
@@ -684,4 +685,21 @@ export async function clearSourceLogin(sourceId: string): Promise<number> {
     reportFailure(t("library.login.clearFailed"), err);
     return 0;
   }
+}
+
+/**
+ * 用应用内 WebView 打开一个网页（Android 原生浮层 / 桌面独立窗口），用户关窗后返回。
+ *
+ * 浏览模式：只把页面显示出来，**不采集也不保存登录态**（与 `loginSourceWebview` 是两回事）；
+ * `title` 是窗口标题用的显示名（阅读页传章节名），站点 Cookie 沿用内核自己那份。
+ * 失败直接抛出，由调用方按自己的场景提示（这里只留一条尝试日志）。
+ */
+export async function openWebviewPage(url: string, title: string): Promise<void> {
+  if (!tauri) {
+    // 纯浏览器开发环境没有应用内 WebView：退化成新标签页（与 openExternal 口径一致）
+    await openExternal(url);
+    return;
+  }
+  log.debug("打开应用内网页", title);
+  await invoke("readerx_webview_open", { url, title });
 }

@@ -73,6 +73,7 @@ import { TtsSheet } from "../components/TtsSheet";
 import { bookDisplayTitle, isFallbackBookAuthor } from "../lib/bookDisplay";
 import {
   BookmarkIcon,
+  BrowserIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
   CloseIcon,
@@ -158,6 +159,9 @@ import { createEdgeHoverReveal } from "../lib/readerEdgeHover";
 import { sameRenderWindow } from "../lib/renderWindow";
 import { centerInScroller } from "../lib/scrollWithin";
 import { showToast } from "../lib/toast";
+import { reportFailure } from "../lib/errorReport";
+import { openWebviewPage } from "../lib/backend";
+import { openExternal } from "../lib/external";
 import {
   caretRangeAtGlobalOffset,
   charNodeAtOffset,
@@ -1053,6 +1057,30 @@ export default function ReaderPage() {
     const current = renderBook();
     return !!current && isOnlineBook(current);
   });
+  /** 在线书当前章在书源站点的原始网页（本地书没有这一项 → 菜单里不出那一行） */
+  const chapterWebUrl = createMemo(() => {
+    if (!isRemoteBook()) return "";
+    return (chapter()?.url ?? "").trim();
+  });
+
+  /** 应用内 WebView 打开本章原网页（Android 浮层 / 桌面独立窗口） */
+  function openChapterWebview(): void {
+    const url = chapterWebUrl();
+    if (!url) return;
+    setMenuOpen(false);
+    const title = chapter()?.title?.trim() || bookDisplayTitle(book()?.title ?? "");
+    void openWebviewPage(url, title).catch((err) => {
+      reportFailure(t("reader.chapterWebviewFailed"), err);
+    });
+  }
+
+  /** 交给系统浏览器打开本章原网页 */
+  function openChapterInBrowser(): void {
+    const url = chapterWebUrl();
+    if (!url) return;
+    setMenuOpen(false);
+    void openExternal(url);
+  }
   const remoteRun = createMemo(() => onlineRunState(bookId()));
   /** 用户批量下载进行中（与后台窗口预取区分：面板据此显示进度、主按钮据此禁用） */
   const remoteDownloading = createMemo(() => onlineDownloadActive(bookId()));
@@ -4476,6 +4504,29 @@ export default function ReaderPage() {
                 </div>
                 </Show>
               </div>
+
+              {/* 在线书：当前章的原始网页（点地址用应用内 WebView 看，右侧按钮交给浏览器） */}
+              <Show when={chapterWebUrl()}>
+                <div class="flex items-center gap-1 border-t border-border px-3">
+                  <button
+                    type="button"
+                    class="min-w-0 flex-1 truncate py-1.5 text-left text-[11px] leading-5 text-text-3 transition-colors duration-150 hover:text-text-2"
+                    title={chapterWebUrl()}
+                    aria-label={t("reader.chapterWebviewOpen")}
+                    onClick={openChapterWebview}
+                  >
+                    {chapterWebUrl()}
+                  </button>
+                  <button
+                    type="button"
+                    class="grid h-8 w-8 flex-none place-items-center rounded-lg text-text-3 transition-[background-color,color] duration-150 hover:bg-surface-2 hover:text-text active:bg-surface-2"
+                    aria-label={t("reader.chapterBrowserOpen")}
+                    onClick={openChapterInBrowser}
+                  >
+                    <BrowserIcon size={17} />
+                  </button>
+                </div>
+              </Show>
             </header>
 
             {/* 底部菜单栏 + 听书悬浮球（固定在菜单栏上方，随菜单一同滑入/滑出） */}

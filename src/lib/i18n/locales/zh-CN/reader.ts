@@ -18,6 +18,11 @@ export const reader = {
   "reader.tapCenterHint": "点屏幕中间唤出菜单",
   "reader.listSeparator": "、",
 
+  // 在线书：当前章原网页（顶部菜单下方那一行）
+  "reader.chapterWebviewOpen": "在应用内查看本章网页",
+  "reader.chapterBrowserOpen": "用浏览器打开本章网页",
+  "reader.chapterWebviewFailed": "无法打开本章网页",
+
   // 章节与进度
   "reader.chapterOrdinal": "第 {index} 章",
   "reader.chapterRange": "第 {from}–{to} 章",

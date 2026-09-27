@@ -508,6 +508,18 @@ export function GlobeKeyIcon(p: SvgIconProps) {
   );
 }
 
+/** 用浏览器打开（窗口 + 地球） */
+export function BrowserIcon(p: SvgIconProps) {
+  return (
+    <Icon {...p}>
+      <rect x="3" y="4.5" width="18" height="15" rx="2.5" />
+      <path d="M3 9h18" />
+      <circle cx="12" cy="15" r="2.8" />
+      <path d="M9.2 15h5.6" />
+    </Icon>
+  );
+}
+
 /** 清空（垃圾桶 + 循环箭头） */
 export function ClearIcon(p: SvgIconProps) {
   return (

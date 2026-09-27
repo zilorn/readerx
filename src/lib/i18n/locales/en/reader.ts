@@ -19,6 +19,11 @@ export const reader = {
   "reader.tapCenterHint": "Tap the center of the screen for the menu",
   "reader.listSeparator": ", ",
 
+  // Online books: the current chapter's original web page (row under the top menu)
+  "reader.chapterWebviewOpen": "View this chapter's page in the app",
+  "reader.chapterBrowserOpen": "Open this chapter's page in a browser",
+  "reader.chapterWebviewFailed": "Cannot open this chapter's page",
+
   // Chapters and progress
   "reader.chapterOrdinal": "Chapter {index}",
   "reader.chapterRange": "Chapters {from}–{to}",
