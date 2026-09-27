@@ -119,7 +119,10 @@ category discovery reflect the latest source list and enable / capability switch
   network** by pasting its http/https URL — no need to download the file first.
 - **Online reading**: search results or category discovery → preview on the online book page →
   "Add to shelf" (only TOC metadata is stored); the toast for a newly added book offers
-  "Add to group" to file it into a shelf group immediately.
+  "Add to group" to file it into a shelf group immediately; opening the reader menu shows the
+  **original web page of the current chapter** below the top bar — tap the address to look at what
+  the site actually returns in an in-app WebView (read-only: it collects nothing and leaves saved
+  login state alone), or use the button next to it to hand the page to your system browser.
 - **User input forms**: a source can call `input.prompt({...})` to ask the user for values on the
   spot (text / password / number fields, several at once, with required and numeric-range checks);
   the app shows a form dialog, the standalone binary asks on the terminal. The same form is asked
