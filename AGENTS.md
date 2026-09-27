@@ -214,5 +214,5 @@
 ## 关于软件版本与更新
 
 - 不要随意修改软件版本。
-- 注意更新`CHANGELOG.md`。
-- `CHANGELOG.md` 如果是未发布版本的更新内容的修复（在Added上内容的修复），请不要写在Fixed。
+- 注意不要更新`CHANGELOG.md`，除非用户要求。
+  当用户发送"更新v0.2.0"之类的要求你需要查看`./.agent-docs/release.md`。
