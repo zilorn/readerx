@@ -235,9 +235,13 @@ pub fn readerx_source_prompt_submit(
 }
 
 /// 仍在等待用户处理的表单（按弹出顺序）。前端订阅事件后再拉一次，补齐订阅前发出的那些。
+///
+/// 书源显示名要读一次书源文件，所以与其它命令一样丢给 blocking 线程池（命令层不碰磁盘）。
 #[tauri::command]
-pub fn readerx_source_prompt_pending(app: AppHandle) -> Vec<SourcePromptEvent> {
-    pending(&app)
+pub async fn readerx_source_prompt_pending(
+    app: AppHandle,
+) -> Result<Vec<SourcePromptEvent>, String> {
+    crate::commands::blocking("输入表单读取", move || Ok(pending(&app))).await
 }
 
 /// [`readerx_source_prompt_pending`] 的实现（对运行时泛型，集成测试直接调它）。
