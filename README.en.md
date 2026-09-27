@@ -40,9 +40,10 @@ of pages and the same local library.
   subpage
 - **Sync** `/sync` (Settings → Sync): two devices on the same local network sync **book info,
   book text, reading position, bookmarks, chapter structure, groups, book sources, text
-  replacements and chapter-splitting rules** directly with each other (covers stay on each
-  device); missing chapters are transferred on demand, and a book the other device has but this
-  one does not is created locally with its metadata and text; turn it on or off, pair with a
+  replacements, chapter-splitting rules, covers and chapter illustrations** directly with each
+  other (audiobook audio and original EPUB / PDF files stay on each device); missing chapters and
+  illustrations are transferred on demand, and a book the other device has but this one does not
+  is created locally with its metadata and text; turn it on or off, pair with a
   code, discover devices on the network, sync manually or automatically at a fixed interval;
   paired devices can be removed from the list (the removed device is no longer synced with and is
   refused when it connects — accept it again from "Find devices"); when both devices change the
