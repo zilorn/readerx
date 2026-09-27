@@ -2269,6 +2269,32 @@ pub fn webview_login(source_id: &str, url: &str, _opts: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// 用户输入表单（书源 JS 引擎调用；编排见 crate::prompt）
+// ---------------------------------------------------------------------------
+
+/// 平台是否支持弹出用户输入表单（App 界面 / CLI 终端；浏览器预览等环境为 false）。
+pub fn source_prompt_supported() -> bool {
+    crate::prompt::is_supported()
+}
+
+/// 弹出一次用户输入表单并**阻塞等待**用户提交 / 取消（编排见 [`crate::prompt::ask`]）。
+///
+/// 返回 JSON 文本 `{ ok, values, message }`：
+/// - 选项写错（缺 fields、key 非法…）返回 `{"__rxError": …}`，由 JS 侧抛成异常；
+/// - 用户取消 / 环境不支持 / 输入不合法都是 `ok:false` + `message`（不抛错，规则自行降级）。
+pub fn source_prompt(source_id: &str, opts: &str) -> String {
+    let request = match crate::prompt::parse_request(source_id, opts) {
+        Ok(request) => request,
+        Err(err) => return error_payload(err),
+    };
+    let outcome = match crate::prompt::ask(&request) {
+        Ok(outcome) => outcome,
+        Err(err) => crate::prompt::PromptOutcome::failure(err),
+    };
+    serde_json::to_string(&outcome).unwrap_or_else(|_| error_payload("表单结果序列化失败".into()))
+}
+
+// ---------------------------------------------------------------------------
 // 登录态的存储部分（localStorage / sessionStorage / IndexedDB）
 // ---------------------------------------------------------------------------
 

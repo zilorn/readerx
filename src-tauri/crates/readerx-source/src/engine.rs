@@ -17,7 +17,7 @@ use crate::models::{
 use crate::panic_guard;
 use boa_engine::{Context, JsResult, JsString, JsValue, NativeFunction, Source};
 use serde_json::{json, Value};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -53,6 +53,10 @@ pub(crate) struct CallCtx {
     /// 单次调用结算结果：Ok(json 字符串) 或 Err(错误文本)
     settled: RefCell<Option<Result<String, String>>>,
     logs: RefCell<Vec<String>>,
+    /// 等用户操作（网页登录 / 输入表单）花掉的时间：不计入函数调用预算。
+    ///
+    /// 用户填一张表单可能要几分钟，把它算进 45s 预算等于「填慢一点就报执行超时」。
+    paused: Cell<Duration>,
 }
 
 impl CallCtx {
@@ -61,6 +65,7 @@ impl CallCtx {
             source_id,
             settled: RefCell::new(None),
             logs: RefCell::new(Vec::new()),
+            paused: Cell::new(Duration::ZERO),
         }
     }
 
@@ -103,6 +108,16 @@ impl CallCtx {
         if let Ok(mut logs) = self.logs.try_borrow_mut() {
             logs.clear();
         }
+        self.paused.set(Duration::ZERO);
+    }
+
+    /// 记一段「等用户操作」的时间（见 [`CallCtx::paused`]）
+    fn add_paused(&self, elapsed: Duration) {
+        self.paused.set(self.paused.get() + elapsed);
+    }
+
+    fn paused(&self) -> Duration {
+        self.paused.get()
     }
 }
 
@@ -243,8 +258,11 @@ fn nv_webview_login_supported(_: &JsValue, _args: &[JsValue], _context: &mut Con
 fn nv_webview_login(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let url = args.first().map(|a| arg_string(a, context)).unwrap_or_default();
     let opts = args.get(1).map(|a| arg_string(a, context)).unwrap_or_default();
+    // 等用户在登录界面里操作的时间不计入函数预算（见 CallCtx::paused）
+    let started = Instant::now();
     let out = with_call(|c| host::webview_login(&c.source_id, &url, &opts))
         .unwrap_or_else(|| "{\"ok\":false,\"message\":\"缺少运行上下文\"}".to_string());
+    with_call(|c| c.add_paused(started.elapsed()));
     ret_string(out)
 }
 
@@ -253,6 +271,21 @@ fn nv_webview_login(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
 fn nv_webview_storage(_: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
     let out = with_call(|c| host::webview_storage(&c.source_id))
         .unwrap_or_else(|| "{}".to_string());
+    ret_string(out)
+}
+
+fn nv_input_prompt_supported(_: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
+    ret_string(if host::source_prompt_supported() { "1".to_string() } else { "0".to_string() })
+}
+
+/// `input.prompt(opts)`：弹出表单并阻塞等待用户提交 / 取消（编排见 crate::prompt）。
+/// 等用户填表的时间不计入函数预算（见 CallCtx::paused）。
+fn nv_input_prompt(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let opts = args.first().map(|a| arg_string(a, context)).unwrap_or_default();
+    let started = Instant::now();
+    let out = with_call(|c| host::source_prompt(&c.source_id, &opts))
+        .unwrap_or_else(|| "{\"ok\":false,\"message\":\"缺少运行上下文\"}".to_string());
+    with_call(|c| c.add_paused(started.elapsed()));
     ret_string(out)
 }
 
@@ -406,6 +439,8 @@ fn native_registry() -> Vec<(&'static str, usize, NativeFunction)> {
         ("__webviewLogin", 2, NativeFunction::from_fn_ptr(nv_webview_login)),
         ("__webviewLoginSupported", 0, NativeFunction::from_fn_ptr(nv_webview_login_supported)),
         ("__webviewStorage", 0, NativeFunction::from_fn_ptr(nv_webview_storage)),
+        ("__inputPrompt", 1, NativeFunction::from_fn_ptr(nv_input_prompt)),
+        ("__inputPromptSupported", 0, NativeFunction::from_fn_ptr(nv_input_prompt_supported)),
         ("__htmlQueryAll", 2, NativeFunction::from_fn_ptr(nv_html_query_all)),
         ("__htmlToText", 2, NativeFunction::from_fn_ptr(nv_html_to_text)),
         ("__sleep", 1, NativeFunction::from_fn_ptr(nv_sleep)),
@@ -475,6 +510,14 @@ const PROLOGUE: &str = r#"
     },
     // 登录时采集到的 localStorage / sessionStorage / IndexedDB 快照（只读）
     storage() { return __rxUnwrap(__webviewStorage()); }
+  };
+  globalThis.input = {
+    // 当前环境能不能弹表单（App 界面 / CLI 终端为 true；浏览器预览等为 false）
+    isSupported() { return __inputPromptSupported() === "1"; },
+    // 选项写错（缺 fields、key 非法…）抛 Error；用户取消 / 环境不支持是 ok:false
+    prompt(opts) {
+      return __rxUnwrap(__inputPrompt(JSON.stringify(opts === undefined ? null : opts)));
+    }
   };
   globalThis.html = {
     queryAll(html, selector) { return __rxUnwrap(__htmlQueryAll(String(html), String(selector))); },
@@ -643,7 +686,9 @@ fn try_call(
         if let Some(result) = taken {
             return result;
         }
-        if Instant::now() >= deadline {
+        // 等用户操作（登录界面 / 输入表单）的时间不计入预算：超时判定要把它加回去
+        let paused = with_call(|c| c.paused()).unwrap_or_default();
+        if Instant::now() >= deadline + paused {
             return Err(format!("书源函数「{fn_name}」执行超时（{}ms）", budget.as_millis()));
         }
         std::thread::sleep(Duration::from_millis(2));
@@ -1395,6 +1440,66 @@ mod tests {
         assert_eq!(value["ok"], json!(true));
         assert_eq!(value["keys"], json!(0));
         assert_eq!(value["dbs"], json!(0));
+    }
+
+    /// `input.prompt`：书源在沙箱里弹表单取用户输入（口令 / 数字…）。
+    ///
+    /// 覆盖四件事：值按字段类型规范化、同一张表单本次运行内只问一次（不重复弹窗）、
+    /// 用户取消是 `ok:false`（不抛错）、选项写错抛异常（书源代码的问题不该静默）。
+    #[test]
+    fn input_prompt_asks_once_and_normalizes_values() {
+        let provider = crate::prompt::fake::FakeProvider::install();
+        let source_id = format!("input-prompt-{}", std::process::id());
+        let before = provider.calls(&source_id);
+
+        let js = r#"
+        function searchBook() {
+          const out = {};
+          out.supported = input.isSupported();
+          const opts = {
+            title: "站点口令",
+            message: "需要口令才能搜索",
+            fields: [
+              { key: "pwd", label: "口令", type: "password", required: true },
+              { key: "rps", label: "并发", type: "number", defaultValue: "3", min: 1, max: 8 }
+            ]
+          };
+          const r = input.prompt(opts);
+          if (!r.ok) throw new Error("prompt 失败: " + r.message);
+          out.pwd = r.values.pwd;
+          out.rps = r.values.rps;
+          out.rpsType = typeof r.values.rps;
+          // 同一张表单再问一次：本次运行内已记住，宿主不该再弹
+          const again = input.prompt(opts);
+          out.sameAsFirst = again.ok && again.values.pwd === r.values.pwd;
+          // 用户取消：ok:false，不抛错
+          const cancelled = input.prompt({
+            title: "取消的表单",
+            fields: [{ key: "pwd", type: "password", defaultValue: "__cancel__" }]
+          });
+          out.cancelledOk = cancelled.ok;
+          out.cancelledMessage = cancelled.message;
+          // 选项写错要抛异常（缺 fields）
+          let threw = false;
+          try { input.prompt({}); } catch (e) { threw = true; }
+          out.badOptionsThrew = threw;
+          return out;
+        }
+        "#;
+        let result = call_source_function(&source_id, js, "searchBook", &json!([]), 5_000)
+            .expect("命令层不应返回 Err");
+        assert!(result.ok, "{:?}", result.error);
+        let value = result.value.unwrap_or(Value::Null);
+        assert_eq!(value["supported"], json!(true));
+        assert_eq!(value["pwd"], json!("pwd-value"));
+        assert_eq!(value["rps"], json!(3));
+        assert_eq!(value["rpsType"], json!("number"));
+        assert_eq!(value["sameAsFirst"], json!(true));
+        assert_eq!(value["cancelledOk"], json!(false));
+        assert!(value["cancelledMessage"].as_str().unwrap_or_default().contains("取消"));
+        assert_eq!(value["badOptionsThrew"], json!(true));
+        // 只弹了两次：第一张表单（第二次命中记忆）+ 取消的那张；选项写错根本没到后端
+        assert_eq!(provider.calls(&source_id), before + 2);
     }
 
     /// 二进制字符串（1 字符 = 1 字节，含 0x80–0xff 与非法 UTF-8 序列）在**真实 JS 调用链**上
