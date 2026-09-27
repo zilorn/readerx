@@ -122,6 +122,7 @@
   （正文与图片分两趟下载：先正文，后图片）。
 - 单请求默认超时 15s（`opts.timeoutMs` 可调，上限 120s）；单函数调用预算 45s、单章正文 30s。
 - 书源 JS 中**不可用**：定时器（`setTimeout`…）、真 DOM、`fetch`、文件/进程访问。
+- 需要用户当场给参数（口令 / 访问码…）用 `input.prompt`，别写死进规则，也别指望环境变量。
 - 纯 CPU 死循环 / 无限递归会被引擎上限中断：单个函数帧循环次数约 1 亿次、递归深度 512 层，
   超出即中止并返回可读错误（如 `循环次数超出上限（书源代码可能存在死循环）`），
   不会让界面一直转圈；但**不要依赖它做流程控制**，规则里出现死循环仍属错误写法。
@@ -130,6 +131,10 @@
   请只在确实需要登录时调用，避免把整个调用拖住。该书源关闭 `autoAuth` 时返回 `ok:false`。
 - `webview.storage()`：读取登录时采集的 localStorage / sessionStorage / IndexedDB 快照
   （凭证不用 Cookie 记的站点靠它把 token 显式带进请求）；只读、不触发认证，没有快照时返回空对象。
+- `input.prompt({...})`（用户输入表单，见 [book-source-api.md](./book-source-api.md)）同样**阻塞等待**
+  用户填写：App 里弹表单、CLI 里在终端提问。同一张表单（同源 + 同标题 + 同字段）本次运行只问一次，
+  并发调用共用一个结果，`fresh: true` 强制重问；用户取消 / 环境不支持返回 `ok:false`。
+  选项写错（缺 `fields`、`key` 非法…）抛 `Error`。填表期间不占函数预算。
 - `autoAuth`（默认 `true`，编辑页可单独关闭）：开启时 `http.*` 命中 Cloudflare 挑战会自动拉起
   应用内 WebView 认证并重试（含 `cf_clearance` 过期自动刷新，Android 端），详见
   [cloudflare.md](./cloudflare.md) 与 [book-source-api.md](./book-source-api.md)。

@@ -92,7 +92,7 @@ category discovery reflect the latest source list and enable / capability switch
   "Source concurrency" (Settings → Book Sources) is a global user setting that controls how many
   sources run at once for a single search.
   The host APIs available to rules (`http` / `html` / `util` / `base64` / `cryptoUtil` /
-  `console`) and the format specification are documented in:
+  `webview` / `input` / `console`) and the format specification are documented in:
   - [docs/book-source-spec.md](./docs/book-source-spec.md) (JSON structure and entry-function contracts)
   - [docs/book-source-api.md](./docs/book-source-api.md) (host API reference)
   - [docs/book-source-guide.md](./docs/book-source-guide.md) (a from-scratch tutorial)
@@ -120,6 +120,10 @@ category discovery reflect the latest source list and enable / capability switch
 - **Online reading**: search results or category discovery → preview on the online book page →
   "Add to shelf" (only TOC metadata is stored); the toast for a newly added book offers
   "Add to group" to file it into a shelf group immediately.
+- **User input forms**: a source can call `input.prompt({...})` to ask the user for values on the
+  spot (text / password / number fields, several at once, with required and numeric-range checks);
+  the app shows a form dialog, the standalone binary asks on the terminal. The same form is asked
+  only once per run (see the `input` section in [docs/book-source-api.md](./docs/book-source-api.md)).
 - **Editing & testing**: the source edit page has a built-in "Save and test" that runs one
   capability at a time with your parameters and shows the result plus `console` output.
 - **Web login / automatic web authentication (Android / Linux / Windows)**: "Web login" on the

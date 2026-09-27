@@ -199,6 +199,19 @@ const resp = await http.get(BASE + "/api/search?q=" + encodeURIComponent(keyword
 });
 ```
 
+**站点要自己填的口令 / 访问码**（不是账号登录）时用 `input.prompt` 让用户当场输入，别把口令写死进规则：
+App 里弹出表单、CLI 里在终端提问，同一次运行内同一张表单只问一遍（细节见
+[book-source-api.md](./book-source-api.md) 的 `input` 段）：
+
+```js
+const form = input.prompt({
+  title: "站点口令",
+  fields: [{ key: "pwd", label: "口令", type: "password", required: true }],
+});
+if (!form.ok) throw new Error("需要口令：" + form.message);
+const resp = await http.get(BASE + "/search?q=" + encodeURIComponent(keyword) + "&pwd=" + form.values.pwd);
+```
+
 没有 Android 环境时仍可退而求其次：
 
 - 需要 Referer/UA：写进书源的「默认请求头 / User-Agent」；

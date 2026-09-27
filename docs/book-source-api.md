@@ -159,6 +159,86 @@ async function searchBook(keyword) {
 - 快照不随书源 JSON 导出/分享；清空登录态（编辑页「清除登录」/ CLI `auth clear`）会一并删掉。
 - 单 origin 最多 500 条 / 类、单值最多 8192 字符（超出截断并由 `truncated` 标记）。
 
+## `input`（用户输入表单：App 界面 / CLI 终端）
+
+书源没法自己确定的参数（站点口令、访问码、翻页倍率…）可以交给用户填：调用后**阻塞等待**——
+App 里弹出表单、CLI 里在终端逐项提问，用户提交 / 取消后返回结果。规则里的写法：
+
+| 成员 | 说明 |
+| --- | --- |
+| `input.isSupported()` | 当前环境能否弹表单（App 界面 / CLI 交互终端为 true；浏览器预览等为 false） |
+| `input.prompt(opts)` | 弹出表单并**阻塞等待**用户提交 / 取消，返回结果对象 |
+
+`opts`：
+
+```js
+{
+  title: "站点口令",            // 可选：表单标题（留空用界面默认文案）
+  message: "该书源需要口令才能搜索", // 可选：补充说明
+  fresh: false,                 // 可选：true = 忽略本次运行已记住的值，重新询问
+  fields: [                     // 必填：1–12 个字段
+    { key: "pwd", label: "口令", type: "password", required: true, maxLength: 64 },
+    { key: "uid", label: "用户名", type: "text", placeholder: "手机号 / 邮箱" },
+    { key: "rps", label: "并发", type: "number", min: 1, max: 8, defaultValue: "3" }
+  ]
+}
+```
+
+字段选项：
+
+| 选项 | 说明 |
+| --- | --- |
+| `key` | 必填。取值的键（`values[key]`）：字母数字与 `_ - .`，≤ 40 字符，同一张表单内不可重复 |
+| `label` | 显示名（留空用 `key`），≤ 60 字符 |
+| `type` | `text`（默认）/ `password`（界面掩码、终端不回显）/ `number`（数字键盘 + 范围校验） |
+| `placeholder` | 占位提示，≤ 120 字符 |
+| `defaultValue` | 预填值（也认 `default` / `value`） |
+| `required` | 默认 `false`；为 `true` 时留空不允许提交（必填判定忽略首尾空白） |
+| `maxLength` | 值上限，默认 512、最大 4096（界面限制输入，宿主再兜底截断） |
+| `min` / `max` | 数字字段的取值范围（其它类型忽略） |
+
+返回对象：
+
+```js
+{
+  ok: true,                       // false = 取消 / 环境不支持 / 超时（不抛错，用 ok 分支）
+  values: { pwd: "…", uid: "…", rps: 3 }, // 数字字段是数字，文本 / 密码是字符串；留空是 ""
+  message: ""                     // 失败 / 取消原因，成功时为空
+}
+```
+
+典型用法：
+
+```js
+async function searchBook(keyword) {
+  const form = input.prompt({
+    title: "站点口令",
+    fields: [{ key: "pwd", label: "口令", type: "password", required: true }],
+  });
+  if (!form.ok) throw new Error("该书源需要口令：" + form.message);
+  const resp = await http.get(BASE + "/search?q=" + encodeURIComponent(keyword) + "&pwd=" + form.values.pwd);
+  // …口令不对时（401 / 403）可以 fresh:true 让用户重填一次
+}
+```
+
+约定与限制：
+
+- **选项写错抛 `Error`**（缺 `fields`、字段不是对象、`key` 非法或重复、类型不支持、`min > max`、字段超过 12 个）：
+  这是书源代码的问题，不该静默降级；用户取消 / 环境不支持则是 `ok:false`。
+- **同一张表单本次运行只问一次**：记忆键 = 同一书源 + 同一 `title` + 同一组字段（顺序与类型也算）。
+  之后的同样调用直接返回已记住的值，不再弹窗；并发调用（多章并行拉正文）同时命中一张表单时只弹一次，
+  其余等第一个结果。把书名 / 关键词拼进 `title` 会让每次调用都变成新表单、每次都弹窗。
+- 想让用户重新填写（口令失效、要换账号）时传 `fresh: true`：跳过记忆重新询问，并把新值写回记忆。
+  编辑页反复「保存并测试」同一张表单时，第二次起不会弹窗（值已记住）——调试表单本身时加上 `fresh: true`。
+- 记忆只在**本次运行内**有效，重启后重新询问；不写进书源 JSON，也不进登录态文件。
+  删除书源、编辑页「清除登录」会一并忘掉该书源记住的值。
+- 等待用户填写的时间**不计入函数调用预算**（与 `webview.login` 一致）；用户一直不处理时
+  应用侧 10 分钟自动收起表单，规则拿到 `ok:false` 与原因。
+- `password` 字段的值只用于当次调用与上述记忆，**不会**进日志、不会进书源导出 / 登录态文件；
+  调试时也别把它 `console.log` 出来。
+- CLI（`readerx-source`）在**交互终端**里逐项提问（密码不回显，提问走标准错误），
+  管道 / 重定向等非交互环境 `isSupported()` 为 false（见 [book-source-cli.md](./book-source-cli.md)）。
+
 ## `html`（CSS 选择器 + 正文清洗）
 
 基于 Rust `scraper`（HTML5 解析 + CSS 选择器子集）。

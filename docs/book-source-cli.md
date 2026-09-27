@@ -10,6 +10,7 @@
 | Boa 引擎 / `http` / `html` / `util` / `base64` / `cryptoUtil` / `console` | ✅ | ✅ |
 | 书源文件与登录 Cookie 目录 | 应用数据目录 | `--data-dir`（可与 App 指向同一目录） |
 | 网页登录 / 自动过 Cloudflare | Android 应用内 WebView | `auth webkit`（本机 WebKit 内核）/ `auth cdp`（连已有 Chrome） |
+| 用户输入表单（`input.prompt`） | 应用内表单弹层 | 交互终端逐项提问（密码不回显） |
 | 章节插图落盘 / `readerx-img` 协议 | ✅ | ❌（CLI 只跑规则，不涉及阅读排版） |
 
 ## 构建
@@ -162,6 +163,25 @@ readerx-source --source demo auth storage --json | jq '.storage.origins[0].local
 - 会话文件是**增量扩展**的：旧文件（只有 `url` / `cookie` / `updated_at`）照常读，新增 `storage` 字段
   后 App 与 CLI 仍能交替读写同一份数据目录。
 - 只更新 Cookie 的操作（`auth cookie` 手工导入）不会抹掉已有的存储快照，反之亦然。
+
+## 用户输入表单（`input.prompt`）
+
+书源调用 `input.prompt`（见 [book-source-api.md](./book-source-api.md)）要用户填参数时，CLI 在**终端**
+逐项提问：提问走**标准错误**（stdout 始终是命令结果），密码字段关闭回显，填完后书源那次调用继续：
+
+```bash
+$ readerx-source --source demo call searchBook '["剑来"]'
+── 站点口令
+   该书源需要口令才能搜索
+口令（必填）:            # 输入不回显
+并发（1–5）: 3
+```
+
+- 必填留空 / 数字越界会**重问整张表单**（最多 3 轮），仍不合法则以 `ok:false` 交给书源代码降级。
+- 标准输入不是终端（管道、重定向、CI）时 `input.isSupported()` 为 false、调用直接拿到 `ok:false`
+  ——不会把命令挂在等输入上；要喂值就自己在规则里给 `defaultValue`，或改用 `--json` 场景下的固定参数。
+- 同一次运行内同一张表单只问一次（与 App 相同）：`run` 拉多章正文时不会每章都问你一遍。
+- 输入的值不落盘、不进日志，退出进程即忘（App 侧也一样，只是记忆活到应用退出）。
 
 ## 身份文件（profile）
 

@@ -61,7 +61,7 @@ PDF 导入优先读文字层并还原成段落（页眉 / 页脚按「跨页重�
 - **书源 = JS 规则**：定义 `searchBook / discoverBooks / discoverCategories / bookDetail / bookToc / bookContent`
   等入口函数，运行于 Rust 内嵌的 **Boa 引擎**沙箱；支持 `async/await` 写法。
   「书源并发」（设置 → 书源）为全局用户设置，指一次搜索同时运行多少个书源。
-  规则可调用的宿主 API（`http` / `html` / `util` / `base64` / `cryptoUtil` / `console`）
+  规则可调用的宿主 API（`http` / `html` / `util` / `base64` / `cryptoUtil` / `webview` / `input` / `console`）
   与格式规范见：
   - [docs/book-source-spec.md](./docs/book-source-spec.md)（JSON 结构与入口函数契约）
   - [docs/book-source-api.md](./docs/book-source-api.md)（宿主 API 参考）
@@ -83,6 +83,9 @@ PDF 导入优先读文字层并还原成段落（页眉 / 页脚按「跨页重�
   入架提示里可直接「加入分组」把新书归入书架分组；阅读页呼出菜单时，顶部菜单下方会显示
   **当前章的原始网页地址**——点地址用应用内 WebView 看一眼站点实际返回的页面（只读不采集，
   不影响已保存的登录态），右侧按钮则交给系统浏览器打开；
+- **用户输入表单**：书源可调用 `input.prompt({...})` 让用户当场填参数（文本 / 密码 / 数字，可多个字段，
+  支持必填与数字范围校验）；App 内弹出表单，独立二进制里在终端提问。同一次运行内同一张表单只问一遍
+  （见 [docs/book-source-api.md](./docs/book-source-api.md) 的 `input` 段）。
 - **编辑与测试**：书源编辑页内置「保存并测试」，可逐能力填入参数运行并查看结果与 `console` 日志。
 - **网页登录 / 自动网页认证（Android / Linux / Windows）**：编辑页「网页登录」在应用内 WebView 里完成登录后
   自动捕获站点 Cookie（含 httpOnly 的 `cf_clearance`），按书源持久化并注入会话（重启自动生效，不随书源 JSON
