@@ -1,7 +1,8 @@
 /**
  * 局域网同步（设置 → 同步 / 冲突裁决）。
  *
- * 这里的文案要讲清两件事：**同步什么**（元信息 / 进度 / 书签 / 分组 / 书源，不含正文）
+ * 这里的文案要讲清两件事：**同步什么**（书籍信息与正文 / 封面与插图 / 进度 / 书签 /
+ * 分组（书架 / 书源）/ 书源 / 替换与分章规则，见 docs/sync.md 第 7.1 节）
  * 与**关掉同步会发生什么**（本地照常记账，重新开启后一起同步出去）。
  */
 export const sync = {
@@ -18,7 +19,7 @@ export const sync = {
   // 总开关
   "sync.enable.title": "局域网同步",
   "sync.enable.onDesc": "与同一局域网内已配对的设备互相同步",
-  "sync.enable.offDesc": "同步的是书籍信息、阅读进度、书签、分组与书源；正文与封面不参与",
+  "sync.enable.offDesc": "同步的是书籍信息与正文、封面与插图、进度、书签、分组（书架 / 书源）、书源、替换与分章规则",
   "sync.enable.toggle": "开启或关闭同步",
   "sync.enable.failed": "切换同步开关失败",
 
@@ -104,7 +105,7 @@ export const sync = {
 
   // 数据
   "sync.scope.title": "已纳入同步的数据",
-  "sync.scope.desc": "书籍信息 / 进度 / 书签 / 分组 / 书源；正文与封面留在各自设备上",
+  "sync.scope.desc": "书籍信息与正文 / 封面与插图 / 进度 / 书签 / 分组（书架 / 书源）/ 书源 / 替换与分章规则",
   "sync.scope.count": "{count} 条",
   "sync.reset.title": "清空同步数据",
   "sync.reset.confirm": "确认清空同步数据？",

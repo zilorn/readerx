@@ -1,10 +1,10 @@
 /**
  * LAN sync (Settings → Sync, and the conflict resolution screen).
  *
- * Two things these strings must make clear: **what syncs** (book metadata, reading
- * position, bookmarks, groups, book sources — never the book files themselves) and
- * **what turning sync off does** (local changes keep being recorded and go out on the
- * next sync).
+ * Two things these strings must make clear: **what syncs** (book info and text, covers
+ * and illustrations, reading position, bookmarks, groups (shelf / source), book sources,
+ * text replacement and chapter rules — see docs/sync.md §7.1) and **what turning sync
+ * off does** (local changes keep being recorded and go out on the next sync).
  */
 export const sync = {
   "sync.title": "Sync",
@@ -21,7 +21,7 @@ export const sync = {
   "sync.enable.title": "LAN sync",
   "sync.enable.onDesc": "Sync with paired devices on the same local network",
   "sync.enable.offDesc":
-    "Syncs book info, reading position, bookmarks, groups and sources; book files and covers stay on each device",
+    "Syncs book info and text, covers and illustrations, reading position, bookmarks, groups (shelf / source), sources, text replacement and chapter rules",
   "sync.enable.toggle": "Turn sync on or off",
   "sync.enable.failed": "Could not change the sync switch",
 
@@ -131,7 +131,7 @@ export const sync = {
   // Data
   "sync.scope.title": "Synced data",
   "sync.scope.desc":
-    "Book info, reading position, bookmarks, groups and sources; book files and covers stay local",
+    "Book info and text / covers and illustrations / reading position / bookmarks / groups (shelf / source) / sources / text replacement and chapter rules",
   "sync.scope.count": "{count} items",
   "sync.scope.count_one": "{count} item",
   "sync.scope.count_other": "{count} items",
