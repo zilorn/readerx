@@ -82,6 +82,9 @@ fn dispatch(cli: Cli) -> Result<(), String> {
             .unwrap_or_else(|| "（未启用文件日志）".to_string())
     );
 
+    // 用户输入表单（input.prompt）的终端后端：与认证后端无关，任何命令都可以弹问
+    install_prompt_provider();
+
     match cli.command.as_str() {
         "sources" | "list" => commands::cmd_sources(&cli),
         "call" => commands::cmd_call(&cli),
@@ -112,6 +115,14 @@ fn install_auth_provider(cli: &Cli) -> Option<Arc<dyn AuthProvider>> {
     };
     auth::install_provider(provider.clone());
     Some(provider)
+}
+
+/// 装终端输入后端：书源调 `input.prompt` 时在终端逐项提问（密码不回显）。
+///
+/// 与认证后端不同，这里没有开关：终端交互不依赖任何可选 feature，
+/// 标准输入不是终端时它自己报 `supported() = false`，书源拿到 `ok:false` 降级。
+fn install_prompt_provider() {
+    readerx_source::prompt::install_provider(Arc::new(readerx_source::cli::prompt::TerminalPrompt::new()));
 }
 
 // ---------------------------------------------------------------------------

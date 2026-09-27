@@ -5,5 +5,6 @@
 pub mod args;
 pub mod auth_cmd;
 pub mod commands;
+pub mod prompt;
 pub mod render;
 pub mod source;
