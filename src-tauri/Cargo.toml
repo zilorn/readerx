@@ -73,6 +73,8 @@ time = { version = "0.3", features = ["local-offset"] }
 # 集成测试要一个 mock AppHandle（真实的数据目录 / 文件布局，只把窗口换成假的）
 [dev-dependencies]
 tauri = { version = "2", features = ["test"] }
+# 集成测试要复现「同步引入前」的旧图片文件名（`<书 id>_<sha1(地址)>.<ext>`）
+sha1 = "0.10"
 
 # 同步界面要列本机真实的局域网地址（`getifaddrs`），只有桌面 Unix 走这条路：
 # Android 的 bionic 不导出该符号（那边改用 `ip addr` 输出解析，见 sync/lan.rs）。

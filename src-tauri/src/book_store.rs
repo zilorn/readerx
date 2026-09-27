@@ -820,10 +820,76 @@ pub(crate) fn delete_book<R: tauri::Runtime>(app: &AppHandle<R>, id: &str) -> Re
     }
     crate::storage::remove_book_tts_cache(app, id)?;
     if let Ok(root) = crate::book_images::images_root(app) {
-        crate::book_images::remove_book(&root, id);
+        // 名字归一之后插图文件名里没有书 id，不能再按前缀扫目录；按这本书**引用到的**
+        // 名字删（含旧名字与 PDF 页图），归一名还要确认没有别的书引用它
+        let locals = book_image_locals(&dir);
+        let referenced = locals.clone();
+        crate::book_images::remove_book_images(&root, &locals, |name| {
+            crate::book_images::asset_name(name)
+                .map(|asset| asset != name || referenced.iter().any(|item| item == name))
+                .unwrap_or(false)
+        });
     }
     log::info!("书籍已删除 id={id}（含书签、听书缓存与章节插图）");
     Ok(())
+}
+
+/// 把一本书章节里引用到的插图名**归一**（去掉本机书 id 前缀），有改动才写回正文。
+///
+/// 同步收到插图后调用：正文块里的引用与对端一致，两台设备才会对同一段正文算出同一个
+/// 指纹（否则正文通道会一直认为「两边不一样」而反复重传）。正文里没有引用、
+/// 或引用本来就归一时**一个字节都不写**（每次同步都重写整本正文是不可接受的）。
+/// 返回是否改动过。
+pub(crate) fn normalize_book_images<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    root: Option<&Path>,
+    id: &str,
+) -> Result<bool, String> {
+    let dir = book_dir_at(app, root, id)?;
+    if !dir.join(BOOKDETAIL_FILE).is_file() {
+        return Ok(false);
+    }
+    let content_path = dir.join(CONTENT_FILE);
+    if !content_path.is_file() {
+        return Ok(false);
+    }
+    let mut content: BookContent = read_json_file(&content_path, "书籍正文")?;
+    let images_root = crate::book_images::images_root_at(app, root)?;
+    if !crate::book_images::normalize_image_refs(&images_root, &mut content.chapters) {
+        return Ok(false);
+    }
+    write_book_content(&dir, &content.chapters)?;
+    Ok(true)
+}
+
+/// 一本书引用到的图片文件名（章节块里的整行图与段内图；含 PDF 页图）。
+///
+/// 读的是 `content.json`；读不出来（文件已删 / 损坏）时返回空清单 —— 调用方
+/// （删书）那时已经按更保守的方式清理过了。
+fn book_image_locals(dir: &Path) -> Vec<String> {
+    let path = dir.join(CONTENT_FILE);
+    if !path.is_file() {
+        return Vec::new();
+    }
+    let Ok(content) = read_json_file::<BookContent>(&path, "书籍正文") else {
+        return Vec::new();
+    };
+    let mut locals: Vec<String> = Vec::new();
+    for chapter in &content.chapters {
+        for block in chapter.blocks.iter().flatten() {
+            if let Some(local) = block.local.as_ref() {
+                locals.push(local.clone());
+            }
+            for image in block.imgs.iter().flatten() {
+                if let Some(local) = image.local.as_ref() {
+                    locals.push(local.clone());
+                }
+            }
+        }
+    }
+    locals.sort();
+    locals.dedup();
+    locals
 }
 
 /// 书库元数据列表（不含任何章节正文）：应用启动 / 书架只拉这一份，
@@ -837,9 +903,11 @@ pub(crate) fn list_book_meta<R: tauri::Runtime>(
 }
 
 /// 扫描书库目录，**两种布局都认**：
+///
 /// - `books/<id>/`：目录布局（元信息来自 bookdetail.json，章节头扫 content.json）；
 /// - `books/<id>.json`：旧布局文件，仅当同名目录还没迁出来时才读它 ——
 ///   迁移没成功的书因此仍能出现在书架上，而不是「书凭空少了」。
+///
 /// 纯路径实现，便于单测。
 fn scan_books_dir(dir: &Path) -> Result<Vec<BookMeta>, String> {
     let mut books = Vec::new();

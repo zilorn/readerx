@@ -21,6 +21,8 @@ log = "0.4"
 readerx-log = { path = "../readerx-log" }
 hmac = "0.12"
 sha2 = "0.10"
+# 插图资源名 = 图片地址的 sha1（与 App 落盘的文件名同一套，见 content::image_asset_name）
+sha1 = "0.10"
 # 资源通道（封面 / 章节插图）的字节上线协议：JSON 里只能放文本，二进制编 base64
 base64 = "0.22"
 getrandom = "0.2"

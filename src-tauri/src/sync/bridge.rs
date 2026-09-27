@@ -855,10 +855,37 @@ fn apply_staged_assets<R: tauri::Runtime>(
                         }
                     }
                 }
-                // 插图在下一步（要把正文块里的引用一起翻译成设备无关的名字）
-                AssetKind::Illustration => continue,
+                AssetKind::Illustration => {
+                    // 插图落到图片目录，文件名用**设备无关的归一名**（对端正文块里引用的
+                    // 就是这个名字）：两台设备因此对同一段正文算出同一个指纹
+                    if !crate::book_images::valid_asset_name(&asset.name) {
+                        log::warn!("对端推来的插图名字不合法，已跳过 name={}", asset.name);
+                        continue;
+                    }
+                    let result = crate::book_images::images_root_at(app, root.as_deref())
+                        .and_then(|root| crate::book_images::store_asset(&root, &asset.name, &asset.bytes));
+                    match result {
+                        Ok(_) => {
+                            changes.books = true;
+                            if !changes.chapters.contains(&local_id) {
+                                // 正文块里的引用可能还是旧名字（带本机书 id 前缀），
+                                // 前端要重载这本书的正文才能看到新引用
+                                changes.chapters.push(local_id.clone());
+                            }
+                        }
+                        Err(error) => {
+                            log::warn!("同步插图落地失败（{local_id}）：{error}");
+                            continue;
+                        }
+                    }
+                }
             }
             landed.push((asset.kind, asset.name.clone()));
+        }
+        // 正文块里的旧引用（带本机书 id 前缀）就地归一：不这么做，本机发出去的正文
+        // 与对端的对不上，正文通道会一直认为「两边不一样」而反复重传
+        if landed.iter().any(|(kind, _)| *kind == AssetKind::Illustration) {
+            normalize_book_images(app, root.as_deref(), &local_id, changes)?;
         }
         if !landed.is_empty() {
             let cleared = {
@@ -867,6 +894,26 @@ fn apply_staged_assets<R: tauri::Runtime>(
             };
             cleared.map_err(|error| SyncError::Io(error.to_string()))?;
         }
+    }
+    Ok(())
+}
+
+/// 见 [`book_store::normalize_book_images`]：把正文块里的旧引用归一，有改动才算落地。
+fn normalize_book_images<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    root: Option<&std::path::Path>,
+    local_id: &str,
+    changes: &mut AppliedChanges,
+) -> Result<(), SyncError> {
+    match book_store::normalize_book_images(app, root, local_id) {
+        Ok(true) => {
+            if !changes.chapters.contains(&local_id.to_string()) {
+                changes.chapters.push(local_id.to_string());
+            }
+            log::info!("同步插图引用已归一 book={local_id}");
+        }
+        Ok(false) => {}
+        Err(error) => log::warn!("插图引用归一失败（{local_id}）：{error}"),
     }
     Ok(())
 }

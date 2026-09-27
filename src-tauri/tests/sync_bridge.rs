@@ -356,6 +356,30 @@ fn sync_once(client: &SharedEngine, server: &SharedEngine) -> readerx_sync::Sync
     readerx_sync::sync_with(&mut guard, &mut transport).expect("同步应成功")
 }
 
+/// 目录下的文件名（不存在时为空）。
+fn list_files(dir: &Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .map(|items| {
+            items
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// sha1 十六进制（旧图片文件名里的哈希部分：`<本机书 id>_<sha1(地址)>.<ext>`）。
+fn sha1_hex(text: &str) -> String {
+    use sha2::Digest;
+    let mut hasher = sha1::Sha1::new();
+    hasher.update(text.as_bytes());
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 /// 集合字段（标签）比较：顺序由引擎的键序决定，比较时按集合看。
 fn sorted_strings(value: &Value) -> Vec<String> {
     let mut items: Vec<String> = value
@@ -1277,4 +1301,128 @@ fn incoming_cover_lands_in_bookdetail_and_clears_staging() {
     // 再次同步：两边封面已经一致，不该再来回搬
     let again = sync_once(&local, &peer.engine);
     assert_eq!((again.assets_pushed, again.assets_pulled), (0, 0), "{again:?}");
+}
+
+/// 插图（资源通道 + 正文引用）：正文赢家那张图搬到另一侧，**引用名归一**
+/// （两台设备对同一段正文算出同一个指纹），第二轮不再搬。
+#[test]
+fn illustration_follows_the_body_winner_and_normalizes_the_reference() {
+    let _serial = SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (handle, app_data) = setup();
+
+    let local_image = "https://img.example.com/local.png";
+    let local_name = readerx_sync::content::image_asset_name(local_image);
+
+    // 本机：一章正文引用本机那张图（`local` 故意写成旧名字：带本机书 id 前缀）
+    seed_local_book(&app_data, "local-1", "三体");
+    // 旧名字（同步引入前的落盘形态）：本机书 id 前缀 + 图片地址的 sha1
+    let legacy_name = format!("local-1_{}.png", sha1_hex(local_image));
+    write_json(
+        &app_data.join("books").join("local-1").join("content.json"),
+        &json!({ "schemaVersion": 1, "chapters": [{
+            "cid": "c0001",
+            "title": "第一章",
+            "paragraphs": [],
+            "blocks": [
+                { "kind": "p", "text": "他指着那张图说道。" },
+                { "kind": "img", "remote": local_image, "src": local_image, "local": legacy_name },
+            ],
+        }]}),
+    );
+    let images = app_data.join("images");
+    std::fs::create_dir_all(&images).unwrap();
+    std::fs::write(images.join(&legacy_name), b"local-image-bytes").unwrap();
+
+    let local = local_engine(&handle, &app_data);
+    let mut index = BookIndex::default();
+    bridge::reconcile(&handle, &local, &mut index).unwrap();
+    let uid = {
+        let guard = lock_engine(&local);
+        guard.entities_of_kind("book", false)[0].id.clone()
+    };
+
+    // 对端：同一本书，正文引用它自己那张图（地址不同 → 资源名不同）
+    let peer_image = "https://img.example.com/peer.png";
+    let peer_name = readerx_sync::content::image_asset_name(peer_image);
+    assert_ne!(local_name, peer_name);
+    let peer = RealPeer::start("illustration", Some(&lock_engine(&local).pairing_code()));
+    seed_peer_book(&peer.data_root, "peer-local", "peer-local", "三体", false);
+    write_json(
+        &peer.data_root.join("books").join("peer-local").join("content.json"),
+        &json!({ "schemaVersion": 1, "chapters": [{
+            "cid": "c0001",
+            "title": "第一章",
+            "paragraphs": [],
+            "blocks": [
+                { "kind": "p", "text": "对端写的正文。" },
+                { "kind": "img", "remote": peer_image, "src": peer_image, "local": peer_name },
+            ],
+        }]}),
+    );
+    let peer_images = peer.data_root.join("images");
+    std::fs::create_dir_all(&peer_images).unwrap();
+    std::fs::write(peer_images.join(&peer_name), b"peer-image-bytes").unwrap();
+    peer.publish_book(&uid);
+
+    // 谁赢由设备 id 决定（正文块整体按这个规则收敛），插图跟着赢家走
+    let local_wins = {
+        let local_id = lock_engine(&local).device_id().to_string();
+        let peer_id = lock_engine(&peer.engine).device_id().to_string();
+        local_id > peer_id
+    };
+
+    // 第一轮：正文先过去（插图跟正文不是同一轮 —— 资源清单只看**已落地**的内容，
+    // 这样赢家不会去取败方那条即将被覆盖的旧引用）
+    let first = sync_once(&local, &peer.engine);
+    // 封面两边都有（seed 里一模一样），不算差集；有差集的只有插图
+    if local_wins {
+        assert!(first.assets_pushed > 0, "赢家应把正文引用的图推给败方：{first:?}");
+        assert_eq!(first.assets_pulled, 0, "赢家不该取败方的图：{first:?}");
+    } else {
+        assert!(first.assets_pulled > 0, "败方应取回赢家那张图：{first:?}");
+        // 败方唯一允许推的是**封面**（封面不跟正文赢家走）：多出来的只能是它
+        assert!(
+            first.assets_pushed <= 1,
+            "败方除了封面不该推别的（尤其不该把正文不引用的图推给赢家）：{first:?}"
+        );
+    }
+    // 败方那张图**没有**被搬走：正文赢家那边不能多出一个没人引用的图
+    let loser_file = if local_wins { peer_name.clone() } else { local_name.clone() };
+    let peer_files = list_files(&peer.data_root.join("images"));
+    assert!(
+        !peer_files.iter().any(|file| file == &loser_file),
+        "赢家那边不该多出败方那张孤儿图：{peer_files:?}"
+    );
+
+    bridge::materialize(&handle, &local, 0, &mut index).unwrap();
+
+    // 第二轮：引用与内容都已一致，不该再搬任何资源（插图不来回换）
+    let second = sync_once(&local, &peer.engine);
+    assert_eq!(
+        (second.assets_pushed, second.assets_pulled),
+        (0, 0),
+        "收敛之后不该再来回搬：{second:?}"
+    );
+    let local_content = read_json(&app_data.join("books").join("local-1").join("content.json"));
+    let local_ref = local_content["chapters"][0]["blocks"][1]["local"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+
+    let winner_name = if local_wins { &local_name } else { &peer_name };
+    let local_images = app_data.join("images");
+    if local_wins {
+        // 本机是赢家：引用保持自己的名字（旧名字应已归一），败方那张不落到本机
+        assert_eq!(local_ref, *winner_name, "赢家的引用应归一成设备无关的名字");
+        assert!(local_images.join(&local_ref).is_file());
+    } else {
+        // 对端是赢家：本机应收到它那张图，引用换成它的名字
+        assert_eq!(local_ref, *winner_name, "败方的引用应换成赢家那张图的名字");
+        assert_eq!(
+            std::fs::read(local_images.join(&local_ref)).unwrap(),
+            b"peer-image-bytes",
+            "赢家那张图的字节应落到本机图片目录"
+        );
+    }
+
 }

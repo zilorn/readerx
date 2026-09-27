@@ -603,21 +603,20 @@ fn asset_pass(
             _ => false,
         };
 
-        // 推：封面（对端没有 / 两边不同且我赢）+ 插图（只在对端缺失，且正文是我赢）
+        // 推：封面按「有推给没有 / 都有则我赢」（与正文赢家无关 —— 封面不是正文的
+        // 派生数据）；插图只在对端缺失**且正文是我赢**时推（见函数头说明）。
         let mut wanted: Vec<String> = Vec::new();
         match &my_cover {
             Some(cover) if peer_cover.is_none() => wanted.push(cover.name.clone()),
             Some(cover) if cover_differs && i_win => wanted.push(cover.name.clone()),
             _ => {}
         }
-        if i_win {
-            for asset in &mine_assets {
-                if asset.name == assets::COVER_ASSET {
-                    continue;
-                }
-                if !present(&peer_assets, &asset.name) {
-                    wanted.push(asset.name.clone());
-                }
+        for asset in &mine_assets {
+            if asset.name == assets::COVER_ASSET || !asset.present() {
+                continue;
+            }
+            if i_win && !present(&peer_assets, &asset.name) {
+                wanted.push(asset.name.clone());
             }
         }
         // 取：封面（我没有，或者两边不同且对端赢）+ 插图（只在正文是对端赢时）
@@ -627,6 +626,7 @@ fn asset_pass(
             Some(cover) if cover_differs && !i_win => pull.push(cover.name.clone()),
             _ => {}
         }
+        // 取插图只在「正文是对端赢」时：赢家那一侧推、这一侧取（见函数头说明）
         if !i_win {
             for asset in &peer_assets {
                 if asset.name == assets::COVER_ASSET || !asset.present() {

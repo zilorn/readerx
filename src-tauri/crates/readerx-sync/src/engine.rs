@@ -30,8 +30,7 @@ use std::sync::Arc;
 
 use crate::assets::{self, Asset, AssetDigest, AssetKind, BookAssets};
 use crate::content::{
-    asset_digest, book_digest, chapter_asset_refs, BookDigest, ChapterContent, ChapterDigest,
-    ContentSource,
+    asset_digest, book_digest, BookDigest, ChapterContent, ChapterDigest, ContentSource,
 };
 use crate::error::{Result, SyncError};
 use crate::hlc::{HlcClock, HlcState};
@@ -1239,21 +1238,18 @@ impl SyncEngine {
         Ok(())
     }
 
-    /// 一本书**在正文里被引用**的资源清单（缺的直接以空指纹出现）。
+    /// 一本书**被引用**的资源清单（缺的直接以空指纹出现）。
     ///
-    /// 宿主给的「在用的名字」（含只有引用、本机还没有字节的那些）+ 暂存区里的资源：
-    /// 资源通道据此知道「对端可能需要什么」，也据此知道本机缺哪些（空指纹）。
-    /// 名字两边都有时以本机手里的指纹为准。
+    /// 「被引用」只看**已经落地的内容**（宿主给的名字）与暂存区里的资源：刚收下的
+    /// 暂存正文**不算** —— 那批正文块还没落地、引用也可能在落地时被归一（旧名字 →
+    /// 设备无关的名字），照它算会让本机把「对端旧引用」当成自己缺的图去拉回来，
+    /// 而正文赢家本来就不该取败方那张（会留下正文不引用的孤儿）。
+    /// 代价是插图比正文晚一轮同步到达（正文先落、下一轮再搬图），见 docs/sync.md。
     pub fn asset_index_full(&self, book: &str) -> Vec<AssetDigest> {
         let mut by_name: BTreeMap<String, String> = BTreeMap::new();
         if let Some(source) = &self.content {
             for name in source.names(book) {
                 by_name.entry(name).or_default();
-            }
-        }
-        for chapter in self.staged_bodies(book) {
-            for entry in chapter_asset_refs(&chapter) {
-                by_name.entry(entry.name).or_default();
             }
         }
         for digest in self.asset_digests(book) {

@@ -195,7 +195,11 @@ pub fn book_digest(book: &str, chapters: &[ChapterDigest]) -> BookDigest {
 // 于是「正文里的引用」与「资源通道里的名字」是同一个字符串，落地时不需要额外翻译。
 // ---------------------------------------------------------------------------
 
-/// 插图地址 → 设备无关的资源名（`<40 位 hex>.<ext>`）。
+/// 插图地址 → 设备无关的资源名（`<sha1(地址)>.<ext>`）。
+///
+/// 用 **sha1** 是为了与 App 落盘的文件名同一套：资源名就是本地副本的文件名
+/// （`images/<资源名>`），旧数据里的 `<本机书 id>_<sha1>.<ext>` 只要剥掉前缀就归一到它，
+/// 不需要重新下载或改名以外的任何换算。
 ///
 /// `ext` 是**地址上的扩展名**（不带点）：同一张图在两台设备上从同一个地址推导出
 /// 同一个扩展名，因此名字一致；认不出来时留空，两端也一样。
@@ -211,18 +215,23 @@ pub fn image_asset_name(identity: &str) -> String {
         }
         None => (String::new(), path.to_string()),
     };
-    let mut hasher = Sha256::new();
-    hasher.update(key.as_bytes());
-    let digest = hasher.finalize();
-    let mut hash = String::with_capacity(40);
-    for byte in digest.iter().take(20) {
-        hash.push_str(&format!("{byte:02x}"));
-    }
+    let hash = sha1_hex(key.as_bytes());
     if ext.is_empty() {
         hash
     } else {
         format!("{hash}.{ext}")
     }
+}
+
+/// sha1 十六进制（40 位小写）——图片名字用的哈希（与 App 侧 `host::sha1_hex` 同口径）。
+fn sha1_hex(bytes: &[u8]) -> String {
+    use sha1::{Digest as _, Sha1};
+    let digest = Sha1::digest(bytes);
+    let mut out = String::with_capacity(40);
+    for byte in digest.iter() {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
 }
 
 /// 地址里认得出的图片扩展名（小写、不含点）。

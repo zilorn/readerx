@@ -49,8 +49,12 @@ fn valid_book_id(book_id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
-/// 本地副本文件名是否合法：必须是本模块写出的 `<bookId>_<sha1hex>.<ext>` 形态
-/// （文件名即 URL 路径段，直接用于自定义协议，必须严格校验，杜绝路径穿越）
+/// 本地副本文件名是否合法。两种形态都认：
+///
+/// - `<40 位 hex>.<ext>`：**归一后的名字**（同步用），名字里没有本机书 id；
+/// - `<bookId>_<40 位 hex>.<ext>`：旧数据（同步引入前落盘的名字）。
+///
+/// 文件名即 URL 路径段，直接用于自定义协议，必须严格校验，杜绝路径穿越。
 pub(crate) fn valid_local_name(name: &str) -> bool {
     let Some((stem, ext)) = name.rsplit_once('.') else {
         return false;
@@ -58,14 +62,33 @@ pub(crate) fn valid_local_name(name: &str) -> bool {
     if ext.is_empty() || ext.len() > 8 || !ext.chars().all(|c| c.is_ascii_alphanumeric()) {
         return false;
     }
-    let Some((book_id, hash)) = stem.rsplit_once('_') else {
-        return false;
-    };
-    valid_book_id(book_id)
-        && hash.len() == HASH_LEN
-        && hash
+    if is_hash(stem) {
+        return true;
+    }
+    match stem.rsplit_once('_') {
+        Some((book_id, hash)) => valid_book_id(book_id) && is_hash(hash),
+        None => false,
+    }
+}
+
+/// 40 位小写十六进制（文件名里的图片身份哈希）
+fn is_hash(text: &str) -> bool {
+    text.len() == HASH_LEN
+        && text
             .chars()
             .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+}
+
+/// 一个**资源名**（同步通道里的 `<40 位 hex>.<ext>`）是否可用作本地副本名。
+///
+/// 落盘时文件名由「资源名的哈希 + 扩展名」推出（见 [`store`]），因此这里只校验形态：
+/// 对端推来的名字要能安全地当文件名用，也要与正文块里的引用对得上。
+/// 名字里**没有本机书 id**：它必须设备无关，否则两台设备对同一段正文会算出两个指纹。
+pub(crate) fn valid_asset_name(asset: &str) -> bool {
+    let Some((stem, ext)) = asset.rsplit_once('.') else {
+        return false;
+    };
+    is_hash(stem) && !ext.is_empty() && ext.len() <= 8 && ext.chars().all(|c| c.is_ascii_alphanumeric())
 }
 
 /// 图片 MIME → 文件扩展名（未知按 bin，仍可落盘；渲染时由响应头 MIME 兜底）
@@ -97,10 +120,12 @@ fn mime_for_ext(ext: &str) -> &'static str {
 }
 
 /// 落盘一张图片，返回本地副本文件名（幂等：同一地址已存在则不重复写）。
-/// 落盘一张图片，返回本地副本文件名。
-/// 文件名由图片身份（地址）哈希决定，因此**同一地址始终对应同一个文件**：
-/// 重新下载（占位框「重试」）会覆盖旧文件，不会留下新旧两份。
-/// `identity` 为图片身份（在线图为原始网络地址，旧数据迁移时为 data URL 自身）。
+///
+/// 文件名 = `sha1(图片地址) + 扩展名`（**不带本机书 id**）：这个名字就是同步通道里的
+/// 资源名（见 [`asset_name`]），两台设备对同一段正文才会算出同一个指纹。
+/// 因此**只能拿图片身份（地址）来算**：调用方如果拿「已经是资源名」的字符串再算一次哈希，
+/// 落出来的文件与正文里的引用就对不上了（引用的是资源名本身）。
+/// 资源通道落地时用 [`store_asset`]，那条路径直接按资源名落盘。
 pub(crate) fn store(
     root: &Path,
     book_id: &str,
@@ -111,11 +136,7 @@ pub(crate) fn store(
     if !valid_book_id(book_id) {
         return Err("非法的书籍 id".to_string());
     }
-    let name = format!(
-        "{book_id}_{}.{}",
-        crate::host::sha1_hex(identity),
-        ext_for_mime(mime)
-    );
+    let name = format!("{}.{}", crate::host::sha1_hex(identity), ext_for_mime(mime));
     fs::create_dir_all(root).map_err(|e| format!("创建图片目录失败: {e}"))?;
     fs::write(root.join(&name), bytes).map_err(|e| format!("写入图片失败: {e}"))?;
     log::debug!(
@@ -123,6 +144,24 @@ pub(crate) fn store(
         bytes.len()
     );
     Ok(name)
+}
+
+/// 按**资源名**落盘一张图片（同步的资源通道收下对端那份时用）。
+///
+/// 与 [`store`] 的区别只有一处：文件名直接用资源名，不再对它算哈希 ——
+/// 资源名本来就是 `sha1(图片地址) + 扩展名`，正文块里引用的也是它。
+pub(crate) fn store_asset(
+    root: &Path,
+    asset: &str,
+    bytes: &[u8],
+) -> Result<String, String> {
+    if !valid_asset_name(asset) {
+        return Err("非法的资源名".to_string());
+    }
+    fs::create_dir_all(root).map_err(|e| format!("创建图片目录失败: {e}"))?;
+    fs::write(root.join(asset), bytes).map_err(|e| format!("写入图片失败: {e}"))?;
+    log::debug!("同步插图已落盘 file={asset} bytes={}", bytes.len());
+    Ok(asset.to_string())
 }
 
 /// 本地副本文件名 → 绝对路径（严格校验，越界一律拒绝）
@@ -149,22 +188,73 @@ pub(crate) fn read(root: &Path, local: &str) -> Result<(String, Vec<u8>), String
     Ok((mime_for_ext(ext).to_string(), bytes))
 }
 
-/// 本地副本文件名 → **设备无关的资源名**（`<sha1(图片地址)>.<ext>`，也就是同步通道里的
-/// 名字）。引用可能来自别的设备（名字已经归一），这时返回 `None`。
+/// 读一个**资源名**对应的图片（同步通道按设备无关的名字取图）。
 ///
-/// 旧布局的文件名是 `<本机书 id>_<sha1>.<ext>`：本机书 id 每台设备都不一样，
+/// 旧名字（`<本机书 id>_<hash>.<ext>`）先归一：这张图很可能还没被任何一次读取归一过，
+/// 而同步必须拿到归一名对应的字节，对端才认得是同一张。
+pub(crate) fn read_asset(
+    root: &Path,
+    asset: &str,
+    legacy: Option<&str>,
+) -> Result<(String, Vec<u8>), String> {
+    if !valid_asset_name(asset) {
+        return Err("非法的图片引用".to_string());
+    }
+    // 资源名就是本地副本的文件名；旧名字（带本机书 id 前缀）先归一
+    if let Some(legacy) = legacy {
+        let _ = normalize_local(root, legacy);
+    }
+    read(root, asset)
+}
+
+/// 本地副本文件名 → **设备无关的资源名**（`<sha1(图片地址)>.<ext>`，也就是同步通道里的
+/// 名字）。引用可能来自别的设备（名字已经归一），这时原样返回。
+///
+/// 旧数据里的文件名是 `<本机书 id>_<sha1>.<ext>`：本机书 id 每台设备都不一样，
 /// 拿它当资源名会让两台设备对同一段正文算出两个指纹，因此**必须**在这里剥掉前缀。
 pub(crate) fn asset_name(local: &str) -> Option<String> {
     let (stem, ext) = local.rsplit_once('.')?;
-    let (book_id, hash) = stem.rsplit_once('_')?;
-    if !valid_book_id(book_id) {
+    if !valid_local_name(local) {
         return None;
     }
-    if hash.len() != HASH_LEN || !hash.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
-    {
-        return None;
+    if is_hash(stem) {
+        return Some(local.to_string());
     }
+    let (_, hash) = stem.rsplit_once('_')?;
     Some(format!("{hash}.{ext}"))
+}
+
+/// 把本地副本文件名归一成**设备无关的名字**，必要时改名旧文件（幂等）。
+///
+/// 返回归一后的文件名；引用本来就归一 / 认不出来时原样返回。旧名字（带本机书 id 前缀）
+/// 只在文件真的存在时才改名：同步过来的引用在本机还没有文件是常事，那种情况只是引用，
+/// 不需要为了它建一个空壳。
+pub(crate) fn normalize_local(root: &Path, local: &str) -> String {
+    let Some(asset) = asset_name(local) else {
+        return local.to_string();
+    };
+    if asset == local {
+        return local.to_string();
+    }
+    let (Ok(from), Ok(to)) = (resolve(root, local), resolve(root, &asset)) else {
+        return local.to_string();
+    };
+    // 文件不在（对端引用了一张本机还没有的图）也要归一：**名字**才是给对端看的，
+    // 字节由资源通道补上。不归一的话，两台设备对同一段正文会一直算出两个指纹。
+    if !from.is_file() {
+        return asset;
+    }
+    match fs::rename(&from, &to) {
+        Ok(()) => {
+            log::info!("插图引用已归一（去掉本机书 id 前缀）file={asset}");
+            asset
+        }
+        Err(error) => {
+            // 改不动就继续用旧名字：图还在，只是这次没归一（下次读取再试）
+            log::debug!("插图引用归一失败（{local}）：{error}");
+            local.to_string()
+        }
+    }
 }
 
 /// 读取若干本地副本的尺寸 / 体积（只读文件头，不解码整张图）
@@ -193,25 +283,27 @@ pub(crate) fn info(root: &Path, locals: &[String]) -> Vec<BookImageInfo> {
     out
 }
 
-/// 删除某本书的全部图片文件（书籍删除时调用）；返回删除的文件数
-pub(crate) fn remove_book(root: &Path, book_id: &str) -> u64 {
-    let prefix = format!("{book_id}_");
-    let Ok(entries) = fs::read_dir(root) else {
-        return 0;
-    };
+/// 删除某本书**引用到的**图片文件（书籍删除时调用，`locals` 取自这本书的章节）；
+/// 返回删除的文件数。
+///
+/// 名字归一之后不能再按「文件名前缀 = 本机书 id」扫目录：归一名里没有书 id，
+/// 一张图还可能被两本书同时引用（同一个地址 → 同一个文件）。因此按引用删，
+/// 并且**只删这张图确实是它自己的那些**（`owned_by`：旧名字一定属于这本书，
+/// 归一名则要求没有别的书也在引用它）。宁可留下几个孤儿文件，也不删掉别人的图。
+pub(crate) fn remove_book_images(root: &Path, locals: &[String], owned_by: impl Fn(&str) -> bool) -> u64 {
     let mut removed = 0;
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue };
-        if name.starts_with(&prefix)
-            && valid_local_name(name)
-            && fs::remove_file(entry.path()).is_ok()
-        {
-            removed += 1;
+    for local in locals {
+        if !valid_local_name(local) || !owned_by(local) {
+            continue;
+        }
+        if let Ok(path) = resolve(root, local) {
+            if fs::remove_file(path).is_ok() {
+                removed += 1;
+            }
         }
     }
     if removed > 0 {
-        log::debug!("已清理书籍插图 book={book_id} files={removed}");
+        log::debug!("已清理书籍插图 files={removed}");
     }
     removed
 }
@@ -605,6 +697,40 @@ pub(crate) fn migrate_chapters(
     changed
 }
 
+/// 把一组章节里引用到的图片名**归一**（去掉本机书 id 前缀），必要时顺手改名旧文件。
+/// 返回是否有改动。落地同步来的插图后调用：这样正文块里的引用与对端一致，
+/// 两台设备才不会对同一段正文算出两个指纹（正文通道会因此反复重传）。
+pub(crate) fn normalize_image_refs(root: &Path, chapters: &mut [LocalBookChapter]) -> bool {
+    let mut changed = false;
+    for chapter in chapters.iter_mut() {
+        let Some(blocks) = chapter.blocks.as_mut() else {
+            continue;
+        };
+        for block in blocks.iter_mut() {
+            if let Some(local) = block.local.as_mut() {
+                let normalized = normalize_local(root, local);
+                if normalized != *local {
+                    *local = normalized;
+                    changed = true;
+                }
+            }
+            let Some(imgs) = block.imgs.as_mut() else {
+                continue;
+            };
+            for image in imgs.iter_mut() {
+                if let Some(local) = image.local.as_mut() {
+                    let normalized = normalize_local(root, local);
+                    if normalized != *local {
+                        *local = normalized;
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+    changed
+}
+
 /// 单张图片（整行图 / 段内图共用）的迁移与自愈，口径见 [`migrate_book`]
 fn migrate_image_fields(
     root: &Path,
@@ -618,6 +744,14 @@ fn migrate_image_fields(
         if !exists(root, &name) {
             *local = None;
             changed = true;
+        } else {
+            // 引用归一（去掉本机书 id 前缀）：同步的正文块里存的就是归一后的名字，
+            // 两台设备对同一段正文才会算出同一个指纹
+            let normalized = normalize_local(root, &name);
+            if normalized != name {
+                *local = Some(normalized);
+                changed = true;
+            }
         }
     }
     if remote.is_none() {
@@ -810,6 +944,8 @@ mod tests {
     #[test]
     fn local_names_are_strictly_validated() {
         let hash = "a".repeat(HASH_LEN);
+        // 两种形态都认：归一名（同步用）与旧名字（带本机书 id 前缀）
+        assert!(valid_local_name(&format!("{hash}.jpg")));
         assert!(valid_local_name(&format!("c0001_{hash}.jpg")));
         assert!(valid_local_name(&format!("book-1_x_{hash}.webp")));
         assert!(!valid_local_name("../etc/passwd"));
@@ -862,8 +998,9 @@ mod tests {
         let other = store_pdf_page(&root, "book-9", 4, &url).expect("store other page");
         assert_ne!(first.local, other.local);
         assert!(store_pdf_page(&root, "book-9", 5, "data:text/plain;base64,aGk=").is_err());
-        // 删除书籍：该书的页面图一并清理
-        assert_eq!(remove_book(&root, "book-9"), 2);
+        // 删除书籍：该书的页面图一并清理（按引用删，名字已归一）
+        let locals = vec![first.local.clone(), other.local.clone()];
+        assert_eq!(remove_book_images(&root, &locals, |_| true), 2);
         assert!(!exists(&root, &first.local));
         let _ = fs::remove_dir_all(&root);
     }
@@ -878,6 +1015,10 @@ mod tests {
             first, again,
             "同一地址始终对应同一个文件名（重下覆盖，不留新旧两份）"
         );
+        // **名字里没有本机书 id**：另一台设备上的同一个地址落到同一个文件名，
+        // 两台设备对同一段正文才会算出同一个指纹
+        let other_book = store(&root, "book-2", "https://img/1.png", "image/png", &bytes).unwrap();
+        assert_eq!(first, other_book, "同一张图不该因为书的 id 不同而换名字");
         assert!(root.join(&first).is_file());
         assert!(exists(&root, &first));
         assert!(!exists(&root, "../escape.png"));
@@ -886,8 +1027,32 @@ mod tests {
         assert_eq!(info.len(), 1);
         assert_eq!((info[0].width, info[0].height), (300, 200));
 
-        assert_eq!(remove_book(&root, "book-1"), 1);
+        assert_eq!(remove_book_images(&root, std::slice::from_ref(&first), |_| true), 1);
         assert!(!exists(&root, first.as_str()));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 旧名字（带本机书 id 前缀）能被识别并**就地归一**：正文块里存的是名字，
+    /// 名字不归一，两台设备对同一段正文就会算出两个指纹。
+    #[test]
+    fn legacy_names_are_normalized_on_read() {
+        let root = temp_root("normalize");
+        let bytes = png_bytes();
+        let legacy = format!("book-1_{}.png", crate::host::sha1_hex("https://img/1.png"));
+        fs::write(root.join(&legacy), &bytes).unwrap();
+        assert!(valid_local_name(&legacy));
+
+        let asset = asset_name(&legacy).expect("旧名字能推出资源名");
+        assert_eq!(asset.len(), HASH_LEN + 4);
+        assert!(valid_asset_name(&asset));
+
+        assert_eq!(normalize_local(&root, &legacy), asset, "读取时就地归一");
+        assert!(!root.join(&legacy).exists(), "旧文件已改名");
+        assert!(root.join(&asset).is_file());
+        // 幂等：归一名再归一还是它自己
+        assert_eq!(normalize_local(&root, &asset), asset);
+        // 认不出来的引用原样返回（不 panic、不乱改名）
+        assert_eq!(normalize_local(&root, "../etc/passwd"), "../etc/passwd");
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -1038,7 +1203,7 @@ mod tests {
         assert!(migrate_book_file(&root, "book-1", &path).unwrap());
         let rewritten = fs::read_to_string(&path).unwrap();
         assert!(!rewritten.contains("data:image/"), "data URL 应被替换掉");
-        assert!(rewritten.contains(r#""src":"","local":"book-1_"#));
+        assert!(rewritten.contains(r#""src":"","local":""#), "名字已归一（不带本机书 id）：{rewritten}");
         // 网络图片的 src 原样保留
         assert!(rewritten.contains(r#""src":"https://img/2.png""#));
         // 重写后的 JSON 仍是合法 JSON，且图片文件真的写出来了
@@ -1085,7 +1250,7 @@ mod tests {
             );
             let rewritten = fs::read_to_string(&path).unwrap();
             assert!(!rewritten.contains("data:image/"), "pad={pad}");
-            assert!(rewritten.contains(r#""local":"book-1_"#), "pad={pad}");
+            assert!(rewritten.contains(r#""local":""#), "pad={pad}");
             assert!(
                 serde_json::from_str::<serde_json::Value>(&rewritten).is_ok(),
                 "pad={pad}"

@@ -157,10 +157,18 @@ impl<R: tauri::Runtime> ContentSource for AppContent<R> {
         if let Some(cover) = cover_asset(&self.app, self.root(), &local_id) {
             out.push(AssetDigest { name: COVER_ASSET.to_string(), hash: cover.digest });
         }
-        for (name, _) in self.images(&local_id) {
-            // 插图的指纹是**身份**的哈希（名字本身），不是文件字节：对账每次都跑，
-            // 不能为了对账把整库图片读一遍。名字由图片地址派生，两边天然一致。
-            out.push(AssetDigest { name: name.clone(), hash: identity_digest(&name) });
+        for (name, local) in self.images(&local_id) {
+            // 正文引用了这个名字，但**字节不一定在手里**：图还没下载下来时引用照样在
+            // 正文里。有文件才算「有内容」（指纹 = 身份的哈希，不是文件字节：
+            // 对账每次都跑，不能为了对账把整库图片读一遍），没有就报空指纹 ——
+            // 报成「有」会让本机永远不去对端取这张图（正文里的引用一直断着）。
+            let present = crate::book_images::images_root_at(&self.app, self.root())
+                .map(|root| crate::book_images::exists(&root, &local))
+                .unwrap_or(false);
+            out.push(AssetDigest {
+                name: name.clone(),
+                hash: if present { identity_digest(&name) } else { String::new() },
+            });
         }
         out
     }
@@ -192,9 +200,10 @@ impl<R: tauri::Runtime> ContentSource for AppContent<R> {
             let Some(local) = by_name.get(name.as_str()) else {
                 continue;
             };
-            match crate::book_images::read(&root, local) {
+            // 名字是给对端看的（设备无关），本地文件可能还叫旧名字：`read_asset` 负责归一
+            match crate::book_images::read_asset(&root, name, Some(local)) {
                 Ok((mime, bytes)) => {
-                    let ext = local.rsplit_once('.').map(|(_, ext)| ext).unwrap_or("");
+                    let ext = name.rsplit_once('.').map(|(_, ext)| ext).unwrap_or("");
                     out.push(Asset::new(name, AssetKind::Illustration, &mime, ext, bytes));
                 }
                 Err(error) => {
@@ -226,6 +235,12 @@ fn cover_asset<R: tauri::Runtime>(
 ) -> Option<Asset> {
     let data_url = book_store::get_cover_at(app, root, local_id).ok().flatten()?;
     let (mime, bytes) = crate::book_images::image_data_url_bytes(&data_url)?;
+    if bytes.is_empty() {
+        // 空载荷（`data:image/png;base64,`）当作**没有封面**：否则资源清单里会多出一条
+        // 「没有内容的封面」，对账时它会被当成「本机有封面」而与对端来回搬
+        log::debug!("封面 data URL 没有内容，按没有封面处理 book={local_id}");
+        return None;
+    }
     Some(
         Asset::new(COVER_ASSET, AssetKind::Cover, &mime, "", bytes).with_data_url(Some(data_url)),
     )
