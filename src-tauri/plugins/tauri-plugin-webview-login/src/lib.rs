@@ -1,6 +1,9 @@
-//! ReaderX 书源「网页登录」Tauri 插件。
+//! ReaderX 应用内 WebView Tauri 插件（两种用途共用一套平台实现）。
 //!
-//! 两端各有一套实现，对外是同一个 [`open_login`]：
+//! - **网页登录**（[`open_login`]）：书源 / 阅读页「网页登录」按钮，抓回登录态；
+//! - **网页浏览**（[`open_view`]）：阅读页里打开某个章节的原始网页，**只显示、不采集**。
+//!
+//! 两端各有一套实现，对外是同一个 [`open_login`] / [`open_view`]：
 //! - **Android**：Tauri 多 WebView 窗口在移动端不受支持，因此由 Kotlin 在 Activity 上叠加
 //!   一个原生 `WebView` 浮层（见 `android/`），捕获含 httpOnly 的 Cookie 与
 //!   localStorage / sessionStorage / IndexedDB 快照后原路返回；
@@ -80,8 +83,8 @@ impl LoginOutcome {
     }
 }
 
-/// 一次登录调用的输入：桌面端窗口要用它设置注入脚本 / UA / 探针；
-/// Android 浮层自己采存储，只用得到 `source_id`。
+/// 一次调用的输入：桌面端窗口要用它设置注入脚本 / UA / 探针；
+/// Android 浮层自己采存储，只用得到 `source_id` 与 [`Self::view`]。
 #[derive(Debug, Clone, Default)]
 pub struct PlatformLoginRequest {
     /// 页面加载前注入的脚本（覆盖所有框架）
@@ -90,10 +93,15 @@ pub struct PlatformLoginRequest {
     pub user_agent: String,
     /// 非 Cookie 登录信息的采集探针（三段脚本，插件只原样执行）
     pub probe: Option<readerx_source::auth::ProbeScript>,
-    /// 书源 id（窗口标题 / label）
+    /// 书源 id（登录窗口标题 / label）
     pub source_id: String,
     /// 最长等待秒数
     pub timeout_secs: u64,
+    /// 浏览模式：只把页面显示给用户看，**不采集也不保存登录态**
+    /// —— 收尾时不读 Cookie 库、不跑存储探针，操作条上也没有「完成」。
+    pub view: bool,
+    /// 浏览窗口的显示名（章节名之类的用户数据；空串时回退到站点主机名）
+    pub title: String,
     /// 桌面端登录窗口要用的 AppHandle（Android 浮层不需要，保持 None）
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     pub app: Option<tauri::AppHandle>,
@@ -108,7 +116,7 @@ fn runner_slot() -> &'static Mutex<Option<LoginRunner>> {
     RUNNER.get_or_init(Default::default)
 }
 
-/// 平台是否支持网页登录（Android 浮层 / 桌面窗口已就绪）。
+/// 平台是否支持应用内 WebView（Android 浮层 / 桌面窗口已就绪）。
 pub fn is_supported() -> bool {
     runner_slot()
         .lock()
@@ -117,24 +125,49 @@ pub fn is_supported() -> bool {
         .is_some()
 }
 
+/// 取当前平台的调用器（未注册 = 当前平台不支持）。
+fn call_runner(
+    url: &str,
+    request: &PlatformLoginRequest,
+    what: &str,
+) -> Result<LoginOutcome, String> {
+    let runner = runner_slot()
+        .lock()
+        .map_err(|_| "应用内 WebView 注册表锁异常".to_string())?
+        .clone()
+        .ok_or_else(|| format!("{what}尚未就绪（当前平台不支持）"))?;
+    runner(url, request)
+}
+
+/// 是否 http(s) 地址（应用内 WebView 只认这两种协议）
+fn is_web_url(url: &str) -> bool {
+    url.starts_with("http://") || url.starts_with("https://")
+}
+
 /// 打开网页登录界面并阻塞等待结果。
 ///
 /// - 返回 `LoginOutcome`：`ok=true` 时 `cookies` 为捕获到的 Cookie 文本；
 ///   桌面端另有 `probe_result`（存储探针的原始读数）。
 /// - 平台不支持（iOS / 未初始化）返回 `Err`。
 pub fn open_login(url: &str, request: &PlatformLoginRequest) -> Result<LoginOutcome, String> {
-    let runner = runner_slot()
-        .lock()
-        .map_err(|_| "登录注册表锁异常".to_string())?
-        .clone()
-        .ok_or_else(|| "网页登录尚未就绪（当前平台不支持）".to_string())?;
-    if !(url.starts_with("http://") || url.starts_with("https://")) {
+    if !is_web_url(url) {
         return Err("仅支持 http/https 的登录地址".to_string());
     }
-    runner(url, request)
+    call_runner(url, request, "网页登录")
 }
 
-/// 插件入口：注册当前平台的登录 runner，并把插件挂到 app 上（Android 由 Kotlin 浮层实现）。
+/// 打开应用内浏览界面并阻塞等待结果（用户关窗 / 走出超时即返回）。
+///
+/// 与 [`open_login`] 的差别只在收尾：`request.view` 为 true 时平台实现不采集
+/// Cookie 与存储快照，返回的 `LoginOutcome` 里只有 `ok` 与最终地址。
+pub fn open_view(url: &str, request: &PlatformLoginRequest) -> Result<LoginOutcome, String> {
+    if !is_web_url(url) {
+        return Err("仅支持 http/https 的网页地址".to_string());
+    }
+    call_runner(url, request, "应用内浏览")
+}
+
+/// 插件入口：注册当前平台的应用内 WebView runner，并把插件挂到 app 上（Android 由 Kotlin 浮层实现）。
 pub fn init<R: Runtime>() -> TauriPlugin<R> {
     prepare();
     tauri::plugin::Builder::new("webview-login")
@@ -148,7 +181,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
         .build()
 }
 
-/// 注册当前平台的登录 runner（幂等；重复调用覆盖旧 runner）。
+/// 注册当前平台的应用内 WebView runner（幂等；重复调用覆盖旧 runner）。
 ///
 /// 与「插件 setup」分开是为了让**没有 Tauri app 的调用方**也能用：桌面端 runner 只需要
 /// 调用时传入的 `AppHandle`（见 [`PlatformLoginRequest::app`]），不必等插件 setup 跑完。
@@ -157,16 +190,17 @@ pub fn prepare() {
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         {
             match request.app.as_ref() {
+                Some(app) if request.view => desktop::view(app, url, request),
                 Some(app) => desktop::authenticate(app, url, request),
                 None => {
-                    Err("桌面登录窗口需要 AppHandle（请通过 PlatformLoginRequest::app 传入）".into())
+                    Err("桌面窗口需要 AppHandle（请通过 PlatformLoginRequest::app 传入）".into())
                 }
             }
         }
         #[cfg(any(target_os = "android", target_os = "ios"))]
         {
             let _ = request;
-            Err(format!("当前平台不支持网页登录：{url}"))
+            Err(format!("当前平台不支持应用内 WebView：{url}"))
         }
     });
     if let Ok(mut guard) = runner_slot().lock() {
@@ -185,9 +219,21 @@ fn register_android_runner<R: Runtime>(
         let outcome: LoginOutcome = handle
             .run_mobile_plugin(
                 "openLogin",
-                serde_json::json!({ "url": url, "timeoutSecs": request.timeout_secs }),
+                serde_json::json!({
+                    "url": url,
+                    "timeoutSecs": request.timeout_secs,
+                    // 浏览模式：浮层只显示标题与「关闭」，不采集登录态
+                    "title": request.title,
+                    "viewMode": request.view,
+                }),
             )
-            .map_err(|e| format!("网页登录失败: {e}"))?;
+            .map_err(|e| {
+                if request.view {
+                    format!("打开应用内浏览失败: {e}")
+                } else {
+                    format!("网页登录失败: {e}")
+                }
+            })?;
         Ok(outcome)
     });
     *runner_slot()

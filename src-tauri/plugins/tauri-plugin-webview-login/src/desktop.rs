@@ -1,19 +1,24 @@
-//! 桌面端（Linux / Windows）网页登录窗口：真实内核里登录 / 过 Cloudflare，
+//! 桌面端（Linux / Windows）应用内 WebView 窗口：真实内核里登录 / 过 Cloudflare，
 //! 抓回含 httpOnly 的 Cookie 与非 Cookie 登录信息（localStorage / sessionStorage / IndexedDB）。
 //!
-//! 与 Android 浮层的差别只在「登录界面怎么摆」：Android 是在 Activity 上叠一个原生 `WebView`，
+//! 两个入口共用同一套窗口摆法与等待逻辑：
+//! - [`authenticate`]（网页登录）：采集并带回登录态；
+//! - [`view`]（网页浏览）：只把页面显示出来，**什么都不采集**（阅读页打开章节原网页用的就是它）。
+//!
+//! 与 Android 浮层的差别只在「界面怎么摆」：Android 是在 Activity 上叠一个原生 `WebView`，
 //! 桌面端开一个独立窗口（Tauri 多 WebView 窗口在移动端不受支持，桌面端才是常规做法）。
-//! 抓取口径两边一致：
+//! 登录模式的抓取口径两边一致：
 //! - **Cookie** 走内核的 Cookie 库 —— Linux 直接用 WebKitGTK 原生 `CookieManager`
 //!   （含 httpOnly 的 `cf_clearance` / `__cf_bm`），其它平台用 `WebviewWindow::cookies_for_url`；
 //! - **非 Cookie 登录信息**走宿主给的页面探针（`PlatformLoginRequest::probe`，脚本原样执行，
 //!   本模块不认识探针的内部结构）。各平台能采到什么见 [`request_probe_result`] 的实测说明。
 //!
-//! 交互设计：
+//! 登录模式的交互设计：
 //! - 窗口里注入一条悬浮「完成」条（页面右下角），用户登录完点它即收尾；
 //!   点击只做一件事——把 [`DONE_FLAG`] 置为 `true`，Rust 侧轮询这个标记即可
 //!   （不走窗口标题：真实站点加载后会覆盖宿主设的标题，信号会丢）；
 //! - 用户直接关窗也当「完成」处理；等待超时则取当前 Cookie 收尾并说明原因。
+//!   浏览模式没有完成条，关窗 / 超时即结束，也不读 Cookie 库。
 //!
 //! 会话隔离：登录窗口与主窗口共用应用自己的 WebView 数据目录（Tauri 在 Linux 上只允许
 //! 首次创建窗口前指定 `data_directory`，主窗口已经建好了），因此登录态不会污染系统浏览器；
@@ -154,6 +159,148 @@ pub fn authenticate(
     Ok(outcome)
 }
 
+/// 等待结束的原因（登录 / 浏览两种模式共用同一条等待循环）
+enum WaitEnd {
+    /// 用户在页面里点了完成条
+    Done,
+    /// 用户关掉了窗口
+    Closed,
+    /// 等待超时（用户忘了关窗）
+    TimedOut,
+}
+
+/// 等用户收尾：轮询完成条标记 / 窗口关闭，到点即返回原因。
+///
+/// `watch_marker` 为 false 时不求值页面（浏览模式没有注入完成条，页面不该被宿主碰）。
+fn wait_for_user(
+    window: &WebviewWindow,
+    done: &AtomicBool,
+    timeout_secs: u64,
+    watch_marker: bool,
+) -> WaitEnd {
+    let wait = Duration::from_secs(timeout_secs.max(10));
+    let start = Instant::now();
+    loop {
+        std::thread::sleep(POLL_INTERVAL);
+        if watch_marker {
+            let poll_started = Instant::now();
+            let finished = eval_page_text(
+                window,
+                &format!("String({DONE_FLAG} === true)"),
+                POLL_INTERVAL,
+            )
+            .map(|text| text.contains("true"))
+            .unwrap_or(false);
+            if poll_started.elapsed() > POLL_INTERVAL {
+                log::warn!(
+                    "登录窗口主世界求值耗时 {:?}（超过轮询间隔，页面可能过重）",
+                    poll_started.elapsed()
+                );
+            }
+            if finished {
+                log::debug!("用户点了「完成」，开始收尾");
+                return WaitEnd::Done;
+            }
+        }
+        if done.load(Ordering::SeqCst) {
+            return WaitEnd::Closed;
+        }
+        if start.elapsed() >= wait {
+            return WaitEnd::TimedOut;
+        }
+    }
+}
+
+/// 在独立窗口里浏览一个网页（阻塞直到用户关窗 / 等待超时）。
+///
+/// 与 [`authenticate`] 共用窗口摆法与等待逻辑，差别在**刻意什么都不采集**：
+/// 不注入完成条、不跑存储探针、不读 Cookie 库，因此绝不会覆盖书源已保存的登录态；
+/// 窗口标题用宿主给的显示名（章节名），用户一眼知道自己在看什么。
+/// 站点 Cookie 仍由内核 Cookie 库按域名持有（与登录窗口共用同一份数据目录），
+/// 浏览时该站点本来就是什么登录状态，看到的就是什么状态。
+pub fn view(
+    app: &tauri::AppHandle,
+    url: &str,
+    request: &PlatformLoginRequest,
+) -> Result<LoginOutcome, String> {
+    let url = url.trim().to_string();
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        // 网页地址可能带 token 之类的查询参数，完整地址不进日志：这里只记长度
+        log::warn!(
+            "桌面浏览只支持 http/https 地址，收到 {} 字符的地址",
+            url.chars().count()
+        );
+        return Err("仅支持 http/https 的网页地址".to_string());
+    }
+    let label = view_label_for(&request.title);
+    if app.get_webview_window(&label).is_some() {
+        log::warn!("已有浏览窗口在开着（label={label}），本次不再打开");
+        return Err("已经有一个浏览窗口开着，请先关闭它".to_string());
+    }
+    let display = if request.title.trim().is_empty() {
+        url_host(&url)
+    } else {
+        request.title.trim().to_string()
+    };
+    log::info!(
+        "打开桌面浏览窗口 label={label} host={} timeout={}s",
+        url_host(&url),
+        request.timeout_secs
+    );
+
+    let done = Arc::new(AtomicBool::new(false));
+    let parsed = url
+        .parse()
+        .map_err(|err| format!("网页地址无法解析：{err}"))?;
+    let window = WebviewWindowBuilder::new(app, &label, WebviewUrl::External(parsed))
+        .title(&format!("ReaderX 浏览 — {display}"))
+        .inner_size(1040.0, 820.0)
+        .min_inner_size(560.0, 480.0)
+        .center()
+        .build()
+        .map_err(|err| format!("打开浏览窗口失败：{err}"))?;
+    log::debug!("浏览窗口已创建 label={label}");
+    {
+        let done = done.clone();
+        window.on_window_event(move |event| {
+            // 用户关窗即结束浏览（销毁则只是催一下轮询线程）
+            if matches!(
+                event,
+                WindowEvent::CloseRequested { .. } | WindowEvent::Destroyed
+            ) {
+                done.store(true, Ordering::SeqCst);
+            }
+        });
+    }
+    if let Err(err) = window.set_focus() {
+        log::warn!("浏览窗口聚焦失败：{err}");
+    }
+
+    let end = wait_for_user(&window, &done, request.timeout_secs, false);
+    if let Err(err) = window.close() {
+        log::warn!("关闭浏览窗口失败：{err}");
+    }
+    let final_url = window
+        .url()
+        .map(|value| value.to_string())
+        .unwrap_or_else(|_| url.clone());
+    let mut outcome = LoginOutcome {
+        ok: true,
+        url: final_url,
+        ..Default::default()
+    };
+    if matches!(end, WaitEnd::TimedOut) {
+        outcome.message = format!("浏览超过 {} 秒，窗口已自动关闭", request.timeout_secs);
+    }
+    // 只记主机名与结束原因：完整地址可能带 token
+    log::debug!(
+        "浏览窗口已收尾 host={} timed_out={}",
+        url_host(&outcome.url),
+        matches!(end, WaitEnd::TimedOut)
+    );
+    Ok(outcome)
+}
+
 /// 轮询标题等待用户完成；到点 / 关窗即收尾（取 Cookie + 探针结果）。
 fn wait_for_completion(
     window: &WebviewWindow,
@@ -162,39 +309,9 @@ fn wait_for_completion(
     request: &PlatformLoginRequest,
 ) -> LoginOutcome {
     let timeout_secs = request.timeout_secs;
-    let wait = Duration::from_secs(timeout_secs.max(10));
-    let start = Instant::now();
-    let mut closed = false;
-    let mut timed_out = false;
-    loop {
-        std::thread::sleep(POLL_INTERVAL);
-        let poll_started = Instant::now();
-        let finished = eval_page_text(
-            window,
-            &format!("String({DONE_FLAG} === true)"),
-            POLL_INTERVAL,
-        )
-        .map(|text| text.contains("true"))
-        .unwrap_or(false);
-        if poll_started.elapsed() > POLL_INTERVAL {
-            log::warn!(
-                "登录窗口主世界求值耗时 {:?}（超过轮询间隔，页面可能过重）",
-                poll_started.elapsed()
-            );
-        }
-        if finished {
-            log::debug!("用户点了「完成」，开始收尾");
-            break;
-        }
-        if done.load(Ordering::SeqCst) {
-            closed = true;
-            break;
-        }
-        if start.elapsed() >= wait {
-            timed_out = true;
-            break;
-        }
-    }
+    let end = wait_for_user(window, done, timeout_secs, true);
+    let closed = matches!(end, WaitEnd::Closed);
+    let timed_out = matches!(end, WaitEnd::TimedOut);
     // 关窗后内核还要一点时间把 Cookie 落进 Cookie 库
     if closed {
         std::thread::sleep(COOKIE_SETTLE);
@@ -329,6 +446,23 @@ fn label_for(source_id: &str) -> String {
         .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
         .collect();
     format!("readerx-login-{sanitized}")
+}
+
+/// 浏览窗口标签：同一时间只开一个（显示名是章节名之类的用户数据，先取文件系统安全的一段）。
+///
+/// 中文标题会被整段替换成 `-`，此时退化成固定标签 —— 正是想要的「一次只看一个页面」。
+fn view_label_for(title: &str) -> String {
+    let sanitized: String = title
+        .chars()
+        .take(40)
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+        .collect();
+    let trimmed = sanitized.trim_matches('-');
+    if trimmed.is_empty() {
+        "readerx-view".to_string()
+    } else {
+        format!("readerx-view-{trimmed}")
+    }
 }
 
 /// 悬浮「完成」条：页面右下角一枚按钮，点一下把 [`DONE_FLAG`] 置为 `true`。
@@ -492,6 +626,18 @@ mod tests {
     fn window_label_is_filesystem_safe() {
         assert_eq!(label_for("demo.src/1"), "readerx-login-demo-src-1");
         assert_eq!(label_for("abc"), "readerx-login-abc");
+    }
+
+    /// 浏览窗口标签同样要文件系统安全：中文标题退化成固定标签（一次只看一个页面），
+    /// 英文标题只取安全的一段，超长标题不会撑出畸形 label
+    #[test]
+    fn view_window_label_is_filesystem_safe() {
+        assert_eq!(view_label_for(""), "readerx-view");
+        assert_eq!(view_label_for("第一章 起点"), "readerx-view");
+        assert_eq!(view_label_for("Chapter 12"), "readerx-view-Chapter-12");
+        assert_eq!(view_label_for("  "), "readerx-view");
+        let long = view_label_for(&"a".repeat(200));
+        assert_eq!(long, format!("readerx-view-{}", "a".repeat(40)));
     }
 
     /// 完成条的脚本必须自洽：点击写的是完成标记、按钮 id 稳定

@@ -1,9 +1,10 @@
 //! 书源「网页登录」桥接层（主 crate 侧）。
 //!
-//! 把「插件（Android 原生 WebView 浮层 / 桌面独立登录窗口）」接到书源引擎的认证接口上：
+//! 把「插件（Android 原生 WebView 浮层 / 桌面独立窗口）」接到书源引擎的认证接口上：
 //! - [`install`]：app setup 时注册一次认证后端——引擎命中 Cloudflare 挑战或书源 JS 调
 //!   `webview.login(url)` 时，都会走这里拉起源码侧的登录界面；
 //! - [`perform`]：界面命令（编辑页「网页登录」按钮）用的阻塞入口；
+//! - [`view`]：只把网页显示出来给人看（阅读页「查看本章原网页」），不采集也不落盘；
 //! - [`seed_source_session`] / [`unseed`]：转发核心 crate 的登录态注入（幂等）——
 //!   Cookie 进请求头，localStorage / sessionStorage / IndexedDB 快照进
 //!   `webview.storage()` 的读取缓存。
@@ -47,6 +48,9 @@ impl AuthProvider for PluginProvider {
             probe: request.probe.clone(),
             source_id: source_id.to_string(),
             timeout_secs: LOGIN_TIMEOUT_SECS,
+            // 登录模式：窗口标题固定用书源 id，收尾时采集登录态
+            view: false,
+            title: source_id.to_string(),
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             app: Some(self.app.clone()),
         };
@@ -107,6 +111,53 @@ fn storage_of(outcome: &PluginOutcome) -> Option<readerx_source::storage::Storag
         .ok()
         .filter(|snapshot| !snapshot.is_empty())
 }
+
+/// 阻塞打开一次应用内浏览窗口（阅读页「查看本章原网页」用）。
+///
+/// 与 [`perform`] 共用同一套平台实现，但**刻意不采集**：不读 Cookie 库、不跑存储探针，
+/// 因此不会覆盖该书源已保存的登录态，也不写任何文件。用户关窗 / 等待超时即返回。
+pub fn view(app: &tauri::AppHandle, url: &str, title: &str) -> Result<(), String> {
+    let platform = PlatformLoginRequest {
+        // 浏览模式不注入任何脚本、不设 UA：页面就按内核默认的样子显示
+        scripts: Vec::new(),
+        user_agent: String::new(),
+        probe: None,
+        source_id: String::new(),
+        timeout_secs: VIEW_TIMEOUT_SECS,
+        view: true,
+        title: title.to_string(),
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        app: Some(app.clone()),
+    };
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    let _ = app;
+    // 标题是章节名之类的用户数据：只记长度；地址过脱敏（可能带 token 之类的查询参数）
+    log::info!(
+        "打开应用内浏览 url={} 标题 {} 字符",
+        readerx_log::redact::url(url),
+        title.chars().count()
+    );
+    let started = std::time::Instant::now();
+    let outcome = tauri_plugin_webview_login::open_view(url.trim(), &platform).map_err(|err| {
+        log::warn!("打开应用内浏览失败：{err}");
+        err
+    })?;
+    // 用户中途关窗 / 超时自动关窗都不是失败：这条流程没有「结果」要给用户
+    log::info!(
+        "应用内浏览结束 ok={} 耗时={}ms reason={}",
+        outcome.ok,
+        started.elapsed().as_millis(),
+        if outcome.message.trim().is_empty() {
+            "（无）"
+        } else {
+            outcome.message.trim()
+        }
+    );
+    Ok(())
+}
+
+/// 浏览窗口的最长等待时间（用户忘了关窗时的兜底）
+const VIEW_TIMEOUT_SECS: u64 = 900;
 
 /// app setup 时调用。iOS 等不支持平台下插件不可用，`supported()` 为 false，不影响其它功能。
 pub fn install(app: tauri::AppHandle) {

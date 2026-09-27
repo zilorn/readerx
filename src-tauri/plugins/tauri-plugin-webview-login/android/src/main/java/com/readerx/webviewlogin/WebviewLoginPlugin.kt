@@ -1,10 +1,12 @@
-// ReaderX 书源「网页登录」Android 原生实现。
+// ReaderX 应用内 WebView（书源「网页登录」+ 阅读页「浏览章节原网页」）Android 原生实现。
 //
-// 在 Tauri Activity 上叠加一个全屏原生 WebView 浮层让用户完成登录，
-// 顶部提供「取消 / 完成」操作条；点「完成」后收集登录态并原路返回给 Rust 侧：
-// - Cookie：CookieManager 采集（含 httpOnly）；
-// - localStorage / sessionStorage：页面内 JS 探针（当前页面 origin，含 IndexedDB 库清单）；
-// 站点把凭证写在 localStorage 而不是 Cookie 里时，只有 Cookie 的登录态等于没登录。
+// 在 Tauri Activity 上叠加一个全屏原生 WebView 浮层，顶部提供操作条；按 `viewMode` 分两种：
+// - 登录（默认）：「取消 | 标题 | 完成」，点「完成」后收集登录态并原路返回给 Rust 侧：
+//   Cookie 走 CookieManager（含 httpOnly）；localStorage / sessionStorage 走页面内 JS 探针
+//   （当前页面 origin，含 IndexedDB 库清单）。站点把凭证写在 localStorage 而不是 Cookie 里时，
+//   只有 Cookie 的登录态等于没登录；
+// - 浏览（`viewMode: true`）：「关闭 | 标题」，**什么都不采集**（不读 Cookie、不跑探针），
+//   关掉浮层就结束 —— 阅读页里查看当前章节原始网页用的就是它。
 
 package com.readerx.webviewlogin
 
@@ -165,30 +167,37 @@ class WebviewLoginPlugin(private val activity: Activity) : Plugin(activity) {
     private var statusLabel: TextView? = null
     private val visitedOrigins = LinkedHashSet<String>()
 
+    /// 浏览模式：只把页面显示出来（操作条上只有「关闭」，收尾时不采集任何登录态）
+    private var viewMode = false
+
     @Volatile
     private var resolved = false
 
     @SuppressLint("SetJavaScriptEnabled")
     @Command
     fun openLogin(invoke: Invoke) {
+        val args = invoke.getArgs()
+        val mode = args.optBoolean("viewMode", false)
         if (container != null) {
-            invoke.reject("已有一个登录窗口打开，请先完成或取消")
+            invoke.reject(
+                if (mode) "已有一个浏览窗口打开，请先关闭" else "已有一个登录窗口打开，请先完成或取消",
+            )
             return
         }
-        val args = invoke.getArgs()
         val url = args.optString("url", "").orEmpty().trim()
         if (!url.startsWith("http://") && !url.startsWith("https://")) {
-            invoke.reject("仅支持 http/https 的登录地址")
+            invoke.reject(if (mode) "仅支持 http/https 的网页地址" else "仅支持 http/https 的登录地址")
             return
         }
         if (activity.findViewById<FrameLayout>(android.R.id.content) == null) {
-            invoke.reject("无法定位窗口，登录不可用")
+            invoke.reject(if (mode) "无法定位窗口，浏览不可用" else "无法定位窗口，登录不可用")
             return
         }
         val title = args.optString("title", "").orEmpty()
         val timeoutSecs = args.optLong("timeoutSecs", DEFAULT_TIMEOUT_SECS.toLong())
             .takeIf { it > 0 } ?: DEFAULT_TIMEOUT_SECS.toLong()
 
+        viewMode = mode
         startedUrl = url
         pendingInvoke = invoke
         resolved = false
@@ -200,7 +209,10 @@ class WebviewLoginPlugin(private val activity: Activity) : Plugin(activity) {
             try {
                 showOverlay(url, title, timeoutSecs)
             } catch (ex: Exception) {
-                finishAndRespond(ok = false, message = ex.message ?: "打开登录窗口失败")
+                finishAndRespond(
+                    ok = false,
+                    message = ex.message ?: if (mode) "打开浏览窗口失败" else "打开登录窗口失败",
+                )
             }
         }
     }
@@ -238,7 +250,7 @@ class WebviewLoginPlugin(private val activity: Activity) : Plugin(activity) {
         }
         val overlay = container!!
 
-        // 顶栏：取消 | 标题 | 完成
+        // 顶栏：登录 = 取消 | 标题 | 完成；浏览 = 关闭 | 标题
         val topBar = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -254,18 +266,24 @@ class WebviewLoginPlugin(private val activity: Activity) : Plugin(activity) {
 
         topBar.addView(
             TextView(activity).apply {
-                text = "取消"
+                text = if (viewMode) "关闭" else "取消"
                 textSize = 15f
                 setTextColor(Color.parseColor("#666666"))
                 gravity = Gravity.CENTER
                 setPadding(dp(16), 0, dp(16), 0)
-                setOnClickListener { finishAndRespond(ok = false, message = "已取消登录") }
+                setOnClickListener {
+                    if (viewMode) {
+                        finishAndRespond(ok = true, message = "")
+                    } else {
+                        finishAndRespond(ok = false, message = "已取消登录")
+                    }
+                }
             },
         )
 
         val titleView = TextView(activity).apply {
             text = title.takeIf { it.isNotBlank() } ?: runCatching { URL(url).host }
-                .getOrNull() ?: "登录"
+                .getOrNull() ?: if (viewMode) "浏览" else "登录"
             textSize = 16f
             setTextColor(Color.parseColor("#222222"))
             gravity = Gravity.CENTER
@@ -300,6 +318,9 @@ class WebviewLoginPlugin(private val activity: Activity) : Plugin(activity) {
                 setTextColor(Color.parseColor("#3B82F6"))
                 gravity = Gravity.CENTER
                 setPadding(dp(16), 0, dp(16), 0)
+                // 浏览模式没有「完成」这一步：左上的「关闭」就是唯一出口。
+                // 用 INVISIBLE 而不是 GONE：标题仍按登录模式的几何居中（不可见视图不接收点击）
+                visibility = if (viewMode) View.INVISIBLE else View.VISIBLE
                 setOnClickListener { finishAndRespond(ok = true, message = "") }
             },
         )
@@ -447,7 +468,10 @@ class WebviewLoginPlugin(private val activity: Activity) : Plugin(activity) {
         timeoutHandler?.postDelayed(
             {
                 if (!resolved && container != null) {
-                    finishAndRespond(ok = false, message = "登录等待超时，窗口已关闭")
+                    finishAndRespond(
+                        ok = false,
+                        message = if (viewMode) "浏览超时，窗口已关闭" else "登录等待超时，窗口已关闭",
+                    )
                 }
             },
             timeoutSecs * 1000,
@@ -555,7 +579,7 @@ class WebviewLoginPlugin(private val activity: Activity) : Plugin(activity) {
         }
     }
 
-    /// 点「完成」后的第一步：冻结操作条、开始采集（异步），采完再真正收尾。
+    /// 收尾前的第一步：冻结操作条，登录模式再异步采集登录态，采完才真正收尾。
     private fun beginFinish(ok: Boolean, message: String) {
         if (resolved) return
         resolved = true
@@ -563,6 +587,11 @@ class WebviewLoginPlugin(private val activity: Activity) : Plugin(activity) {
         timeoutHandler = null
 
         val finalUrl = webView?.url ?: startedUrl
+        // 浏览模式：只是看页面，不采集 Cookie 与存储（因此也不会覆盖书源已保存的登录态）
+        if (viewMode) {
+            doFinish(true, "", finalUrl, "", 0, null)
+            return
+        }
         if (!ok) {
             doFinish(false, message, finalUrl, "", 0, null)
             return

@@ -176,6 +176,7 @@ pub fn run() {
             commands::readerx_source_login_supported,
             commands::readerx_source_login_webview,
             commands::readerx_source_login_clear,
+            commands::readerx_webview_open,
             data_transfer::commands::readerx_data_export,
             data_transfer::commands::readerx_data_import_pick,
             data_transfer::commands::readerx_data_import,

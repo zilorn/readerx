@@ -706,7 +706,8 @@ pub async fn readerx_source_fetch_image(
 }
 
 // ---------------------------------------------------------------------------
-// 书源网页登录（应用内 WebView：Android 浮层 / 桌面登录窗口；Cookie 按源持久化）
+// 应用内 WebView（Android 浮层 / 桌面独立窗口）
+// 两种用途：书源网页登录（采集并持久化 Cookie）/ 网页浏览（只看，什么都不采集）
 // ---------------------------------------------------------------------------
 
 /// 是否支持网页登录（Android 应用内为 true）。
@@ -736,6 +737,25 @@ pub async fn readerx_source_login_webview(
             return Err("非法的书源 id".to_string());
         }
         webview_login::perform(&source_id, &url)
+    })
+    .await
+}
+
+/// 用应用内 WebView 打开一个网页（阻塞直到用户关窗/超时）。
+///
+/// 浏览模式：只把页面显示出来，不采集也不保存登录态（与网页登录是两回事）；
+/// `title` 是窗口标题用的显示名（阅读页传章节名），站点 Cookie 沿用内核自己那份。
+#[tauri::command]
+pub async fn readerx_webview_open(
+    app: AppHandle,
+    url: String,
+    title: String,
+) -> Result<(), String> {
+    blocking("打开网页", move || {
+        if !webview_login::is_supported() {
+            return Err("当前平台不支持应用内 WebView".to_string());
+        }
+        webview_login::view(&app, &url, &title)
     })
     .await
 }
