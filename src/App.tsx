@@ -3,6 +3,7 @@ import type { Component } from "solid-js";
 import { Router, Route, useNavigate, type RouteSectionProps } from "@solidjs/router";
 import { Toasts } from "./components/Toasts";
 import { GroupPicker } from "./components/GroupPicker";
+import { SourcePromptDialog } from "./components/SourcePromptDialog";
 import { MobileStage } from "./shell/MobileStage";
 import { DesktopStage } from "./shell/DesktopStage";
 import { bookMetaById, ensureLocalBooksLoaded } from "./lib/books";
@@ -79,6 +80,9 @@ const AppShell: Component<RouteSectionProps> = (props) => {
       </Show>
 
       <Toasts />
+
+      {/* 书源输入表单（input.prompt）：书源引擎在等这份输入，弹层必须盖在任何页面之上 */}
+      <SourcePromptDialog />
 
       {/* 入架提示里的「加入分组」：移入分组抽屉 */}
       <Show when={groupAssignBookId()}>

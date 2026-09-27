@@ -27,6 +27,7 @@ import { tts } from "./en/tts";
 import { webdav } from "./en/webdav";
 import { library } from "./en/library";
 import { misc } from "./en/misc";
+import { prompt } from "./en/prompt";
 import { sync } from "./en/sync";
 import { backup } from "./en/backup";
 import type { MessageKey } from "./zh-CN";
@@ -48,6 +49,7 @@ export const en: Record<MessageKey, string> & Record<string, string> = {
   ...webdav,
   ...library,
   ...misc,
+  ...prompt,
   ...sync,
   ...backup,
 };

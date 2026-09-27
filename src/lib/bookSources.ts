@@ -160,7 +160,8 @@ export function blankBookSource(partial?: Partial<BookSource>): BookSource {
 
 /** 内置示例模板（教程见 docs/book-source-guide.md） */
 export const TEMPLATE_JS = `// 入口函数：searchBook / discoverCategories / discoverBooks / bookDetail / bookToc / bookContent
-// 宿主 API：http / html / util / base64 / cryptoUtil / console / webview(登录)（详见 docs/book-source-api.md）
+// 宿主 API：http / html / util / base64 / cryptoUtil / console / webview(登录) / input(用户输入表单)
+// 详见 docs/book-source-api.md
 const BASE = "https://example.com";
 
 async function searchBook(keyword) {

@@ -9,6 +9,9 @@ mod models;
 // 桌面端单实例：重复启动只聚焦已有窗口，不开第二个进程（移动端由系统保证）
 #[cfg(desktop)]
 mod single_instance;
+// 书源「用户输入表单」（input.prompt）的界面桥接：事件推给前端弹层、命令收回用户填的值。
+// 对外可见同样是为了让集成测试直接验证桥接（见 tests/source_prompt_bridge.rs）。
+pub mod source_prompt;
 mod storage;
 
 /// 数据根覆盖入口（集成测试专用；见 `storage::pin_data_root`）。
@@ -125,6 +128,8 @@ pub fn run() {
             // 那是磁盘 I/O，跟着调用它的 blocking 线程跑，不占用启动线程。
             // 网页登录后端：把「插件（Android 原生浮层 / 桌面独立登录窗口）」注册为引擎的认证实现
             webview_login::install(app.handle().clone());
+            // 用户输入表单后端：书源 `input.prompt` 弹的是前端弹层（见 source_prompt 模块）
+            source_prompt::install(app.handle().clone());
             // 局域网同步：建服务并交给界面；启用过的用户在这里开引擎、补齐落地、拉起监听。
             // 引擎与网络都在后台线程上跑，不占启动线程。
             let sync_service = sync::SyncService::new(app.handle().clone());
@@ -176,6 +181,8 @@ pub fn run() {
             commands::readerx_source_login_supported,
             commands::readerx_source_login_webview,
             commands::readerx_source_login_clear,
+            source_prompt::readerx_source_prompt_submit,
+            source_prompt::readerx_source_prompt_pending,
             commands::readerx_webview_open,
             data_transfer::commands::readerx_data_export,
             data_transfer::commands::readerx_data_import_pick,

@@ -23,6 +23,7 @@ import { tts } from "./zh-CN/tts";
 import { webdav } from "./zh-CN/webdav";
 import { library } from "./zh-CN/library";
 import { misc } from "./zh-CN/misc";
+import { prompt } from "./zh-CN/prompt";
 import { sync } from "./zh-CN/sync";
 import { backup } from "./zh-CN/backup";
 
@@ -43,6 +44,7 @@ export const zhCN = {
   ...webdav,
   ...library,
   ...misc,
+  ...prompt,
   ...sync,
   ...backup,
 };

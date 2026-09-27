@@ -399,6 +399,8 @@ pub async fn readerx_source_delete(app: AppHandle, id: String) -> Result<(), Str
         if let Some(source) = storage::get_book_source(&app, &id)? {
             sync::service_hook(&app).on_source_deleted(&source);
         }
+        // 书源没了，本次运行里记住的表单值（口令之类）也一并忘掉
+        readerx_source::prompt::forget(&id);
         storage::delete_book_source(&app, &id)
     })
     .await
@@ -767,6 +769,9 @@ pub async fn readerx_source_login_clear(app: AppHandle, source_id: String) -> Re
         let saved = storage::read_source_login_cookie(&app, &source_id)?;
         storage::remove_source_login_cookie(&app, &source_id)?;
         webview_login::unseed(&source_id);
+        // 用户要求「清掉这个源保存的东西」时，本次运行记住的表单值（口令之类）也要一起清，
+        // 否则下一次调用还会拿旧口令去请求，看起来像「清了没用」
+        readerx_source::prompt::forget(&source_id);
         let mut removed = 0;
         if let Some(cookie) = saved {
             removed += host::http_remove_cookie(&source_id, &cookie);

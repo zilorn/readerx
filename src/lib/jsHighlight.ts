@@ -110,7 +110,16 @@ const LITERALS = new Set([
 ]);
 
 /** 书源宿主 API（docs/book-source-api.md），单独配色便于辨认可用能力 */
-const HOST_API = new Set(["http", "html", "util", "base64", "cryptoUtil", "webview", "console"]);
+const HOST_API = new Set([
+  "http",
+  "html",
+  "util",
+  "base64",
+  "cryptoUtil",
+  "webview",
+  "input",
+  "console",
+]);
 
 /** 沙箱内可用的标准内建 */
 const BUILTIN = new Set([

@@ -9,6 +9,7 @@ import { initGroups } from "./lib/groups";
 import { initI18n, t } from "./lib/i18n";
 import { installGlobalErrorReporting, listenBackendErrors, reportFailure } from "./lib/errorReport";
 import { initSync } from "./lib/sync";
+import { initSourcePrompts } from "./lib/sourcePrompt";
 import { createLogger } from "./lib/logger";
 import { initFrontendLogLevel } from "./lib/logs";
 import "./index.css";
@@ -28,6 +29,8 @@ async function start() {
   void listenBackendErrors();
   // 同步服务在 Rust 侧启动时就绪，这里只订阅它的状态与落地事件（订阅失败不影响同步）
   void initSync();
+  // 书源输入表单（input.prompt）：尽早订阅，书源引擎那边正阻塞等用户提交
+  void initSourcePrompts();
 
   log.info("开始载入本地偏好");
   const startedAt = performance.now();
