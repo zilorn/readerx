@@ -1755,6 +1755,7 @@ export default function ReaderPage() {
   // -------------------------------------------------------------------
   const [followEnabled, setFollowEnabled] = createSignal(true);
 
+  let ttsPageCache: { source: LocalBookChapter; geometry: string; result: PaginatedChapter } | null = null;
   const ttsPlayer = createTtsPlayer({
     bookId,
     chapterIndex: chapterIdx,
@@ -1763,6 +1764,41 @@ export default function ReaderPage() {
     navigateChapter: (idx) => goToChapter(idx),
     followEnabled,
     readingOffset: ttsReadingOffset,
+    pageOffsets: async (index) => {
+      if (!isPaged()) return [];
+      // 当前章复用阅读器的真实分页；跨章跟读等待其排版完成。
+      let result = index === chapterIdx() ? paged() : null;
+      if (!result && index === chapterIdx() && paginateTask) {
+        result = await paginateTask.promise;
+      }
+      const source = index === chapterIdx() ? pageSource() : renderBook()?.chapters[index];
+      const geo = layout();
+      if (!source || !geo) return [];
+      const geometryKey = JSON.stringify([geo, imageLayoutTick(), chapterAuthor()]);
+      if (!result && ttsPageCache?.source === source && ttsPageCache.geometry === geometryKey) {
+        result = ttsPageCache.result;
+      }
+      if (!result) {
+        const sizes = new Map<string, { w: number; h: number } | null>();
+        for (const image of chapterUnits(source).flatMap(unitImages)) {
+          const local = chapterImageLocal(readerImageRemote(image.src, image.remote) ?? "") || image.local || "";
+          sizes.set(readerImageKey({ ...image, local }), cachedImageSize(local) ?? null);
+        }
+        result = await startChapterPagination(source, chapterAuthor(), geo, sizes).promise;
+      }
+      if (!result) return [];
+      ttsPageCache = { source, geometry: geometryKey, result };
+      const textMirror = buildTextMirror(chapterUnits(source));
+      const offsets: number[] = [];
+      for (const page of result.pages) {
+        for (const fragment of page) {
+          if (fragment.kind !== "p" && fragment.kind !== "h") continue;
+          offsets.push((textMirror.unitStart[fragment.unit] ?? 0) + fragment.cstart);
+          break;
+        }
+      }
+      return offsets;
+    },
     notify: (message, isError) => showToast(message, !!isError),
     // 解码失败（Linux 桌面端多为系统缺 MP3 解码插件）：弹出修复指南，
     // 只把「弹指南」这件事交给界面，判定与「只弹一次」的口径留在播放器里

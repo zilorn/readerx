@@ -7,6 +7,7 @@
  * untranslated. Log text (`log.*`) stays Chinese.
  */
 export const tts = {
+  "tts.pageSplit": "Split speech at page boundaries",
   // Listening settings sheet (TtsSheet)
   "tts.sheet.title": "Listening settings",
   "tts.sheet.close": "Close listening settings",

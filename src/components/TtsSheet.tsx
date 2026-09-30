@@ -17,6 +17,8 @@ import {
   nativeVoiceList,
 } from "../lib/ttsEngine";
 import {
+  currentTtsPageSplit,
+  setTtsPageSplit,
   httpTtsBody,
   httpTtsMethod,
   httpTtsUrl,
@@ -26,6 +28,7 @@ import {
 } from "../lib/ttsSettings";
 import { t, type MessageKey } from "../lib/i18n";
 import { CheckIcon, CloseIcon, HeadphonesIcon, TimerIcon } from "./icons";
+import { ToggleSwitch } from "./ToggleSwitch";
 import { ScrollArea } from "./ScrollArea";
 
 export interface TtsSheetProps {
@@ -136,6 +139,11 @@ export function TtsSheet(props: TtsSheetProps) {
         </div>
 
         <ScrollArea class="min-h-0 flex-1" contentClass="px-1 py-3 pb-[calc(14px+env(safe-area-inset-bottom))]">
+          <div class="mx-3 mb-4 flex cursor-pointer items-center justify-between gap-3 rounded-xl bg-surface-2 px-3 py-3 text-[13px]">
+            <span>{t("tts.pageSplit")}</span>
+            <ToggleSwitch on={currentTtsPageSplit()} label={t("tts.pageSplit")}
+              onChange={() => setTtsPageSplit(!currentTtsPageSplit())} />
+          </div>
           {/* 引擎 */}
           <SectionTitle text={t("tts.section.engine")} />
           <div class="grid grid-cols-2 gap-2 px-3 pb-4">

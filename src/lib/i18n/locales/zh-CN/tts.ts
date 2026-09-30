@@ -1,5 +1,6 @@
 /** 听书：设置、播放、缓存、解码 */
 export const tts = {
+  "tts.pageSplit": "按页分段朗读",
   // 听书设置面板（TtsSheet）
   "tts.sheet.title": "听书设置",
   "tts.sheet.close": "关闭听书设置",

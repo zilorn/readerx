@@ -162,6 +162,27 @@ export function splitSpeechLocal(text: string): SpeechRange[] {
   return out;
 }
 
+/** 在原分句结果上追加页边界，保留章节镜像与单元内偏移。 */
+export function splitSpeechItemsAtPages(
+  items: ChapterSpeechItem[],
+  pageOffsets: readonly number[],
+): ChapterSpeechItem[] {
+  const cuts = [...new Set(pageOffsets.filter(Number.isFinite))].sort((a, b) => a - b);
+  return items.flatMap((item) => {
+    if (item.isTitle) return [item];
+    const edges = [item.start, ...cuts.filter((cut) => cut > item.start && cut < item.end), item.end];
+    return edges.slice(0, -1).flatMap((start, i) => {
+      let end = edges[i + 1];
+      while (start < end && isWhitespace(item.text[start - item.start])) start++;
+      while (end > start && isWhitespace(item.text[end - item.start - 1])) end--;
+      const text = item.text.slice(start - item.start, end - item.start);
+      if (!text) return [];
+      return [{ ...item, start, end, ls: item.ls + start - item.start,
+        le: item.ls + end - item.start, text }];
+    });
+  });
+}
+
 /** 章节 → 逐句朗读项（按章节镜像偏移排序；图片/无文字段自动跳过）。
  *  每章第一项固定为「章节标题」（朗读章首先报标题，正文无对应高亮位置）。 */
 export function buildChapterSpeechItems(chapter: LocalBookChapter): ChapterSpeechItem[] {

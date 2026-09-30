@@ -29,10 +29,13 @@ const [httpMethodSignal, setHttpMethodSignal] = createSignal<HttpTtsMethod>("GET
 const [httpUrlSignal, setHttpUrlSignal] = createSignal<string>("");
 const [httpBodySignal, setHttpBodySignal] = createSignal<string>("");
 
+const [pageSplitSignal, setPageSplitSignal] = createSignal(false);
+
 let loaded = false;
 let loadPromise: Promise<void> | null = null;
 
 interface StoredTtsPrefs {
+  pageSplit?: boolean;
   engine?: string;
   voice?: string;
   rate?: number;
@@ -49,6 +52,7 @@ export function ensureTtsPrefsLoaded(): Promise<void> {
     try {
       const stored = await readState<StoredTtsPrefs>(TTS_KEY);
       if (stored && typeof stored === "object") {
+        if (typeof stored.pageSplit === "boolean") setPageSplitSignal(stored.pageSplit);
         if (stored.engine === "native" || stored.engine === "http") {
           setEngineSignal(stored.engine);
         }
@@ -78,6 +82,7 @@ export function ensureTtsPrefsLoaded(): Promise<void> {
 let writeQueue: Promise<void> = Promise.resolve();
 function persist(): void {
   const prefs: StoredTtsPrefs = {
+    pageSplit: pageSplitSignal(),
     engine: engineSignal(),
     voice: voiceSignal(),
     rate: rateSignal(),
@@ -150,5 +155,13 @@ export function setHttpTtsUrl(url: string): void {
 export function setHttpTtsBody(body: string): void {
   if (body === httpBodySignal()) return;
   setHttpBodySignal(body);
+  persist();
+}
+
+export const currentTtsPageSplit = pageSplitSignal;
+
+export function setTtsPageSplit(enabled: boolean): void {
+  if (enabled === pageSplitSignal()) return;
+  setPageSplitSignal(enabled);
   persist();
 }

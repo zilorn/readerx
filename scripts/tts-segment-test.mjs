@@ -8,7 +8,7 @@ const splitter = source.slice(source.indexOf("const END_CHARS"), source.indexOf(
 const { outputText } = ts.transpileModule(splitter, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 },
 });
-const { splitSpeechLocal } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString("base64")}`);
+const { splitSpeechLocal, splitSpeechItemsAtPages } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString("base64")}`);
 
 const cases = [
   ["他说：“第一句。第二句！第三句？”然后离开。", ["他说：“第一句。", "第二句！", "第三句？”", "然后离开。"]],
@@ -37,3 +37,16 @@ for (const [text, expected] of cases) {
   }
 }
 process.stdout.write(`TTS 分句回归检查通过（${cases.length} 组）\n`);
+
+const title = { unit: -1, ls: 0, le: 0, start: -1, end: -1, isTitle: true, text: "标题" };
+const original = { unit: 2, ls: 3, le: 13, start: 20, end: 30, text: "甲乙丙丁。戊己庚辛。" };
+const split = splitSpeechItemsAtPages([title, original], [27, 22, 22, 20, 30, NaN]);
+assert.equal(split[0], title);
+assert.deepEqual(split.slice(1).map(({ text, start, end, ls, le }) => ({ text, start, end, ls, le })), [
+  { text: "甲乙", start: 20, end: 22, ls: 3, le: 5 },
+  { text: "丙丁。戊己", start: 22, end: 27, ls: 5, le: 10 },
+  { text: "庚辛。", start: 27, end: 30, ls: 10, le: 13 },
+]);
+assert.deepEqual(splitSpeechItemsAtPages([original], []), [original]);
+assert.equal(split.slice(1).map((item) => item.text).join(""), original.text);
+process.stdout.write("TTS 页边界与偏移回归检查通过\n");

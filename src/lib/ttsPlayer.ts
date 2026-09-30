@@ -27,6 +27,7 @@
 import { createSignal } from "solid-js";
 import type { LocalBookChapter } from "./booksTypes";
 import {
+  currentTtsPageSplit,
   currentTtsEngine,
   currentTtsRate,
   currentTtsVoice,
@@ -59,7 +60,7 @@ import {
   stopSourceNode,
 } from "./webAudio";
 import { isLinuxDesktop } from "./ttsDecodeGuide";
-import { buildChapterSpeechItems, type ChapterSpeechItem } from "./ttsSegment";
+import { buildChapterSpeechItems, splitSpeechItemsAtPages, type ChapterSpeechItem } from "./ttsSegment";
 import { t } from "./i18n";
 import { createLogger } from "./logger";
 
@@ -96,6 +97,7 @@ export interface TtsPlayerCtx {
   navigateChapter: (index: number) => void;
   /** 当前阅读位置（镜像偏移）；未知返回 null */
   readingOffset: () => number | null;
+  pageOffsets?: (chapterIndex: number) => Promise<readonly number[]>;
   /** 轻提示 */
   notify?: (message: string, isError?: boolean) => void;
   /**
@@ -190,6 +192,7 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
   // ---- 内部可变状态（不走响应式） ----
   let seq = 0;
   let items: ChapterSpeechItem[] = [];
+  let itemsLayoutKey: string | null = null;
   let chapterIdxEngine = ctx.chapterIndex();
   let pendingAutoNav = -1;
   let autoStartPref: "first" | "last" = "first";
@@ -339,6 +342,7 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
     chapterIdxEngine = chapterIndex;
     const ch = ctx.chapterAt(chapterIndex);
     items = ch ? buildChapterSpeechItems(ch) : [];
+    itemsLayoutKey = null;
     audioBytesCache.clear();
   }
 
@@ -443,7 +447,7 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
   }
 
   /** 逐句播放入口：按当前引擎分发到原生 / HTTP 两种路径 */
-  async function playFrom(idxItem: number, stayPaused = false): Promise<void> {
+  async function playFrom(idxItem: number, stayPaused = false, position?: number | null): Promise<void> {
     if (disposed) return;
     // 停止期间冻结的倒计时在重新起播时接着走（定时不随停止被清掉）
     if (!stayPaused && status() === "stopped") resumeMinuteTimer();
@@ -452,6 +456,23 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
     clearNativeWait();
     lastSynthError = null;
     if (idxItem < 0 || idxItem >= items.length) return;
+    // 每次切句重新取页面边界，字号、窗口和开关变化无需重启播放器。
+    const anchor = items[idxItem];
+    const chapterIndex = chapterIdxEngine;
+    if (ctx.pageOffsets) {
+      const splitAtPages = currentTtsPageSplit();
+      if (splitAtPages && !stayPaused) setStatus("loading");
+      const cuts = splitAtPages ? await ctx.pageOffsets(chapterIndex) : [];
+      if (my !== seq || disposed) return;
+      const layoutKey = `${chapterIndex}:${cuts.join(",")}`;
+      if (itemsLayoutKey !== layoutKey) {
+        const chapter = ctx.chapterAt(chapterIndex);
+        items = chapter ? splitSpeechItemsAtPages(buildChapterSpeechItems(chapter), cuts) : [];
+        itemsLayoutKey = layoutKey;
+        const offset = splitAtPages ? position ?? anchor.start : anchor.start;
+        idxItem = anchor.isTitle ? 0 : Math.max(0, items.findIndex((item) => !item.isTitle && item.end > offset));
+      }
+    }
     activate(idxItem);
     setError(null);
     if (stayPaused) {
@@ -629,7 +650,8 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
       return;
     }
     const stayPaused = status() === "paused";
-    void playFrom(pref === "last" ? items.length - 1 : 0, stayPaused);
+    void playFrom(pref === "last" ? items.length - 1 : 0, stayPaused,
+      pref === "last" ? items[items.length - 1]?.end - 1 : undefined);
   }
 
   /**
@@ -680,7 +702,9 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
         ? items.length - 1
         : 0
       : nearestIndexFor(ctx.readingOffset?.() ?? null);
-    void playFrom(idx, stayPaused);
+    void playFrom(idx, stayPaused, auto
+      ? autoStartPref === "last" ? items[idx]?.end - 1 : undefined
+      : ctx.readingOffset());
   }
 
   /** 起播当前视图章节：从 offset() 所在句子开始（null/不可用回退章首）。仅停止态可用 */
@@ -707,10 +731,11 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
         }
         return;
       }
-      const idx = nearestIndexFor(offset());
+      const position = offset();
+      const idx = nearestIndexFor(position);
       pausedRequested = false;
       resetFailureStreak();
-      void playFrom(idx);
+      void playFrom(idx, false, position);
     });
   }
 
@@ -977,7 +1002,9 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
     for (let ci = 0; ci < chapterCount; ci++) {
       const ch = ctx.chapterAt(ci);
       if (!ch) continue;
-      const itemsIn = buildChapterSpeechItems(ch);
+      const cuts = currentTtsPageSplit() && ctx.pageOffsets ? await ctx.pageOffsets(ci) : [];
+      if (disposed) return 0;
+      const itemsIn = splitSpeechItemsAtPages(buildChapterSpeechItems(ch), cuts);
       for (const s of itemsIn) {
         if (s.text.trim()) {
           plan.push(s.text);
