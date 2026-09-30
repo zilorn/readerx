@@ -3,9 +3,8 @@
  *
  * 关键规则：
  * - 按 。！？!?… 等强断句符切句，ASCII 句点遇数字/字母（小数、域名）不切；
- * - 引号（“”‘’「」『』（）等）配对保护：句号出现在引号内部时不截断，
- *   只有引号闭合（深度归零）后才允许收句，保证 「他说：“你要的。都在这里。”」 整句连读、
- *   “ 不会跑到下一句开头或单独成段；
+ * - 引号/括号内部照常断句，连续句末标点与尾随闭合符号归入前句；
+ *   开放符号归入下一句，避免多句对白被合并成一个朗读单元；
  * - 不含可读文字（字母/数字/汉字）的纯标点片段直接丢弃，不被朗读；
  * - 超长无标点段落用逗号等软边界兜底切分，避免一句过长。
  *
@@ -127,41 +126,33 @@ export function splitSpeechLocal(text: string): SpeechRange[] {
     }
 
     const ch = text[i];
-    let starter = true;
+    const top = stack[stack.length - 1];
+    const closing = ch in CLOSE_MAP || (ch === '"' && top === '"');
+
+    // 不等待引号/括号配平：内部下一句开始时即可收句。
+    // 连续标点、闭合符号仍留在前句，开放符号则是下一句的起点。
+    if (cand >= 0 && !isTerm(text, i) && !closing && !isWhitespace(ch)) {
+      push(cand);
+      continue;
+    }
 
     if (OPEN_CHARS.has(ch)) {
       stack.push(ch);
-      starter = false;
     } else if (ch in CLOSE_MAP) {
-      const want = CLOSE_MAP[ch];
-      const top = stack.length > 0 ? stack[stack.length - 1] : undefined;
-      if (top === want) {
-        stack.pop();
-        if (stack.length === 0 && cand >= 0) cand = i + 1; // 闭合引号归入前句
-      }
-      starter = false;
+      if (top === CLOSE_MAP[ch]) stack.pop();
+      if (cand >= 0) cand = i + 1;
     } else if (ch === '"') {
-      // ASCII 双引号成对开关：避免 “"你好。"他笑道。” 在句号处误切
-      const top = stack.length > 0 ? stack[stack.length - 1] : undefined;
+      // ASCII 双引号成对开关，用于判断它属于前句还是后句。
       if (top === '"') {
         stack.pop();
-        if (stack.length === 0 && cand >= 0) cand = i + 1; // 闭合引号归入前句
+        if (cand >= 0) cand = i + 1;
       } else {
         stack.push('"');
       }
-      starter = false;
     } else if (isTerm(text, i)) {
       cand = i + 1;
-      starter = false;
     } else if (SOFT_CHARS.has(ch)) {
       lastSoft = i;
-      starter = false;
-    }
-
-    // 引号配对处于平衡且出现过可收句位置时，遇到新句子起始字符即收句
-    if (stack.length === 0 && cand >= 0 && starter) {
-      push(cand);
-      continue; // 当前字符作为下一句开头重新处理
     }
 
     i++;
