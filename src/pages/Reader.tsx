@@ -1868,6 +1868,26 @@ export default function ReaderPage() {
     if (ttsPlayer.status() === "stopped") setFollowEnabled(true);
   });
 
+  // 语音从其它章追上用户正在阅读的章节时恢复跟读。
+  // 只监听朗读章节的变化，避免用户切章或同章内继续朗读撤销手动取消跟随。
+  createEffect(
+    on(
+      () => ttsPlayer.focus()?.cid ?? null,
+      (cid, previousCid) => {
+        if (
+          cid !== null &&
+          previousCid != null &&
+          cid !== previousCid &&
+          cid === book()?.chapters[chapterIdx()]?.cid &&
+          ttsActive()
+        ) {
+          setFollowEnabled(true);
+        }
+      },
+      { defer: true },
+    ),
+  );
+
   /** 批量预热整本书（HTTP 源）：逐句合成写入按书籍的磁盘缓存 */
   async function runPrewarmBook(): Promise<void> {
     if (prewarmText() !== null) return; // 已在预热
