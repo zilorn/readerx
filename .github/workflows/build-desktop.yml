@@ -54,7 +54,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # 多架构目标要显式装进工具链（Windows 的 aarch64 由 msvc 链接器原生支持，无需额外 SDK）
       - name: Setup build environment
@@ -74,7 +74,7 @@ jobs:
         run: node scripts/collect-artifacts.mjs desktop --target ${{ matrix.target }} --out "${{ runner.temp }}/artifacts"
 
       - name: Upload bundles
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: readerx-${{ matrix.name }}
           path: ${{ runner.temp }}/artifacts/*
