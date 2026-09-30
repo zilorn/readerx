@@ -30,10 +30,13 @@ export function PageHeader(props: PageHeaderProps) {
             <ChevronLeftIcon />
           </button>
         </Show>
-        <div class="flex min-w-0 flex-1 items-baseline gap-2">
-          <h1 class="text-[22px] font-bold tracking-[0.02em]">{props.title}</h1>
+        {/* 标题保持单行；副标题空间不足时换行，避免长说明挤压标题。 */}
+        <div class="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2 gap-y-0.5">
+          <h1 class="max-w-full flex-none truncate text-[22px] font-bold tracking-[0.02em]">
+            {props.title}
+          </h1>
           {props.subtitle && (
-            <span class="whitespace-nowrap text-xs text-text-3">
+            <span class="min-w-0 max-w-full break-words text-xs text-text-3">
               {props.subtitle}
             </span>
           )}
