@@ -8,6 +8,8 @@
 - 完成工作。
 - remove worktree.
 - 合并（merge）或变基（rebase）到main分支。
+- 如有冲突，解决冲突。
+- 删除创建分支。
 
 ## 关于merge和rebase的选择：
 
