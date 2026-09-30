@@ -92,11 +92,12 @@ fn open_url<R: tauri::Runtime>(
     let fs = app
         .try_state::<tauri_plugin_fs::Fs<R>>()
         .ok_or_else(|| "文件访问插件不可用".to_string())?;
-    let options = if write {
-        OpenOptions::new().write(true).create(true).truncate(true)
+    let mut options = OpenOptions::new();
+    if write {
+        options.write(true).create(true).truncate(true);
     } else {
-        OpenOptions::new().read(true)
-    };
+        options.read(true);
+    }
     fs.open(path, options)
         .map_err(|e| format!("打开所选文件失败: {e}"))
 }
