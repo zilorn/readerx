@@ -153,3 +153,7 @@ Windows x86_64 / aarch64 安装包到同一个 Release；桌面按 ABI 分开出
 质量门槛（`pnpm exec tsc --noEmit` / `pnpm build` / `cargo test`）在本地按需跑。
 
 详见 [AGENTS.md](./AGENTS.md)（仓库协作与代码约定）。
+
+## 参与贡献
+
+问题反馈、功能建议和 Pull Request 流程见 [贡献指南](./CONTRIBUTING.md)。

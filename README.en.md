@@ -203,3 +203,7 @@ workflows, and download instructions are in `scripts/tip.md`. Quality gates
 
 See [AGENTS.md](./AGENTS.md) for repository collaboration and code conventions
 (written in Chinese, like the docs under `docs/`).
+
+## Contributing
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for bug reports, feature requests and the pull request workflow.
