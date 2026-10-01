@@ -68,6 +68,8 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 time = { version = "0.3", features = ["local-offset"] }
 mobi = { version = "0.8", default-features = false }
 encoding_rs = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+semver = "1"
 
 # 桌面端单实例：重复启动不再开出第二个进程，而是聚焦已在运行的那个窗口
 # （两个实例会同时写同一份书库与设置）。插件不支持移动端，那边由系统保证单实例，

@@ -1,3 +1,4 @@
+mod app_updates;
 mod book_images;
 mod book_store;
 mod mobi;
@@ -145,6 +146,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::greet,
+            app_updates::readerx_update_check,
             reading_time::readerx_reading_time_get,
             reading_time::readerx_reading_time_add,
             commands::readerx_state_get,

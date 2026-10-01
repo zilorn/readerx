@@ -657,3 +657,17 @@ export interface ReadingTimeStats {
 export const [readingTimeStats, setReadingTimeStats] = createSignal<ReadingTimeStats>({
   schemaVersion: 1, days: {}, books: {},
 });
+
+// 更新检查共享状态；偏好仍由 Rust state 命令持久化。
+export interface AppUpdate {
+  version: string;
+  notes: string;
+  assets: { name: string; browser_download_url: string }[];
+}
+export const [availableAppUpdate, setAvailableAppUpdate] = createSignal<AppUpdate | null>(null);
+export const [appUpdateChecking, setAppUpdateChecking] = createSignal(false);
+export const [autoAppUpdate, setAutoAppUpdate] = createSignal(true);
+export async function setAutoAppUpdateEnabled(value: boolean): Promise<void> {
+  setAutoAppUpdate(value);
+  await writeState("readerx.autoAppUpdate", value);
+}

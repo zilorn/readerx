@@ -1,3 +1,6 @@
+import { For } from "solid-js";
+import { checkAppUpdate, downloadAppUpdate } from "../lib/appUpdates";
+import { availableAppUpdate, appUpdateChecking, autoAppUpdate, setAutoAppUpdateEnabled } from "../lib/store";
 import { ReadingTimeSummary } from "../components/ReadingTimeSummary";
 import { createEffect, createSignal, onCleanup, Show, type JSX } from "solid-js";
 import { useNavigate } from "@solidjs/router";
@@ -390,6 +393,32 @@ export default function SettingsPage() {
               </span>
               <span class="ml-auto text-xs text-text-3">v{appVersion()}</span>
             </div>
+            <div class="flex items-center gap-3 px-4 py-[13px]">
+              <span class="flex-1 text-[14.5px] font-medium">{t("settings.update.auto")}</span>
+              <ToggleSwitch on={autoAppUpdate()} label={t("settings.update.auto")}
+                onChange={() => void setAutoAppUpdateEnabled(!autoAppUpdate())} />
+            </div>
+            <button class="w-full px-4 py-[13px] text-left text-[14.5px] font-medium disabled:opacity-50"
+              disabled={appUpdateChecking()} onClick={() => void checkAppUpdate()}>
+              {t(appUpdateChecking() ? "settings.update.checking" : "settings.update.check")}
+            </button>
+            <Show when={availableAppUpdate()}>{update => (
+              <div class="space-y-3 p-4">
+                <p class="text-sm font-medium text-accent">{t("settings.update.found", { version: update().version })}</p>
+                <Show when={update().notes}><p class="max-h-48 overflow-y-auto whitespace-pre-wrap break-words text-xs text-text-2">{update().notes}</p></Show>
+                <For each={update().assets}>{asset => (
+                  <button class="block w-full break-all rounded-lg bg-accent-weak px-3 py-2 text-left text-xs text-accent"
+                    onClick={() => void downloadAppUpdate(asset.browser_download_url)}>
+                    {t("settings.update.download", { name: asset.name })}
+                  </button>
+                )}</For>
+                <Show when={update().assets.length === 0}>
+                  <button class="text-sm text-accent" onClick={() => void downloadAppUpdate("https://github.com/zilorn/readerx/releases/latest")}>
+                    {t("settings.update.view")}
+                  </button>
+                </Show>
+              </div>
+            )}</Show>
             <Row
               icon={<GitHubIcon size={18} />}
               label={t("settings.about.github")}

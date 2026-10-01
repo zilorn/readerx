@@ -1,3 +1,4 @@
+import { startAppUpdateDiscovery } from "./lib/appUpdates";
 import { lazy, onMount, onCleanup, Show, createEffect } from "solid-js";
 import type { Component } from "solid-js";
 import { Router, Route, useNavigate, type RouteSectionProps } from "@solidjs/router";
@@ -112,6 +113,7 @@ function App() {
   // 页面切换动画（淡入淡出）不先空白。预热放到首帧交互之后（延迟执行），
   // 避免与书架首次渲染/书库加载抢解析时间；首页自身的块由路由按需加载。
   onMount(() => {
+    onCleanup(startAppUpdateDiscovery());
     const warmupTimer = window.setTimeout(() => {
       void import("./pages/Discover");
       void import("./pages/Settings");
