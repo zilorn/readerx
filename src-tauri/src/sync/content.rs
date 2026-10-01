@@ -28,6 +28,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use readerx_sync::assets::{Asset, AssetDigest, AssetKind, COVER_ASSET};
 use readerx_sync::content::{identity_digest, ChapterContent, ChapterDigest, ContentSource};
@@ -48,17 +49,32 @@ pub struct AppContent<R: tauri::Runtime> {
     /// —— 引擎在任何时刻才去读对端的书库，读到哪一份取决于当时变量是什么。
     root: Option<PathBuf>,
     /// 书实体 id → 本机书 id（懒建；查不到时重建一次，书被加了 / 删了能跟上）
-    books: Mutex<HashMap<String, String>>,
+    books: Mutex<BookCache>,
+}
+
+/// 连续查询缺失书籍时最多每秒重建一次，避免逐书逐通道扫描整个书库。
+#[derive(Default)]
+struct BookCache {
+    ids: HashMap<String, String>,
+    refreshed: Option<Instant>,
 }
 
 impl<R: tauri::Runtime> AppContent<R> {
     pub fn new(app: AppHandle<R>) -> Arc<AppContent<R>> {
-        Arc::new(AppContent { app, root: None, books: Mutex::new(HashMap::new()) })
+        Arc::new(AppContent {
+            app,
+            root: None,
+            books: Mutex::new(BookCache::default()),
+        })
     }
 
     /// 读另一份数据根的来源（同步夹具里的「另一台设备」）。
     pub fn at(app: AppHandle<R>, root: impl Into<PathBuf>) -> Arc<AppContent<R>> {
-        Arc::new(AppContent { app, root: Some(root.into()), books: Mutex::new(HashMap::new()) })
+        Arc::new(AppContent {
+            app,
+            root: Some(root.into()),
+            books: Mutex::new(BookCache::default()),
+        })
     }
 
     /// 这份来源的数据根参数（见 `storage::data_root_at`）。
@@ -73,21 +89,22 @@ impl<R: tauri::Runtime> AppContent<R> {
 
     /// 书实体 id → 本机书 id（未命中时重建一次索引）。
     fn local_id(&self, uid: &str) -> Option<String> {
-        if let Ok(map) = self.books.lock() {
-            if let Some(id) = map.get(uid) {
-                return Some(id.clone());
-            }
+        let mut cache = self
+            .books
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(id) = cache.ids.get(uid) {
+            return Some(id.clone());
         }
-        let rebuilt = self.rebuild();
-        let hit = rebuilt.get(uid).cloned();
-        if let Ok(mut map) = self.books.lock() {
-            *map = rebuilt;
+        if cache
+            .refreshed
+            .is_some_and(|time| time.elapsed() < Duration::from_secs(1))
+        {
+            return None;
         }
-        // 重建之后仍没有：这本书本机确实没有（还没同步过来 / 已经删了）
-        if hit.is_none() {
-            log::debug!("正文通道里没有这本书的本机副本 uid={uid}");
-        }
-        hit
+        cache.ids = self.rebuild();
+        cache.refreshed = Some(Instant::now());
+        cache.ids.get(uid).cloned()
     }
 
     /// 一本书正文里引用到的插图：资源名（设备无关）+ 本地副本文件名。
@@ -155,7 +172,10 @@ impl<R: tauri::Runtime> ContentSource for AppContent<R> {
         };
         let mut out: Vec<AssetDigest> = Vec::new();
         if let Some(cover) = cover_asset(&self.app, self.root(), &local_id) {
-            out.push(AssetDigest { name: COVER_ASSET.to_string(), hash: cover.digest });
+            out.push(AssetDigest {
+                name: COVER_ASSET.to_string(),
+                hash: cover.digest,
+            });
         }
         for (name, local) in self.images(&local_id) {
             // 正文引用了这个名字，但**字节不一定在手里**：图还没下载下来时引用照样在
@@ -167,7 +187,11 @@ impl<R: tauri::Runtime> ContentSource for AppContent<R> {
                 .unwrap_or(false);
             out.push(AssetDigest {
                 name: name.clone(),
-                hash: if present { identity_digest(&name) } else { String::new() },
+                hash: if present {
+                    identity_digest(&name)
+                } else {
+                    String::new()
+                },
             });
         }
         out
@@ -183,7 +207,10 @@ impl<R: tauri::Runtime> ContentSource for AppContent<R> {
                 out.push(cover);
             }
         }
-        let wanted: Vec<&String> = names.iter().filter(|name| name.as_str() != COVER_ASSET).collect();
+        let wanted: Vec<&String> = names
+            .iter()
+            .filter(|name| name.as_str() != COVER_ASSET)
+            .collect();
         if wanted.is_empty() {
             return out;
         }
@@ -223,7 +250,10 @@ impl<R: tauri::Runtime> ContentSource for AppContent<R> {
         let Some(local_id) = self.local_id(book) else {
             return Vec::new();
         };
-        self.images(&local_id).into_iter().map(|(name, _)| name).collect()
+        self.images(&local_id)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect()
     }
 }
 
@@ -233,7 +263,9 @@ fn cover_asset<R: tauri::Runtime>(
     root: Option<&Path>,
     local_id: &str,
 ) -> Option<Asset> {
-    let data_url = book_store::get_cover_at(app, root, local_id).ok().flatten()?;
+    let data_url = book_store::get_cover_at(app, root, local_id)
+        .ok()
+        .flatten()?;
     let (mime, bytes) = crate::book_images::image_data_url_bytes(&data_url)?;
     if bytes.is_empty() {
         // 空载荷（`data:image/png;base64,`）当作**没有封面**：否则资源清单里会多出一条
@@ -241,9 +273,7 @@ fn cover_asset<R: tauri::Runtime>(
         log::debug!("封面 data URL 没有内容，按没有封面处理 book={local_id}");
         return None;
     }
-    Some(
-        Asset::new(COVER_ASSET, AssetKind::Cover, &mime, "", bytes).with_data_url(Some(data_url)),
-    )
+    Some(Asset::new(COVER_ASSET, AssetKind::Cover, &mime, "", bytes).with_data_url(Some(data_url)))
 }
 
 /// 本地章节 → 引擎的正文载荷（结构化块原样透传）。

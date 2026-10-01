@@ -349,6 +349,16 @@ fn publish_book_locked<R: tauri::Runtime>(
         return Ok(());
     }
 
+    // 旧实体可能没有建书所需的书源地址。只补身份已验证的缺失字段，保留远端编辑。
+    if let Some(url) = facts.source_url(meta.book_source_id.as_deref()) {
+        let missing = engine.entity(&uid)
+            .and_then(|entity| entity.field("source_url"))
+            .is_none_or(|value| value.as_str().is_none_or(|text| text.trim().is_empty()));
+        if missing {
+            publish_fields(engine, &uid, &BTreeMap::from([("source_url".to_string(), json!(url))]))?;
+        }
+    }
+
     if mode == PublishMode::Imported {
         // 以引擎为准：对端可能已经改过这本书（改名 / 打标签 / 换分组），
         // 本地重新导入同一个文件时把这些改动落地回来，而不是用导入值覆盖掉
@@ -907,18 +917,19 @@ fn apply_staged_content<R: tauri::Runtime>(
     changes: &mut AppliedChanges,
 ) -> Result<(), SyncError> {
     let books = lock_engine(engine).staged_books();
+    let mut sources = None;
     for book_uid in books {
-        let bodies = lock_engine(engine).staged_bodies(&book_uid);
-        if bodies.is_empty() {
-            continue;
-        }
         let (local_id, created) = match index.resolve(app, &book_uid).map_err(SyncError::Io)? {
             Some(local_id) => (local_id, false),
-            None => match create_local_book_from_sync(app, engine, index, &book_uid)? {
+            None => match create_local_book_from_sync(app, engine, index, &book_uid, &mut sources)? {
                 Some(local_id) => (local_id, true),
                 None => continue,
             },
         };
+        let bodies = lock_engine(engine).staged_bodies(&book_uid);
+        if bodies.is_empty() {
+            continue;
+        }
         match book_store::apply_sync_chapters(app, &local_id, &bodies) {
             // 重建书时正文已经随书一次写齐（`put_book`），这里返回 0 是正常的；
             // 已有书返回 0 说明内容与本地一致（重复推送）：两种情况都该清掉暂存
@@ -981,6 +992,10 @@ fn apply_staged_assets<R: tauri::Runtime>(
         guard.staged_asset_books()
     };
     for book_uid in books {
+        // 没有本机书时不读取资源体：暂存 JSON 会解码图片并重算 SHA-256。
+        let Some(local_id) = index.resolve(app, &book_uid).map_err(SyncError::Io)? else {
+            continue;
+        };
         let assets = {
             let guard = lock_engine(engine);
             guard.staged_assets(&book_uid)
@@ -988,10 +1003,6 @@ fn apply_staged_assets<R: tauri::Runtime>(
         if assets.is_empty() {
             continue;
         }
-        let Some(local_id) = index.resolve(app, &book_uid).map_err(SyncError::Io)? else {
-            log::debug!("对端的资源到了本机还没有这本书，先留在暂存区 uid={book_uid}");
-            continue;
-        };
         let mut landed: Vec<(AssetKind, String)> = Vec::new();
         for asset in &assets {
             match asset.kind {
@@ -1093,6 +1104,7 @@ fn create_local_book_from_sync<R: tauri::Runtime>(
     engine: &SharedEngine,
     index: &mut BookIndex,
     book_uid: &str,
+    sources: &mut Option<Vec<BookSource>>,
 ) -> Result<Option<String>, SyncError> {
     let (fields, structure) = {
         let guard = lock_engine(engine);
@@ -1114,10 +1126,14 @@ fn create_local_book_from_sync<R: tauri::Runtime>(
 
     // 在线书：书身份含书源地址，本机没有对应书源时建出来的书与引擎对不上
     let book_source_id = if fields.book_url.is_some() {
-        match fields.source_url.as_deref().and_then(local_source_id_by_url) {
-            Some(id) => Some(id),
+        // 一次落地只读一遍书源；读取错误必须返回，不能伪装成书源缺失。
+        if sources.is_none() {
+            *sources = Some(readerx_source::store::list_sources().map_err(SyncError::Io)?);
+        }
+        match matching_source(sources.as_deref().unwrap_or_default(), &fields, book_uid) {
+            Some(source) => Some(source.id.clone()),
             None => {
-                log::debug!("对端的在线书还没有对应书源，暂不建书 uid={book_uid}");
+                log::debug!("在线书暂不能建书：书源缺失或身份不匹配 uid={book_uid} 载荷含书源地址={}", fields.source_url.is_some());
                 return Ok(None);
             }
         }
@@ -1202,14 +1218,29 @@ fn merge_structure_with_bodies(
     chapters
 }
 
-/// 本机书源 id（按同步来的书源地址找；找不到返回 None —— 在线书的身份就缺一块）。
-fn local_source_id_by_url(url: &str) -> Option<String> {
-    let wanted = identity::source_uid(url);
-    readerx_source::store::list_sources()
-        .ok()?
-        .into_iter()
-        .find(|source| identity::source_uid(&source.book_source_url) == wanted)
-        .map(|source| source.id)
+/// 只有能重算出原书 uid 的书源才能关联；兼容旧载荷缺失书源地址。
+fn matching_source<'a>(
+    sources: &'a [BookSource],
+    fields: &BookEntityFields,
+    uid: &str,
+) -> Option<&'a BookSource> {
+    let matches_identity = |source: &&BookSource| {
+        identity::book_uid(&BookKey {
+            source_url: Some(&source.book_source_url),
+            book_url: fields.book_url.as_deref(),
+            file_name: &fields.file_name,
+            size: fields.size,
+        }) == uid
+    };
+    if let Some(url) = fields.source_url.as_deref() {
+        let wanted = identity::source_uid(url);
+        if let Some(source) = sources.iter()
+            .filter(|source| identity::source_uid(&source.book_source_url) == wanted)
+            .find(matches_identity) {
+            return Some(source);
+        }
+    }
+    sources.iter().find(matches_identity)
 }
 
 /// 由书实体 id 派生一个稳定的色相（0–359）：封面不同步，新书也要有个可辨的底色。
@@ -2301,6 +2332,35 @@ mod tests {
         assert_eq!(value["bookId"], json!("local-1"));
         assert_eq!(value["charEnd"], json!(20));
         assert_eq!(value["chapterIndex"], Value::Null);
+    }
+
+    #[test]
+    fn source_matching_recovers_missing_address_without_guessing_by_host() {
+        let source: BookSource = serde_json::from_value(json!({
+            "id": "src-test", "name": "测试", "bookSourceUrl": "https://example.com",
+            "js": ""
+        })).unwrap();
+        let mut entity = Entity::new("book", "book", readerx_sync::Hlc::default(), 1);
+        entity.fields.insert("book_url".into(), readerx_sync::FieldState::Value {
+            value: json!("https://example.com/book/1"), hlc: readerx_sync::Hlc::default(),
+            origin: readerx_sync::model::Stamp::new("A", 1),
+        });
+        let mut fields = book_snapshot_fields(&entity);
+        let uid = identity::book_uid(&BookKey {
+            source_url: Some(&source.book_source_url), book_url: fields.book_url.as_deref(),
+            ..BookKey::default()
+        });
+        let sources = vec![source];
+        assert_eq!(matching_source(&sources, &fields, &uid).unwrap().id, "src-test");
+        fields.source_url = Some("https://obsolete.example.com".into());
+        assert!(matching_source(&sources, &fields, &uid).is_some());
+        assert!(matching_source(&sources, &fields, "b-other").is_none());
+        assert!(matching_source(&[], &fields, &uid).is_none());
+        fields.source_url = Some(" HTTPS://EXAMPLE.COM/ ".into());
+        assert!(matching_source(&sources, &fields, &uid).is_some());
+        let mut wrong = sources[0].clone();
+        wrong.book_source_url = "https://example.com/other-source".into();
+        assert!(matching_source(&[wrong], &fields, &uid).is_none());
     }
 
     /// 载荷里不留本机字段：`id` 每台设备各自生成，`groupId` 是本机分组 id ——
