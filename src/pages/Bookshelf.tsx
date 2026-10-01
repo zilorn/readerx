@@ -63,11 +63,13 @@ interface ShelfItem {
 /**
  * 书架筛选（互斥单选，不可叠加）：
  * - all    ：无筛选（全部在架书，不含归入隐藏分组的书）
+ * - ungrouped：只看未分组的在架书
  * - source ：只看某一来源（本地 / WebDAV / 在线）
  * - group  ：只看某一分组（含内置「隐藏」分组）
  */
 type ShelfFilter =
   | { kind: "all" }
+  | { kind: "ungrouped" }
   | { kind: "source"; source: BookSource }
   | { kind: "group"; groupId: string };
 
@@ -77,10 +79,11 @@ function isHiddenGroup(groupId: string): boolean {
 }
 
 /**
- * 把记忆的筛选标签 key（all / local / webdav / online / group-<id>）还原为筛选条件。
+ * 把记忆的筛选标签 key（all / ungrouped / local / webdav / online / group-<id>）还原为筛选条件。
  * 目标分组已被删除（内置隐藏分组除外）/ 来源未知时回落「全部」，避免指向不存在的 chip。
  */
 function restoreShelfFilter(key: string): ShelfFilter {
+  if (key === "ungrouped") return { kind: "ungrouped" };
   if (key === "local" || key === "webdav" || key === "online") {
     return { kind: "source", source: key };
   }
@@ -395,6 +398,11 @@ export default function BookshelfPage() {
     items().filter((item) => !isHiddenGroupId(item.book.groupId)),
   );
 
+  /** 未分组的在架书（兼容缺省、null 与空字符串） */
+  const ungroupedItems = createMemo<ShelfItem[]>(() =>
+    shelfItems().filter((item) => !item.book.groupId),
+  );
+
   /** 各来源在架书数（隐藏分组的书不参与来源计数） */
   const sourceCounts = createMemo<Record<BookSource, number>>(() => {
     const counts: Record<BookSource, number> = { local: 0, webdav: 0, online: 0 };
@@ -423,11 +431,12 @@ export default function BookshelfPage() {
   });
 
   /**
-   * 实际生效的筛选：所选来源已无书 / 所选自定义分组已被删除 / 隐藏分组已无书时
+   * 实际生效的筛选：所选来源已无书 / 所选自定义分组已被删除 / 隐藏或未分组已无书时
    * 回到「全部」，避免筛选指向一个已经不存在的 chip。
    */
   const activeFilter = createMemo<ShelfFilter>(() => {
     const f = filter();
+    if (f.kind === "ungrouped" && ungroupedItems().length === 0) return { kind: "all" };
     if (!showSourceChips() && f.kind === "source") return { kind: "all" };
     if (f.kind === "source" && sourceCounts()[f.source] === 0) return { kind: "all" };
     if (f.kind === "group") {
@@ -443,6 +452,7 @@ export default function BookshelfPage() {
   /** 当前可见书架（按单一筛选条件，来源与分组不可叠加） */
   const visibleItems = createMemo(() => {
     const f = activeFilter();
+    if (f.kind === "ungrouped") return ungroupedItems();
     if (f.kind === "group" && isHiddenGroup(f.groupId)) return hiddenItems();
     if (f.kind === "source")
       return shelfItems().filter((item) => bookSourceOf(item.book) === f.source);
@@ -471,9 +481,10 @@ export default function BookshelfPage() {
     const chips: FilterChip[] = [];
     const groups = groupList();
     const hiddenCount = hiddenItems().length;
-    // 没有来源筛选、自定义分组也没有隐藏书时，筛选条整体不出现：
+    const ungroupedCount = ungroupedItems().length;
+    // 没有来源筛选、自定义分组、隐藏书或未分组书时，筛选条整体不出现：
     // 关闭来源筛选或书架只有本地书时等同「只有本地」，此时「全部」仅随分组一起出现
-    if (!showSourceChips() && groups.length === 0 && hiddenCount === 0) return chips;
+    if (!showSourceChips() && groups.length === 0 && hiddenCount === 0 && ungroupedCount === 0) return chips;
     chips.push({
       key: "all",
       label: t("common.all"),
@@ -499,6 +510,14 @@ export default function BookshelfPage() {
         }
       }
     }
+    if (ungroupedCount > 0) {
+      chips.push({
+        key: "ungrouped",
+        label: t("common.ungrouped"),
+        count: ungroupedCount,
+        value: { kind: "ungrouped" },
+      });
+    }
     // 内置隐藏分组 tag：有隐藏书时出现，排在自定义分组之前
     if (hiddenCount > 0) {
       chips.push({
@@ -519,9 +538,10 @@ export default function BookshelfPage() {
     return chips;
   });
 
-  /** 当前生效筛选对应的 chip key（all / local / webdav / online / group-<id>） */
+  /** 当前生效筛选对应的 chip key（all / ungrouped / local / webdav / online / group-<id>） */
   const activeChipKey = createMemo(() => {
     const f = activeFilter();
+    if (f.kind === "ungrouped") return "ungrouped";
     if (f.kind === "group") return `group-${f.groupId}`;
     if (f.kind === "source") return f.source;
     return "all";
