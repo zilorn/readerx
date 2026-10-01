@@ -647,3 +647,13 @@ export { syncProgress };
 export function setSyncProgress(next: SyncProgress): void {
   updateSyncProgress((current) => !current || next.sequence >= current.sequence ? next : current);
 }
+
+// 阅读时长由 Rust 累加并持久化；保活的设置页直接订阅同一份统计。
+export interface ReadingTimeStats {
+  schemaVersion: number;
+  days: Record<string, number>;
+  books: Record<string, number>;
+}
+export const [readingTimeStats, setReadingTimeStats] = createSignal<ReadingTimeStats>({
+  schemaVersion: 1, days: {}, books: {},
+});

@@ -7,6 +7,13 @@
  * 这里只有容器的标题 / 说明 / 无障碍标签。
  */
 export const settings = {
+  "settings.readingTime.title": "阅读时长",
+  "settings.readingTime.today": "今日",
+  "settings.readingTime.week": "近七天",
+  "settings.readingTime.total": "累计",
+  "settings.readingTime.duration": "{hours} 小时 {minutes} 分",
+  "settings.readingTime.failed": "保存或读取阅读时长失败",
+
   // 区块标题（「书架」区块与「设置」页头分别复用 shell.tab.shelf / shell.tab.settings）
   "settings.section.appearance": "外观",
   "settings.section.reading": "阅读",

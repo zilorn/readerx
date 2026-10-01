@@ -1,3 +1,4 @@
+import { trackReadingTime } from "../lib/readingTime";
 import { Drawer } from "../components/Drawer";
 import {
   For,
@@ -11,7 +12,7 @@ import {
   untrack,
   type JSX,
 } from "solid-js";
-import { useNavigate, useParams } from "@solidjs/router";
+import { useLocation, useNavigate, useParams } from "@solidjs/router";
 import { LoadingScreen } from "../components/LoadingScreen";
 import { ReaderSettingsSheet } from "../components/ReaderSettingsSheet";
 import { ReplaceRulesSheet } from "../components/ReplaceRulesSheet";
@@ -887,6 +888,7 @@ interface ReaderSearchSession {
 export default function ReaderPage() {
   const navigate = useNavigate();
   const params = useParams();
+  const location = useLocation();
   const bookId = () => params.id ?? "";
 
   createEffect(() => {
@@ -1043,6 +1045,9 @@ export default function ReaderPage() {
     if (!list || list.length === 0) return undefined;
     return list[Math.min(chapterIdx(), list.length - 1)];
   });
+
+  trackReadingTime(bookId, () => location.pathname === `/book/${encodeURIComponent(bookId())}`
+    && contentLoad() === "ready" && !!chapter() && chapterHasContent(chapter()!));
 
   const isFirstChapter = () => chapterIdx() <= 0;
   const isLastChapter = () => {

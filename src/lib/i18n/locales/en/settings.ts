@@ -6,6 +6,13 @@
  * Rust; only the container chrome (titles, descriptions, accessibility labels) lives here.
  */
 export const settings = {
+  "settings.readingTime.title": "Reading time",
+  "settings.readingTime.today": "Today",
+  "settings.readingTime.week": "Last 7 days",
+  "settings.readingTime.total": "Total",
+  "settings.readingTime.duration": "{hours}h {minutes}m",
+  "settings.readingTime.failed": "Failed to save or load reading time",
+
   // Section headings (the Bookshelf section reuses shell.tab.shelf, the page title shell.tab.settings)
   "settings.section.appearance": "Appearance",
   "settings.section.reading": "Reading",

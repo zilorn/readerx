@@ -15,6 +15,7 @@ mod single_instance;
 // 对外可见同样是为了让集成测试直接验证桥接（见 tests/source_prompt_bridge.rs）。
 pub mod source_prompt;
 mod storage;
+mod reading_time;
 
 /// 数据根覆盖入口（集成测试专用；见 `storage::pin_data_root`）。
 pub use storage::{pin_data_root, DataRootPin};
@@ -144,6 +145,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::greet,
+            reading_time::readerx_reading_time_get,
+            reading_time::readerx_reading_time_add,
             commands::readerx_state_get,
             commands::readerx_state_set,
             commands::readerx_state_remove,

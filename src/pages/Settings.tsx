@@ -1,3 +1,4 @@
+import { ReadingTimeSummary } from "../components/ReadingTimeSummary";
 import { createEffect, createSignal, onCleanup, Show, type JSX } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 import { openExternal } from "../lib/external";
@@ -175,6 +176,7 @@ export default function SettingsPage() {
             {t("settings.section.reading")}
           </h2>          <div class="divide-y divide-border overflow-hidden rounded-[14px] border border-border bg-surface">
             <ReadingSettingsRows />
+            <ReadingTimeSummary />
           </div>
         </section>
 
