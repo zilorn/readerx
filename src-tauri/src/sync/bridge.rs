@@ -874,6 +874,7 @@ pub fn materialize<R: tauri::Runtime>(
     let snapshots = collect_snapshots(engine, from, &[])?;
     let mut changes = apply_snapshots(app, engine, index, snapshots)?;
     changes.reading_time |= super::reading_time::apply(app, engine)?;
+    apply_online_books(app, engine, index, &mut changes)?;
     apply_staged_content(app, engine, index, &mut changes)?;
     apply_staged_assets(app, engine, index, &mut changes)?;
     Ok(changes)
@@ -892,9 +893,51 @@ pub fn materialize_entities<R: tauri::Runtime>(
     let snapshots = collect_snapshots(engine, usize::MAX, ids)?;
     let mut changes = apply_snapshots(app, engine, index, snapshots)?;
     changes.reading_time |= super::reading_time::apply(app, engine)?;
+    apply_online_books(app, engine, index, &mut changes)?;
     apply_staged_content(app, engine, index, &mut changes)?;
     apply_staged_assets(app, engine, index, &mut changes)?;
     Ok(changes)
+}
+
+/// 在线书无需缓存正文也能按书源阅读；每次落地重试尚未创建的书，兼容旧同步记录
+/// 以及书源、元信息、目录分批到达的情况。书源已在 apply_snapshots 中先行落地。
+fn apply_online_books<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    engine: &SharedEngine,
+    index: &mut BookIndex,
+    changes: &mut AppliedChanges,
+) -> Result<(), SyncError> {
+    let books: Vec<String> = {
+        let guard = lock_engine(engine);
+        guard.entities_of_kind("book", false).into_iter()
+            .filter(|entity| entity.field("book_url")
+                .is_some_and(|value| value.as_str().is_some_and(|url| !url.trim().is_empty())))
+            .map(|entity| entity.id.clone())
+            .collect()
+    };
+    let mut sources = None;
+    for uid in books {
+        if index.resolve(app, &uid).map_err(SyncError::Io)?.is_some() {
+            continue;
+        }
+        let Some(local_id) = create_local_book_from_sync(app, engine, index, &uid, &mut sources)? else {
+            continue;
+        };
+        changes.books = true;
+        changes.chapters.push(local_id);
+        // 新书创建前跳过的进度、书签及书籍规则按引擎当前值补落地。
+        let related: Vec<String> = {
+            let guard = lock_engine(engine);
+            ["reading_progress", "bookmark", "text_replace"].into_iter()
+                .flat_map(|kind| guard.entities_of_kind(kind, true))
+                .filter(|entity| book_ref_of(entity) == uid)
+                .map(|entity| entity.id.clone())
+                .collect()
+        };
+        let snapshots = collect_snapshots(engine, usize::MAX, &related)?;
+        changes.merge(apply_snapshots(app, engine, index, snapshots)?);
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -903,7 +946,8 @@ pub fn materialize_entities<R: tauri::Runtime>(
 
 /// 把引擎暂存区里的正文写进书库。
 ///
-/// 本机还没有这本书时**按引擎里的元信息建一本**：正文同步的意义就是「这台设备也要能读
+/// 本机还没有这本书时**按引擎里的元信息建一本**：在线书也可在正文到达前创建。
+/// 导入书的正文同步让「这台设备也要能读
 /// 这本书」。建书需要几样东西凑齐，缺一不可（缺了就先把正文留在暂存区，等下次）：
 ///
 /// - 书实体（书名 / 格式 / 文件名 / 字节数 / 书源地址）—— 元信息都没同步过来时建不了；
@@ -1098,7 +1142,8 @@ fn clear_staged(
 
 /// 按引擎里的元信息 + 目录 + 暂存正文新建本地书。
 ///
-/// 返回新建的本机书 id；条件不满足（见 [`apply_staged_content`]）时返回 `None`。
+/// 返回新建的本机书 id；在线书只需元信息与匹配书源，导入书还需要章节。
+/// 条件不满足时返回 `None`，等待下一次落地重试。
 fn create_local_book_from_sync<R: tauri::Runtime>(
     app: &AppHandle<R>,
     engine: &SharedEngine,
@@ -1143,11 +1188,12 @@ fn create_local_book_from_sync<R: tauri::Runtime>(
 
     let bodies = lock_engine(engine).staged_bodies(book_uid);
     let chapters = merge_structure_with_bodies(&structure, &bodies);
-    if chapters.is_empty() {
+    if chapters.is_empty() && book_source_id.is_none() {
         return Ok(None);
     }
     let group_id = local_group_id(app, fields.group.as_deref()).map_err(SyncError::Io)?;
     let local_id = new_local_id("local");
+    let online = book_source_id.is_some();
     let book = crate::models::LocalBook {
         id: local_id.clone(),
         title: fields.title.clone(),
@@ -1171,7 +1217,7 @@ fn create_local_book_from_sync<R: tauri::Runtime>(
     };
     book_store::put_book(app, book).map_err(SyncError::Io)?;
     index.insert(&local_id, book_uid);
-    log::info!("同步新建本地书 id={local_id}（对端同步来的正文）");
+    log::info!("同步新建本地书 id={local_id} 在线书={}", online);
     Ok(Some(local_id))
 }
 
@@ -2264,6 +2310,23 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn online_directory_without_bodies_preserves_fetch_urls() {
+        let structure = vec![
+            ChapterRef { cid: "c1".into(), title: "第一章".into(), url: Some("https://example.com/1".into()) },
+            ChapterRef { cid: "c2".into(), title: "第二章".into(), url: Some("https://example.com/2".into()) },
+        ];
+        let chapters = merge_structure_with_bodies(&structure, &[]);
+        assert_eq!(chapters.len(), 2);
+        for (chapter, entry) in chapters.iter().zip(&structure) {
+            assert_eq!(chapter.cid, entry.cid);
+            assert_eq!(chapter.title, entry.title);
+            assert_eq!(chapter.url, entry.url);
+            assert!(chapter.paragraphs.is_empty());
+            assert!(chapter.blocks.is_none());
+        }
+    }
 
     #[test]
     fn progress_values_map_camel_case_keys() {
