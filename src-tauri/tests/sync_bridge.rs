@@ -1933,3 +1933,85 @@ fn sync_service_streams_large_books_and_saves_before_stop_or_disconnect() {
     drop(server);
     service.shutdown();
 }
+
+#[test]
+fn reading_time_migrates_merges_and_survives_replay_restore_and_restart() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let (app, root_a) = setup();
+    seed_local_book(&root_a, "local-time-a", "三体");
+    let state_a = root_a.join("state/readerx.readingTime.json");
+    write_json(&state_a, &json!({"schemaVersion": 1,
+        "days": {"2026-10-01": 15_000}, "books": {"local-time-a": 15_000}}));
+    let a = local_engine(&app, &root_a);
+    let code = lock_engine(&a).pairing_code();
+    let b = peer_engine("reading-time-b", Some(&code));
+    let root_b = root_a.join("peer-reading-time");
+    let _ = std::fs::remove_dir_all(&root_b);
+    seed_local_book(&root_b, "local-time-b", "三体");
+    let state_b = root_b.join("state/readerx.readingTime.json");
+    write_json(&state_b, &json!({"schemaVersion": 1,
+        "days": {"2026-10-01": 10_000}, "books": {"local-time-b": 10_000}}));
+    let mut index_a = BookIndex::default();
+    let mut index_b = BookIndex::default();
+    bridge::reconcile(&app, &a, &mut index_a).unwrap();
+    let migrated_a = read_json(&state_a);
+    assert_eq!(migrated_a["schemaVersion"], 2);
+    let uid = bridge::local_uid(&app, "local-time-a");
+    assert_eq!(migrated_a["books"][&uid], 15_000);
+    // 迁移必须只做一次；读取 / 对账不得再生成来源或同步操作。
+    let ops = lock_engine(&a).ops().len();
+    bridge::reconcile(&app, &a, &mut index_a).unwrap();
+    assert_eq!(lock_engine(&a).ops().len(), ops);
+    assert_eq!(read_json(&state_a), migrated_a);
+    {
+        let _pin = readerx_lib::pin_data_root(Some(root_b.clone()));
+        bridge::reconcile(&app, &b, &mut index_b).unwrap();
+    }
+    sync_once(&a, &b);
+    assert!(bridge::materialize(&app, &a, 0, &mut index_a).unwrap().reading_time);
+    {
+        let _pin = readerx_lib::pin_data_root(Some(root_b.clone()));
+        assert!(bridge::materialize(&app, &b, 0, &mut index_b).unwrap().reading_time);
+    }
+    assert_eq!(read_json(&state_a)["days"]["2026-10-01"], 25_000);
+    assert_eq!(read_json(&state_a)["books"][&uid], 25_000);
+    assert_eq!(read_json(&state_a), read_json(&state_b));
+    assert!(!bridge::materialize(&app, &a, 0, &mut index_a).unwrap().reading_time);
+
+    // 对端离线增加五秒，之后经第三台设备转发仍只计一次。
+    let mut newer_b = read_json(&state_b);
+    let source_b = newer_b["contributions"].as_object().unwrap().iter()
+        .find(|(_, part)| part["days"]["2026-10-01"] == 10_000).unwrap().0.clone();
+    newer_b["contributions"][&source_b]["days"]["2026-10-01"] = json!(15_000);
+    newer_b["contributions"][&source_b]["books"][&uid] = json!(15_000);
+    write_json(&state_b, &newer_b);
+    {
+        let _pin = readerx_lib::pin_data_root(Some(root_b.clone()));
+        bridge::reconcile(&app, &b, &mut index_b).unwrap();
+    }
+    let c = peer_engine("reading-time-c", Some(&code));
+    sync_once(&c, &b);
+    sync_once(&a, &c);
+    bridge::materialize(&app, &a, 0, &mut index_a).unwrap();
+    assert_eq!(read_json(&state_a)["days"]["2026-10-01"], 30_000);
+    assert_eq!(lock_engine(&a).conflicts(None).len(), 0);
+    sync_once(&a, &b);
+    assert!(!bridge::materialize(&app, &a, 0, &mut index_a).unwrap().reading_time);
+
+    // 旧备份恢复后，完整重建也能补回游标以前的记录，重发不会产生新快照。
+    write_json(&state_a, &migrated_a);
+    let cursor = lock_engine(&a).ops().len();
+    assert!(bridge::materialize(&app, &a, cursor, &mut index_a).unwrap().reading_time);
+    assert_eq!(read_json(&state_a)["days"]["2026-10-01"], 30_000);
+    bridge::reconcile(&app, &a, &mut index_a).unwrap();
+    assert_eq!(lock_engine(&a).ops().len(), cursor);
+
+    // 删除书籍不会级联删除历史时长。
+    bridge::publish_book_delete(&app, &a, "local-time-a").unwrap();
+    bridge::materialize(&app, &a, 0, &mut index_a).unwrap();
+    assert_eq!(read_json(&state_a)["days"]["2026-10-01"], 30_000);
+    drop(a);
+    let reopened = local_engine(&app, &root_a);
+    bridge::materialize(&app, &reopened, 0, &mut index_a).unwrap();
+    assert_eq!(read_json(&state_a)["days"]["2026-10-01"], 30_000);
+}

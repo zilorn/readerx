@@ -14,6 +14,7 @@ import { createSignal } from "solid-js";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { reloadBookContent, reloadLocalBooks } from "./books";
 import { reloadBookBookmarks } from "./bookmarks";
+import { loadReadingTime } from "./readingTime";
 import { reloadChapterRules } from "./chapterRules";
 import { refreshBookSources } from "./bookSources";
 import { describeError, reportFailure } from "./errorReport";
@@ -99,6 +100,7 @@ export interface SyncOutcome {
 export interface AppliedChanges {
   books: boolean;
   progress: boolean;
+  readingTime: boolean;
   groups: boolean;
   /** 书源分组有变化 → 重新读回书源分组（必须排在书源前面） */
   sourceGroups: boolean;
@@ -294,6 +296,7 @@ async function applyChanges(changes: AppliedChanges): Promise<void> {
     "同步已更新本地数据",
     `books=${changes.books}`,
     `progress=${changes.progress}`,
+    `readingTime=${changes.readingTime}`,
     `groups=${changes.groups}`,
     `sourceGroups=${changes.sourceGroups}`,
     `sources=${changes.sources}`,
@@ -311,6 +314,7 @@ async function applyChanges(changes: AppliedChanges): Promise<void> {
     // 目录 / 正文变了：丢掉这几本的物化缓存，下次打开阅读页重新读回
     if (changes.chapters.length > 0) await reloadBookContent(changes.chapters);
     if (changes.progress) await reloadReadingProgress();
+    if (changes.readingTime) await loadReadingTime();
     if (changes.bookmarks.length > 0) {
       for (const bookId of changes.bookmarks) await reloadBookBookmarks(bookId);
     }

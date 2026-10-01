@@ -307,6 +307,15 @@ impl SchemaRegistry {
                 .field("updated_at", MergeKind::LwwSilent),
         );
 
+        // 阅读时长快照不可变，身份包含来源、统计项与累计值；无删除级联。
+        registry.register(
+            Schema::new("reading_time")
+                .field("source", MergeKind::Frozen)
+                .field("metric", MergeKind::Frozen)
+                .field("key", MergeKind::Frozen)
+                .field("milliseconds", MergeKind::Frozen),
+        );
+
         // 书签：一条书签一旦存在就是「用户标记」，正文位置不可变；
         // 备注可以改（并发改备注走 LWW，败方进冲突队列）
         registry.register(
@@ -417,6 +426,7 @@ mod tests {
         for kind in [
             "book",
             "reading_progress",
+            "reading_time",
             "bookmark",
             "group",
             "source_group",

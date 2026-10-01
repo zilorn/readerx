@@ -9,12 +9,13 @@ export function readingDay(date = new Date()): string {
 }
 
 let writes: Promise<void> = Promise.resolve();
-export function loadReadingTime(): void {
+export function loadReadingTime(): Promise<void> {
   writes = writes.then(async () => {
     if (isTauri()) {
       setReadingTimeStats(await invoke<ReadingTimeStats>("readerx_reading_time_get"));
     }
   }).catch((err: unknown) => reportFailure(t("settings.readingTime.failed"), err));
+  return writes;
 }
 
 function record(bookId: string, day: string, milliseconds: number): void {

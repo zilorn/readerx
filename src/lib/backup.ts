@@ -15,6 +15,7 @@ import { reloadLocalBooks } from "./books";
 import { refreshBookSources } from "./bookSources";
 import { reloadChapterRules } from "./chapterRules";
 import { reloadGroups } from "./groups";
+import { loadReadingTime } from "./readingTime";
 import { reloadReadingProgress } from "./store";
 import { reloadSourceGroups } from "./sourceGroups";
 import { reloadTextReplacements } from "./textReplacements";
@@ -151,6 +152,7 @@ async function reloadAfterImport(): Promise<void> {
   await reloadSourceGroups();
   await reloadLocalBooks();
   await reloadReadingProgress();
+  await loadReadingTime();
   await reloadTextReplacements();
   await reloadChapterRules();
   await refreshBookSources();

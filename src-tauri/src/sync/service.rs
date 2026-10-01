@@ -365,6 +365,10 @@ impl<R: tauri::Runtime> SyncService<R> {
         if let Err(error) = self.reconcile_local() {
             log::warn!("导入后同步对账失败（下次启动会继续）：{error}");
         }
+        // 恢复旧备份后补回引擎中较新的累计值，再允许继续计时。
+        if let Err(error) = self.materialize_soon() {
+            log::warn!("导入后同步落地失败（下次启动会继续）：{error}");
+        }
     }
 
     // ------------------------------------------------------------ 开关与设置
@@ -1037,6 +1041,23 @@ impl<R: tauri::Runtime> SyncService<R> {
     // ------------------------------------------------------------ 本地写入钩子
     //
     // 未启用同步时全部是空操作（引擎都没建），因此本地写路径可以无条件调用。
+
+    /// 从引擎补回累计时长（包括旧备份恢复之前已经同步的记录）。
+    pub(crate) fn refresh_reading_time(&self) -> Result<bool, String> {
+        let Some(engine) = self.engine() else {
+            return Ok(false);
+        };
+        super::reading_time::apply(&self.app, &engine).map_err(|error| error.to_string())
+    }
+
+    pub fn on_reading_time_changed(&self) {
+        let Some(engine) = self.engine() else {
+            return;
+        };
+        if let Err(error) = super::reading_time::publish(&self.app, &engine) {
+            log::warn!("同步发布阅读时长失败：{error}");
+        }
+    }
 
     /// 书籍元信息变了（改名 / 换分组 / 改标签；只动元信息，不碰目录）。
     pub fn on_book_changed(&self, book_id: &str, mode: PublishMode) {

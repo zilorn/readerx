@@ -28,6 +28,7 @@ pub mod identity;
 mod lan;
 mod service;
 mod progress;
+mod reading_time;
 mod settings;
 
 // 命令层公开一层模块路径：`generate_handler!` 要在同一路径下找到

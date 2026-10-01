@@ -68,6 +68,8 @@ pub struct AppliedChanges {
     pub books: bool,
     /// 阅读进度有变化 → 重新读回进度
     pub progress: bool,
+    /// 阅读时长变化 → 重载统计
+    pub reading_time: bool,
     /// 分组有变化 → 重新读回分组
     pub groups: bool,
     /// 书源分组有变化 → 重新读回书源分组
@@ -90,6 +92,7 @@ impl AppliedChanges {
     fn merge(&mut self, next: AppliedChanges) {
         self.books |= next.books;
         self.progress |= next.progress;
+        self.reading_time |= next.reading_time;
         self.groups |= next.groups;
         self.source_groups |= next.source_groups;
         self.sources |= next.sources;
@@ -103,6 +106,7 @@ impl AppliedChanges {
     pub fn is_empty(&self) -> bool {
         !self.books
             && !self.progress
+            && !self.reading_time
             && !self.groups
             && !self.source_groups
             && !self.sources
@@ -837,6 +841,7 @@ pub fn reconcile<R: tauri::Runtime>(
             publish_source_with(engine, &facts, source)?;
         }
     }
+    super::reading_time::publish(app, engine)?;
     lock_engine(engine).flush()?;
     log::info!("本地数据已完成同步对账 书籍={}", index.len());
     Ok(())
@@ -858,6 +863,7 @@ pub fn materialize<R: tauri::Runtime>(
 ) -> Result<AppliedChanges, SyncError> {
     let snapshots = collect_snapshots(engine, from, &[])?;
     let mut changes = apply_snapshots(app, engine, index, snapshots)?;
+    changes.reading_time |= super::reading_time::apply(app, engine)?;
     apply_staged_content(app, engine, index, &mut changes)?;
     apply_staged_assets(app, engine, index, &mut changes)?;
     Ok(changes)
@@ -875,6 +881,7 @@ pub fn materialize_entities<R: tauri::Runtime>(
 ) -> Result<AppliedChanges, SyncError> {
     let snapshots = collect_snapshots(engine, usize::MAX, ids)?;
     let mut changes = apply_snapshots(app, engine, index, snapshots)?;
+    changes.reading_time |= super::reading_time::apply(app, engine)?;
     apply_staged_content(app, engine, index, &mut changes)?;
     apply_staged_assets(app, engine, index, &mut changes)?;
     Ok(changes)
