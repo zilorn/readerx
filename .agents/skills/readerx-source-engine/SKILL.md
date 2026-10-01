@@ -5,7 +5,7 @@ description: 修改 ReaderX 书源引擎、Boa 宿主 API、浏览器认证后�
 
 # ReaderX 书源引擎开发
 
-先读取 [AGENTS.md](../../../AGENTS.md) 的书源、储存、平台与日志章节。链接以本技能目录为起点；Rust 命令在 src-tauri 执行。
+按以下边界定位实现与验证范围。链接以本技能目录为起点；Rust 命令在 src-tauri 执行。
 
 ## 定位与参考
 
