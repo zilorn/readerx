@@ -445,9 +445,23 @@ fn content_pass(
                 }
                 let sent: HashSet<String> = items.iter().map(|item| item.cid.clone()).collect();
                 wanted.retain(|cid| !sent.contains(cid));
-                match transport.request(&Request::PushChapters { book: book.clone(), items })? {
+                match transport.request(&Request::PushChapters { book: book.clone(), items: items.clone() })? {
                     Response::ContentAck { stored } => {
-                        report.content_pushed += stored;
+                        // stored 只计新写入；同时同步或重试时，重复数据也已完整到达。
+                        let confirmed = if stored == items.len() {
+                            stored
+                        } else {
+                            match transport.request(&Request::ChapterDigests { book: book.clone() })? {
+                                Response::ChapterDigests { known: true, chapters, .. } => items.iter().filter(|item| {
+                                    chapters.iter().any(|digest| digest.cid == item.cid && digest.hash == item.fingerprint())
+                                }).count(),
+                                _ => return Err(SyncError::Protocol(format!("正文推送后无法复核 book={book}"))),
+                            }
+                        };
+                        if confirmed != items.len() {
+                            return Err(SyncError::Protocol(format!("正文推送未完整确认 book={book} sent={} confirmed={confirmed}", items.len())));
+                        }
+                        report.content_pushed += confirmed;
                         report.bytes += size;
                         notify_progress(engine, report, progress, "content", Some(&book), book_index + 1, book_count, report.content_pushed + report.content_pulled - before, Some(planned))?;
                     }
@@ -722,7 +736,26 @@ fn asset_pass(
                     )))
                 }
             };
-            report.assets_pushed += stored;
+            let confirmed = if stored == pushed.0.len() {
+                stored
+            } else {
+                match transport.request(&Request::AssetDigests { book: book.clone() })? {
+                    Response::AssetDigests { known: true, assets, .. } => pushed.0.iter().filter(|item| {
+                        assets.iter().any(|digest| digest.name == item.name && digest.hash == crate::content::asset_digest(&item.bytes))
+                    }).count(),
+                    _ => return Err(SyncError::Protocol(format!("资源推送后无法复核 book={book}"))),
+                }
+            };
+            if confirmed != pushed.0.len() {
+                return Err(SyncError::Protocol(format!("资源推送未完整确认 book={book} sent={} confirmed={confirmed}", pushed.0.len())));
+            }
+            if push_batch.is_some_and(|batch| batch.len() != pushed.0.len()) {
+                return Err(SyncError::Protocol(format!("本机资源无法读取或超过单帧预算 book={book} limit={ASSET_BATCH_BYTES}")));
+            }
+            if items.len() != requested.len() || items.iter().any(|item| !requested.contains(&item.name)) {
+                return Err(SyncError::Protocol(format!("对端资源未完整返回或超过单帧预算 book={book} requested={} received={} limit={ASSET_BATCH_BYTES}", requested.len(), items.len())));
+            }
+            report.assets_pushed += confirmed;
             report.bytes += pushed.1;
 
             if !items.is_empty() {

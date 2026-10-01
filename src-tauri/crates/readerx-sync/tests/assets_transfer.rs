@@ -386,3 +386,74 @@ fn illustrations_of_unique_chapters_move_in_both_directions() {
     let again = sync_once(&b, &a);
     assert_eq!((again.assets_pushed, again.assets_pulled), (0, 0));
 }
+
+/// 清单返回后，模拟另一条连接已经暂存相同数据。
+struct DuplicatePush {
+    inner: LoopbackTransport,
+    server: SharedEngine,
+    reject: bool,
+}
+impl readerx_sync::net::Transport for DuplicatePush {
+    fn peer(&self) -> readerx_sync::net::PeerInfo {
+        readerx_sync::net::Transport::peer(&self.inner)
+    }
+    fn request(&mut self, request: &readerx_sync::proto::Request) -> readerx_sync::Result<readerx_sync::proto::Response> {
+        if let readerx_sync::proto::Request::ExchangeAssets { book, push: items, .. } = request {
+            if self.reject {
+                return Ok(readerx_sync::proto::Response::Assets { book: book.clone(), stored: 0, items: vec![] });
+            }
+            readerx_sync::net::lock_engine(&self.server).stage_assets(book, items)?;
+        }
+        readerx_sync::net::Transport::request(&mut self.inner, request)
+    }
+}
+#[test]
+fn duplicate_push_is_confirmed_but_missing_data_still_fails() {
+    for reject in [false, true] {
+        let source = Arc::new(MemContent::default());
+        let a = engine(&format!("ack-a-{reject}"), source.clone());
+        let b = engine(&format!("ack-b-{reject}"), Arc::new(MemContent::default()));
+        source.put("b-race", Asset::new(COVER_ASSET, AssetKind::Cover, "image/png", "png", vec![1, 2, 3]));
+        readerx_sync::net::lock_engine(&a).create_entity("book", Some("b-race".into()), [("title", serde_json::json!("竞态回归"))]).unwrap();
+        let mut transport = DuplicatePush { inner: LoopbackTransport::new(b.clone()), server: b.clone(), reject };
+        let result = readerx_sync::sync_with(&mut readerx_sync::net::lock_engine(&a), &mut transport);
+        if reject {
+            assert!(result.unwrap_err().to_string().contains("未完整确认"));
+        } else {
+            let report = result.unwrap();
+            assert_eq!(report.assets_pushed, 1);
+            assert!(!report.more_content && !report.more_assets);
+        }
+        drop(transport);
+        drop(a);
+        drop(b);
+        for side in ["a", "b"] {
+            let dir = std::env::temp_dir().join(format!("readerx-sync-assets-ack-{side}-{reject}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
+#[test]
+fn oversized_cover_reports_the_book_and_budget_in_both_directions() {
+    for push in [false, true] {
+        let a_source = Arc::new(MemContent::default());
+        let b_source = Arc::new(MemContent::default());
+        let a = engine(&format!("oversize-a-{push}"), a_source.clone());
+        let b = engine(&format!("oversize-b-{push}"), b_source.clone());
+        create_book(&a, "b-large");
+        let source = if push { &a_source } else { &b_source };
+        source.put("b-large", Asset::new(COVER_ASSET, AssetKind::Cover, "image/png", "png",
+            vec![1; readerx_sync::proto::ASSET_BATCH_BYTES + 1]));
+        let mut transport = LoopbackTransport::new(b.clone());
+        let error = readerx_sync::sync_with(&mut readerx_sync::net::lock_engine(&a), &mut transport).unwrap_err().to_string();
+        assert!(error.contains("b-large") && error.contains("单帧预算"), "{error}");
+        drop(transport);
+        drop(a);
+        drop(b);
+        for side in ["a", "b"] {
+            let dir = std::env::temp_dir().join(format!("readerx-sync-assets-oversize-{side}-{push}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}

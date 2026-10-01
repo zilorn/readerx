@@ -219,3 +219,50 @@ fn large_content_difference_drains_in_one_session() {
     let again = sync_once(&a, &b);
     assert_eq!(again.content_pushed + again.content_pulled, 0);
 }
+
+/// 清单返回后，模拟另一条连接已经暂存相同数据。
+struct DuplicatePush {
+    inner: LoopbackTransport,
+    server: SharedEngine,
+    reject: bool,
+}
+impl readerx_sync::net::Transport for DuplicatePush {
+    fn peer(&self) -> readerx_sync::net::PeerInfo {
+        readerx_sync::net::Transport::peer(&self.inner)
+    }
+    fn request(&mut self, request: &readerx_sync::proto::Request) -> readerx_sync::Result<readerx_sync::proto::Response> {
+        if let readerx_sync::proto::Request::PushChapters { book, items } = request {
+            if self.reject {
+                return Ok(readerx_sync::proto::Response::ContentAck { stored: 0 });
+            }
+            readerx_sync::net::lock_engine(&self.server).stage_content(book, items)?;
+        }
+        readerx_sync::net::Transport::request(&mut self.inner, request)
+    }
+}
+#[test]
+fn duplicate_push_is_confirmed_but_missing_data_still_fails() {
+    for reject in [false, true] {
+        let source = Arc::new(MemContent::default());
+        let a = engine(&format!("ack-a-{reject}"), source.clone());
+        let b = engine(&format!("ack-b-{reject}"), Arc::new(MemContent::default()));
+        source.put("b-race", "c1", "重复正文");
+        readerx_sync::net::lock_engine(&a).create_entity("book", Some("b-race".into()), [("title", serde_json::json!("竞态回归"))]).unwrap();
+        let mut transport = DuplicatePush { inner: LoopbackTransport::new(b.clone()), server: b.clone(), reject };
+        let result = readerx_sync::sync_with(&mut readerx_sync::net::lock_engine(&a), &mut transport);
+        if reject {
+            assert!(result.unwrap_err().to_string().contains("未完整确认"));
+        } else {
+            let report = result.unwrap();
+            assert_eq!(report.content_pushed, 1);
+            assert!(!report.more_content && !report.more_assets);
+        }
+        drop(transport);
+        drop(a);
+        drop(b);
+        for side in ["a", "b"] {
+            let dir = std::env::temp_dir().join(format!("readerx-sync-content-ack-{side}-{reject}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
