@@ -1,4 +1,4 @@
-# ReaderX Android 自动发版
+# ReaderX 三平台自动发版
 #
 # 触发：推送形如 v* 的 tag 时触发（按惯例 tag 打在 main 分支的提交上），
 #       例如 `git tag v1.2.3 && git push origin v1.2.3`。
@@ -22,17 +22,19 @@
 #     ANDROID_KEY_ALIAS          # 别名（示例 readerx）
 #     ANDROID_KEY_PASSWORD       # key 口令
 #
+# Windows 签名配置见 docs/windows-signing.md（正式发布强制签名）。
+#
 # 产物：**一个 tag 出三个平台**，汇总到同一个 GitHub Release：
 #   - Android：按 ABI 拆分的**签名** APK（arm64-v8a / armeabi-v7a / x86 / x86_64，不做 universal 融合包）；
 #   - Linux x86_64：AppImage / deb / rpm（无代码签名证书，未签名）；
-#   - Windows x86_64 / aarch64：各出一个 NSIS 安装包（无代码签名证书，未签名）
+#   - Windows x86_64 / aarch64：各出一个已签名 NSIS 安装包
 #     —— 与 Android 按 ABI 拆分同一个理由，ARM 机器不该装到靠模拟运行的 x64 包。
 #   产物文件名统一成 `readerx-<版本>-<平台>-<架构>…`（如 readerx-1.2.3-windows-aarch64-setup.exe），
 #   用户在下载列表里就能分清平台与架构；口径集中在 scripts/collect-artifacts.mjs，
 #   构建 job 收集时改名，发布 job 只按文件名收。
-#   Release body 取 CHANGELOG.md 中与版本号对应的区块（缺失时回退到 [Unreleased]），并附一段未签名说明。
+#   Release body 取 CHANGELOG.md 中与版本号对应的区块（缺失时回退到 [Unreleased]），并附安装与签名说明。
 
-name: Release Android
+name: Release
 
 on:
   push:
@@ -204,7 +206,36 @@ jobs:
         with:
           rust-targets: ${{ matrix.target }}
 
+      - name: Configure Windows signing
+        if: runner.os == 'Windows'
+        id: signing
+        uses: ./.github/actions/windows-signing
+        with:
+          certificate-base64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          certificate-password: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          timestamp-url: ${{ vars.WINDOWS_TIMESTAMP_URL || 'http://timestamp.digicert.com' }}
+
+      - name: Build signed Windows bundles
+        if: runner.os == 'Windows'
+        run: pnpm tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --config "${{ steps.signing.outputs.config }}"
+        timeout-minutes: 70
+
+      - name: Verify Windows signatures
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/verify-windows-signing.ps1 -Target '${{ matrix.target }}'
+
+      - name: Clean Windows signing material
+        if: always() && (runner.os == 'Windows')
+        shell: pwsh
+        run: |
+          if ($env:READERX_SIGNING_THUMBPRINT) {
+            Remove-Item "Cert:\CurrentUser\My\$env:READERX_SIGNING_THUMBPRINT" -Force -ErrorAction SilentlyContinue
+          }
+          Remove-Item "${{ runner.temp }}/readerx-signing.json" -Force -ErrorAction SilentlyContinue
+
       - name: Build desktop bundles
+        if: runner.os != 'Windows'
         run: pnpm tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
         timeout-minutes: 70
 
