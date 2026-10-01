@@ -1,3 +1,4 @@
+import { syncProgress } from "../lib/store";
 import { createEffect, createSignal, For, onMount, Show } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 import { PageHeader } from "../components/PageHeader";
@@ -33,6 +34,7 @@ import {
   syncAppliedTick,
   syncErrorText,
   syncNow,
+  stopSync,
   syncPairingCode,
   syncStatus,
   syncWithAddr,
@@ -218,7 +220,7 @@ export default function SyncPage() {
     const outcome = await syncNow();
     setBusy(false);
     await Promise.all([reload(), reloadAddrs()]);
-    if (!outcome) return;
+    if (!outcome || syncProgress()?.phase === "stopped") return;
     if (outcome.synced.length > 0) {
       showToast(t("sync.result.ok", { names: outcome.synced.join("、"), count: outcome.synced.length }));
     } else if (outcome.failed.length > 0) {
@@ -231,7 +233,7 @@ export default function SyncPage() {
     const outcome = await syncWithAddr(addr);
     setBusy(false);
     await reload();
-    if (outcome && outcome.synced.length > 0) {
+    if (outcome && syncProgress()?.phase !== "stopped" && outcome.synced.length > 0) {
       // 刚同步成功的设备既不再是陌生设备，也不再是「已删除」（主动同步 = 重新接受）
       setFound(
         (list) =>
@@ -361,14 +363,20 @@ export default function SyncPage() {
                   )}
                 </Show>
               </span>
-              <button
+              <Show when={status().syncing} fallback={<button
                 class="inline-flex h-[34px] flex-none items-center gap-1.5 rounded-[9px] bg-accent px-3 text-[13px] font-semibold text-on-accent transition-[scale,opacity] duration-100 active:scale-[0.97] active:opacity-90 disabled:opacity-50"
                 disabled={busy() || status().syncing}
                 onClick={() => void onSyncNow()}
               >
                 <RefreshIcon size={15} />
                 {t("sync.action.syncNow")}
-              </button>
+              </button>}>
+                <button class="h-[34px] flex-none rounded-[9px] bg-danger px-3 text-[13px] font-semibold text-on-accent disabled:opacity-50"
+                  disabled={syncProgress()?.phase === "stopping"}
+                  onClick={() => void stopSync()}>
+                  {t("sync.action.stop")}
+                </button>
+              </Show>
             </div>
 
             <SyncProgressPanel />

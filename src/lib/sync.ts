@@ -388,6 +388,15 @@ export async function joinSyncGroup(code: string): Promise<boolean> {
 }
 
 /** 立即同步（先试已知设备，没有就扫局域网）；返回 null 表示失败 */
+export async function stopSync(): Promise<void> {
+  if (!isTauri()) return;
+  try {
+    await invoke("readerx_sync_stop");
+  } catch (error) {
+    reportFailure(t("sync.now.failed"), error);
+  }
+}
+
 export async function syncNow(): Promise<SyncOutcome | null> {
   if (!isTauri()) return null;
   try {

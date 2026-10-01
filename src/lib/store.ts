@@ -625,7 +625,7 @@ export function setShelfSelecting(on: boolean): void {
 
 /** 同步中的实时进度，只存在内存中，刷新后由 Rust 状态恢复。 */
 export interface SyncProgress {
-  phase: "connecting" | "metadata" | "content" | "assets" | "applying" | "continuing" | "done" | "failed";
+  phase: "connecting" | "metadata" | "content" | "assets" | "applying" | "stopping" | "stopped" | "done" | "failed";
   peerName: string;
   bookTitle: string | null;
   bookIndex: number;

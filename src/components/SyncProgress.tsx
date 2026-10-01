@@ -9,7 +9,8 @@ const PHASE_KEYS: Record<string, MessageKey> = {
   content: "sync.progress.content",
   assets: "sync.progress.assets",
   applying: "sync.progress.applying",
-  continuing: "sync.progress.continuing",
+  stopping: "sync.progress.stopping",
+  stopped: "sync.progress.stopped",
   done: "sync.progress.done",
   failed: "sync.progress.failed",
 };
@@ -26,7 +27,6 @@ export function SyncProgressPanel() {
           <div class="mx-4 mb-3 flex flex-col gap-2 rounded-xl bg-surface-2 p-3" aria-live="polite">
             <div class="flex items-center justify-between gap-2 text-[12px]">
               <span class="font-medium">{t(PHASE_KEYS[progress().phase] ?? "sync.status.syncing")}</span>
-              <span class="shrink-0 text-text-3">{t("sync.progress.batch", { count: progress().batch })}</span>
             </div>
             <Show when={progress().peerName}>
               <div class="truncate text-[11.5px] text-text-2">{progress().peerName}</div>
@@ -37,7 +37,7 @@ export function SyncProgressPanel() {
                 <span class="shrink-0 tabular-nums">{progress().bookIndex} / {progress().bookCount}</span>
               </div>
             </Show>
-            <Show when={progress().phase !== "failed"}>
+            <Show when={progress().phase !== "failed" && progress().phase !== "stopped"}>
               <Show when={progress().phase === "done" || determinate()} fallback={
                 <progress class="h-2 w-full overflow-hidden rounded-full accent-accent" aria-label={t("sync.progress.bar")} />
               }>
