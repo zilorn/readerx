@@ -63,6 +63,7 @@ fn is_usable_ip(ip: std::net::IpAddr) -> bool {
 /// 各系统的取值都是 `0x1`（Linux / macOS / \*BSD / Android 的 `<net/if.h>`），
 /// 这里写常量而不是 `libc::IFF_UP`：该常量不是所有目标平台都有导出，
 /// 而过滤「没插网线的 Docker 网桥」这类地址只需要这一个位。
+#[cfg(all(unix, not(target_os = "android")))]
 const IFF_UP: u32 = 0x1;
 
 /// 把一条 `ip/前缀` 记录收进结果（`ip addr` 输出解析用）

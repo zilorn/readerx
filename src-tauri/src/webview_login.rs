@@ -19,8 +19,9 @@ use tauri_plugin_webview_login::{LoginOutcome as PluginOutcome, PlatformLoginReq
 /// 插件后端（Android 浮层 / 桌面窗口，由插件按平台自行选择）。
 ///
 /// 桌面端登录窗口由 Core 之外的 GUI 线程创建，需要 `AppHandle`；Android 浮层不需要，
-/// 但一起带着没有代价（字段只在桌面端编译）。
+/// 字段与初始化仅在桌面端编译。
 struct PluginProvider {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     app: tauri::AppHandle,
 }
 
@@ -161,7 +162,12 @@ const VIEW_TIMEOUT_SECS: u64 = 900;
 
 /// app setup 时调用。iOS 等不支持平台下插件不可用，`supported()` 为 false，不影响其它功能。
 pub fn install(app: tauri::AppHandle) {
-    auth::install_provider(Arc::new(PluginProvider { app }));
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    let _ = app;
+    auth::install_provider(Arc::new(PluginProvider {
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        app,
+    }));
 }
 
 /// 当前平台是否支持网页登录（Android 浮层 / 桌面窗口 + 插件已初始化）。
