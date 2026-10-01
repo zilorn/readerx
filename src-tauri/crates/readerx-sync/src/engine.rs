@@ -1832,7 +1832,10 @@ fn read_staged_asset(path: &Path) -> std::io::Result<Asset> {
 /// 原子写（临时文件 + rename）：半截文件不会被当成一份正文读出来。
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, bytes)?;
+    use std::io::Write;
+    let mut file = std::fs::File::create(&tmp)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
     match std::fs::rename(&tmp, path) {
         Ok(()) => Ok(()),
         Err(error) => {

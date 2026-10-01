@@ -360,6 +360,7 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T, what: &str) -> Result
         let mut writer = BufWriter::new(file);
         serde_json::to_writer(&mut writer, value).map_err(|e| format!("序列化{what}失败: {e}"))?;
         std::io::Write::flush(&mut writer).map_err(|e| format!("写入{what}失败: {e}"))?;
+        writer.get_ref().sync_all().map_err(|e| format!("写入{what}失败: {e}"))?;
     }
     fs::rename(&tmp, path).map_err(|e| {
         let _ = fs::remove_file(&tmp);

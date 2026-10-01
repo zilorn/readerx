@@ -1787,7 +1787,7 @@ fn startup_migrates_legacy_hidden_membership_once() {
 
 /// 点一次同步即连续搬完超过单会话预算的书，并逐批发送真实进度。
 #[test]
-fn sync_service_continues_large_books_and_reports_live_progress() {
+fn sync_service_streams_large_books_and_saves_before_stop_or_disconnect() {
     use tauri::Listener;
     let _serial = SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let (handle, app_data) = setup();
@@ -1806,8 +1806,22 @@ fn sync_service_continues_large_books_and_reports_live_progress() {
         file_name: "三体.epub", size: 1024, ..Default::default()
     });
     peer.publish_book(&uid);
+    {
+        let mut guard = lock_engine(&peer.engine);
+        guard.create_entity("reading_progress", Some(identity::progress_uid(&uid)), [
+            ("book_id", json!(uid)), ("chapter", json!(10)), ("chapter_cid", json!("c0010")),
+            ("char_offset", json!(2)), ("updated_at", json!(1_700_000_000_000u64))
+        ]).unwrap();
+        guard.create_entity("bookmark", Some("stream-bookmark".into()), [
+            ("book_id", json!(uid)), ("chapter_cid", json!("c0010")), ("text", json!("正文")),
+            ("created_at", json!(1_700_000_000_000u64))
+        ]).unwrap();
+    }
+    let connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = connections.clone();
     let options = ServerOptions::from_engine(&lock_engine(&peer.engine)).unwrap()
-        .with_bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)));
+        .with_bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+        .with_peer_seen(Arc::new(move |_| { counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst); }));
     let server = PeerServer::start(peer.engine.clone(), options).unwrap();
     let events = Arc::new(Mutex::new(Vec::<Value>::new()));
     let captured = events.clone();
@@ -1816,21 +1830,94 @@ fn sync_service_continues_large_books_and_reports_live_progress() {
     });
     let outcome = service.sync_with_addr_now(&server.local_addr().to_string()).unwrap();
     assert_eq!(outcome.content_pulled, 450);
+    assert_eq!(connections.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert_eq!(outcome.assets_pulled, 1);
     assert!(outcome.bytes > 0);
     let progress = serde_json::to_value(service.status()).unwrap()["progress"].clone();
     assert_eq!(progress["phase"], "done");
-    assert_eq!(progress["batch"], 3);
+    assert_eq!(progress["batch"], 1);
     assert_eq!(progress["contentPulled"], 450);
     let ids = list_files(&app_data.join("books"));
     assert_eq!(ids.len(), 1);
     assert_eq!(read_json(&app_data.join("books").join(&ids[0]).join("content.json"))["chapters"].as_array().unwrap().len(), 450);
+    assert_eq!(read_json(&app_data.join("state/readerx.shelf.json"))[&ids[0]]["chapterCid"], "c0010");
+    assert_eq!(read_json(&app_data.join("books").join(&ids[0]).join("bookmarks.json"))["bookmarks"].as_array().unwrap().len(), 1);
     let events = events.lock().unwrap();
-    assert!(events.iter().any(|event| event["phase"] == "continuing"));
+    assert!(!events.iter().any(|event| event["phase"] == "continuing"));
     assert!(events.iter().any(|event| event["phase"] == "content" && event["completed"].as_u64().unwrap() > 0));
     assert!(events.windows(2).all(|pair| pair[0]["sequence"].as_u64() < pair[1]["sequence"].as_u64()));
     assert!(events.windows(2).all(|pair| pair[0]["contentPulled"].as_u64() <= pair[1]["contentPulled"].as_u64()));
     drop(events);
+    // 接收中实时写盘，点击停止时保留已收到的数据，再次同步仅补齐剩余部分。
+    let path = peer.data_root.join("books/peer-local/content.json");
+    let mut content = read_json(&path);
+    for index in 450..900 {
+        content["chapters"].as_array_mut().unwrap().push(json!({
+            "cid": format!("c{index:04}"), "title": format!("第{index}章"), "paragraphs": ["正文"]
+        }));
+    }
+    write_json(&path, &content);
+    let saved_at_stop = Arc::new(Mutex::new(0usize));
+    let saved = saved_at_stop.clone();
+    let weak = Arc::downgrade(&service);
+    let local_path = app_data.join("books").join(&ids[0]).join("content.json");
+    let observed_path = local_path.clone();
+    let stop_listener = handle.listen("readerx-sync-progress", move |event| {
+        let value: Value = serde_json::from_str(event.payload()).unwrap();
+        if value["phase"] == "content" && value["contentPulled"].as_u64().unwrap_or(0) >= 10 {
+            *saved.lock().unwrap() = read_json(&observed_path)["chapters"].as_array().unwrap().len();
+            weak.upgrade().unwrap().stop_sync();
+        }
+    });
+    let outcome = service.sync_with_addr_now(&server.local_addr().to_string()).unwrap();
+    handle.unlisten(stop_listener);
+    assert!(outcome.synced.is_empty());
+    assert!(outcome.failed.is_empty());
+    assert_eq!(*saved_at_stop.lock().unwrap(), 550);
+    let stopped_count = read_json(&local_path)["chapters"].as_array().unwrap().len();
+    assert!(stopped_count >= 550 && stopped_count < 900);
+    let stopped = serde_json::to_value(service.status()).unwrap();
+    assert_eq!(stopped["progress"]["phase"], "stopped");
+    assert!(!service.status().syncing);
+    assert!(service.status().last_error.is_none());
+    let resumed = service.sync_with_addr_now(&server.local_addr().to_string()).unwrap();
+    assert_eq!(resumed.content_pulled, 900 - stopped_count);
+    assert_eq!(read_json(&local_path)["chapters"].as_array().unwrap().len(), 900);
+
+    // 对端在传输中关闭连接：完整收到的章已经落库，重连只传余量。
+    for index in 900..1500 {
+        content["chapters"].as_array_mut().unwrap().push(json!({
+            "cid": format!("c{index:04}"), "title": format!("第{index}章"), "paragraphs": ["正文"]
+        }));
+    }
+    write_json(&path, &content);
+    let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let failing_options = ServerOptions::from_engine(&lock_engine(&peer.engine)).unwrap()
+        .with_bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+        .with_checkpoint(Arc::new(move || {
+            if requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 4 {
+                Err(readerx_sync::SyncError::Transport("模拟对端断线".into()))
+            } else { Ok(()) }
+        }));
+    let failing_server = PeerServer::start(peer.engine.clone(), failing_options).unwrap();
+    assert!(service.sync_with_addr_now(&failing_server.local_addr().to_string()).is_err());
+    let received = read_json(&local_path)["chapters"].as_array().unwrap().len();
+    assert!(received > 900 && received < 1500);
+    drop(failing_server);
+    let resumed = service.sync_with_addr_now(&server.local_addr().to_string()).unwrap();
+    assert_eq!(resumed.content_pulled, 1500 - received);
+
+    // 落库失败不能推进操作游标；移除写盘障碍后无需重新接收即可恢复。
+    let cursor = read_json(&app_data.join("sync/settings.json"))["materializedOps"].clone();
+    let obstacle = app_data.join("books").join(&ids[0]).join("bookdetail.json.tmp");
+    std::fs::create_dir(&obstacle).unwrap();
+    lock_engine(&peer.engine).set_field(&uid, "title", json!("同步后的书名")).unwrap();
+    assert!(service.sync_with_addr_now(&server.local_addr().to_string()).is_err());
+    assert_eq!(read_json(&app_data.join("sync/settings.json"))["materializedOps"], cursor);
+    std::fs::remove_dir(&obstacle).unwrap();
+    service.sync_with_addr_now(&server.local_addr().to_string()).unwrap();
+    assert_eq!(read_json(&app_data.join("books").join(&ids[0]).join("bookdetail.json"))["title"], "同步后的书名");
+
     // 单章超过帧上限时不能假报全部完成，也不能无限空转。
     let path = peer.data_root.join("books/peer-local/content.json");
     let mut content = read_json(&path);

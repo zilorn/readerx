@@ -99,7 +99,7 @@ pub fn handle_request(
             }
         }
         Request::PullChapters { book, cids } => {
-            // 按帧预算装箱：装不下的章节这次不给，对端下次同步会重新算差集
+            // 按帧预算装箱：装不下的章节由对端在本连接后续请求中继续取回
             let bodies = engine.content_bodies(book, cids);
             let mut items = Vec::new();
             let mut bytes = 0usize;
@@ -107,7 +107,7 @@ pub fn handle_request(
                 let size = body.body_bytes() as usize;
                 if size > CONTENT_BATCH_BYTES {
                     // 单章超过帧预算：这一章搬不过去（不静默丢，留下日志）
-                    log::warn!("章节正文超过单帧预算，跳过 book={book} bytes={size}");
+                    log::debug!("章节正文超过单帧预算，跳过 book={book} bytes={size}");
                     continue;
                 }
                 if items.len() >= CONTENT_BATCH_CHAPTERS || bytes + size > CONTENT_BATCH_BYTES {
@@ -117,7 +117,7 @@ pub fn handle_request(
                 items.push(body);
             }
             if items.len() < cids.len() {
-                log::debug!("本次只回了 {} 章正文（其余留给下次同步）", items.len());
+                log::debug!("本次只回了 {} 章正文（其余继续请求）", items.len());
             }
             Response::Chapters { book: book.clone(), items }
         }
@@ -177,7 +177,7 @@ pub fn handle_request(
                 assets::fit_batch(bodies, ASSET_BATCH_BYTES as u64, ASSET_BATCH_ITEMS);
             if items.len() < pull.len() {
                 log::debug!(
-                    "本次只回了 {} 份资源（其余留给下次同步）book={book} bytes={bytes}",
+                    "本次只回了 {} 份资源（其余继续请求）book={book} bytes={bytes}",
                     items.len()
                 );
             }

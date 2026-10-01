@@ -147,6 +147,8 @@ impl From<WireError> for SyncError {
 /// 同步框架的错误。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyncError {
+    /// 用户主动停止（已收到的数据仍保留）。
+    Cancelled,
     /// 磁盘 I/O（打开 / 读写 / 重命名）
     Io(String),
     /// 序列化 / 反序列化失败（多半意味着文件被外部改坏或格式版本不认识）
@@ -187,6 +189,7 @@ impl SyncError {
     /// 都不进 i18n 词典 —— 这是诊断信息，不是界面文案。
     pub fn code(&self) -> String {
         match self {
+            SyncError::Cancelled => "cancelled".to_string(),
             SyncError::Io(_) => "io".to_string(),
             SyncError::Json(_) => "json".to_string(),
             SyncError::NotFound(_) => "not_found".to_string(),
@@ -232,6 +235,7 @@ impl SyncError {
 impl fmt::Display for SyncError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            SyncError::Cancelled => write!(f, "同步已停止"),
             SyncError::Io(m) => write!(f, "磁盘错误：{m}"),
             SyncError::Json(m) => write!(f, "数据格式错误：{m}"),
             SyncError::NotFound(m) => write!(f, "找不到：{m}"),

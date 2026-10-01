@@ -14,7 +14,7 @@
 //! 换来的是「不留长连接、不需要心跳与重连状态机」）。
 
 use std::io::BufReader;
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 use crate::crypto::{self, derive_keys, nonce, proof, SessionKeys, ROLE_CLIENT, ROLE_SERVER, ROLE_SESSION};
@@ -62,7 +62,8 @@ impl TcpTransport {
         identity: &ClientIdentity<'_>,
         timeout: Duration,
     ) -> Result<TcpTransport> {
-        let stream = TcpStream::connect(addr)
+        let address = addr.to_socket_addrs().map_err(|e| SyncError::Transport(e.to_string()))?.next().ok_or_else(|| SyncError::Transport("没有可用的设备地址".into()))?;
+        let stream = TcpStream::connect_timeout(&address, timeout)
             .map_err(|e| SyncError::Transport(format!("连接 {addr} 失败：{e}")))?;
         stream.set_read_timeout(Some(timeout))?;
         stream.set_write_timeout(Some(timeout))?;
@@ -194,7 +195,8 @@ impl Transport for TcpTransport {
 
     fn request(&mut self, request: &Request) -> Result<Response> {
         self.send_seq += 1;
-        write_secure(&mut self.writer, &self.keys.client_to_server, self.send_seq, request, MAX_FRAME_BYTES)?;
+        write_secure(&mut self.writer, &self.keys.client_to_server, self.send_seq, request, MAX_FRAME_BYTES)
+            .map_err(|error| match error { SyncError::Io(message) => SyncError::Transport(message), other => other })?;
         let Some((seq, response)): Option<(u64, Response)> =
             read_secure(&mut self.reader, &self.keys.server_to_client, self.recv_seq, MAX_FRAME_BYTES)?
         else {

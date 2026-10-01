@@ -87,6 +87,19 @@ pub struct AppliedChanges {
 }
 
 impl AppliedChanges {
+    fn merge(&mut self, next: AppliedChanges) {
+        self.books |= next.books;
+        self.progress |= next.progress;
+        self.groups |= next.groups;
+        self.source_groups |= next.source_groups;
+        self.sources |= next.sources;
+        self.text_replaces |= next.text_replaces;
+        self.chapter_rules |= next.chapter_rules;
+        self.bookmarks.extend(next.bookmarks);
+        self.chapters.extend(next.chapters);
+        self.deleted_books.extend(next.deleted_books);
+    }
+
     pub fn is_empty(&self) -> bool {
         !self.books
             && !self.progress
@@ -903,7 +916,6 @@ fn apply_staged_content<R: tauri::Runtime>(
             // 重建书时正文已经随书一次写齐（`put_book`），这里返回 0 是正常的；
             // 已有书返回 0 说明内容与本地一致（重复推送）：两种情况都该清掉暂存
             Ok(0) => {
-                clear_staged(engine, &book_uid, &bodies)?;
                 if created {
                     changes.books = true;
                     changes.chapters.push(local_id);
@@ -914,14 +926,24 @@ fn apply_staged_content<R: tauri::Runtime>(
                 if !changes.chapters.contains(&local_id) {
                     changes.chapters.push(local_id.clone());
                 }
-                clear_staged(engine, &book_uid, &bodies)?;
-                log::info!("同步正文已落地 book={local_id} 章节={applied}");
+                log::debug!("同步正文已落地 book={local_id} 章节={applied}");
             }
             Err(error) => {
                 // 写盘失败：暂存留着，下次同步 / 下次落地再试（不能当成已经落地）
-                log::warn!("同步正文落地失败（{local_id}）：{error}");
+                return Err(SyncError::Io(error));
             }
         }
+        // 元信息比正文先到时，进度与书签曾因无本机书而跳过；建书后重新落地其当前状态。
+        let related: Vec<String> = {
+            let guard = lock_engine(engine);
+            ["reading_progress", "bookmark"].into_iter()
+                .flat_map(|kind| guard.entities_of_kind(kind, true))
+                .filter(|entity| book_ref_of(entity) == book_uid)
+                .map(|entity| entity.id.clone()).collect()
+        };
+        let snapshots = collect_snapshots(engine, usize::MAX, &related)?;
+        changes.merge(apply_snapshots(app, engine, index, snapshots)?);
+        clear_staged(engine, &book_uid, &bodies)?;
     }
     Ok(())
 }
@@ -976,12 +998,11 @@ fn apply_staged_assets<R: tauri::Runtime>(
                     match book_store::set_cover_at(app, root.as_deref(), &local_id, Some(&value)) {
                         Ok(true) => {
                             changes.books = true;
-                            log::info!("同步封面已落地 book={local_id}");
+                            log::debug!("同步封面已落地 book={local_id}");
                         }
                         Ok(false) => {}
                         Err(error) => {
-                            log::warn!("同步封面落地失败（{local_id}）：{error}");
-                            continue;
+                            return Err(SyncError::Io(error));
                         }
                     }
                 }
@@ -1004,8 +1025,7 @@ fn apply_staged_assets<R: tauri::Runtime>(
                             }
                         }
                         Err(error) => {
-                            log::warn!("同步插图落地失败（{local_id}）：{error}");
-                            continue;
+                            return Err(SyncError::Io(error));
                         }
                     }
                 }
@@ -1224,7 +1244,7 @@ fn apply_snapshots<R: tauri::Runtime>(
                     }
                 }
                 Ok(None) => {}
-                Err(error) => log::warn!("同步落地单本书失败（{uid}）：{error}"),
+                Err(error) => return Err(SyncError::Io(error)),
             }
         }
     }
@@ -1251,7 +1271,7 @@ fn apply_snapshots<R: tauri::Runtime>(
                     }
                 }
                 Ok(false) => {}
-                Err(error) => log::warn!("同步落地书籍目录失败（{local_id}）：{error}"),
+                Err(error) => return Err(SyncError::Io(error)),
             }
         }
     }

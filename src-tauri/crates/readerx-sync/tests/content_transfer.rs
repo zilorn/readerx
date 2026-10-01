@@ -199,3 +199,23 @@ fn empty_device_pulls_the_peers_book() {
     let again = sync_once(&a, &b);
     assert_eq!((again.content_pulled, again.content_pushed), (0, 0));
 }
+
+/// 总量超过旧 32 MiB 会话预算，且每个百章清单需要拆成多帧时，不能丢掉后半清单。
+#[test]
+fn large_content_difference_drains_in_one_session() {
+    let source = Arc::new(MemContent::default());
+    let target = Arc::new(MemContent::default());
+    let a = engine("large-a", source.clone());
+    let b = engine("large-b", target);
+    readerx_sync::net::lock_engine(&a).create_entity("book", Some("b-large".into()),
+        [("title", serde_json::json!("大书"))]).unwrap();
+    let text = "x".repeat(900 * 1024);
+    for index in 0..40 { source.put("b-large", &format!("c{index:03}"), &text); }
+    let report = sync_once(&a, &b);
+    assert_eq!(report.content_pushed, 40);
+    assert!(report.bytes > 32 * 1024 * 1024);
+    assert!(!report.more_content);
+    assert_eq!(readerx_sync::net::lock_engine(&b).content_digests("b-large").len(), 40);
+    let again = sync_once(&a, &b);
+    assert_eq!(again.content_pushed + again.content_pulled, 0);
+}
