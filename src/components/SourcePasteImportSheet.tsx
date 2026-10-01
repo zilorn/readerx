@@ -6,6 +6,7 @@
  * - 导入失败（JSON 解析不了 / 没有可导入的书源 / 拉取失败）留在本抽屉内提示，
  *   成功后由父级接管进入「确认导入」。
  */
+import { Drawer } from "./Drawer";
 import { Show, createSignal, onMount } from "solid-js";
 import { ClipboardIcon, CloseIcon, DownloadIcon } from "./icons";
 import { t } from "../lib/i18n";
@@ -78,88 +79,86 @@ export function SourcePasteImportSheet(props: SourcePasteImportSheetProps) {
   const isUrl = () => props.detectUrl(text());
 
   return (
-    <div class="fixed inset-0 z-50" role="dialog" aria-label={t("sourceEditor.paste.ariaLabel")}>
-      <div
-        class="absolute inset-0 animate-sheet-fade bg-black/45 backdrop-blur-[2px]"
-        onClick={() => {
-          if (!busy()) props.onClose();
-        }}
-      />
-      <div class="absolute inset-x-0 bottom-0 z-[51] flex max-h-[88%] animate-sheet-up flex-col overflow-hidden rounded-t-[16px] bg-surface shadow-[0_-10px_34px_rgb(0_0_0/0.22)]">
-        <div class="flex flex-none items-center gap-2.5 border-b border-border px-4 py-3">
-          <span class="text-[15px] font-bold">{t("sourceEditor.paste.title")}</span>
-          <span class="flex-1 text-xs text-text-3">{t("sourceEditor.paste.subtitle")}</span>
+    <Drawer
+      onClose={() => {
+        if (!busy()) props.onClose();
+      }}
+      label={t("sourceEditor.paste.ariaLabel")}
+      sizeClass="max-h-[88%]"
+    >
+      <div class="flex flex-none items-center gap-2.5 border-b border-border px-4 py-3">
+        <span class="text-[15px] font-bold">{t("sourceEditor.paste.title")}</span>
+        <span class="flex-1 text-xs text-text-3">{t("sourceEditor.paste.subtitle")}</span>
+        <button
+          class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
+          aria-label={t("common.close")}
+          onClick={props.onClose}
+        >
+          <CloseIcon />
+        </button>
+      </div>
+
+      <div class="flex min-h-0 flex-1 flex-col px-4 pb-[calc(16px+env(safe-area-inset-bottom))] pt-3.5">
+        <textarea
+          ref={inputRef}
+          rows={7}
+          spellcheck={false}
+          autocapitalize="off"
+          autocomplete="off"
+          placeholder={t("sourceEditor.paste.placeholder")}
+          class="min-h-[132px] w-full flex-1 resize-none rounded-[12px] border border-border bg-bg px-3 py-2.5 font-mono text-[12px] leading-[1.6] text-text outline-none transition-colors placeholder:text-text-3 focus:border-accent"
+          value={text()}
+          onInput={(e) => {
+            setText(e.currentTarget.value);
+            setError("");
+          }}
+        />
+        <div class="mt-1.5 flex items-center gap-2">
           <button
-            class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-            aria-label={t("common.close")}
+            class="inline-flex flex-none items-center gap-1.5 rounded-[10px] bg-surface-2 px-3 py-2 text-[12.5px] font-semibold text-text-2 transition-[scale] duration-100 active:scale-[0.97] disabled:opacity-50"
+            disabled={reading() || busy()}
+            onClick={() => void readClipboard(false)}
+          >
+            <ClipboardIcon size={15} />
+            {reading() ? t("common.loadingDots") : t("sourceEditor.paste.readClipboard")}
+          </button>
+          <Show when={text().length > 0}>
+            <span class="min-w-0 flex-1 truncate text-right text-[11px] text-text-3">
+              {isUrl()
+                ? t("sourceEditor.paste.url")
+                : t("sourceEditor.paste.charCount", { count: text().length })}
+            </span>
+          </Show>
+        </div>
+
+        <Show when={error()}>
+          <p class="mt-2 rounded-[10px] bg-danger-weak px-3 py-2 text-[12px] leading-[1.5] text-danger">
+            {error()}
+          </p>
+        </Show>
+
+        <div class="mt-3.5 flex gap-2.5">
+          <button
+            class="flex-1 rounded-xl bg-surface-2 px-4 py-2.5 text-[13.5px] font-semibold text-text-2 disabled:opacity-50"
+            disabled={busy()}
             onClick={props.onClose}
           >
-            <CloseIcon />
+            {t("common.cancel")}
+          </button>
+          <button
+            class="inline-flex flex-1 items-center justify-center gap-1.5 rounded-xl bg-accent px-4 py-2.5 text-[13.5px] font-semibold text-on-accent disabled:pointer-events-none disabled:opacity-50"
+            disabled={busy() || text().trim().length === 0}
+            onClick={() => void submit()}
+          >
+            <DownloadIcon size={16} />
+            {busy()
+              ? t("sourceEditor.paste.processing")
+              : isUrl()
+                ? t("sourceEditor.paste.fetch")
+                : t("sourceEditor.paste.parse")}
           </button>
         </div>
-
-        <div class="flex min-h-0 flex-1 flex-col px-4 pb-[calc(16px+env(safe-area-inset-bottom))] pt-3.5">
-          <textarea
-            ref={inputRef}
-            rows={7}
-            spellcheck={false}
-            autocapitalize="off"
-            autocomplete="off"
-            placeholder={t("sourceEditor.paste.placeholder")}
-            class="min-h-[132px] w-full flex-1 resize-none rounded-[12px] border border-border bg-bg px-3 py-2.5 font-mono text-[12px] leading-[1.6] text-text outline-none transition-colors placeholder:text-text-3 focus:border-accent"
-            value={text()}
-            onInput={(e) => {
-              setText(e.currentTarget.value);
-              setError("");
-            }}
-          />
-          <div class="mt-1.5 flex items-center gap-2">
-            <button
-              class="inline-flex flex-none items-center gap-1.5 rounded-[10px] bg-surface-2 px-3 py-2 text-[12.5px] font-semibold text-text-2 transition-[scale] duration-100 active:scale-[0.97] disabled:opacity-50"
-              disabled={reading() || busy()}
-              onClick={() => void readClipboard(false)}
-            >
-              <ClipboardIcon size={15} />
-              {reading() ? t("common.loadingDots") : t("sourceEditor.paste.readClipboard")}
-            </button>
-            <Show when={text().length > 0}>
-              <span class="min-w-0 flex-1 truncate text-right text-[11px] text-text-3">
-                {isUrl()
-                  ? t("sourceEditor.paste.url")
-                  : t("sourceEditor.paste.charCount", { count: text().length })}
-              </span>
-            </Show>
-          </div>
-
-          <Show when={error()}>
-            <p class="mt-2 rounded-[10px] bg-danger-weak px-3 py-2 text-[12px] leading-[1.5] text-danger">
-              {error()}
-            </p>
-          </Show>
-
-          <div class="mt-3.5 flex gap-2.5">
-            <button
-              class="flex-1 rounded-xl bg-surface-2 px-4 py-2.5 text-[13.5px] font-semibold text-text-2 disabled:opacity-50"
-              disabled={busy()}
-              onClick={props.onClose}
-            >
-              {t("common.cancel")}
-            </button>
-            <button
-              class="inline-flex flex-1 items-center justify-center gap-1.5 rounded-xl bg-accent px-4 py-2.5 text-[13.5px] font-semibold text-on-accent disabled:pointer-events-none disabled:opacity-50"
-              disabled={busy() || text().trim().length === 0}
-              onClick={() => void submit()}
-            >
-              <DownloadIcon size={16} />
-              {busy()
-                ? t("sourceEditor.paste.processing")
-                : isUrl()
-                  ? t("sourceEditor.paste.fetch")
-                  : t("sourceEditor.paste.parse")}
-            </button>
-          </div>
-        </div>
       </div>
-    </div>
+    </Drawer>
   );
 }

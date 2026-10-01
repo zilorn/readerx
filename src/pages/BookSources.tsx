@@ -1,3 +1,4 @@
+import { Drawer } from "../components/Drawer";
 import { For, Show, createEffect, createMemo, createSignal } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 import { PageHeader } from "../components/PageHeader";
@@ -671,14 +672,11 @@ export default function BookSourcesPage() {
 
       {/* 删除确认 */}
       <Show when={deleteId() !== null}>
-        <div
-          class="fixed inset-0 z-40 animate-sheet-fade bg-black/45 backdrop-blur-[2px]"
-          onClick={() => setDeleteId(null)}
-        />
-        <div
-          class="fixed inset-x-0 bottom-0 z-[41] mx-auto max-w-[var(--app-column)] animate-sheet-up rounded-t-[16px] bg-surface px-4 pb-[calc(20px+env(safe-area-inset-bottom))] pt-4 shadow-[0_-10px_34px_rgb(0_0_0/0.22)]"
-          role="dialog"
-          aria-label={t("sources.delete.aria")}
+        <Drawer
+          onClose={() => setDeleteId(null)}
+          label={t("sources.delete.aria")}
+          layer={40}
+          class="px-4 pb-[calc(20px+env(safe-area-inset-bottom))] pt-4"
         >
           <p class="mb-1 text-center text-[15px] font-bold">{t("sources.delete.title")}</p>
           <p class="mb-4 text-center text-[12px] leading-[1.6] text-text-3">
@@ -698,19 +696,16 @@ export default function BookSourcesPage() {
               {t("common.delete")}
             </button>
           </div>
-        </div>
+        </Drawer>
       </Show>
 
       {/* 网络导入：从网址拉取书源 JSON */}
       <Show when={urlDialog()}>
-        <div
-          class="fixed inset-0 z-40 animate-sheet-fade bg-black/45 backdrop-blur-[2px]"
-          onClick={closeUrlImport}
-        />
-        <div
-          class="fixed inset-x-0 bottom-0 z-[41] mx-auto max-w-[var(--app-column)] animate-sheet-up rounded-t-[16px] bg-surface px-4 pb-[calc(20px+env(safe-area-inset-bottom))] pt-4 shadow-[0_-10px_34px_rgb(0_0_0/0.22)]"
-          role="dialog"
-          aria-label={t("sources.url.dialogAria")}
+        <Drawer
+          onClose={closeUrlImport}
+          label={t("sources.url.dialogAria")}
+          layer={40}
+          class="px-4 pb-[calc(20px+env(safe-area-inset-bottom))] pt-4"
         >
           <p class="mb-1 text-center text-[15px] font-bold">{t("sources.url.label")}</p>
           <p class="mb-4 text-center text-[12px] leading-[1.6] text-text-3">
@@ -756,7 +751,7 @@ export default function BookSourcesPage() {
               {urlBusy() ? t("sources.url.fetching") : t("sources.url.fetchAndImport")}
             </button>
           </div>
-        </div>
+        </Drawer>
       </Show>
 
       {/* 粘贴导入：剪贴板 / 手输 JSON 或 JSON 网址 */}

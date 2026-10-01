@@ -3,6 +3,7 @@
  * 编辑书名 / 作者 / 标签 / 简介，并可更换或移除自定义封面。
  * 每次打开都会重新挂载，故内部表单初值即当前书籍内容。
  */
+import { Drawer } from "./Drawer";
 import { Show, createSignal } from "solid-js";
 import { Portal } from "solid-js/web";
 import { updateBookInfo } from "../lib/books";
@@ -101,15 +102,11 @@ export function BookMetaSheet(props: BookMetaSheetProps) {
 
   return (
     <Portal>
-      <div
-        class="fixed inset-0 z-[70] animate-sheet-fade bg-black/45 backdrop-blur-[2px]"
-        onClick={close}
-      />
-      <div
-        class="fixed inset-x-0 bottom-0 z-[71] mx-auto flex max-h-[88%] max-w-[var(--app-column)] animate-sheet-up flex-col overflow-hidden rounded-t-[16px] bg-surface shadow-[0_-10px_34px_rgb(0_0_0/0.22)]"
-        role="dialog"
-        aria-modal="true"
-        aria-label={t("book.meta.title")}
+      <Drawer
+        onClose={close}
+        label={t("book.meta.title")}
+        layer={70}
+        sizeClass="max-h-[88%]"
       >
         <div class="flex flex-none items-center gap-2.5 border-b border-border px-4 py-3">
           <span class="text-[15px] font-bold">{t("book.meta.title")}</span>
@@ -273,7 +270,7 @@ export function BookMetaSheet(props: BookMetaSheetProps) {
             </Show>
           </button>
         </ScrollArea>
-      </div>
+      </Drawer>
 
       <input
         ref={coverInput}

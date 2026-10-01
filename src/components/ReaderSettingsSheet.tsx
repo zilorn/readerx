@@ -5,6 +5,7 @@
  * - 下方调整阅读页底部状态栏的显示（开/关）与进度百分比口径（整本书 / 当前章节）。
  * 状态栏本体渲染在 Reader.tsx 阅读区底部，此处只改全局偏好。
  */
+import { Drawer } from "./Drawer";
 import { For, Show, type JSX } from "solid-js";
 import { t, type MessageKey } from "../lib/i18n";
 import {
@@ -99,16 +100,13 @@ function OnlineActionRow(props: {
 export function ReaderSettingsSheet(props: ReaderSettingsSheetProps) {
   return (
     <Show when={props.open}>
-      <div
-        data-reader-ui
-        class="absolute inset-0 z-50 animate-sheet-fade bg-black/45 backdrop-blur-[2px]"
-        onClick={props.onClose}
-      />
-      <div
-        data-reader-ui
-        class="absolute inset-x-0 bottom-0 z-[51] flex max-h-[70%] animate-sheet-up select-none flex-col overflow-hidden rounded-t-[16px] bg-surface shadow-[0_-10px_34px_rgb(0_0_0/0.22)]"
-        role="dialog"
-        aria-label={t("readerChrome.settings.title")}
+      <Drawer
+        onClose={props.onClose}
+        label={t("readerChrome.settings.title")}
+        position="absolute"
+        sizeClass="max-h-[70%]"
+        readerUi
+        class="select-none"
       >
         <div class="flex flex-none items-center gap-2.5 border-b border-border px-4 py-3">
           <SettingsIcon size={19} class="text-accent" />
@@ -256,7 +254,7 @@ export function ReaderSettingsSheet(props: ReaderSettingsSheetProps) {
             </div>
           </Show>
         </ScrollArea>
-      </div>
+      </Drawer>
     </Show>
   );
 }

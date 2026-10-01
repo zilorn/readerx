@@ -1,3 +1,4 @@
+import { Drawer } from "../components/Drawer";
 import {
   For,
   Show,
@@ -4775,28 +4776,15 @@ export default function ReaderPage() {
             {/* 目录：手机端是自下而上的抽屉，桌面端是贴右边缘滑出的侧栏
                 （与「鼠标贴右边缘呼出目录」对应，见 lib/readerEdgeHover.ts） */}
             <Show when={tocOpen()}>
-              <div
-                data-reader-ui
-                class="absolute inset-0 z-40 animate-sheet-fade"
-                classList={{
-                  "bg-black/45 backdrop-blur-[2px]": !isDesktopShell(),
-                  // 桌面端侧栏与正文并排，遮罩只做轻微压暗，不模糊整屏正文
-                  "bg-black/20": isDesktopShell(),
-                }}
-                onClick={() => setTocOpen(false)}
-              />
-              <div
-                ref={tocPanelRef}
-                data-reader-ui
-                class="absolute z-[41] flex select-none flex-col overflow-hidden bg-surface"
-                classList={{
-                  "inset-x-0 bottom-0 max-h-[72%] animate-sheet-up rounded-t-[16px] shadow-[0_-10px_34px_rgb(0_0_0/0.22)]":
-                    !isDesktopShell(),
-                  "inset-y-0 right-0 w-[380px] max-w-[86%] animate-sheet-in-right border-l border-border shadow-[-10px_0_34px_rgb(0_0_0/0.22)]":
-                    isDesktopShell(),
-                }}
-                role="dialog"
-                aria-label={t("reader.toc")}
+              <Drawer
+                onClose={() => setTocOpen(false)}
+                label={t("reader.toc")}
+                position="absolute"
+                layer={40}
+                readerUi
+                class="select-none"
+                panelRef={(element) => (tocPanelRef = element)}
+                placement={isDesktopShell() ? "right" : "bottom"}
               >
                 <div class="flex flex-none items-center gap-2.5 border-b border-border px-4 py-3">
                   <span class="text-[15px] font-bold">{t("reader.toc")}</span>
@@ -4876,7 +4864,7 @@ export default function ReaderPage() {
                     }}
                   </For>
                 </ScrollArea>
-              </div>
+              </Drawer>
             </Show>
             {/* 书签面板 */}
             <BookmarkPanel
@@ -5022,16 +5010,12 @@ export default function ReaderPage() {
               {/* data-reader-ui：下载面板挂在阅读区内部，事件会冒泡到阅读区的
                   按下 / 抬手手势（点按分区翻页、横滑翻页）；不标记的话在面板上
                   点一下就会按点到的位置翻页 / 呼出菜单 */}
-              <div
-                data-reader-ui
-                class="fixed inset-0 z-40 animate-sheet-fade bg-black/45 backdrop-blur-[2px]"
-                onClick={() => setDownloadOpen(false)}
-              />
-              <div
-                data-reader-ui
-                class="fixed inset-x-0 bottom-0 z-[41] mx-auto flex max-h-[70%] max-w-[var(--app-column)] animate-sheet-up flex-col overflow-hidden rounded-t-[16px] bg-surface shadow-[0_-10px_34px_rgb(0_0_0/0.22)]"
-                role="dialog"
-                aria-label={t("reader.downloadTitle")}
+              <Drawer
+                onClose={() => setDownloadOpen(false)}
+                label={t("reader.downloadTitle")}
+                layer={40}
+                sizeClass="max-h-[70%]"
+                readerUi
               >
                 <div class="flex flex-none items-center gap-2.5 border-b border-border px-4 py-3">
                   <span class="text-[15px] font-bold">{t("reader.downloadTitle")}</span>
@@ -5265,7 +5249,7 @@ export default function ReaderPage() {
                     {t("reader.downloadStorageNote")}
                   </p>
                 </ScrollArea>
-              </div>
+              </Drawer>
 
               {/* 起始章 / 结束章选择（盖在下载面板之上，选完即收起） */}
               <Show when={rangePick()}>

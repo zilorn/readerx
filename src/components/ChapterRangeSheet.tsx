@@ -4,6 +4,7 @@
  * 只能落在 [min, max] 内（起始章不得晚于结束章，反之亦然），区间外的行置灰不可点。
  * 选中的行标「当前」，尚未缓存正文的章标「未缓存」—— 便于从还没下过的地方接着下载。
  */
+import { Drawer } from "./Drawer";
 import { For, Show, createEffect, on } from "solid-js";
 import { t } from "../lib/i18n";
 import type { LocalBookChapter } from "../lib/booksTypes";
@@ -62,16 +63,12 @@ export function ChapterRangeSheet(props: ChapterRangeSheetProps) {
 
   return (
     <Show when={props.open}>
-      <div
-        data-reader-ui
-        class="fixed inset-0 z-[42] animate-sheet-fade bg-black/45 backdrop-blur-[2px]"
-        onClick={props.onClose}
-      />
-      <div
-        data-reader-ui
-        class="fixed inset-x-0 bottom-0 z-[43] mx-auto flex max-h-[70%] flex-col overflow-hidden rounded-t-[16px] bg-surface shadow-[0_-10px_34px_rgb(0_0_0/0.22)]"
-        role="dialog"
-        aria-label={props.title}
+      <Drawer
+        onClose={props.onClose}
+        label={props.title}
+        layer={42}
+        sizeClass="max-h-[70%]"
+        readerUi
       >
         <div class="flex flex-none items-center gap-2.5 border-b border-border px-4 py-3">
           <span class="text-[15px] font-bold">{props.title}</span>
@@ -149,7 +146,7 @@ export function ChapterRangeSheet(props: ChapterRangeSheetProps) {
             }}
           </For>
         </ScrollArea>
-      </div>
+      </Drawer>
     </Show>
   );
 }

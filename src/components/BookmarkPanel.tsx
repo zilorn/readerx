@@ -9,6 +9,7 @@
  * （按章节找书签），只命中正文的则只留命中的条目；命中文字在卡片上高亮，
  * 点条目仍是原来的跳转定位。
  */
+import { Drawer } from "./Drawer";
 import { For, Show, createEffect, createMemo, createSignal, on, onCleanup } from "solid-js";
 import { t } from "../lib/i18n";
 import type { Bookmark } from "../lib/bookmarks";
@@ -249,16 +250,13 @@ export function BookmarkPanel(props: BookmarkPanelProps) {
 
   return (
     <Show when={props.open}>
-      <div
-        data-reader-ui
-        class="absolute inset-0 z-40 animate-sheet-fade bg-black/45 backdrop-blur-[2px]"
-        onClick={props.onClose}
-      />
-      <div
-        data-reader-ui
-        class="absolute inset-x-0 bottom-0 z-[41] flex max-h-[72%] select-none animate-sheet-up flex-col overflow-hidden rounded-t-[16px] bg-surface shadow-[0_-10px_34px_rgb(0_0_0/0.22)]"
-        role="dialog"
-        aria-label={t("readerChrome.bookmark.title")}
+      <Drawer
+        onClose={props.onClose}
+        label={t("readerChrome.bookmark.title")}
+        position="absolute"
+        layer={40}
+        readerUi
+        class="select-none"
       >
         <div class="flex flex-none items-center gap-2.5 border-b border-border px-4 py-3">
           <BookmarkIcon size={19} class="text-accent" />
@@ -400,7 +398,7 @@ export function BookmarkPanel(props: BookmarkPanelProps) {
             </ScrollArea>
           </Show>
         </Show>
-      </div>
+      </Drawer>
     </Show>
   );
 }

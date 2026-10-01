@@ -5,6 +5,7 @@
  * 点任一结果卡片由阅读页跳到命中位置并进入「搜索模式」逐条查看，
  * 已在搜索模式时可用 activeIndex 高亮对应卡片并自动滚动到可视区。
  */
+import { Drawer } from "./Drawer";
 import {
   For,
   Show,
@@ -208,16 +209,14 @@ export function BookSearchPanel(props: BookSearchPanelProps) {
 
   return (
     <Show when={props.open}>
-      <div
-        data-reader-ui
-        class="absolute inset-0 z-[45] animate-sheet-fade bg-black/45 backdrop-blur-[2px]"
-        onClick={props.onClose}
-      />
-      <div
-        data-reader-ui
-        role="dialog"
-        aria-label={t("discover.bookSearch.title")}
-        class="absolute inset-x-0 bottom-0 z-[46] flex h-[min(86%,760px)] animate-sheet-up select-none flex-col overflow-hidden rounded-t-[16px] bg-surface shadow-[0_-10px_34px_rgb(0_0_0/0.22)]"
+      <Drawer
+        onClose={props.onClose}
+        label={t("discover.bookSearch.title")}
+        position="absolute"
+        layer={45}
+        sizeClass="h-[min(86%,760px)]"
+        readerUi
+        class="select-none"
       >
         <div class="flex flex-none items-center gap-2.5 border-b border-border px-4 py-3">
           <SearchIcon size={18} class="flex-none text-accent" />
@@ -344,7 +343,7 @@ export function BookSearchPanel(props: BookSearchPanelProps) {
             </Show>
           </div>
         </ScrollArea>
-      </div>
+      </Drawer>
     </Show>
   );
 }

@@ -1,3 +1,4 @@
+import { Drawer } from "./Drawer";
 import { For, Show, createSignal, type JSX } from "solid-js";
 import { CheckIcon, CloseIcon, EyeOffIcon, PlusIcon } from "./icons";
 import {
@@ -31,73 +32,71 @@ export function GroupPicker(props: GroupPickerProps) {
   }
 
   return (
-    <div class="fixed inset-0 z-[90]" role="dialog" aria-label={t("book.picker.choose")}>
-      <div
-        class="absolute inset-0 animate-sheet-fade bg-black/45 backdrop-blur-[2px]"
-        onClick={props.onClose}
-      />
-      <div class="absolute inset-x-0 bottom-0 z-[91] flex max-h-[72%] animate-sheet-up flex-col overflow-hidden rounded-t-[16px] bg-surface shadow-[0_-10px_34px_rgb(0_0_0/0.22)]">
-        <div class="flex flex-none items-center gap-2.5 border-b border-border px-4 py-3">
-          <span class="text-[15px] font-bold">{t("book.picker.title")}</span>
-          <span class="flex-1 text-xs text-text-3">{t("book.picker.subtitle")}</span>
+    <Drawer
+      onClose={props.onClose}
+      label={t("book.picker.choose")}
+      layer={90}
+    >
+      <div class="flex flex-none items-center gap-2.5 border-b border-border px-4 py-3">
+        <span class="text-[15px] font-bold">{t("book.picker.title")}</span>
+        <span class="flex-1 text-xs text-text-3">{t("book.picker.subtitle")}</span>
+        <button
+          class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
+          aria-label={t("common.close")}
+          onClick={props.onClose}
+        >
+          <CloseIcon />
+        </button>
+      </div>
+
+      {/* 底部预留安全区，避免列表 / 新建分组输入被 Home 指示条遮挡 */}
+      <ScrollArea
+        class="min-h-0 flex-1"
+        contentClass="px-0 py-1 pb-[calc(14px+env(safe-area-inset-bottom))]"
+      >
+        <GroupRow
+          label={t("common.ungrouped")}
+          active={!props.value}
+          onClick={() => pick(null)}
+        />
+        {/* 内置隐藏分组：不落库、不可改名/删除；仅用于把书从书架常规视图隐藏 */}
+        <GroupRow
+          label={t("book.groups.hidden")}
+          hint={t("book.groups.hiddenHint")}
+          icon={<EyeOffIcon size={18} />}
+          active={props.value === HIDDEN_GROUP_ID}
+          onClick={() => pick(HIDDEN_GROUP_ID)}
+        />
+        <For each={groupList()}>
+          {(group) => (
+            <GroupRow
+              label={group.name}
+              active={props.value === group.id}
+              onClick={() => pick(group.id)}
+            />
+          )}
+        </For>
+
+        <div class="mt-1 flex items-center gap-2 px-[18px]">
+          <input
+            value={newName()}
+            onInput={(e) => setNewName(e.currentTarget.value)}
+            placeholder={t("book.groups.newPlaceholder")}
+            class="min-w-0 flex-1 rounded-[10px] border border-border bg-bg px-3 py-[9px] text-[13.5px] text-text outline-none transition-colors placeholder:text-text-3 focus:border-accent"
+            onKeyDown={(e) => {
+              if (e.key === "Enter") createAndPick();
+            }}
+          />
           <button
-            class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-            aria-label={t("common.close")}
-            onClick={props.onClose}
+            class="inline-flex h-[38px] flex-none items-center justify-center gap-1 rounded-[10px] bg-accent px-3 text-[13px] font-semibold text-on-accent transition-[scale,opacity] duration-100 active:scale-[0.97] active:opacity-90"
+            onClick={createAndPick}
           >
-            <CloseIcon />
+            <PlusIcon size={16} />
+            {t("book.picker.create")}
           </button>
         </div>
-
-        {/* 底部预留安全区，避免列表 / 新建分组输入被 Home 指示条遮挡 */}
-        <ScrollArea
-          class="min-h-0 flex-1"
-          contentClass="px-0 py-1 pb-[calc(14px+env(safe-area-inset-bottom))]"
-        >
-          <GroupRow
-            label={t("common.ungrouped")}
-            active={!props.value}
-            onClick={() => pick(null)}
-          />
-          {/* 内置隐藏分组：不落库、不可改名/删除；仅用于把书从书架常规视图隐藏 */}
-          <GroupRow
-            label={t("book.groups.hidden")}
-            hint={t("book.groups.hiddenHint")}
-            icon={<EyeOffIcon size={18} />}
-            active={props.value === HIDDEN_GROUP_ID}
-            onClick={() => pick(HIDDEN_GROUP_ID)}
-          />
-          <For each={groupList()}>
-            {(group) => (
-              <GroupRow
-                label={group.name}
-                active={props.value === group.id}
-                onClick={() => pick(group.id)}
-              />
-            )}
-          </For>
-
-          <div class="mt-1 flex items-center gap-2 px-[18px]">
-            <input
-              value={newName()}
-              onInput={(e) => setNewName(e.currentTarget.value)}
-              placeholder={t("book.groups.newPlaceholder")}
-              class="min-w-0 flex-1 rounded-[10px] border border-border bg-bg px-3 py-[9px] text-[13.5px] text-text outline-none transition-colors placeholder:text-text-3 focus:border-accent"
-              onKeyDown={(e) => {
-                if (e.key === "Enter") createAndPick();
-              }}
-            />
-            <button
-              class="inline-flex h-[38px] flex-none items-center justify-center gap-1 rounded-[10px] bg-accent px-3 text-[13px] font-semibold text-on-accent transition-[scale,opacity] duration-100 active:scale-[0.97] active:opacity-90"
-              onClick={createAndPick}
-            >
-              <PlusIcon size={16} />
-              {t("book.picker.create")}
-            </button>
-          </div>
-        </ScrollArea>
-      </div>
-    </div>
+      </ScrollArea>
+    </Drawer>
   );
 }
 

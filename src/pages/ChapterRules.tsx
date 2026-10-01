@@ -1,3 +1,4 @@
+import { Drawer } from "../components/Drawer";
 import { For, Show, createSignal } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 import { PageHeader } from "../components/PageHeader";
@@ -117,14 +118,10 @@ export default function ChapterRulesPage() {
 
       {/* 添加规则抽屉 */}
       <Show when={ruleOpen()}>
-        <div
-          class="fixed inset-0 z-40 animate-sheet-fade bg-black/45 backdrop-blur-[2px]"
-          onClick={() => setRuleOpen(false)}
-        />
-        <div
-          class="fixed inset-x-0 bottom-0 z-[41] mx-auto flex max-h-[72%] max-w-[var(--app-column)] animate-sheet-up flex-col overflow-hidden rounded-t-[16px] bg-surface shadow-[0_-10px_34px_rgb(0_0_0/0.22)]"
-          role="dialog"
-          aria-label={t("chapterRules.action.add")}
+        <Drawer
+          onClose={() => setRuleOpen(false)}
+          label={t("chapterRules.action.add")}
+          layer={40}
         >
           <div class="flex flex-none items-center gap-2.5 border-b border-border px-4 py-3">
             <span class="text-[15px] font-bold">
@@ -199,7 +196,7 @@ export default function ChapterRulesPage() {
               {t("chapterRules.hint.appliesToImports")}
             </p>
           </ScrollArea>
-        </div>
+        </Drawer>
       </Show>
     </div>
   );

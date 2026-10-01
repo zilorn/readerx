@@ -1,3 +1,4 @@
+import { Drawer } from "./Drawer";
 import { createSignal, Show, type JSX } from "solid-js";
 import { Portal } from "solid-js/web";
 import { useNavigate } from "@solidjs/router";
@@ -219,44 +220,38 @@ export function ImportButton(props: ImportButtonProps) {
 
       <Show when={open()}>
         <Portal>
-          <div
-            class="fixed inset-0 z-[60]"
-            role="dialog"
-            aria-label={t("shelf.import.title")}
+          <Drawer
+            onClose={() => setOpen(false)}
+            label={t("shelf.import.title")}
+            layer={60}
           >
-            <div
-              class="absolute inset-0 animate-sheet-fade bg-black/45 backdrop-blur-[2px]"
-              onClick={() => setOpen(false)}
-            />
-            <div class="absolute inset-x-0 bottom-0 z-[61] flex animate-sheet-up flex-col overflow-hidden rounded-t-[16px] bg-surface shadow-[0_-10px_34px_rgb(0_0_0/0.22)]">
-              <div class="flex flex-none items-center gap-2.5 border-b border-border px-4 py-3">
-                <span class="flex-1 text-[15px] font-bold">
-                  {t("shelf.import.title")}
-                </span>
-                <button
-                  class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-                  aria-label={t("common.close")}
-                  onClick={() => setOpen(false)}
-                >
-                  <CloseIcon />
-                </button>
-              </div>
-              <div class="flex flex-col px-0 py-1.5 pb-2.5">
-                <MenuRow
-                  icon={<FileTextIcon size={19} />}
-                  label={t("shelf.import.local")}
-                  desc={t("shelf.import.localDesc")}
-                  onClick={openLocalPicker}
-                />
-                <MenuRow
-                  icon={<ServerIcon size={19} />}
-                  label={t("shelf.import.webdav")}
-                  desc={t("shelf.import.webdavDesc")}
-                  onClick={openWebDav}
-                />
-              </div>
+            <div class="flex flex-none items-center gap-2.5 border-b border-border px-4 py-3">
+              <span class="flex-1 text-[15px] font-bold">
+                {t("shelf.import.title")}
+              </span>
+              <button
+                class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
+                aria-label={t("common.close")}
+                onClick={() => setOpen(false)}
+              >
+                <CloseIcon />
+              </button>
             </div>
-          </div>
+            <div class="flex flex-col px-0 py-1.5 pb-2.5">
+              <MenuRow
+                icon={<FileTextIcon size={19} />}
+                label={t("shelf.import.local")}
+                desc={t("shelf.import.localDesc")}
+                onClick={openLocalPicker}
+              />
+              <MenuRow
+                icon={<ServerIcon size={19} />}
+                label={t("shelf.import.webdav")}
+                desc={t("shelf.import.webdavDesc")}
+                onClick={openWebDav}
+              />
+            </div>
+          </Drawer>
         </Portal>
       </Show>
 

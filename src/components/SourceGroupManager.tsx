@@ -1,3 +1,4 @@
+import { Drawer } from "./Drawer";
 import { For, Show, createSignal, type JSX } from "solid-js";
 import { CheckIcon, CloseIcon, EditIcon, FolderIcon, PlusIcon, TrashIcon } from "./icons";
 import { t } from "../lib/i18n";
@@ -104,132 +105,130 @@ export function SourceGroupManagerSheet(props: { onClose: () => void }) {
   }
 
   return (
-    <div class="fixed inset-0 z-50" role="dialog" aria-label={t("sourceGroups.manage.aria")}>
-      <div
-        class="absolute inset-0 animate-sheet-fade bg-black/45 backdrop-blur-[2px]"
-        onClick={props.onClose}
-      />
-      <div class="absolute inset-x-0 bottom-0 z-[51] flex max-h-[76%] animate-sheet-up flex-col overflow-hidden rounded-t-[16px] bg-surface shadow-[0_-10px_34px_rgb(0_0_0/0.22)]">
-        <div class="flex flex-none items-center gap-2.5 border-b border-border px-4 py-3">
-          <span class="grid h-[34px] w-[34px] flex-none place-items-center rounded-[10px] bg-accent-weak text-accent">
-            <FolderIcon size={18} />
+    <Drawer
+      onClose={props.onClose}
+      label={t("sourceGroups.manage.aria")}
+      sizeClass="max-h-[76%]"
+    >
+      <div class="flex flex-none items-center gap-2.5 border-b border-border px-4 py-3">
+        <span class="grid h-[34px] w-[34px] flex-none place-items-center rounded-[10px] bg-accent-weak text-accent">
+          <FolderIcon size={18} />
+        </span>
+        <span class="flex min-w-0 flex-1 flex-col">
+          <span class="text-[15px] font-bold leading-tight">
+            {t("sourceGroups.manager.title")}
           </span>
-          <span class="flex min-w-0 flex-1 flex-col">
-            <span class="text-[15px] font-bold leading-tight">
-              {t("sourceGroups.manager.title")}
-            </span>
-            <span class="text-[11px] text-text-3">{t("sourceGroups.manager.subtitle")}</span>
-          </span>
-          <button
-            class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-            aria-label={t("sourceGroups.manager.close")}
-            onClick={props.onClose}
-          >
-            <CloseIcon />
-          </button>
-        </div>
-
-        <ScrollArea class="min-h-0 flex-1">
-          <div class="divide-y divide-border">
-            {/* 未分组：只提供整组启停（不能改名 / 删除） */}
-            <GroupRow
-              label={t("common.ungrouped")}
-              total={ungrouped().total}
-              enabled={ungrouped().enabled}
-              busy={busy()}
-              onToggle={(next) => void toggleGroup(ungroupedIds(), next)}
-            />
-            <For each={sourceGroupList()}>
-              {(group) => {
-                const ids = (): string[] => idsInGroup(group.id);
-                return (
-                  <GroupRow
-                    label={group.name}
-                    total={stats(ids()).total}
-                    enabled={stats(ids()).enabled}
-                    busy={busy()}
-                    onToggle={(next) => void toggleGroup(ids(), next)}
-                  >
-                    <Show
-                      when={editingId() === group.id}
-                      fallback={
-                        <>
-                          <button
-                            class="grid h-8 w-8 flex-none place-items-center rounded-lg text-text-2 transition-colors active:bg-surface-2"
-                            aria-label={t("sourceGroups.row.rename", { name: group.name })}
-                            onClick={() => startEdit(group.id, group.name)}
-                          >
-                            <EditIcon size={16} />
-                          </button>
-                          <button
-                            class="grid h-8 w-8 flex-none place-items-center rounded-lg text-text-2 transition-colors active:bg-surface-2"
-                            classList={{ "text-danger": confirmDelete() === group.id }}
-                            aria-label={
-                              confirmDelete() === group.id
-                                ? t("sourceGroups.row.confirmDelete", { name: group.name })
-                                : t("sourceGroups.row.delete", { name: group.name })
-                            }
-                            onClick={() => void handleDelete(group.id)}
-                          >
-                            {confirmDelete() === group.id ? (
-                              <CheckIcon size={16} />
-                            ) : (
-                              <TrashIcon size={16} />
-                            )}
-                          </button>
-                        </>
-                      }
-                    >
-                      <input
-                        value={editName()}
-                        onInput={(e) => setEditName(e.currentTarget.value)}
-                        class="min-w-0 flex-1 rounded-[8px] border border-border bg-bg px-2 py-[6px] text-[14px] text-text outline-none focus:border-accent"
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") commitEdit(group.id, group.name);
-                          if (e.key === "Escape") setEditingId(null);
-                        }}
-                      />
-                      <button
-                        class="grid h-8 w-8 flex-none place-items-center rounded-lg text-accent transition-colors active:bg-surface-2"
-                        aria-label={t("sourceGroups.row.saveName")}
-                        onClick={() => commitEdit(group.id, group.name)}
-                      >
-                        <CheckIcon size={17} />
-                      </button>
-                    </Show>
-                  </GroupRow>
-                );
-              }}
-            </For>
-            <Show when={sourceGroupList().length === 0}>
-              <p class="px-4 py-4 text-center text-[12.5px] text-text-3">
-                {t("sourceGroups.manager.empty")}
-              </p>
-            </Show>
-          </div>
-        </ScrollArea>
-
-        {/* 新建分组 */}
-        <div class="flex flex-none items-center gap-2 border-t border-border px-4 py-3 pb-[calc(12px+env(safe-area-inset-bottom))]">
-          <input
-            value={newName()}
-            onInput={(e) => setNewName(e.currentTarget.value)}
-            placeholder={t("sourceGroups.create.placeholder")}
-            class="min-w-0 flex-1 rounded-[10px] border border-border bg-bg px-3 py-[8px] text-[13.5px] text-text outline-none transition-colors placeholder:text-text-3 focus:border-accent"
-            onKeyDown={(e) => {
-              if (e.key === "Enter") handleCreate();
-            }}
-          />
-          <button
-            class="inline-flex h-[34px] flex-none items-center justify-center gap-1 rounded-[9px] bg-accent px-3 text-[13px] font-semibold text-on-accent transition-[scale,opacity] duration-100 active:scale-[0.97] active:opacity-90"
-            onClick={handleCreate}
-          >
-            <PlusIcon size={15} />
-            {t("common.add")}
-          </button>
-        </div>
+          <span class="text-[11px] text-text-3">{t("sourceGroups.manager.subtitle")}</span>
+        </span>
+        <button
+          class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
+          aria-label={t("sourceGroups.manager.close")}
+          onClick={props.onClose}
+        >
+          <CloseIcon />
+        </button>
       </div>
-    </div>
+
+      <ScrollArea class="min-h-0 flex-1">
+        <div class="divide-y divide-border">
+          {/* 未分组：只提供整组启停（不能改名 / 删除） */}
+          <GroupRow
+            label={t("common.ungrouped")}
+            total={ungrouped().total}
+            enabled={ungrouped().enabled}
+            busy={busy()}
+            onToggle={(next) => void toggleGroup(ungroupedIds(), next)}
+          />
+          <For each={sourceGroupList()}>
+            {(group) => {
+              const ids = (): string[] => idsInGroup(group.id);
+              return (
+                <GroupRow
+                  label={group.name}
+                  total={stats(ids()).total}
+                  enabled={stats(ids()).enabled}
+                  busy={busy()}
+                  onToggle={(next) => void toggleGroup(ids(), next)}
+                >
+                  <Show
+                    when={editingId() === group.id}
+                    fallback={
+                      <>
+                        <button
+                          class="grid h-8 w-8 flex-none place-items-center rounded-lg text-text-2 transition-colors active:bg-surface-2"
+                          aria-label={t("sourceGroups.row.rename", { name: group.name })}
+                          onClick={() => startEdit(group.id, group.name)}
+                        >
+                          <EditIcon size={16} />
+                        </button>
+                        <button
+                          class="grid h-8 w-8 flex-none place-items-center rounded-lg text-text-2 transition-colors active:bg-surface-2"
+                          classList={{ "text-danger": confirmDelete() === group.id }}
+                          aria-label={
+                            confirmDelete() === group.id
+                              ? t("sourceGroups.row.confirmDelete", { name: group.name })
+                              : t("sourceGroups.row.delete", { name: group.name })
+                          }
+                          onClick={() => void handleDelete(group.id)}
+                        >
+                          {confirmDelete() === group.id ? (
+                            <CheckIcon size={16} />
+                          ) : (
+                            <TrashIcon size={16} />
+                          )}
+                        </button>
+                      </>
+                    }
+                  >
+                    <input
+                      value={editName()}
+                      onInput={(e) => setEditName(e.currentTarget.value)}
+                      class="min-w-0 flex-1 rounded-[8px] border border-border bg-bg px-2 py-[6px] text-[14px] text-text outline-none focus:border-accent"
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") commitEdit(group.id, group.name);
+                        if (e.key === "Escape") setEditingId(null);
+                      }}
+                    />
+                    <button
+                      class="grid h-8 w-8 flex-none place-items-center rounded-lg text-accent transition-colors active:bg-surface-2"
+                      aria-label={t("sourceGroups.row.saveName")}
+                      onClick={() => commitEdit(group.id, group.name)}
+                    >
+                      <CheckIcon size={17} />
+                    </button>
+                  </Show>
+                </GroupRow>
+              );
+            }}
+          </For>
+          <Show when={sourceGroupList().length === 0}>
+            <p class="px-4 py-4 text-center text-[12.5px] text-text-3">
+              {t("sourceGroups.manager.empty")}
+            </p>
+          </Show>
+        </div>
+      </ScrollArea>
+
+      {/* 新建分组 */}
+      <div class="flex flex-none items-center gap-2 border-t border-border px-4 py-3 pb-[calc(12px+env(safe-area-inset-bottom))]">
+        <input
+          value={newName()}
+          onInput={(e) => setNewName(e.currentTarget.value)}
+          placeholder={t("sourceGroups.create.placeholder")}
+          class="min-w-0 flex-1 rounded-[10px] border border-border bg-bg px-3 py-[8px] text-[13.5px] text-text outline-none transition-colors placeholder:text-text-3 focus:border-accent"
+          onKeyDown={(e) => {
+            if (e.key === "Enter") handleCreate();
+          }}
+        />
+        <button
+          class="inline-flex h-[34px] flex-none items-center justify-center gap-1 rounded-[9px] bg-accent px-3 text-[13px] font-semibold text-on-accent transition-[scale,opacity] duration-100 active:scale-[0.97] active:opacity-90"
+          onClick={handleCreate}
+        >
+          <PlusIcon size={15} />
+          {t("common.add")}
+        </button>
+      </div>
+    </Drawer>
   );
 }
 

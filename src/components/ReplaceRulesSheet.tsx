@@ -5,6 +5,7 @@
  * - 列表视图：点击某条进入编辑；每条可改 查找/替换为/正则/作用域，可删除；
  * - 新建/编辑保存后立即生效（只影响阅读显示，不改动原文文件）。
  */
+import { Drawer } from "./Drawer";
 import { For, Show, createMemo, createSignal, type JSX } from "solid-js";
 import {
   CheckIcon,
@@ -190,16 +191,14 @@ export function ReplaceRulesSheet(props: ReplaceRulesSheetProps) {
 
   return (
     <Show when={props.open}>
-      <div
-        data-reader-ui
-        class="absolute inset-0 z-[52] animate-sheet-fade bg-black/45 backdrop-blur-[2px]"
-        onClick={props.onClose}
-      />
-      <div
-        data-reader-ui
-        class="absolute inset-x-0 bottom-0 z-[53] flex max-h-[76%] animate-sheet-up select-none flex-col overflow-hidden rounded-t-[16px] bg-surface shadow-[0_-10px_34px_rgb(0_0_0/0.22)]"
-        role="dialog"
-        aria-label={t("chapterRules.replace.title")}
+      <Drawer
+        onClose={props.onClose}
+        label={t("chapterRules.replace.title")}
+        position="absolute"
+        layer={52}
+        sizeClass="max-h-[76%]"
+        readerUi
+        class="select-none"
       >
         {/* 标题栏 */}
         <div class="flex flex-none items-center gap-2.5 border-b border-border px-4 py-3">
@@ -445,7 +444,7 @@ export function ReplaceRulesSheet(props: ReplaceRulesSheetProps) {
             </div>
           </ScrollArea>
         </Show>
-      </div>
+      </Drawer>
     </Show>
   );
 }

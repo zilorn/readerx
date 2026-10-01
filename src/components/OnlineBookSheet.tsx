@@ -4,6 +4,7 @@
  * 在抽屉内预览简介、目录，并可「加入书架」或「加入书架并阅读」。
  * 目录加载完成前不可加入书架（书架元数据以目录为骨架）。
  */
+import { Drawer } from "./Drawer";
 import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
 import { Portal } from "solid-js/web";
 import { useNavigate } from "@solidjs/router";
@@ -249,15 +250,11 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
   return (
     <Show when={props.pick}>
       <Portal>
-        <div
-          class="fixed inset-0 z-[70] animate-sheet-fade bg-black/45 backdrop-blur-[2px]"
-          onClick={close}
-        />
-        <div
-          class="fixed inset-x-0 bottom-0 z-[71] mx-auto flex max-h-[88%] w-full max-w-[var(--app-column)] animate-sheet-up flex-col overflow-hidden rounded-t-[16px] bg-surface shadow-[0_-10px_34px_rgb(0_0_0/0.22)]"
-          role="dialog"
-          aria-modal="true"
-          aria-label={t("discover.sheet.aria")}
+        <Drawer
+          onClose={close}
+          label={t("discover.sheet.aria")}
+          layer={70}
+          sizeClass="max-h-[88%]"
         >
           <div class="flex flex-none items-center gap-2 border-b border-border px-4 py-3">
             <span class="text-[15px] font-bold">{t("discover.sheet.title")}</span>
@@ -492,7 +489,7 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
               </button>
             </div>
           </div>
-        </div>
+        </Drawer>
       </Portal>
     </Show>
   );

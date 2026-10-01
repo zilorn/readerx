@@ -7,6 +7,7 @@
  * - POST 的 body 以 { 或 [ 开头按 JSON 发送，否则按表单编码；
  * - 服务端应返回音频字节（mp3 / wav / ogg 等）。
  */
+import { Drawer } from "./Drawer";
 import { For, Show, createEffect, createMemo, createSignal } from "solid-js";
 import type { TtsEngine, HttpTtsMethod } from "../lib/ttsSettings";
 import type { TtsTimerMode } from "../lib/ttsPlayer";
@@ -112,16 +113,13 @@ export function TtsSheet(props: TtsSheetProps) {
 
   return (
     <Show when={props.open}>
-      <div
-        data-reader-ui
-        class="absolute inset-0 z-50 animate-sheet-fade bg-black/45 backdrop-blur-[2px]"
-        onClick={props.onClose}
-      />
-      <div
-        data-reader-ui
-        class="absolute inset-x-0 bottom-0 z-[51] flex max-h-[86%] animate-sheet-up select-none flex-col overflow-hidden rounded-t-[16px] bg-surface shadow-[0_-10px_34px_rgb(0_0_0/0.22)]"
-        role="dialog"
-        aria-label={t("tts.sheet.title")}
+      <Drawer
+        onClose={props.onClose}
+        label={t("tts.sheet.title")}
+        position="absolute"
+        sizeClass="max-h-[86%]"
+        readerUi
+        class="select-none"
       >
         <div class="flex flex-none items-center gap-2.5 border-b border-border px-4 py-3">
           <HeadphonesIcon size={19} class="text-accent" />
@@ -418,7 +416,7 @@ export function TtsSheet(props: TtsSheetProps) {
             {t("tts.action.stop")}
           </button>
         </ScrollArea>
-      </div>
+      </Drawer>
     </Show>
   );
 }

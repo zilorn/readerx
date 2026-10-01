@@ -1,3 +1,4 @@
+import { Drawer } from "./Drawer";
 import {
   For,
   Show,
@@ -139,127 +140,122 @@ export function DavServerDrawer(props: DavServerDrawerProps) {
   return (
     <Show when={props.open}>
       <Portal>
-        <div
-          class="fixed inset-0 z-[70]"
-          role="dialog"
-          aria-label={t("webdav.drawer.dialogLabel")}
+        <Drawer
+          onClose={props.onClose}
+          label={t("webdav.drawer.dialogLabel")}
+          layer={70}
+          sizeClass="max-h-[86%]"
         >
-          <div
-            class="absolute inset-0 animate-sheet-fade bg-black/45 backdrop-blur-[2px]"
-            onClick={props.onClose}
-          />
-          <div class="absolute inset-x-0 bottom-0 z-[71] flex max-h-[86%] animate-sheet-up flex-col overflow-hidden rounded-t-[16px] bg-surface shadow-[0_-10px_34px_rgb(0_0_0/0.22)]">
-            <div class="flex flex-none items-center gap-2 border-b border-border px-4 py-3">
-              <Show
-                when={view() === "form"}
-                fallback={
-                  <span class="flex-1 text-[15px] font-bold">
-                    {t("webdav.drawer.title")}
-                  </span>
-                }
-              >
-                <button
-                  class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-                  aria-label={t("webdav.drawer.backToList")}
-                  onClick={toList}
-                >
-                  <ChevronLeftIcon />
-                </button>
+          <div class="flex flex-none items-center gap-2 border-b border-border px-4 py-3">
+            <Show
+              when={view() === "form"}
+              fallback={
                 <span class="flex-1 text-[15px] font-bold">
-                  {editingId() ? t("webdav.server.edit") : t("webdav.server.add")}
+                  {t("webdav.drawer.title")}
                 </span>
-              </Show>
+              }
+            >
               <button
                 class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-                aria-label={t("common.close")}
-                onClick={props.onClose}
+                aria-label={t("webdav.drawer.backToList")}
+                onClick={toList}
               >
-                <CloseIcon />
+                <ChevronLeftIcon />
               </button>
-            </div>
-
-            <ScrollArea
-              class="min-h-0 flex-1"
-              contentClass="pb-[calc(14px+env(safe-area-inset-bottom))]"
+              <span class="flex-1 text-[15px] font-bold">
+                {editingId() ? t("webdav.server.edit") : t("webdav.server.add")}
+              </span>
+            </Show>
+            <button
+              class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
+              aria-label={t("common.close")}
+              onClick={props.onClose}
             >
-              <Show when={view() === "list"}>
-                <p class="px-[18px] pb-1 pt-2 text-[12px] text-text-3">
-                  {t("webdav.drawer.hint")}
-                </p>
-                <Show
-                  when={davServers().length > 0}
-                  fallback={
-                    <div class="flex flex-col items-center gap-1 px-6 py-10 text-center">
-                      <ServerIcon size={42} class="mb-1 text-text-3" />
-                      <p class="text-[13.5px] font-medium text-text-2">
-                        {t("webdav.empty.noServers")}
-                      </p>
-                    </div>
-                  }
-                >
-                  <For each={davServers()}>
-                    {(server) => (
-                      <ServerRow
-                        server={server}
-                        active={server.id === davActiveId()}
-                        deleting={deletingId() === server.id}
-                        onPick={() => pickServer(server.id)}
-                        onEdit={() => startEdit(server)}
-                        onDelete={() => requestDelete(server.id)}
-                      />
-                    )}
-                  </For>
-                </Show>
-
-                <button
-                  class="mx-[18px] mt-2 flex w-[calc(100%-36px)] items-center justify-center gap-1.5 rounded-xl border border-dashed border-border py-[11px] text-[13.5px] font-medium text-text-2 transition-colors active:bg-surface-2"
-                  onClick={startAdd}
-                >
-                  <PlusIcon size={16} />
-                  {t("webdav.server.add")}
-                </button>
-              </Show>
-
-              <Show when={view() === "form"}>
-                <div class="flex flex-col gap-3 px-[18px] pb-2 pt-3">
-                  <Field
-                    label={t("webdav.form.name")}
-                    placeholder={t("webdav.form.namePlaceholder")}
-                    value={name()}
-                    onInput={setName}
-                  />
-                  <Field
-                    label={t("webdav.form.url")}
-                    placeholder="https://dav.example.com/dav"
-                    value={url()}
-                    onInput={setUrl}
-                    autofocus
-                  />
-                  <Field
-                    label={t("webdav.form.username")}
-                    placeholder={t("webdav.form.usernamePlaceholder")}
-                    value={username()}
-                    onInput={setUsername}
-                  />
-                  <Field
-                    label={t("webdav.form.password")}
-                    placeholder=""
-                    value={password()}
-                    onInput={setPassword}
-                    type="password"
-                  />
-                  <button
-                    class="mt-1 inline-flex items-center justify-center gap-1.5 rounded-xl bg-accent px-4 py-[11px] text-[14px] font-semibold text-on-accent shadow-lg shadow-accent/25 transition-[scale,opacity] duration-100 active:scale-[0.97] active:opacity-90"
-                    disabled={busy()}
-                    onClick={() => void save()}
-                  >
-                    {busy() ? t("webdav.form.saving") : t("common.save")}
-                  </button>
-                </div>
-              </Show>
-            </ScrollArea>
+              <CloseIcon />
+            </button>
           </div>
-        </div>
+
+          <ScrollArea
+            class="min-h-0 flex-1"
+            contentClass="pb-[calc(14px+env(safe-area-inset-bottom))]"
+          >
+            <Show when={view() === "list"}>
+              <p class="px-[18px] pb-1 pt-2 text-[12px] text-text-3">
+                {t("webdav.drawer.hint")}
+              </p>
+              <Show
+                when={davServers().length > 0}
+                fallback={
+                  <div class="flex flex-col items-center gap-1 px-6 py-10 text-center">
+                    <ServerIcon size={42} class="mb-1 text-text-3" />
+                    <p class="text-[13.5px] font-medium text-text-2">
+                      {t("webdav.empty.noServers")}
+                    </p>
+                  </div>
+                }
+              >
+                <For each={davServers()}>
+                  {(server) => (
+                    <ServerRow
+                      server={server}
+                      active={server.id === davActiveId()}
+                      deleting={deletingId() === server.id}
+                      onPick={() => pickServer(server.id)}
+                      onEdit={() => startEdit(server)}
+                      onDelete={() => requestDelete(server.id)}
+                    />
+                  )}
+                </For>
+              </Show>
+
+              <button
+                class="mx-[18px] mt-2 flex w-[calc(100%-36px)] items-center justify-center gap-1.5 rounded-xl border border-dashed border-border py-[11px] text-[13.5px] font-medium text-text-2 transition-colors active:bg-surface-2"
+                onClick={startAdd}
+              >
+                <PlusIcon size={16} />
+                {t("webdav.server.add")}
+              </button>
+            </Show>
+
+            <Show when={view() === "form"}>
+              <div class="flex flex-col gap-3 px-[18px] pb-2 pt-3">
+                <Field
+                  label={t("webdav.form.name")}
+                  placeholder={t("webdav.form.namePlaceholder")}
+                  value={name()}
+                  onInput={setName}
+                />
+                <Field
+                  label={t("webdav.form.url")}
+                  placeholder="https://dav.example.com/dav"
+                  value={url()}
+                  onInput={setUrl}
+                  autofocus
+                />
+                <Field
+                  label={t("webdav.form.username")}
+                  placeholder={t("webdav.form.usernamePlaceholder")}
+                  value={username()}
+                  onInput={setUsername}
+                />
+                <Field
+                  label={t("webdav.form.password")}
+                  placeholder=""
+                  value={password()}
+                  onInput={setPassword}
+                  type="password"
+                />
+                <button
+                  class="mt-1 inline-flex items-center justify-center gap-1.5 rounded-xl bg-accent px-4 py-[11px] text-[14px] font-semibold text-on-accent shadow-lg shadow-accent/25 transition-[scale,opacity] duration-100 active:scale-[0.97] active:opacity-90"
+                  disabled={busy()}
+                  onClick={() => void save()}
+                >
+                  {busy() ? t("webdav.form.saving") : t("common.save")}
+                </button>
+              </div>
+            </Show>
+          </ScrollArea>
+        </Drawer>
       </Portal>
     </Show>
   );
