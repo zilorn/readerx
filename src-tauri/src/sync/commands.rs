@@ -87,6 +87,13 @@ pub async fn readerx_sync_now(app: AppHandle) -> Result<SyncOutcome, String> {
     blocking("同步", move || service(&app)?.sync_now()).await
 }
 
+/// 停止请求立即返回，传输线程负责保存后断开。
+#[tauri::command]
+pub fn readerx_sync_stop(app: AppHandle) -> Result<(), String> {
+    service(&app)?.stop_sync();
+    Ok(())
+}
+
 /// 与指定地址（`ip:port`）同步一次。
 #[tauri::command]
 pub async fn readerx_sync_sync_addr(app: AppHandle, addr: String) -> Result<SyncOutcome, String> {

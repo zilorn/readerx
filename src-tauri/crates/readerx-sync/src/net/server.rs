@@ -82,14 +82,10 @@ pub struct ServerOptions {
     /// 放在这里而不是让宿主轮询：地址只有服务端知道（来源 IP + 对端自报的监听端口），
     /// 而界面要在对端连进来的那一刻就刷新设备列表。
     pub on_peer_seen: Option<Arc<dyn Fn(&PeerInfo) + Send + Sync>>,
-    /// 对端推来的**正文**进了暂存区之后的回调。
-    ///
-    /// 宿主据此把暂存正文落到自己的书库里（App：materialize）。放在服务端而不是让宿主
-    /// 轮询：对端连进来推送完就断了，不通知的话本机要等到下一次自己发起同步才会落地 ——
-    /// 用户看到的是「同步完成了，但另一台设备上的书还是没出现」。
-    ///
-    /// 回调在**引擎锁之外**执行（服务端处理完一条请求、写回应答之后才调用），
-    /// 宿主可以安全地去拿引擎锁；耗时操作应由宿主自己丢到后台线程。
+    /// 每个请求处理后、应答前的持久化检查点，在引擎锁外执行。
+    /// 失败时关闭连接，不向发送端确认成功；已暂存数据保留供恢复。
+    pub on_checkpoint: Option<Arc<dyn Fn() -> Result<()> + Send + Sync>>,
+    /// 兼容通知回调，在引擎锁外、应答前调用。
     pub on_applied: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
@@ -123,6 +119,7 @@ impl ServerOptions {
             timeout: Duration::from_secs(20),
             max_connections: 8,
             on_peer_seen: None,
+            on_checkpoint: None,
             on_applied: None,
         })
     }
@@ -138,6 +135,11 @@ impl ServerOptions {
     }
 
     /// 引擎里的数据被对端改变后通知宿主（见字段说明）。
+    pub fn with_checkpoint(mut self, callback: Arc<dyn Fn() -> Result<()> + Send + Sync>) -> Self {
+        self.on_checkpoint = Some(callback);
+        self
+    }
+
     pub fn with_applied(mut self, callback: Arc<dyn Fn() + Send + Sync>) -> ServerOptions {
         self.on_applied = Some(callback);
         self
@@ -491,20 +493,14 @@ fn serve_connection(
             let mut engine = lock_engine(&engine);
             handle_request(&mut engine, Some(&client_device), &request)
         };
-        // 对端推来的**正文**真的写进了暂存区 → 通知宿主落地（放在引擎锁之外：
-        // 宿主落地时要重新拿这把锁）。
-        //
-        // 只有正文触发：操作本身在下一次同步 / 下一次启动时会被常规落地，
-        // 而正文没有别的触发点 —— 不通知的话，对端明明把书推过来了，本机却要等到
-        // 下一轮同步才「看见」这本书。少通知也能少给宿主添后台线程。
-        let applied = matches!(&response, Response::ContentAck { stored } if *stored > 0);
+        // 在应答前落地，包括元数据、正文、资源；即使应答写失败也已保存。
+        if let Some(callback) = &options.on_checkpoint { callback()?; }
+        let applied = matches!(&response, Response::ContentAck { stored } if *stored > 0)
+            || matches!(&response, Response::Assets { stored, .. } if *stored > 0)
+            || matches!(&response, Response::Ack { .. });
+        if applied { if let Some(callback) = &options.on_applied { callback(); } }
         send_seq += 1;
         write_secure(&mut writer, &keys.server_to_client, send_seq, &response, MAX_FRAME_BYTES)?;
-        if applied {
-            if let Some(callback) = &options.on_applied {
-                callback();
-            }
-        }
 
         // 推送之后把对端进度落盘（它下次连接就能只发差集）
         if let Response::Ack { knowledge, .. } = &response {

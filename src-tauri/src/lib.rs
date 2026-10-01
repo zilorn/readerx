@@ -199,6 +199,7 @@ pub fn run() {
             sync::commands::readerx_sync_pairing_code,
             sync::commands::readerx_sync_join,
             sync::commands::readerx_sync_now,
+            sync::commands::readerx_sync_stop,
             sync::commands::readerx_sync_sync_addr,
             sync::commands::readerx_sync_discover,
             sync::commands::readerx_sync_peers,

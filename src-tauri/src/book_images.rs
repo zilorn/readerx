@@ -159,7 +159,18 @@ pub(crate) fn store_asset(
         return Err("非法的资源名".to_string());
     }
     fs::create_dir_all(root).map_err(|e| format!("创建图片目录失败: {e}"))?;
-    fs::write(root.join(asset), bytes).map_err(|e| format!("写入图片失败: {e}"))?;
+    let path = root.join(asset);
+    let tmp = path.with_extension("sync.tmp");
+    let result = (|| -> std::io::Result<()> {
+        let mut file = fs::File::create(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        fs::rename(&tmp, &path)
+    })();
+    if let Err(error) = result {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("写入图片失败: {error}"));
+    }
     log::debug!("同步插图已落盘 file={asset} bytes={}", bytes.len());
     Ok(asset.to_string())
 }

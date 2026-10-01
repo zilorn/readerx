@@ -12,15 +12,8 @@
 //! 本地改动就持续记进操作日志，关掉的只是网络与自动同步。否则「关掉 → 本地读了几本书
 //! → 再打开」这段历史会凭空消失。从未启用过的用户完全不受影响：不建引擎、不写日志。
 //!
-//! 锁的顺序（避免死锁）：
-//!
-//! ```text
-//! Inner 锁（只做短操作）→ 取出引擎 Arc → 放掉 Inner 锁 → 引擎锁（同步会话会长时间持有）
-//! ```
-//!
-//! 一次同步会话会**一直持有引擎锁**（`session::sync_with` 需要 `&mut SyncEngine`），
-//! 所以自动同步带随机抖动，并且默认只由「设备 id 较大」的一方发起：两边同时向对方
-//! 发起会话时，各自都在等对方的引擎锁，会一直耗到超时。
+//! 网络请求在引擎锁之外运行；收到完整数据包后通过串行落地检查点保存。
+//! 落地时仅短暂访问服务状态和引擎，不在持有服务状态锁时执行检查点。
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -40,7 +33,7 @@ use crate::storage;
 
 use super::bridge::{self, AppliedChanges, BookIndex, PublishMode};
 use super::settings::{self, SyncSettings};
-use super::progress::{self, ProgressSnapshot, ProgressState};
+use super::progress::{ProgressSnapshot, ProgressState};
 
 /// 前端监听的事件名：同步状态变化（开关、同步结果、冲突数…）。
 pub const SYNC_EVENT: &str = "readerx-sync-status";
@@ -209,8 +202,9 @@ pub struct SyncService<R: tauri::Runtime = tauri::Wry> {
     wake: Condvar,
     stop: AtomicBool,
     auto_started: AtomicBool,
-    /// 是否有一次「对端推送后的落地」正在跑（见 [`SyncService::materialize_soon`]）
-    materializing: AtomicBool,
+    /// 串行化本地对账与落库，避免交换索引和操作游标时互相覆盖。
+    materializing: Mutex<()>,
+    cancel_sync: AtomicBool,
 }
 
 impl<R: tauri::Runtime> SyncService<R> {
@@ -235,7 +229,8 @@ impl<R: tauri::Runtime> SyncService<R> {
             wake: Condvar::new(),
             stop: AtomicBool::new(false),
             auto_started: AtomicBool::new(false),
-            materializing: AtomicBool::new(false),
+            materializing: Mutex::new(()),
+            cancel_sync: AtomicBool::new(false),
         })
     }
 
@@ -341,17 +336,17 @@ impl<R: tauri::Runtime> SyncService<R> {
     /// 首次启用时这一步要写几百条操作（每条都要 fsync），因此**放在后台线程**：
     /// 用户点开关必须立刻有反应，而不是等整个书库灌完。
     pub fn reconcile_local(&self) -> Result<(), String> {
+        let _materializing = self.materializing.lock().unwrap_or_else(|p| p.into_inner());
         let engine = self.engine().ok_or("同步未启用")?;
         let mut index = {
             let mut inner = self.lock();
             std::mem::take(&mut inner.index)
         };
         let result = bridge::reconcile(&self.app, &engine, &mut index);
-        let ops = lock_engine(&engine).op_count();
         {
             let mut inner = self.lock();
             inner.index = index;
-            inner.settings.materialized_ops = ops;
+            // 对账只发布本机改动，不能跨过尚未落地的远端操作。
         }
         self.persist_settings();
         self.emit_status();
@@ -584,7 +579,7 @@ impl<R: tauri::Runtime> SyncService<R> {
         self.begin_sync()?;
         let outcome = self.run_sync(&engine, allow_discovery);
         let synced = outcome.as_ref().map(|o| o.synced.len()).unwrap_or(0);
-        let failure = outcome.as_ref().err().cloned();
+        let failure = outcome.as_ref().err().cloned().or_else(|| outcome.as_ref().ok().and_then(|o| o.failed.first().cloned()));
         self.finish_sync(synced, failure);
         outcome
     }
@@ -608,6 +603,7 @@ impl<R: tauri::Runtime> SyncService<R> {
                 conflicts: report.conflicts,
                 ..SyncOutcome::default()
             },
+            Err(SyncError::Cancelled) => SyncOutcome::default(),
             Err(error) => SyncOutcome {
                 failed: vec![error.to_string()],
                 ..SyncOutcome::default()
@@ -622,12 +618,12 @@ impl<R: tauri::Runtime> SyncService<R> {
         };
         if !applied.is_empty() { self.emit_applied(&applied); }
         outcome.applied = Some(applied);
-        self.finish_sync(outcome.synced.len(), result.as_ref().err().map(|e| e.to_string()));
+        self.finish_sync(outcome.synced.len(), result.as_ref().err().filter(|e| **e != SyncError::Cancelled).map(|e| e.to_string()));
         if result.is_ok() {
             // 刚同步完按正常间隔接管，不能立刻再连对端与它的主动同步相撞。
             self.wake.notify_all();
         }
-        result.map(|_| outcome).map_err(|e| e.to_string())
+        match result { Ok(_) | Err(SyncError::Cancelled) => Ok(outcome), Err(error) => Err(error.to_string()) }
     }
 
     /// 一轮同步（只打已知地址；`allow_discovery` 时才退一步扫局域网）。
@@ -649,7 +645,7 @@ impl<R: tauri::Runtime> SyncService<R> {
         // 一台都没连上：多半是对端换了 IP（DHCP）或记的地址已经失效。
         // 用一次发现刷新**已配对设备**的地址，地址真的变了就再给一次机会 ——
         // 手动同步不该让用户「再点一次才成功」。
-        if outcome.synced.is_empty() && had_targets {
+        if outcome.synced.is_empty() && had_targets && !self.cancel_sync.load(Ordering::Acquire) {
             let refreshed = self.refresh_paired_addrs(engine);
             if !refreshed.is_empty() {
                 log::info!("已刷新 {} 台对端的地址，重试同步", refreshed.len());
@@ -662,7 +658,7 @@ impl<R: tauri::Runtime> SyncService<R> {
             self.emit_applied(&applied);
         }
         outcome.applied = Some(applied);
-        if outcome.synced.is_empty() && outcome.failed.is_empty() {
+        if outcome.synced.is_empty() && outcome.failed.is_empty() && !self.cancel_sync.load(Ordering::Acquire) {
             return Err("还没有已配对的设备：先用配对码加入，或在「查找局域网设备」里选一台".to_string());
         }
         Ok(outcome)
@@ -676,6 +672,7 @@ impl<R: tauri::Runtime> SyncService<R> {
         outcome: &mut SyncOutcome,
     ) {
         for (device, name, addr) in targets {
+            if self.cancel_sync.load(Ordering::Acquire) { break; }
             match self.sync_with(engine, addr) {
                 Ok(report) => {
                     outcome.pulled += report.pulled;
@@ -690,6 +687,7 @@ impl<R: tauri::Runtime> SyncService<R> {
                         .synced
                         .push(if name.is_empty() { device.clone() } else { name.clone() });
                 }
+                Err(SyncError::Cancelled) => break,
                 Err(error) => {
                     log::debug!("与对端同步失败 addr={addr}: {error}");
                     outcome.failed.push(format!("{name}：{error}"));
@@ -711,63 +709,32 @@ impl<R: tauri::Runtime> SyncService<R> {
             .collect()
     }
 
-    /// 与一个地址同步，达到预算就释放引擎锁、落地，再接着传下一批。
-    fn sync_with(
-        &self,
-        engine: &SharedEngine,
-        addr: &str,
-    ) -> Result<readerx_sync::SyncReport, SyncError> {
-        let mut total = readerx_sync::SyncReport::default();
-        let mut batch = 1;
-        loop {
-            self.progress.publish(&self.app, ProgressSnapshot {
-                transfer: readerx_sync::SyncProgress {
-                    phase: "connecting".into(), peer_name: addr.to_string(),
-                    content_pushed: total.content_pushed, content_pulled: total.content_pulled,
-                    assets_pushed: total.assets_pushed, assets_pulled: total.assets_pulled,
-                    bytes: total.bytes, ..Default::default()
-                }, batch, ..Default::default()
-            });
-            let result = {
-                let mut guard = lock_engine(engine);
-                readerx_sync::sync_with_addr_progress(&mut guard, addr, SYNC_TIMEOUT, &mut |mut current| {
-                    current.content_pushed += total.content_pushed;
-                    current.content_pulled += total.content_pulled;
-                    current.assets_pushed += total.assets_pushed;
-                    current.assets_pulled += total.assets_pulled;
-                    current.bytes += total.bytes;
-                    self.progress.publish(&self.app, ProgressSnapshot {
-                        transfer: current, batch, ..Default::default()
-                    });
-                })
-            };
-            let report = match result {
-                Ok(report) => report,
-                Err(error) => {
-                    self.progress.phase(&self.app, "failed", Some(error.to_string()));
-                    return Err(error);
-                }
-            };
-            let moved = report.content_pushed + report.content_pulled + report.assets_pushed + report.assets_pulled;
-            let more = report.more_content || report.more_assets;
-            progress::accumulate(&mut total, report);
-            self.progress.phase(&self.app, "applying", None);
-            let applied = self.materialize_pending().map_err(|error| {
-                self.progress.phase(&self.app, "failed", Some(error.clone()));
-                SyncError::Io(error)
-            })?;
-            if !applied.is_empty() {
-                self.emit_applied(&applied);
-            }
-            if !more { return Ok(total); }
-            if moved == 0 {
-                let error = SyncError::Protocol("续传未取得进展，剩余内容将在下次同步重试".into());
-                self.progress.phase(&self.app, "failed", Some(error.to_string()));
-                return Err(error);
-            }
-            self.progress.phase(&self.app, "continuing", None);
-            batch += 1;
+    /// 一条连接持续传输，检查点落地后再检查停止请求。
+    fn sync_with(&self, engine: &SharedEngine, addr: &str) -> Result<readerx_sync::SyncReport, SyncError> {
+        if self.cancel_sync.load(Ordering::Acquire) { return Err(SyncError::Cancelled); }
+        self.progress.publish(&self.app, ProgressSnapshot { transfer: readerx_sync::SyncProgress { phase: "connecting".into(), peer_name: addr.into(), ..Default::default() }, batch: 1, ..Default::default() });
+        let result = readerx_sync::sync_shared_with_addr(engine, addr, SYNC_TIMEOUT, &mut |current| {
+            let mut current = current;
+            if self.cancel_sync.load(Ordering::Acquire) { current.phase = "stopping".into(); }
+            self.progress.publish(&self.app, ProgressSnapshot { transfer: current, batch: 1, ..Default::default() });
+        }, &mut || {
+            let applied = self.materialize_pending().map_err(SyncError::Io)?;
+            if !applied.is_empty() { self.emit_applied(&applied); }
+            if self.cancel_sync.load(Ordering::Acquire) { Err(SyncError::Cancelled) } else { Ok(()) }
+        });
+        if let Err(error) = &result {
+            if *error != SyncError::Cancelled { self.progress.phase(&self.app, "failed", Some(error.to_string())); }
         }
+        result
+    }
+
+    /// 请求停止；传输线程保存当前响应后关闭连接。
+    pub fn stop_sync(&self) {
+        let inner = self.lock();
+        if !inner.syncing { return; }
+        self.cancel_sync.store(true, Ordering::Release);
+        drop(inner);
+        self.progress.phase(&self.app, "stopping", None);
     }
 
     fn begin_sync(&self) -> Result<(), String> {
@@ -775,6 +742,7 @@ impl<R: tauri::Runtime> SyncService<R> {
         if inner.syncing {
             return Err("正在同步中".to_string());
         }
+        self.cancel_sync.store(false, Ordering::Release);
         inner.syncing = true;
         drop(inner);
         self.progress.publish(&self.app, ProgressSnapshot {
@@ -787,7 +755,7 @@ impl<R: tauri::Runtime> SyncService<R> {
 
     fn finish_sync(&self, synced: usize, error: Option<String>) {
         let current_error = error.clone().or_else(|| self.progress.snapshot().and_then(|p| p.error));
-        self.progress.phase(&self.app, if current_error.is_some() { "failed" } else { "done" }, current_error);
+        self.progress.phase(&self.app, if current_error.is_some() { "failed" } else if self.cancel_sync.load(Ordering::Acquire) { "stopped" } else { "done" }, current_error);
         {
             let mut inner = self.lock();
             inner.syncing = false;
@@ -798,6 +766,10 @@ impl<R: tauri::Runtime> SyncService<R> {
                 inner.next_auto_ms = now_ms() + inner.settings.auto_interval_secs * 1000;
             } else if let Some(error) = error {
                 inner.last_error = Some(error);
+            } else if self.cancel_sync.load(Ordering::Acquire) {
+                inner.last_error = None;
+                inner.auto_failures = 0;
+                inner.next_auto_ms = now_ms() + inner.settings.auto_interval_secs * 1000;
             }
         }
         self.persist_settings();
@@ -806,21 +778,23 @@ impl<R: tauri::Runtime> SyncService<R> {
 
     /// 把 `materialized_ops` 之后的操作落地到本地文件，并推进游标。
     fn materialize_pending(&self) -> Result<AppliedChanges, String> {
+        let _materializing = self.materializing.lock().unwrap_or_else(|p| p.into_inner());
         let engine = self.engine().ok_or("同步尚未启用")?;
+        let end = lock_engine(&engine).op_count();
         let from = self.lock().settings.materialized_ops;
         let mut index = {
             let mut inner = self.lock();
             std::mem::take(&mut inner.index)
         };
         let result = bridge::materialize(&self.app, &engine, from, &mut index);
-        let (ops, conflicts) = {
+        let conflicts = {
             let guard = lock_engine(&engine);
-            (guard.op_count(), guard.pending_conflict_count())
+            guard.pending_conflict_count()
         };
         {
             let mut inner = self.lock();
             inner.index = index;
-            inner.settings.materialized_ops = ops;
+            if result.is_ok() { inner.settings.materialized_ops = end; }
         }
         self.persist_settings();
         if conflicts > 0 {
@@ -831,26 +805,15 @@ impl<R: tauri::Runtime> SyncService<R> {
 
     /// 落地并推事件（对端连进来推完就走的那条路：本机数据文件要立刻跟上）。
     ///
-    /// 用 [`AtomicBool`] 串行化：一条连接一次会话可能推好几批，落地是幂等的，
-    /// 但两个落地线程同时跑会各自推进游标、互相看不见对方刚写下的东西。
-    /// 正忙时直接跳过 —— 在跑的那次会把这期间进来的改动一起落地。
     pub(crate) fn materialize_soon(&self) -> Result<(), String> {
-        if self.materializing.swap(true, Ordering::AcqRel) {
-            return Ok(());
-        }
-        let result = self.materialize_pending();
-        self.materializing.store(false, Ordering::Release);
-        match result {
-            Ok(changes) => {
-                self.emit_applied(&changes);
-                Ok(())
-            }
-            Err(error) => Err(error),
-        }
+        let changes = self.materialize_pending()?;
+        self.emit_applied(&changes);
+        Ok(())
     }
 
     /// 落地指定实体（冲突裁决后用，见 [`SyncService::resolve_conflict`]）。
     fn materialize_ids(&self, ids: &[String]) -> Result<AppliedChanges, String> {
+        let _materializing = self.materializing.lock().unwrap_or_else(|p| p.into_inner());
         let engine = self.engine().ok_or("同步尚未启用")?;
         let mut index = {
             let mut inner = self.lock();
@@ -1329,24 +1292,12 @@ impl<R: tauri::Runtime> SyncService<R> {
                     service.emit_status();
                 }
             });
-            // 对端推来的操作 / 正文要先落进引擎，本机的数据文件不会自己变：
-            // 这里在后台线程里做一次落地（materialize 会重新拿引擎锁，不能在
-            // 服务端线程里同步做 —— 那条线程正要写应答）。
-            let applied = std::sync::Arc::new({
+            // 引擎锁已释放，确认本地落地成功后才应答对端。
+            let checkpoint = std::sync::Arc::new({
                 let service = Arc::clone(self);
-                move || {
-                    let service = Arc::clone(&service);
-                    std::thread::Builder::new()
-                        .name("readerx-sync-apply".to_string())
-                        .spawn(move || {
-                            if let Err(error) = service.materialize_soon() {
-                                log::debug!("对端推送后的落地未完成：{error}");
-                            }
-                        })
-                        .ok();
-                }
+                move || service.materialize_soon().map_err(SyncError::Io)
             });
-            let options = options.with_peer_seen(peer_seen).with_applied(applied);
+            let options = options.with_peer_seen(peer_seen).with_checkpoint(checkpoint);
             match PeerServer::start(engine.clone(), options) {
                 Ok(server) => {
                     let port = server.local_addr().port();
@@ -1489,8 +1440,8 @@ impl<R: tauri::Runtime> SyncService<R> {
                 .values()
                 .filter_map(|peer| {
                     let addr = peer.addr.clone()?;
-                    // 默认只由「设备 id 较大」的一方发起：两边同时发起会互相等对方的
-                    // 引擎锁，直到双双超时。连续几轮都没成功时，这一侧也主动起来。
+                    // 默认只由设备 id 较大的一方发起，避免双向重复流量；
+                    // 连续几轮都没成功时另一方也尝试。
                     let initiative = self_id > peer.device_id || failures >= INITIATIVE_FALLBACK_ROUNDS;
                     initiative.then(|| (peer.device_id.clone(), peer.name.clone(), addr))
                 })
@@ -1507,6 +1458,7 @@ impl<R: tauri::Runtime> SyncService<R> {
         let mut synced = 0usize;
         let mut last_error = None;
         for (_, name, addr) in &targets {
+            if self.cancel_sync.load(Ordering::Acquire) { break; }
             match self.sync_with(&engine, addr) {
                 Ok(report) => {
                     synced += 1;
@@ -1517,6 +1469,7 @@ impl<R: tauri::Runtime> SyncService<R> {
                         log::debug!("自动同步完成（无变化）peer={name}");
                     }
                 }
+                Err(SyncError::Cancelled) => break,
                 Err(error) => {
                     log::debug!("自动同步失败 peer={name}: {error}");
                     last_error = Some(error.to_string());
@@ -1536,6 +1489,10 @@ impl<R: tauri::Runtime> SyncService<R> {
             Ok(applied) if !applied.is_empty() => self.emit_applied(&applied),
             Ok(_) => {}
             Err(error) => log::warn!("自动同步后的落地失败：{error}"),
+        }
+        if self.cancel_sync.load(Ordering::Acquire) {
+            self.finish_sync(0, last_error);
+            return AutoRound::NoPeers;
         }
         if synced == 0 {
             // 全都没连上（换网 / 换 IP 很常见）：用发现**刷新已配对设备的地址**，
