@@ -20,6 +20,19 @@
 基于 **Tauri 2 + SolidJS + TypeScript** 的电子书阅读器：手机（Android）上是一个单手可用的
 移动端应用，桌面（Linux / Windows）上是侧边导航的窗口应用，两者共用同一套页面与本地书库。
 
+## 界面预览
+
+以下截图来自本地网页服务器运行的真实界面，书名、作者、正文与阅读进度均为虚构演示数据。
+
+<p align="center">
+  <img src="./docs/images/mobile-bookshelf.png" alt="手机端书架" width="300" />
+  <img src="./docs/images/mobile-reader.png" alt="手机端阅读" width="300" />
+</p>
+
+<p align="center">
+  <img src="./docs/images/desktop-bookshelf.png" alt="桌面端书架" width="960" />
+</p>
+
 ## 功能
 
 - **书架** `/`：本地书籍网格、继续阅读、阅读进度、书籍删除管理
