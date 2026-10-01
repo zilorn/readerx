@@ -94,6 +94,7 @@ import {
 } from "../lib/books";
 import { withDisplayReplacements } from "../lib/textReplacements";
 import { withHanBook } from "../lib/hanDisplay";
+import { sentenceSelectionRange } from "../lib/textSelection";
 import { t, type MessageKey } from "../lib/i18n";
 import {
   BOOKMARK_MAX_LEN,
@@ -2984,7 +2985,7 @@ export default function ReaderPage() {
   // -------------------------------------------------------------------
   // 分页模式：自绘文本选区（拖选 + 跨屏自动翻页续选）
   // 原生 text 选区在分页列被禁用（select-none），由本引擎接管：
-  //   - 触屏：长按起选（拉丁词按整词 / 中文按单字），随后拖动扩选；
+  //   - 触屏：长按按听书分句起选（裁剪到被长按的单页），随后拖动扩选；
   //   - 鼠标/触控笔：按下后拖拽（≥6px）直接起选；
   //   - 选区端拖出正文列上/下缘 → 指针在屏缘外持续停留满判定时长后，
   //     在本章内翻一屏续选（双页模式一屏两页；每翻一屏需先回屏内再拖出），
@@ -3197,20 +3198,6 @@ export default function ReaderPage() {
     return Math.min(mir.text.length, base + anchor.cstart + local);
   }
 
-  /** 长按起点：拉丁词按整词扩展；中文等无词界文字按单个字 */
-  function expandSelectStart(text: string, c: number): [number, number] {
-    const isWordChar = (i: number): boolean => {
-      const ch = text[i];
-      return !!ch && /[A-Za-z0-9_]/.test(ch);
-    };
-    if (!isWordChar(c)) return [c, Math.min(c + 1, text.length)];
-    let s = c;
-    while (s > 0 && isWordChar(s - 1)) s--;
-    let e = c + 1;
-    while (e < text.length && isWordChar(e)) e++;
-    return [s, e];
-  }
-
   function captureSelPointer(pointerId: number): void {
     const el = areaRef;
     if (el && el.setPointerCapture) {
@@ -3233,14 +3220,24 @@ export default function ReaderPage() {
     }
   }
 
-  /** 长按触发：选中整词/字并进入可拖动扩选状态 */
+  /** 长按触发：选中当前页内的听书句段并进入可拖动扩选状态 */
   function startLongPressSelection(p: SelPressState): void {
     selPress = null;
     gestureStart = null; // 抬手不再当作点击（翻页/呼出菜单）
     const mir = mirror();
     if (p.downChar === null || !mir || p.downChar < 0 || p.downChar >= mir.text.length) return;
     if (!selEngineUsable()) return;
-    const [s, e] = expandSelectStart(mir.text, p.downChar);
+    const position = unitAtGlobalOffset(mir, p.downChar);
+    const first = snapPage(pageIdx());
+    const page = pageSpans().slice(first, first + pageColumns())
+      .find(([start, end]) => p.downChar! >= start && p.downChar! < end);
+    if (!position || !page) return;
+    const unit = mir.units[position.unit];
+    if (unit.kind !== "p" && unit.kind !== "h") return;
+    const base = mir.unitStart[position.unit];
+    const range = sentenceSelectionRange(unit.text, position.local, page[0] - base, page[1] - base);
+    if (!range) return;
+    const [s, e] = range.map((offset) => base + offset);
     cancelFollowIfActive();
     selDrag = {
       kind: "long",
@@ -3337,7 +3334,7 @@ export default function ReaderPage() {
     const below = rect ? y > rect.bottom + 8 : false;
     const above = rect ? y < rect.top - 8 : false;
     if (below || above) {
-      // 长按整词阶段直接拖出屏缘：向下视为扩选终点、向上视为扩选起点
+      // 长按句段阶段直接拖出屏缘：向下视为扩选终点、向上视为扩选起点
       if (drag.anchor === null && span) {
         drag.anchor = below ? span[0] : span[1];
       }
@@ -3380,11 +3377,11 @@ export default function ReaderPage() {
     drag.x = x;
     drag.y = y;
     if (drag.anchor === null) {
-      // 长按整词起选后的首次移动：以词的另一端为固定端
+      // 长按句段起选后的首次移动：以句段的另一端为固定端
       if (!span) return;
       if (c <= span[0]) drag.anchor = span[1];
       else if (c >= span[1]) drag.anchor = span[0];
-      else return; // 仍停留在词内
+      else return; // 仍停留在句段内
     }
     const anchor = drag.anchor;
     const lo = Math.min(anchor, c);

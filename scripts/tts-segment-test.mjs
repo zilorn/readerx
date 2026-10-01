@@ -5,10 +5,11 @@ import ts from "typescript";
 // 分句器是纯函数；截取该部分，避免加载依赖 WebView 的章节模块。
 const source = await readFile(new URL("../src/lib/ttsSegment.ts", import.meta.url), "utf8");
 const splitter = source.slice(source.indexOf("const END_CHARS"), source.indexOf("export function buildChapterSpeechItems"));
-const { outputText } = ts.transpileModule(splitter, {
+const selectionSource = await readFile(new URL("../src/lib/textSelection.ts", import.meta.url), "utf8");
+const { outputText } = ts.transpileModule(splitter + selectionSource.replace(/^import .*;\n/m, ""), {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 },
 });
-const { splitSpeechLocal, splitSpeechItemsAtPages } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString("base64")}`);
+const { splitSpeechLocal, splitSpeechItemsAtPages, sentenceSelectionRange } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString("base64")}`);
 
 const cases = [
   ["他说：“第一句。第二句！第三句？”然后离开。", ["他说：“第一句。", "第二句！", "第三句？”", "然后离开。"]],
@@ -50,3 +51,26 @@ assert.deepEqual(split.slice(1).map(({ text, start, end, ls, le }) => ({ text, s
 assert.deepEqual(splitSpeechItemsAtPages([original], []), [original]);
 assert.equal(split.slice(1).map((item) => item.text).join(""), original.text);
 process.stdout.write("TTS 页边界与偏移回归检查通过\n");
+
+// 长按须沿用完整段落的分句结果，再裁到被按下的那一页，不能重新对页内碎片分句。
+for (const [text] of cases) {
+  for (const sentence of splitSpeechLocal(text)) {
+    for (let offset = sentence.s; offset < sentence.e; offset++) {
+      assert.deepEqual(sentenceSelectionRange(text, offset, 0, text.length), [sentence.s, sentence.e]);
+      const cut = Math.floor((sentence.s + sentence.e) / 2);
+      const page = offset < cut ? [0, cut] : [cut, text.length];
+      assert.deepEqual(sentenceSelectionRange(text, offset, ...page), [
+        Math.max(sentence.s, page[0]), Math.min(sentence.e, page[1]),
+      ]);
+    }
+  }
+}
+assert.deepEqual(sentenceSelectionRange("甲乙丙丁。", 2, 1, 4), [1, 4]);
+// 页起点可以在前一个单元内，页终点也可以在后一个单元内。
+assert.deepEqual(sentenceSelectionRange("第一句。第二句！", 5, -10, 20), [4, 8]);
+assert.deepEqual(sentenceSelectionRange("  甲。", 0, 0, 4), [0, 1]);
+assert.deepEqual(sentenceSelectionRange("😀！？", 0, 0, 4), [0, 2]);
+assert.deepEqual(sentenceSelectionRange("😀！？", 1, 0, 4), [0, 2]);
+assert.equal(sentenceSelectionRange("甲乙。", 2, 0, 2), null);
+assert.equal(sentenceSelectionRange("甲乙。", 3, 0, 3), null);
+process.stdout.write("长按分句选取与单页裁剪回归检查通过\n");
