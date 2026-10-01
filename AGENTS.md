@@ -1,221 +1,46 @@
 # AGENTS.md
 
-> 禁止更改AGENTS.md
+未经用户明确要求，不修改本文件。CLAUDE.md 为指向本文件的软链。
 
-本文件为仓库协作约定，面向人类与 AI 代理（CLAUDE.md 为指向本文件的软链）。
+## 项目与技能入口
 
-## 项目是什么
+ReaderX 是 Tauri 2 + SolidJS 电子书阅读器，支持本地书库、在线书源及 Android / Linux / Windows。Android 为首要目标；手机与桌面共用页面、路由和业务逻辑，外壳按窗口宽度切换。
 
-**ReaderX** —— 基于 **Tauri 2 + SolidJS** 的移动端风格电子书阅读器（书架 / 导入 / 设置 / 阅读）。
+专项约定只维护在下列 skill 中；执行对应任务前读取相关 SKILL.md。技能索引见 [.agents/skills.md](.agents/skills.md)。
 
-- 形态：同一份 Web 前端 + Tauri 宿主，跑在**手机与桌面两端**：
-  - **Android（首要目标）**：手机列 + 底部 Tab，界面按单手操作设计；
-  - **Linux / Windows 桌面**：窗口宽度 ≥900px 时换成侧边导航 + 内容区（`src/lib/platform.ts` 的断点，
-    外壳见 `src/shell/`），窗口拉窄会自动回到手机外壳；
-  - 页面组件、路由、本地书库两端**共用一份**，不要为桌面复制一套页面；差异只在外壳与系统集成
-    （窗口尺寸约束、原生文件选择导入、Esc 返回）。
-- 包管理：**pnpm**（仓库已有 `pnpm-lock.yaml`，新增依赖请用 `pnpm add`）。
-- 本地书管理：此项目专注于本地书管理。
+| 任务 | 技能 |
+| --- | --- |
+| 页面、外壳、状态、主题、i18n、构建资源 | [readerx-frontend](.agents/skills/readerx-frontend/SKILL.md) |
+| 书源引擎、宿主 API、浏览器认证、登录态、CLI | [readerx-source-engine](.agents/skills/readerx-source-engine/SKILL.md) |
+| `wt: XXX` 或明确要求 worktree | [readerx-worktree](.agents/skills/readerx-worktree/SKILL.md) |
+| 指定版本更新或发布 | [readerx-release](.agents/skills/readerx-release/SKILL.md) |
 
-## 常用命令
+## 通用开发约定
 
-| 命令                     | 说明                                                 |
-| ------------------------ | ---------------------------------------------------- |
-| `pnpm dev`               | 启动 Vite 开发服务器（固定 `http://localhost:1420`） |
-| `pnpm build`             | 生产构建（输出 `dist/`）                             |
-| `pnpm exec tsc --noEmit` | 类型检查（严格模式，改动后必须跑，勿提交红叉）       |
-| `pnpm run i18n:check`    | 界面文案词典校验（中英 key / 占位符 / 漏改的中文）   |
-| `pnpm tauri dev`         | Tauri 桌面开发窗口                                   |
-| `pnpm tauri android dev` | Android 真机/模拟器开发                              |
-| `pnpm tauri build`       | 打包发布                                             |
+- 使用 pnpm，新增依赖用 `pnpm add`。开发服务器为 `http://localhost:1420`；启动前确认端口，复用已有服务。
+- 后端逻辑优先放 Rust，持久化由 Rust 操作；修改数据格式时考虑旧数据迁移。
+- 新增 App Rust command 同步 `src-tauri/src/lib.rs` 的 `invoke_handler`，按需配置 `src-tauri/capabilities`。
+- 不随意删除已有功能，不增加无意义页面或说明性提示；职责过多的文件应按业务拆分。
+- 普通开发不修改版本或 CHANGELOG.md；版本与发布按对应 skill 执行。
+- 不手写或提交生成的简繁词典，不提交 dist/、node_modules/ 等构建产物。
 
-书源引擎（`src-tauri/crates/readerx-source`）可独立编译为命令行工具，与 App 共用同一份引擎代码：
+## 日志与失败
 
-| 命令                                                    | 说明                                     |
-| ------------------------------------------------------- | ---------------------------------------- |
-| `cargo build -p readerx-source --features cli`          | 构建 `readerx-source`（含 CDP 认证后端） |
-| `cargo build -p readerx-source --features "cli webkit"` | 追加 WebKitGTK 认证后端（需系统开发包）  |
-| `cargo test -p readerx-source`                          | 引擎 / 宿主 / 存储的单元测试             |
+所有业务代码遵循 [docs/logging.md](docs/logging.md)：
 
-> Rust侧测试请在src-tauri中运行，因为根目录无效。
+- Rust 用 `log` 门面，前端用 `src/lib/logger.ts` 的 `createLogger(scope)`；不直接写 `println!` / `console.*`，CLI 结果输出除外。
+- `error` 记录异常，`warn` 记录可恢复失败或降级，`info` 记录完整用户动作；逐章、逐请求等循环细节只用 `debug`。
+- 不记录凭据、请求头值、存储快照或正文；只记数量或长度。URL 用 `readerx_log::redact::url()`，错误文本中的地址用 `redact::urls_in_text()` 脱敏。
+- 前端用户可见失败走 `reportFailure(...)`，不再重复记录 `log.error`。
 
-> 端口 1420 可能已被 `tauri android dev` 占用，勿再起第二个 dev server。
+## 验证与环境
 
-如果需要grep可以使用rg（如果有），速度更快。
+- 修改前端后运行 `pnpm exec tsc --noEmit`、`pnpm run i18n:check`；提交前保证 `pnpm build` 通过。纯文档/技能修改检查链接、内容与技能格式即可。
+- Rust 检查在 `src-tauri` 执行，选择涉及的 crate / feature；专项检查见对应 skill。
+- 沙箱阻拦正常操作或 cargo / pnpm 缓存写入时申请提权，不通过临时缓存目录绕过。需要安装系统库时告诉用户。
 
-## 构建期产物
+## Git 交付
 
-- `src/generated/han-dict-<方向>.bin`（简繁转换词典，gzip）由 `scripts/han-dict.mjs` 生成，
-  `vite.config.ts` 的 `hanDict` 插件在 dev / build 启动时自动调用它（词典未变则不写盘）；
-  **不入库**（见 `.gitignore`），不要手写或提交。词典内容取自 `node_modules/opencc-js` 的当前版本，
-  随依赖更新，无需手动同步。
-- 改动简繁词典分区时，必须同时改 `scripts/han-dict.mjs` 的 `HAN_DICT_SECTIONS` 与
-  `src/lib/hanDict.ts` 的 `SECTIONS`（资源格式头 `readerx-han-dict/1` 对不上会在运行时报错，
-  而不是静默给出错误转换）。
-- 大块纯数据（词典、字表之类）不要以 JS 模块形式引入：走「构建期压缩成资源 + 运行时按需取用」，
-  否则又会打出一个超过 500 kB 的 chunk 并拖慢 WebView 解析。
-
-## 路由与懒加载约定
-
-- 路由集中在 `src/App.tsx`，用 `@solidjs/router` v1 的 JSX API：
-
-  ```tsx
-  <Router root={AppShell}>
-    <Route path="/" component={BookshelfPage} />
-    ...
-  </Router>
-  ```
-
-- **每个页面文件必须 default export 一个 Solid 组件**，并在 App.tsx 里用 `lazy(() => import(...))` 引入 —— 新增页面照抄现有写法即可，构建时 Vite 会自动拆 chunk。
-- 根布局 `AppShell`（`src/App.tsx`）只负责：按窗口宽度选外壳（`MobileStage` / `DesktopStage`）、
-  承接 `<Suspense>` 的懒加载 fallback、全局 Toast，以及跨页面的「移入分组」抽屉。
-  页面栈与导航都在外壳里，加新外壳行为改 `src/shell/`，别往 AppShell 堆。
-- 主 Tab 页面（手机端）才有底部导航；阅读页 / 404 等次级页不显示 Tab；桌面端主 Tab 在侧边栏。
-- **常驻（保活）页面**：主 Tab（`/`、`/discover`、`/settings`）与 `/webdav-import` 由页面栈
-  直接挂载并常驻 DOM（注册表 `KEPT_PAGES` 在 `src/App.tsx`，两个外壳共用），切走只是
-  `display:none`、再进入复用同一层，页内状态与滚动位置原样保留 —— 这些路径**不写 `<Route>`**，
-  路由表只声明真正会 push / pop 的次级页面。要保活一个新页面：加进 `KEPT_PAGES`，
-  并让该页面用 `closeOnRouteChange`（`src/lib/keptPage.ts`）收起挂在 `<Portal>` 上的弹层
-  （Portal 渲染到 document.body，不随页面层隐藏）。其余页面按推入 / 弹出卸载，正常写 `<Route>`。
-- 主 Tab 与「自管整页高度」的路由口径集中在 `src/shell/routes.ts`（手机底部导航与桌面侧边栏
-  都读它），新增主 Tab 只改这一处 + `KEPT_PAGES`。
-- 页面内跳转用 `useNavigate()` / `<A href>`（不要写原生 `<a href>`）。
-
-## 状态约定（重要）
-
-- 全局状态一律放 `src/lib/store.ts` 的**模块级 signal**（`createSignal` 于模块顶层创建，无需 Context）。
-- 读取即响应式：组件里直接调用导出的 getter 函数即可被追踪；修改走导出的 setter/action。
-- 页面内部一次性 UI 状态（搜索词、弹层开关）用组件内 `createSignal`。
-- 阅读字号、主题、书架进度是**跨页面共享偏好**：书架→阅读页→设置页应实时联动，勿在页面里各自存一份。
-- 不要引入 Redux/MobX 之类的状态库，不要用 `createEffect` 驱动 UI 渲染树。
-
-## 主题与样式约定
-
-- 样式统一使用 **Tailwind CSS v4**（`@tailwindcss/vite` 已接入，入口为 `src/index.css`）。不要在组件里新写手写 BEM/业务 CSS，复杂规则如需 CSS 也优先用 `@utility` 等 Tailwind 机制。
-- 三套主题（浅色/深色/护眼 sepia）由 `html[data-theme]` 切换，CSS 变量仍定义在 `src/index.css`；Tailwind 颜色 token 通过 `@theme inline` 映射到 `var(--bg)` / `var(--surface)` / `var(--text)` / `var(--accent)` 等运行期变量。颜色一律走 `var(--*)` 或 Tailwind token（如 `text-text-2`、`bg-accent`），禁止在组件里写死色值。
-- 应用外壳为 ≤480px 的居中手机列（`.app` 对应 Tailwind `mx-auto max-w-[480px]`），内容滚动区为 `.app-view` 对应 `flex-1 overflow-y-auto`；新页面按现有结构书写。
-- 阅读字号来自全局 signal（px 值内联设置），行高/字距沿用阅读区既有排版（`leading-[1.95]` / `tracking-[0.01em]`、段首 `indent-[2em]`），修改字号勿破坏排版节奏。
-- 图标不引第三方库：往 `src/components/icons.tsx` 里加内联 SVG 函数（线性 24px，stroke="currentColor"）。
-
-## 界面文案与多语言（i18n）
-
-- 用户可见文案一律走 `src/lib/i18n` 的 `t("模块.key")`，**不要在组件里写死中文**；
-  词典按业务模块放在 `src/lib/i18n/locales/{zh-CN,en}/`，key 前缀与模块同名，中英两侧一起补。
-- `t()` 只能在函数 / 组件里调用（词典按需加载，也要跟随语言变化）：模块顶层常量存 key，
-  渲染时再 `t(...)`。
-- 日志（`log.*`）、代码注释、参与匹配 / 持久化的字符串（正则、状态 key、书源字段名、JS 代码样例）
-  保持中文，不进词典；落库的兜底值靠显示层翻译（见 `src/lib/bookDisplay.ts`）。
-- 改完跑 `pnpm run i18n:check` 与 `pnpm exec tsc --noEmit`；完整规范、复数写法与已知取舍见
-  `docs/i18n.md`。
-
-## 类型与质量门槛
-
-- tsconfig 开启 `strict / noUnusedLocals / noUnusedParameters`：未使用的 import、变量会直接报错，写完先 `pnpm exec tsc --noEmit`。
-- 组件 props 用 interface/type 显式声明；页面组件 default export，其余组件具名导出。
-- 提交前保证 `pnpm build` 通过；不要提交 `dist/` 与 `node_modules/`。
-- 提交前保证是否过度依赖一个文件中的代码，即一个文件承担了太多职责。
-
-## 桌面端约定
-
-- 外壳二选一由 `src/lib/platform.ts` 的**窗口宽度断点**决定（不是编译期分支）：`MobileStage` 是页面栈
-  滑动动画 + 底部 Tab，`DesktopStage` 是侧边栏 + 内容区。两者共用 `KEPT_PAGES` 保活注册表与
-  `src/shell/routes.ts` 的路由口径，新增主 Tab 只改 `routes.ts`。
-- 挂在 `<body>` 上的浮层（底部抽屉 / 操作条）宽度统一用 `max-w-[var(--app-column)]`（见 `src/index.css`），
-  这样手机列与桌面内容区都能正确居中；不要再写死 `max-w-[480px]`。
-- 手机专属能力（如 `input[type=file]` 的 SAF 导入）在桌面端要换成原生实现：桌面导入走
-  `readerx_pick_book_file`（系统文件选择器 + Rust 读字节），见 `src/components/ImportButton.tsx`。
-- 桌面登录窗口的实现在 `plugins/tauri-plugin-webview-login`：Linux 用 WebKitGTK 原生
-  `CookieManager` 读 Cookie（含 httpOnly），页面存储探针在各平台的实际能力见
-  `desktop.rs` 的实测表——**Linux 上宿主脚本与页面存储隔离，不要试图用 eval 读 localStorage**。
-
-## 平台提醒
-
-- Tauri WebView 只认较新的 CSS：flex/grid/backdrop-filter 可用，但避免过度依赖实验特性（`color-mix` 已用，注意低版本 Android WebView 兼容性，必要时加 fallback）。
-- 新增 Rust command 需同步注册 `src-tauri/src/lib.rs` 的 `invoke_handler`，并在 `src-tauri/capabilities` 里按需授权。
-
-## 书源引擎边界（重要）
-
-- 书源引擎（Boa 沙箱、宿主 `http`/`html`/`cryptoUtil`、书源与登录态持久化）住在
-  `src-tauri/crates/readerx-source`，**不依赖 Tauri / GUI**；App 与独立二进制共用它，
-  不要在主 crate 里再写第二份引擎或书源存储逻辑。
-- 该 crate 需要「真实浏览器」时一律通过 `readerx_source::auth` 的 `AuthProvider` 注册后端：
-  App 注册 `tauri-plugin-webview-login`（Android 原生浮层 / 桌面独立登录窗口，插件内部按平台分实现），
-  CLI 注册 webkit2gtk / CDP（都是可选 feature）。新增平台认证方式时实现该 trait，
-  不要往核心里塞 `#[cfg(target_os)]` 分支。
-- `AuthProvider::authenticate` 的入参是 `AuthRequest`：注入脚本、会话 UA（`cf_clearance` 与 UA 绑定，
-  窗口 UA 必须与请求 UA 一致）与存储探针（`ProbeScript` 四段脚本）。后端只原样执行探针，
-  不认识它的内部结构；探针本身住在 `storage.rs`，改格式时四个宿主（Android / 桌面 / CDP / CLI webkit）
-  一起考虑。
-- 数据目录由宿主在启动时用 `readerx_source::store::init_data_root` 指定（App 用应用数据目录，
-  CLI 用 `--data-dir`），App 与 CLI 因此能交替读写同一份书源与登录态；改动文件格式要同时
-  考虑两边的兼容（见 `store.rs` 的文件布局注释）。
-- 独立二进制的用法与认证流程见 `docs/book-source-cli.md`；书源相关改动需同步更新 `docs/`。
-
-## 沙箱问题
-
-- 遇到沙箱阻拦请提权。
-- 如果需要安装系统库请告诉用户，而不是另找其他方法。
-- 如果你发现`cargo` `pnpm`的缓存写入遭到沙箱阻拦，请提权。
-
-错误做法：export一个临时cache目录。
-**注意**：如果是临时测试，之后删除的话不要提权。
-
-## 关于前端
-
-- 请使用svg而不是表情，特殊的文本（如返回使用< 这是**绝对禁止**的）。
-- 不要加入无意义的页面：可以不加入页面就不加入，除非用户要求。
-- 不要加入无意义的文本提示，不要将用户的话写进页面中。
-
-如：
-用户：在这个页面中添加爬取`XXX`的功能。
-你写的文件中：在此页面通过爬取XXX获取书籍，以便……
-
-这个**绝对禁止**。
-
-## 后端与储存
-
-后端代码尽量写在Rust中，而不是webview。
-储存数据，持久化数据请用Rust后端操作，不要将数据储存在webview中。
-
-重要的是：要注意数据迁移。
-
-## 日志约定
-
-- **只有一个出口**：Rust 用 `log` 门面的宏（`log::info!` / `log::warn!` …），前端用
-  `src/lib/logger.ts` 的 `createLogger(scope)`。**不要在业务代码里写 `println!` / `console.*`**
-  （CLI 的结果输出除外，那是给用户看的数据，不是日志）。
-- 设施在 `src-tauri/crates/readerx-log`（一天一个目录 / 一次启动一个文件 + 体积轮转 +
-  标准错误 + Android logcat + 脱敏），App 侧接线在 `src-tauri/src/logging.rs`；日志文件是
-  `<应用数据目录>/logs/<日期>/readerx-<时刻>.log`，应用内「设置 → 调试 → 应用日志」
-  可看（含切换历史文件）、可复制、可切级别。完整说明见 `docs/logging.md`。
-- 级别口径：`error` 不该发生的异常 / `warn` 可恢复的失败与降级 / `info` 用户可感知的完整动作 /
-  `debug` 细节（逐章、逐请求）。循环里只记 `debug`，绝不在循环里记 `info`/`warn`。
-- **凭据永不进日志**：Cookie、token、密码、请求头取值、存储快照、书籍正文一律不写；
-  只记数量或长度。URL 过 `readerx_log::redact::url()`，错误文本里的地址过
-  `redact::urls_in_text()`（底层库会把完整地址写进错误原因）。
-- 用户可见的失败只写一次：走 `reportFailure(...)`（它自己记日志），不要再补一条 `log.error`。
-
-## 功能删除与修改
-
-- 除非用户强制要求，请不要随意删除功能。（包括删除页面，删除某个功能，删除有重要用途的方法）
-- 修改功能可以随意抉择。
-- 书源相关改动需要更新`docs/`。
-
-## git相关
-
-- 你需要完成任务后提交git，并告知用户提交信息。
-  就像：`[哈希值]` | [提交信息]
-  以这样的形式列出表格
-  你可以对你的改动做出简短的描述
-  请使用中文编写提交信息
-- 如果任务量大，需要分着提交。
-- 提交时要注意不要提交与本次任务无关的文件，也不要删除（即不进行任何操作）。
-- 如果用户说明wt: XXX，则说明要创建worktree并进行工作。详看`./.agent-docs/worktree.md`
-
-格式为：feat/fix/docs: [content]
-
-## 关于软件版本与更新
-
-- 不要随意修改软件版本。
-- 注意不要更新`CHANGELOG.md`，除非用户要求。
-  当用户发送"更新v0.2.0"之类的要求你需要查看`./.agent-docs/release.md`。
+- 完成任务后提交，仅暂存本次任务文件；不操作用户的无关修改。任务较大时按完整改动分批提交。
+- 提交信息用中文，格式为 `feat/fix/docs: 内容`。最终用表格报告提交哈希与提交信息，并简述改动、验证结果及未验证范围。
+- worktree 的创建、整合与清理，以及发布的 tag / 推送，按对应 skill 和用户授权执行。
