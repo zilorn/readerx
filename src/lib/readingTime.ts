@@ -8,6 +8,12 @@ export function readingDay(date = new Date()): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
 
+export function formatReadingDuration(milliseconds: number): string {
+  if (milliseconds > 0 && milliseconds < 60_000) return t("settings.readingTime.lessThanMinute");
+  const minutes = Math.floor(milliseconds / 60_000);
+  return t("settings.readingTime.duration", { hours: Math.floor(minutes / 60), minutes: minutes % 60 });
+}
+
 let writes: Promise<void> = Promise.resolve();
 export function loadReadingTime(): Promise<void> {
   writes = writes.then(async () => {

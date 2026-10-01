@@ -8,7 +8,6 @@
 export const settings = {
   "settings.readingTime.lessThanMinute": "Less than 1 min",
   "settings.readingTime.details": "View details",
-  "settings.readingTime.collapse": "Hide details",
   "settings.readingTime.trend": "Daily reading",
   "settings.readingTime.period": "Time range",
   "settings.readingTime.month": "Last 30 days",

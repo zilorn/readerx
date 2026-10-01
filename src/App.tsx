@@ -24,6 +24,7 @@ const WebdavImportPage = lazy(() => import("./pages/WebdavImport"));
 const DiscoverPage = lazy(() => import("./pages/Discover"));
 const SettingsPage = lazy(() => import("./pages/Settings"));
 const ChapterRulesPage = lazy(() => import("./pages/ChapterRules"));
+const ReadingTimePage = lazy(() => import("./pages/ReadingTime"));
 const TtsCachePage = lazy(() => import("./pages/TtsCache"));
 const DataBackupPage = lazy(() => import("./pages/DataBackup"));
 const ReaderPage = lazy(() => import("./pages/Reader"));
@@ -131,6 +132,7 @@ function App() {
       {/* 主 Tab（/ 、/discover 、/settings）与 /webdav-import 属常驻页面，见 KEPT_PAGES */}
       <Route path="/shelf-search" component={ShelfSearchPage} />
       <Route path="/chapter-rules" component={ChapterRulesPage} />
+      <Route path="/reading-time" component={ReadingTimePage} />
       <Route path="/tts-cache" component={TtsCachePage} />
       <Route path="/data-backup" component={DataBackupPage} />
       <Route path="/book/:id" component={ReaderPage} />

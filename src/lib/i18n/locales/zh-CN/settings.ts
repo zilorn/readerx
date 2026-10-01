@@ -9,7 +9,6 @@
 export const settings = {
   "settings.readingTime.lessThanMinute": "不足 1 分钟",
   "settings.readingTime.details": "查看详情",
-  "settings.readingTime.collapse": "收起详情",
   "settings.readingTime.trend": "每日阅读",
   "settings.readingTime.period": "统计范围",
   "settings.readingTime.month": "近三十天",
