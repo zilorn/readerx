@@ -1,3 +1,4 @@
+import { replaceRuleId } from "./dataIds";
 /**
  * 文本替换（阅读时显示级替换）模块。
  *
@@ -113,14 +114,16 @@ export function newReplaceRuleId(): string {
 
 /** 新增一条替换规则 */
 export function addReplaceRule(rule: TextReplaceRule): void {
-  persist([...ruleListSignal(), rule]);
+  const next = { ...rule, id: replaceRuleId(rule) };
+  persist([...ruleListSignal().filter((item) => item.id !== next.id), next]);
 }
 
 /** 按 id 更新一条替换规则（不存在时忽略） */
 export function updateReplaceRule(rule: TextReplaceRule): void {
   const list = ruleListSignal();
   if (!list.some((item) => item.id === rule.id)) return;
-  persist(list.map((item) => (item.id === rule.id ? rule : item)));
+  const next = { ...rule, id: replaceRuleId(rule) };
+  persist([...list.filter((item) => item.id !== rule.id && item.id !== next.id), next]);
 }
 
 /** 按 id 删除一条替换规则 */

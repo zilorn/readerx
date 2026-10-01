@@ -7,7 +7,7 @@
 ```jsonc
 {
   "schemaVersion": 1,
-  "id": "src-m7x2k9p4q1",      // 导出保留；导入时同 id/同名同站会覆盖
+  "id": "s-0123456789abcdef",   // 本地与同步统一；首次按书源地址派生，编辑后沿用
   "name": "示例源",
   "bookSourceUrl": "https://example.com", // 站点根
   "author": "",
@@ -22,7 +22,7 @@
     "content": true              //   正文
   },
   "autoAuth": true,              // 自动网页认证（登录/CF 挑战，Android / Linux / Windows）；默认 true，可单独关闭
-  "groupId": "sg-m7x2k9",        // 本机分组归属（本地字段；导出时改写为可读的 groupName，见「分组」）
+  "groupId": "sg-0123456789abcdef", // 统一书源分组 ID（本地字段；导出时改写为可读的 groupName，见「分组」）
   "userAgent": "",               // 空 = 内置默认
   "headers": { "Referer": "https://..." }, // 每请求合并的默认头（可含 Cookie）
   "updateTime": 1725400000000,
@@ -169,3 +169,7 @@
 
 - 某能力关闭后：发现页不显示对应入口，引擎也会拒绝调用（双重校验）。
 - 若开关开着但函数没实现：调用返回结构化错误（`bookXxx is not defined`），界面上可读展示。
+
+书源 ID 与在线书 `bookdetail.json` 的 `bookSourceId`、同步书源实体 ID 一致。
+旧随机书源 ID 在启动和备份恢复时迁移，源文件、在线书引用、登录态和 CLI 登录配置
+一起更新；已有稳定 ID 在编辑书源后保留。

@@ -980,8 +980,7 @@ fn scan_books_dir(dir: &Path) -> Result<Vec<BookMeta>, String> {
 /// 因此单独开一个只读 `bookdetail.json` 的视图。
 ///
 /// 刻意不在这里的字段（不同步）：`cover`（data URL，会把操作日志撑爆）、
-/// `imported_at` / `hue`（每台设备导入时各自生成的，同步过去只会制造无意义的差异）、
-/// `book_source_id`（本机书源 id，跨设备没有意义）。
+/// `imported_at` / `hue`（导入时间与封面色相）。书源 ID 与同步身份一致。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct BookSyncMeta {
     pub id: String,
@@ -1149,6 +1148,7 @@ fn apply_sync_meta_in_dir(dir: &Path, want: &BookSyncMeta) -> Result<bool, Strin
     detail.split_desc = want.split_desc.clone();
     detail.source = want.source.clone();
     detail.book_url = want.book_url.clone();
+    detail.book_source_id = want.book_source_id.clone();
     detail.group_id = want.group_id.clone();
     detail.tags = if want.tags.is_empty() { None } else { Some(want.tags.clone()) };
     detail.source_tags = if want.source_tags.is_empty() {

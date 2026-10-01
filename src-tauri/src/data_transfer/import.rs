@@ -80,7 +80,17 @@ pub(super) fn apply<R: tauri::Runtime>(
         )?;
     }
 
+    let aliases = archive_sources.iter().map(|source| {
+        let local = if mode == ImportMode::Merge {
+            local_sources.iter().find(|local| same_source(&local.book_source_url, &source.url))
+        } else { None };
+        let target = local.map(|local| crate::sync::identity::entity_id(&local.id, "s-", crate::sync::identity::source_uid(&local.book_source_url)))
+            .unwrap_or_else(|| crate::sync::identity::entity_id(&source.id, "s-", crate::sync::identity::source_uid(&source.url)));
+        (source.id.clone(), target)
+    }).collect();
+    readerx_source::id_migration::migrate(&storage::data_root(app)?, &aliases)?;
     crate::sync::book_ids::migrate(app)?;
+    crate::sync::data_ids::migrate(&storage::data_root(app)?)?;
 
     // 同步已启用时做一次全量对账，让导入的书 / 书源进入同步引擎（没启用是空操作）
     crate::sync::service_hook(app).on_data_imported();

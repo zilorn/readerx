@@ -61,6 +61,7 @@ fn dispatch(cli: Cli) -> Result<(), String> {
         .clone()
         .unwrap_or_else(readerx_source::default_data_root);
     readerx_source::store::init_data_root(&root);
+    readerx_source::id_migration::migrate(&root, &std::collections::BTreeMap::new())?;
 
     // 拿到数据根后把文件目标挂上：`<数据目录>/logs/<日期>/readerx-source-<时刻>.log`
     // （一天一个目录、一次运行一份文件，详见 `docs/logging.md`）。

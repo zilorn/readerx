@@ -1,3 +1,4 @@
+import { sourceGroupId } from "./dataIds";
 /**
  * 书源分组（书源管理 / 发现页 / 书源编辑页共用）。
  * - 分组清单作为偏好由 Rust 后端持久化（readerx.sourceGroups，与书架分组的存法一致）；
@@ -103,10 +104,6 @@ export function sourceGroupName(id?: string | null): string {
   return sourceGroupById(id)?.name ?? "";
 }
 
-function newSourceGroupId(): string {
-  return `sg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
-}
-
 /** 新建分组；同名则直接返回已有分组（不重复建） */
 export function createSourceGroup(name: string): SourceGroup | null {
   const trimmed = normalizeName(name);
@@ -114,7 +111,7 @@ export function createSourceGroup(name: string): SourceGroup | null {
   const existing = sourceGroups().find((group) => group.name === trimmed);
   if (existing) return existing;
   const group: SourceGroup = {
-    id: newSourceGroupId(),
+    id: sourceGroupId(trimmed),
     name: trimmed,
     createdAt: Date.now(),
   };

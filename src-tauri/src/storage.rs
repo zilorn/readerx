@@ -393,12 +393,6 @@ pub(crate) fn clear_tts_cache<R: tauri::Runtime>(
 // 这里只做一层薄转发：命令层签名不变，书源读写的唯一实现在核心 crate，
 // 避免 App 与 CLI 各写一套格式而互相读不懂。
 
-pub(crate) fn put_book_source<R: tauri::Runtime>(
-    _app: &AppHandle<R>, source: &BookSource,
-) -> Result<(), String> {
-    readerx_source::store::put_source(source)
-}
-
 /// 读取单个书源；不存在返回 Ok(None)
 pub(crate) fn get_book_source<R: tauri::Runtime>(
     _app: &AppHandle<R>, id: &str,

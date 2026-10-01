@@ -106,9 +106,11 @@ function applySummary(source: BookSource): BookSourceSummary {
 /** 保存（新建或覆盖）并即时刷新列表 */
 export async function persistBookSource(source: BookSource): Promise<void> {
   const next = { ...source, updateTime: Date.now() };
+  const oldId = source.id;
   await saveRemoteSource(next);
+  source.id = next.id;
   setSourcesState((prev) => {
-    const rest = (prev ?? []).filter((s) => s.id !== next.id);
+    const rest = (prev ?? []).filter((s) => s.id !== next.id && s.id !== oldId);
     return [...rest, applySummary(next)].sort((a, b) =>
       a.name.localeCompare(b.name, "zh"),
     );

@@ -57,3 +57,6 @@ pub fn service_hook<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> std::sync::
         .map(|state| state.0.clone())
         .unwrap_or_else(|| SyncService::new(app.clone()))
 }
+
+#[doc(hidden)]
+pub mod data_ids;

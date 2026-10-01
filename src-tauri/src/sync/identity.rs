@@ -8,9 +8,9 @@
 //! | --- | --- | --- |
 //! | 在线书 | 书源地址 + 书籍详情页地址 | 同一本书源的同一本书，两台设备指向同一份内容 |
 //! | 导入书 | 文件名（大小写归一）+ 字节数 | 同一个文件在两台设备上的稳定特征，且不需要读文件内容 |
-//! | 分组 | 分组名 | 分组是用户自己起的名字，名字就是它的身份 |
+//! | 分组 | 首次按分组名派生 | 本地与同步共享 ID，改名沿用 |
 //! | 书源分组 | 分组名 | 同上；与书架分组是两个命名空间，同名不会算成同一个实体 |
-//! | 书源 | 书源地址 | 书源 id 每台设备各自生成，地址才是它真正的主键 |
+//! | 书源 | 首次按书源地址派生 | 本地、同步及在线书引用共享 ID |
 //!
 //! **已知取舍**：导入书用「文件名 + 字节数」而不是内容哈希 —— 算内容哈希要把整本书
 //! 读一遍（几百 MB，导入路径上不可接受），而文件名相同、字节数也相同的两个**不同**文件
@@ -66,7 +66,7 @@ pub fn source_group_uid(name: &str) -> String {
 
 /// 书源实体 id（`s-<16 位十六进制>`）：书源地址即身份。
 pub fn source_uid(url: &str) -> String {
-    format!("s-{}", short_hash(&format!("source\n{}", normalize_url(url))))
+    readerx_source::identity::source_id(url)
 }
 
 /// 阅读进度实体 id：一本书一条，跟随书身份。
@@ -223,5 +223,19 @@ mod tests {
         assert_ne!(chapter_rule_uid("卷首", "^卷"), chapter_rule_uid("卷首", "^第"));
         assert!(chapter_rule_uid("卷首", "^卷").starts_with("cr-"));
         assert!(text_replace_uid("global", "", "a", "b", false).starts_with("tr-"));
+    }
+}
+
+/// 已迁移的书源与分组 ID 是持久身份，编辑后沿用。
+pub fn stable_id(id: &str, prefix: &str) -> bool {
+    id.len() == prefix.len() + 16
+        && id.starts_with(prefix)
+        && id[prefix.len()..].bytes().all(|b| b.is_ascii_hexdigit())
+}
+pub fn entity_id(id: &str, prefix: &str, fallback: String) -> String {
+    if stable_id(id, prefix) {
+        id.to_string()
+    } else {
+        fallback
     }
 }

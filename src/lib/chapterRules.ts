@@ -1,3 +1,4 @@
+import { chapterRuleId } from "./dataIds";
 /**
  * 分章规则模块：
  * - 内置若干常见“章节标题”正则，按列表顺序尝试；
@@ -206,13 +207,13 @@ export function addChapterRule(name: string, pattern: string): AddRuleResult {
   if (error) return { ok: false, error };
 
   const rule: ChapterRule = {
-    id: `user-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6).toString(36)}`,
+    id: chapterRuleId(trimmedName, normalized),
     name: trimmedName,
     pattern: normalized,
     builtin: false,
     createdAt: Date.now(),
   };
-  persistRules([...rulesSignal(), rule]);
+  persistRules([...rulesSignal().filter((item) => item.id !== rule.id), rule]);
   return { ok: true, rule };
 }
 

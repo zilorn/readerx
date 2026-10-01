@@ -62,6 +62,7 @@ export default function SourceEditorPage() {
     initial ??
     blankBookSource({ id: newBookSourceId(), js: TEMPLATE_JS });
 
+  const [savedId, setSavedId] = createSignal(draft().id);
   const [tab, setTab] = createSignal<EditorTab>("info");
   /** Tab 文案在渲染时求值：语言一变跟着更新（常量表里只有 key） */
   const editorTabs = createMemo(() =>
@@ -118,7 +119,7 @@ export default function SourceEditorPage() {
       const value = line.slice(idx + 1).trim();
       if (key) headers[key] = value;
     }
-    const id = draft().id;
+    const id = savedId();
     const next: BookSource = {
       schemaVersion: 1,
       id,
@@ -157,6 +158,7 @@ export default function SourceEditorPage() {
     }
     try {
       await persistBookSource(source);
+      setSavedId(source.id);
       setEditorSourceDraft(source);
       return source;
     } catch (e) {

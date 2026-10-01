@@ -270,7 +270,7 @@ fn export_and_merge_import_restores_everything() {
     assert_eq!(content["chapters"][0]["paragraphs"][0], "三体 的正文");
     let detail = read_json(&root.join("books/b-5e20dcb39c59dc92/bookdetail.json"));
     assert_eq!(detail["title"], "三体");
-    assert_eq!(detail["groupId"], "grp-1");
+    assert_eq!(detail["groupId"], crate::sync::identity::group_uid("科幻"));
 
     // 书签、分组、规则、插图、书源、登录态
     assert_eq!(
@@ -293,11 +293,11 @@ fn export_and_merge_import_restores_everything() {
         "卷首"
     );
     assert_eq!(
-        read_json(&root.join("book_sources/src-1.json"))["bookSourceUrl"],
+        read_json(&root.join(format!("book_sources/{}.json", crate::sync::identity::source_uid("https://a.example.com"))))["bookSourceUrl"],
         "https://a.example.com"
     );
     assert_eq!(
-        read_json(&root.join("source_sessions/src-1.json"))["cookie"],
+        read_json(&root.join(format!("source_sessions/{}.json", crate::sync::identity::source_uid("https://a.example.com"))))["cookie"],
         "sid=secret"
     );
     // 偏好类状态原样回来（换机时是「本机没有」→ 取归档那份）
@@ -338,9 +338,9 @@ fn export_without_credentials_leaves_login_state_and_passwords_out() {
     // 导入后本机的登录态不被删（归档没带它，不等于「用户不要了」）
     let summary = import(&app, &backup, ImportMode::Merge);
     assert_eq!(summary.books_updated, 2);
-    assert!(root.join("source_sessions/src-1.json").is_file());
+    assert!(root.join(format!("source_sessions/{}.json", crate::sync::identity::source_uid("https://a.example.com"))).is_file());
     assert_eq!(
-        read_json(&root.join("source_sessions/src-1.json"))["cookie"],
+        read_json(&root.join(format!("source_sessions/{}.json", crate::sync::identity::source_uid("https://a.example.com"))))["cookie"],
         "sid=secret"
     );
 }

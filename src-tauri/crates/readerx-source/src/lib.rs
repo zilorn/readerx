@@ -64,3 +64,6 @@ pub fn default_data_root() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("."));
     base.join("readerx-source")
 }
+
+pub mod identity;
+pub mod id_migration;

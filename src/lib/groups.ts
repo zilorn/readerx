@@ -1,3 +1,4 @@
+import { groupId } from "./dataIds";
 /**
  * 书架分组（本地书 / 云端书共用）。
  * - 用户分组列表作为偏好由 Rust 后端持久化（readerx.groups）；
@@ -86,17 +87,13 @@ export function groupDisplayName(id?: string | null): string {
   return groupName(id);
 }
 
-function newGroupId(): string {
-  return `grp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
-}
-
 /** 创建分组；同名直接返回已有分组。内置名「隐藏」已保留，直接返回内置隐藏分组 */
 export function createGroup(name: string): Group {
   const trimmed = name.trim();
   if (trimmed === HIDDEN_GROUP_NAME) return hiddenGroup();
   const existing = groups().find((group) => group.name === trimmed);
   if (existing) return existing;
-  const group: Group = { id: newGroupId(), name: trimmed, createdAt: Date.now() };
+  const group: Group = { id: groupId(trimmed), name: trimmed, createdAt: Date.now() };
   setGroupsSignal((prev) => [...prev, group]);
   persist();
   return group;

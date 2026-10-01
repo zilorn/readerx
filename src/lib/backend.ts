@@ -1,3 +1,4 @@
+import { sourceId, stableId } from "./dataIds";
 /**
  * 前端与 Rust 后端的唯一通道。
  * - Tauri 环境：通过 invoke 读写 Rust 管理的 JSON 文件；
@@ -275,10 +276,14 @@ export async function getRemoteSource(id: string): Promise<BookSource | null> {
 
 export async function saveRemoteSource(source: BookSource): Promise<void> {
   if (!tauri) {
+    const old = source.id;
+    source.id = stableId(old, "s-") ? old : sourceId(source.bookSourceUrl);
+    memorySources.delete(old);
     memorySources.set(source.id, source);
     return;
   }
-  await invoke("readerx_source_put", { source });
+  const saved = await invoke<BookSource>("readerx_source_put", { source });
+  source.id = saved.id;
 }
 
 export async function deleteRemoteSource(id: string): Promise<void> {

@@ -1240,7 +1240,7 @@ impl<R: tauri::Runtime> SyncService<R> {
             return;
         };
         if let Err(error) =
-            bridge::publish_source_delete(&self.app, &engine, &book_source.book_source_url)
+            bridge::publish_source_delete(&self.app, &engine, &super::identity::entity_id(&book_source.id, "s-", super::identity::source_uid(&book_source.book_source_url)))
         {
             log::warn!("同步发布书源删除失败：{error}");
         }

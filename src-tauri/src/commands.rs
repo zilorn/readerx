@@ -383,12 +383,14 @@ fn validate_source(source: &BookSource) -> Result<(), String> {
 
 /// 新建 / 覆盖保存一个书源
 #[tauri::command]
-pub async fn readerx_source_put(app: AppHandle, source: BookSource) -> Result<(), String> {
+pub async fn readerx_source_put(app: AppHandle, mut source: BookSource) -> Result<BookSource, String> {
     blocking("书源写入", move || {
         validate_source(&source)?;
-        storage::put_book_source(&app, &source)?;
+        let old = source.id.clone();
+        source.id = sync::identity::entity_id(&old, "s-", sync::identity::source_uid(&source.book_source_url));
+        readerx_source::id_migration::save_source(&storage::data_root(&app)?, &source, &old)?;
         sync::service_hook(&app).on_source_changed(&source);
-        Ok(())
+        Ok(source)
     })
     .await
 }

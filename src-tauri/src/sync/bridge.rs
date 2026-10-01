@@ -311,7 +311,12 @@ fn group_ids<R: tauri::Runtime>(
             ) else {
                 continue;
             };
-            map.insert(id.to_string(), uid_of(name));
+            let prefix = if key == SOURCE_GROUPS_KEY {
+                "sg-"
+            } else {
+                "g-"
+            };
+            map.insert(id.to_string(), identity::entity_id(id, prefix, uid_of(name)));
         }
     }
     map
@@ -358,6 +363,15 @@ fn publish_book_locked<R: tauri::Runtime>(
             .is_none_or(|value| value.as_str().is_none_or(|text| text.trim().is_empty()));
         if missing {
             publish_fields(engine, &uid, &BTreeMap::from([("source_url".to_string(), json!(url))]))?;
+        }
+    }
+
+    // 升级后的对账补齐旧同步实体的书源 ID，不覆盖已有的统一关联。
+    if let Some(id) = book_values(facts, meta).get("book_source_id").and_then(Value::as_str) {
+        let missing = engine.entity(&uid).and_then(|entity| entity.field("book_source_id"))
+            .is_none_or(|value| value.as_str().is_none_or(|id| !identity::stable_id(id, "s-")));
+        if missing {
+            publish_value(engine, &uid, "book_source_id", json!(id))?;
         }
     }
 
@@ -494,7 +508,11 @@ pub fn publish_groups<R: tauri::Runtime>(
         if name.is_empty() {
             continue;
         }
-        let uid = identity::group_uid(name);
+        let uid = identity::entity_id(
+            group.get("id").and_then(Value::as_str).unwrap_or_default(),
+            "g-",
+            identity::group_uid(name),
+        );
         live.push(uid.clone());
         if guard.entity(&uid).is_none() {
             guard.create_entity("group", Some(uid), [("name", json!(name))])?;
@@ -524,7 +542,11 @@ pub fn publish_source_groups<R: tauri::Runtime>(
         if name.is_empty() {
             continue;
         }
-        let uid = identity::source_group_uid(name);
+        let uid = identity::entity_id(
+            group.get("id").and_then(Value::as_str).unwrap_or_default(),
+            "sg-",
+            identity::source_group_uid(name),
+        );
         live.push(uid.clone());
         // 创建时间只用来稳定显示顺序（新建的分组排在后面），并发不一致不算冲突
         let created_at = group.get("createdAt").and_then(Value::as_i64).unwrap_or(0);
@@ -558,7 +580,7 @@ fn tombstone_missing_groups(
     Ok(())
 }
 
-/// 发布一份书源（整份 JSON；本机的 `id` 不进同步载荷，分组归属走独立的 `group` 字段）。
+/// 发布书源：ID 与本地一致，分组归属走独立的 `group` 字段。
 pub fn publish_source<R: tauri::Runtime>(
     app: &AppHandle<R>,
     engine: &SharedEngine,
@@ -574,7 +596,11 @@ fn publish_source_with(
     facts: &LocalFacts,
     source: &BookSource,
 ) -> Result<(), SyncError> {
-    let uid = identity::source_uid(&source.book_source_url);
+    let uid = identity::entity_id(
+        &source.id,
+        "s-",
+        identity::source_uid(&source.book_source_url),
+    );
     let payload = source_payload(source);
     let group = facts.source_group_sync_id(source.group_id.as_deref());
     let mut guard = lock_engine(engine);
@@ -592,6 +618,7 @@ fn publish_source_with(
         return Ok(());
     }
     publish_value(&mut guard, &uid, "name", json!(source.name))?;
+    publish_value(&mut guard, &uid, "url", json!(source.book_source_url))?;
     publish_value(&mut guard, &uid, "group", option_json(group.as_deref()))?;
     publish_multi(&mut guard, &uid, "json", payload)?;
     Ok(())
@@ -603,7 +630,7 @@ pub fn publish_source_delete<R: tauri::Runtime>(
     engine: &SharedEngine,
     book_source_url: &str,
 ) -> Result<(), SyncError> {
-    let uid = identity::source_uid(book_source_url);
+    let uid = identity::entity_id(book_source_url, "s-", identity::source_uid(book_source_url));
     let mut guard = lock_engine(engine);
     if guard.entity(&uid).is_some() {
         guard.delete_entity(&uid, Some("书源已删除".to_string()))?;
@@ -613,9 +640,7 @@ pub fn publish_source_delete<R: tauri::Runtime>(
 
 /// 重新发布**已分组的书源**（书源分组清单改名后调用）。
 ///
-/// 分组名就是它的身份：改名会让书源上那个「旧名字派生出的实体 id」作废，书源不跟着
-/// 重新发布，对端按名字就找不回分组，落地时会把它们退回未分组。归属没变的书源在这里
-/// 一条操作都不会写（见 [`publish_value`]），所以整批走一遍是廉价的。
+/// 分组改名沿用 ID；归属未变时不会写操作。
 pub fn republish_grouped_sources<R: tauri::Runtime>(
     app: &AppHandle<R>,
     engine: &SharedEngine,
@@ -1269,12 +1294,17 @@ fn merge_structure_with_bodies(
     chapters
 }
 
-/// 只有能重算出原书 uid 的书源才能关联；兼容旧载荷缺失书源地址。
+/// 优先按统一书源 ID 关联；旧载荷按地址与书籍身份匹配。
 fn matching_source<'a>(
     sources: &'a [BookSource],
     fields: &BookEntityFields,
     uid: &str,
 ) -> Option<&'a BookSource> {
+    if let Some(id) = fields.book_source_id.as_deref() {
+        if let Some(source) = sources.iter().find(|source| source.id == id) {
+            return Some(source);
+        }
+    }
     let matches_identity = |source: &&BookSource| {
         identity::book_uid(&BookKey {
             source_url: Some(&source.book_source_url),
@@ -1439,7 +1469,11 @@ fn apply_book_fields<R: tauri::Runtime>(
         tags: fields.tags.clone(),
         source_tags: fields.source_tags.clone(),
         group_id: local_group_id(app, fields.group.as_deref())?,
-        book_source_id: book_store::get_sync_meta(app, local_id)?.and_then(|m| m.book_source_id),
+        book_source_id: fields
+            .book_source_id
+            .clone()
+            .filter(|id| identity::stable_id(id, "s-"))
+            .or(book_store::get_sync_meta(app, local_id)?.and_then(|m| m.book_source_id)),
         // source_url 只是同步载荷（对端建书时用它找回自己的书源），不落进本机元信息
     };
     book_store::apply_sync_meta(app, local_id, &want)
@@ -1490,6 +1524,7 @@ fn collect_snapshots(
                 book_uid: book_ref_of(entity),
             }),
             "group" => snapshots.push(Snapshot::Group {
+                uid: id,
                 deleted,
                 name: entity
                     .field("name")
@@ -1497,6 +1532,7 @@ fn collect_snapshots(
                     .unwrap_or_default(),
             }),
             "source_group" => snapshots.push(Snapshot::SourceGroup {
+                uid: id,
                 deleted,
                 name: entity
                     .field("name")
@@ -1548,10 +1584,12 @@ enum Snapshot {
         book_uid: String,
     },
     Group {
+        uid: String,
         deleted: bool,
         name: String,
     },
     SourceGroup {
+        uid: String,
         deleted: bool,
         name: String,
     },
@@ -1590,6 +1628,7 @@ struct BookEntityFields {
     book_url: Option<String>,
     /// 书源地址（在线书建书时要用它找回本机的书源；导入书为空）
     source_url: Option<String>,
+    book_source_id: Option<String>,
     source_tags: Vec<String>,
     split_desc: String,
 }
@@ -1616,6 +1655,7 @@ fn book_snapshot_fields(entity: &Entity) -> BookEntityFields {
         source: text("source"),
         book_url: text("book_url"),
         source_url: text("source_url"),
+        book_source_id: text("book_source_id"),
         source_tags: list("source_tags"),
         split_desc: text("split_desc").unwrap_or_default(),
     }
@@ -1866,12 +1906,14 @@ fn text_field(entity: &Entity, field: &str) -> String {
         .unwrap_or_default()
 }
 
-/// 落地分组：同步来的分组在本机按**名字**对应，缺的补上，删掉的移除。
+/// 落地分组：清单直接使用同步实体 ID，缺的补上，删掉的移除。
 fn apply_groups<R: tauri::Runtime>(
     app: &AppHandle<R>, snapshots: &[Snapshot],
 ) -> Result<bool, String> {
-    apply_group_list(app, GROUPS_KEY, "grp", snapshots, |snapshot| match snapshot {
-        Snapshot::Group { deleted, name } if !name.is_empty() => Some((*deleted, name.as_str())),
+    apply_group_list(app, GROUPS_KEY, snapshots, |snapshot| match snapshot {
+        Snapshot::Group { uid, deleted, name } if !name.is_empty() => {
+            Some((*deleted, uid.as_str(), name.as_str()))
+        }
         _ => None,
     })
 }
@@ -1882,9 +1924,9 @@ fn apply_groups<R: tauri::Runtime>(
 fn apply_source_groups<R: tauri::Runtime>(
     app: &AppHandle<R>, snapshots: &[Snapshot],
 ) -> Result<bool, String> {
-    apply_group_list(app, SOURCE_GROUPS_KEY, "sgrp", snapshots, |snapshot| match snapshot {
-        Snapshot::SourceGroup { deleted, name } if !name.is_empty() => {
-            Some((*deleted, name.as_str()))
+    apply_group_list(app, SOURCE_GROUPS_KEY, snapshots, |snapshot| match snapshot {
+        Snapshot::SourceGroup { uid, deleted, name } if !name.is_empty() => {
+            Some((*deleted, uid.as_str(), name.as_str()))
         }
         _ => None,
     })
@@ -1894,11 +1936,10 @@ fn apply_source_groups<R: tauri::Runtime>(
 fn apply_group_list<R: tauri::Runtime>(
     app: &AppHandle<R>,
     key: &str,
-    id_prefix: &str,
     snapshots: &[Snapshot],
-    pick: impl Fn(&Snapshot) -> Option<(bool, &str)>,
+    pick: impl Fn(&Snapshot) -> Option<(bool, &str, &str)>,
 ) -> Result<bool, String> {
-    let names: Vec<(bool, &str)> = snapshots.iter().filter_map(pick).collect();
+    let names: Vec<(bool, &str, &str)> = snapshots.iter().filter_map(pick).collect();
     if names.is_empty() {
         return Ok(false);
     }
@@ -1906,8 +1947,12 @@ fn apply_group_list<R: tauri::Runtime>(
         .and_then(|value| value.as_array().cloned())
         .unwrap_or_default();
     let mut changed = false;
-    for (deleted, name) in names {
-        let existing = groups.iter().position(|group| group_name(group) == Some(name));
+    for (deleted, uid, name) in names {
+        let existing = groups.iter().position(|group| {
+            let id = group.get("id").and_then(Value::as_str).unwrap_or_default();
+            let prefix = if key == SOURCE_GROUPS_KEY { "sg-" } else { "g-" };
+            id == uid || (!identity::stable_id(id, prefix) && group_name(group) == Some(name))
+        });
         match (deleted, existing) {
             (true, Some(index)) => {
                 groups.remove(index);
@@ -1915,11 +1960,17 @@ fn apply_group_list<R: tauri::Runtime>(
             }
             (false, None) => {
                 groups.push(json!({
-                    "id": new_local_id(id_prefix),
+                    "id": uid,
                     "name": name,
                     "createdAt": now_ms(),
                 }));
                 changed = true;
+            }
+            (false, Some(index)) => {
+                if groups[index]["name"] != name {
+                    groups[index]["name"] = json!(name);
+                    changed = true;
+                }
             }
             _ => {}
         }
@@ -1943,9 +1994,9 @@ fn apply_source<R: tauri::Runtime>(
     payload: Option<&Value>,
     group: Option<&str>,
 ) -> Result<bool, String> {
-    let found = existing
-        .iter()
-        .find(|source| identity::source_uid(&source.book_source_url) == uid);
+    let found = existing.iter().find(|source| {
+        identity::entity_id(&source.id, "s-", identity::source_uid(&source.book_source_url)) == uid
+    });
     if deleted {
         if let Some(source) = found {
             readerx_source::store::delete_source(&source.id).map_err(|e| e.to_string())?;
@@ -1965,10 +2016,7 @@ fn apply_source<R: tauri::Runtime>(
     let Some(object) = json.as_object_mut() else {
         return Ok(false);
     };
-    let id = found
-        .map(|source| source.id.clone())
-        .unwrap_or_else(|| new_local_id("src"));
-    object.insert("id".to_string(), json!(id));
+    object.insert("id".to_string(), json!(uid));
     // 分组归属以同步结果为准（组名 → 本机分组 id）：对端把书源移出分组、
     // 或那个分组已被删掉时，源文件里的 groupId 一并清掉，不留悬空引用
     match local_source_group_id(app, group)? {
@@ -1986,7 +2034,7 @@ fn apply_source<R: tauri::Runtime>(
             return Ok(false);
         }
     }
-    readerx_source::store::put_source(&source).map_err(|e| e.to_string())?;
+    readerx_source::id_migration::save_source(&storage::data_root(app)?, &source, found.map(|old| old.id.as_str()).unwrap_or(uid))?;
     Ok(true)
 }
 
@@ -2034,7 +2082,17 @@ fn local_group_id_in<R: tauri::Runtime>(
         .iter()
         .find(|group| {
             group_name(group)
-                .map(|name| uid_of(name) == sync_group)
+                .map(|name| {
+                    identity::entity_id(
+                        group.get("id").and_then(Value::as_str).unwrap_or_default(),
+                        if key == SOURCE_GROUPS_KEY {
+                            "sg-"
+                        } else {
+                            "g-"
+                        },
+                        uid_of(name),
+                    ) == sync_group
+                })
                 .unwrap_or(false)
         })
         .and_then(|group| group.get("id").and_then(Value::as_str).map(str::to_string)))
@@ -2060,6 +2118,11 @@ fn book_values(facts: &mut LocalFacts, meta: &BookSyncMeta) -> BTreeMap<String, 
     fields.insert("size".to_string(), json!(meta.size));
     fields.insert("source".to_string(), option_json(meta.source.as_deref()));
     fields.insert("book_url".to_string(), option_json(meta.book_url.as_deref()));
+    let source_id = meta.book_source_id.as_deref().and_then(|id| {
+        if identity::stable_id(id, "s-") { Some(id.to_string()) }
+        else { facts.source_url(Some(id)).map(|url| identity::source_uid(&url)) }
+    });
+    fields.insert("book_source_id".to_string(), option_json(source_id.as_deref()));
     // 书源地址：对端建这本书时要靠它找回自己那边的书源（书身份含书源地址）
     fields.insert(
         "source_url".to_string(),
@@ -2181,8 +2244,13 @@ fn chapter_rule_values(name: &str, pattern: &str, created_at: i64) -> BTreeMap<S
 fn source_payload(source: &BookSource) -> Value {
     let mut json = serde_json::to_value(source).unwrap_or_else(|_| json!({}));
     if let Some(object) = json.as_object_mut() {
-        // id 每台设备各自生成；groupId 是本机的书源分组归属，都不进同步载荷
-        object.remove("id");
+        object.insert("id".into(),
+            json!(identity::entity_id(
+                &source.id,
+                "s-",
+                identity::source_uid(&source.book_source_url)
+            )),
+        );
         object.remove("groupId");
     }
     json
@@ -2300,10 +2368,6 @@ fn option_json(value: Option<&str>) -> Value {
         Some(text) if !text.trim().is_empty() => json!(text),
         _ => Value::Null,
     }
-}
-
-fn new_local_id(prefix: &str) -> String {
-    format!("{prefix}-{}", readerx_sync::new_id().to_string().to_lowercase())
 }
 
 fn now_ms() -> u64 {
@@ -2429,13 +2493,18 @@ mod tests {
         assert!(matching_source(&sources, &fields, &uid).is_some());
         let mut wrong = sources[0].clone();
         wrong.book_source_url = "https://example.com/other-source".into();
-        assert!(matching_source(&[wrong], &fields, &uid).is_none());
+        assert!(matching_source(&[wrong.clone()], &fields, &uid).is_none());
+        let id = identity::source_uid("https://example.com");
+        wrong.id = id.clone();
+        fields.book_source_id = Some(id.clone());
+        assert_eq!(matching_source(&[wrong], &fields, &uid).unwrap().id, id,
+            "书源地址更新后，统一 ID 仍能恢复原书关联");
     }
 
-    /// 载荷里不留本机字段：`id` 每台设备各自生成，`groupId` 是本机分组 id ——
+    /// 载荷保留统一 `id`；`groupId` 单独同步，
     /// 归属走实体的 `group` 字段（存书源分组实体 id），因此并发改分组与改 JS 不会互相盖掉。
     #[test]
-    fn source_payload_drops_local_fields() {
+    fn source_payload_keeps_shared_id_and_separates_group() {
         let source = BookSource {
             schema_version: 1,
             id: "src-abc".to_string(),
@@ -2454,7 +2523,7 @@ mod tests {
             js: "function searchBook(){}".to_string(),
         };
         let payload = source_payload(&source);
-        assert!(payload.get("id").is_none());
+        assert_eq!(payload["id"], identity::source_uid(&source.book_source_url));
         assert!(payload.get("groupId").is_none());
         assert_eq!(payload["name"], json!("示例源"));
         assert!(payload["js"].as_str().unwrap().contains("searchBook"));
