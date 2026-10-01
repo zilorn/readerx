@@ -296,7 +296,7 @@ fn content_pass(
         return Ok(());
     }
 
-    // 本机的逐本总览：只列有正文的书
+    // 点名每一本书，包括本机还没有正文的书，才能向对端取回正文。
     let books: Vec<String> = engine
         .entities_of_kind("book", false)
         .into_iter()
@@ -305,7 +305,6 @@ fn content_pass(
     let my_index: Vec<_> = books
         .iter()
         .map(|book| engine.content_index(book))
-        .filter(|digest| digest.chapters > 0)
         .collect();
 
     let response = transport.request(&Request::ContentIndex { books: my_index })?;
@@ -510,10 +509,9 @@ fn fit_batch(items: Vec<ChapterContent>) -> (Vec<ChapterContent>, u64) {
 ///
 /// - **封面**：两边都有且指纹不同时，设备 id 大的一方为准（封面是可改的数据，
 ///   谁后改说不清，只能定一个稳定的赢家）；只有一边有时，「有」的一方推给「没有」的一方。
-/// - **插图**：只在**正文的赢家**那一侧推、另一侧取。
+/// - **插图**：正文赢家可以补图；另一侧缺失且明确引用的图也双向补齐。
 ///   插图的名字写在正文块里，块整体按「设备 id 大的一方为准」收敛，因此插图也必须
-///   跟着同一个赢家走：否则败方把自己的图推过去，会留下正文根本不引用的孤儿文件，
-///   而赢家的引用仍然是断的。
+///   按引用补图，既保留冲突正文的方向规则，也不遗漏另一侧独有章节的插图。
 fn asset_pass(
     engine: &mut SyncEngine,
     transport: &mut dyn Transport,
@@ -525,8 +523,7 @@ fn asset_pass(
     }
 
     // 名册带**每一本**书：对端只回应答里点过名的书，漏报就等于让对端手里的封面 /
-    // 插图永远过不来 —— 封面正是「本机一点资源都没有、却要对端推过来」的情形
-    // （正文通道没有这个问题：本机没正文时对端推过来也没用，资源则相反）。
+    // 插图永远过不来 —— 新设备没有本地资源时也需要向对端取回封面与章节图。
     // 清单只列有资源的书：对端据此知道哪些书不用再算一遍。
     let books: Vec<String> = engine
         .entities_of_kind("book", false)
@@ -603,8 +600,7 @@ fn asset_pass(
             _ => false,
         };
 
-        // 推：封面按「有推给没有 / 都有则我赢」（与正文赢家无关 —— 封面不是正文的
-        // 派生数据）；插图只在对端缺失**且正文是我赢**时推（见函数头说明）。
+        // 推：封面按有补无 / 冲突赢家；插图按赢家或对端明确缺失的引用补齐。
         let mut wanted: Vec<String> = Vec::new();
         match &my_cover {
             Some(cover) if peer_cover.is_none() => wanted.push(cover.name.clone()),
@@ -615,26 +611,28 @@ fn asset_pass(
             if asset.name == assets::COVER_ASSET || !asset.present() {
                 continue;
             }
-            if i_win && !present(&peer_assets, &asset.name) {
+            if (i_win || peer_assets.iter().any(|peer| peer.name == asset.name))
+                && !present(&peer_assets, &asset.name)
+            {
                 wanted.push(asset.name.clone());
             }
         }
-        // 取：封面（我没有，或者两边不同且对端赢）+ 插图（只在正文是对端赢时）
+        // 取：封面与本机缺失的章节图，独有章节的图不受全局赢家限制。
         let mut pull: Vec<String> = Vec::new();
         match &peer_cover {
             Some(cover) if my_cover.is_none() => pull.push(cover.name.clone()),
             Some(cover) if cover_differs && !i_win => pull.push(cover.name.clone()),
             _ => {}
         }
-        // 取插图只在「正文是对端赢」时：赢家那一侧推、这一侧取（见函数头说明）
-        if !i_win {
-            for asset in &peer_assets {
-                if asset.name == assets::COVER_ASSET || !asset.present() {
-                    continue;
-                }
-                if !present(&mine_assets, &asset.name) {
-                    pull.push(asset.name.clone());
-                }
+        // 暂存正文引用参与清单，本机作为赢家时也能补齐刚拉来的章节图。
+        for asset in &peer_assets {
+            if asset.name == assets::COVER_ASSET || !asset.present() {
+                continue;
+            }
+            if (!i_win || mine_assets.iter().any(|mine| mine.name == asset.name))
+                && !present(&mine_assets, &asset.name)
+            {
+                pull.push(asset.name.clone());
             }
         }
 

@@ -851,7 +851,7 @@ pub fn materialize_entities<R: tauri::Runtime>(
 /// - 书实体（书名 / 格式 / 文件名 / 字节数 / 书源地址）—— 元信息都没同步过来时建不了；
 /// - 在线书还要求本机有对应的**书源**：书身份由「书源地址 + 书籍地址」派生，
 ///   书源缺失时算出来的身份与引擎里的对不上，建出来的书会变成同步不到的孤儿；
-/// - PDF 不建：阅读要读原始文件，而文件不同步。
+/// - PDF 与其他导入书一样：阅读使用已解析的正文块与页面图片。
 fn apply_staged_content<R: tauri::Runtime>(
     app: &AppHandle<R>,
     engine: &SharedEngine,
@@ -1057,10 +1057,6 @@ fn create_local_book_from_sync<R: tauri::Runtime>(
         (fields, structure)
     };
 
-    if fields.format == "pdf" {
-        log::info!("对端有这本 PDF 的正文，但本机没有原文件：暂不建书（阅读要读原文件）");
-        return Ok(None);
-    }
     // 在线书：书身份含书源地址，本机没有对应书源时建出来的书与引擎对不上
     let book_source_id = if fields.book_url.is_some() {
         match fields.source_url.as_deref().and_then(local_source_id_by_url) {

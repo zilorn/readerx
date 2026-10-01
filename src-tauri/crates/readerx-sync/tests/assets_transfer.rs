@@ -326,18 +326,18 @@ fn assets_wait_until_the_peer_knows_the_book() {
 
     let report = sync_once(&a, &b);
     // 元信息在同一轮里先同步过去，因此这一轮插图就能落地（与正文通道同一时序）
-    assert!(report.assets_pushed <= 1, "{report:?}");
+    assert_eq!(report.assets_pushed, 1, "独有书籍的插图应同一轮传输：{report:?}");
     let staged = readerx_sync::net::lock_engine(&b).staged_assets("b-1");
     assert!(
         staged.iter().all(|item| item.name == name),
         "只该推引用到的那张图：{staged:?}"
     );
 
-    // 对端连书都没有（换一本不存在的书）：一份资源都不搬
+    // 再向一台空设备同步：元信息、正文与图都应在同一轮到达
     let c_content = Arc::new(MemContent::default());
     let c = engine("wait-assets-c", c_content);
     let report = sync_once(&a, &c);
-    assert_eq!((report.assets_pushed, report.assets_pulled), (0, 0), "对端没有这本书：{report:?}");
+    assert_eq!((report.assets_pushed, report.assets_pulled), (1, 0), "空设备应收到书籍插图：{report:?}");
 }
 
 /// 没注册来源的一方（旧版本 / CLI）完全不参与资源通道：既不推也不收。
@@ -362,4 +362,27 @@ fn assets_are_skipped_when_the_peer_has_no_source() {
     let report = sync_once(&a, &b);
     assert_eq!((report.assets_pushed, report.assets_pulled), (0, 0));
     assert!(readerx_sync::net::lock_engine(&b).staged_assets("b-1").is_empty());
+}
+
+/// 双方各自独有章节的插图都应搬运，不能按全局设备 id 丢掉其中一侧。
+#[test]
+fn illustrations_of_unique_chapters_move_in_both_directions() {
+    let a_content = Arc::new(MemContent::default());
+    let b_content = Arc::new(MemContent::default());
+    let a = engine("unique-images-a", a_content.clone());
+    let b = engine("unique-images-b", b_content.clone());
+    create_book(&a, "b-1");
+    let (a_name, a_asset) = illustration("https://img.example.com/unique-a.png", b"image-a");
+    let (b_name, b_asset) = illustration("https://img.example.com/unique-b.png", b"image-b");
+    a_content.put("b-1", a_asset);
+    b_content.put("b-1", b_asset);
+    a_content.put_chapter("b-1", chapter_with("c1", "甲独有章节", &["https://img.example.com/unique-a.png"]));
+    b_content.put_chapter("b-1", chapter_with("c2", "乙独有章节", &["https://img.example.com/unique-b.png"]));
+    let report = sync_once(&a, &b);
+    assert_eq!((report.content_pushed, report.content_pulled), (1, 1));
+    assert_eq!((report.assets_pushed, report.assets_pulled), (1, 1));
+    assert!(effective(&a, "b-1").contains_key(&b_name));
+    assert!(effective(&b, "b-1").contains_key(&a_name));
+    let again = sync_once(&b, &a);
+    assert_eq!((again.assets_pushed, again.assets_pulled), (0, 0));
 }

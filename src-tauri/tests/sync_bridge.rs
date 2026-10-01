@@ -1116,7 +1116,7 @@ fn synced_content_creates_the_book_locally() {
     }
 
     // 同步一轮：操作先到，正文随后进暂存区
-    sync_once(&peer, &local);
+    sync_once(&local, &peer);
     assert_eq!(
         lock_engine(&local).staged_bodies(&uid).len(),
         2,
@@ -1204,6 +1204,73 @@ fn local_book_content_is_published_to_the_peer() {
     assert_eq!(staged.len(), 1, "对端应收到本机那一章");
     assert_eq!(staged[0].paragraphs, vec!["正文".to_string()]);
     assert_eq!(staged[0].title, "第一章");
+}
+
+/// 新设备主动拉取导入书，包括没有文字层、只有页面图片的 PDF。
+#[test]
+fn empty_device_pulls_readable_books_including_scanned_pdf() {
+    let _serial = SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    for (format, scanned) in [("txt", false), ("epub", false), ("mobi", false), ("pdf", false), ("pdf", true)] {
+        let (handle, app_data) = setup();
+        let initial = local_engine(&handle, &app_data);
+        lock_engine(&initial).flush().unwrap();
+        drop(initial);
+        let device_path = app_data.join("sync/device.json");
+        let mut device = read_json(&device_path);
+        device["device_id"] = json!("zz-empty-device");
+        write_json(&device_path, &device);
+        let local = local_engine(&handle, &app_data);
+        let peer = RealPeer::start(&format!("import-{format}-{scanned}"), Some(&lock_engine(&local).pairing_code()));
+        seed_peer_book(&peer.data_root, "peer-local", "peer-local", "三体", true);
+        let detail_path = peer.data_root.join("books/peer-local/bookdetail.json");
+        let mut detail = read_json(&detail_path);
+        let file_name = format!("三体.{format}");
+        detail["format"] = json!(format);
+        detail["fileName"] = json!(file_name);
+        write_json(&detail_path, &detail);
+        let image = format!("{}.jpg", "a".repeat(40));
+        let image_bytes = b"page-image-bytes";
+        if scanned {
+            write_json(&peer.data_root.join("books/peer-local/content.json"), &json!({
+                "schemaVersion": 1, "chapters": [{ "cid": "c0001", "title": "扫描页",
+                    "paragraphs": [], "blocks": [{ "kind": "img", "local": image }] }]
+            }));
+            std::fs::create_dir_all(peer.data_root.join("images")).unwrap();
+            std::fs::write(peer.data_root.join("images").join(&image), image_bytes).unwrap();
+        }
+        let uid = identity::book_uid(&identity::BookKey { file_name: &file_name, size: 1024, ..Default::default() });
+        {
+            let mut guard = lock_engine(&peer.engine);
+            guard.create_entity("book", Some(uid.clone()), [
+                ("title", json!("三体")), ("format", json!(format)),
+                ("file_name", json!(file_name)), ("size", json!(1024)),
+            ]).unwrap();
+        }
+        // 刻意让空设备成为设备 id 较大的一侧，验证补图不再被全局赢家挡住。
+        assert!(lock_engine(&local).device_id() > lock_engine(&peer.engine).device_id());
+        let report = sync_once(&local, &peer.engine);
+        assert_eq!(report.content_pulled, 1, "{format}/{scanned}: {report:?}");
+        assert!(report.assets_pulled >= 1, "封面应同一轮拉取：{report:?}");
+        let mut index = BookIndex::default();
+        let changes = bridge::materialize(&handle, &local, 0, &mut index).unwrap();
+        assert!(changes.books);
+        let ids = list_files(&app_data.join("books"));
+        assert_eq!(ids.len(), 1);
+        let book_dir = app_data.join("books").join(&ids[0]);
+        assert_eq!(read_json(&book_dir.join("bookdetail.json"))["format"], format);
+        assert_eq!(bridge::local_uid(&handle, &ids[0]), uid);
+        let body = read_json(&book_dir.join("content.json"));
+        if scanned {
+            assert_eq!(body["chapters"][0]["blocks"][0]["local"], image);
+            assert_eq!(std::fs::read(app_data.join("images").join(&image)).unwrap(), image_bytes);
+        } else {
+            assert_eq!(body["chapters"][0]["paragraphs"][0], "正文");
+        }
+        assert!(lock_engine(&local).staged_bodies(&uid).is_empty());
+        assert!(lock_engine(&local).staged_assets(&uid).is_empty());
+        let again = sync_once(&local, &peer.engine);
+        assert_eq!((again.content_pulled, again.content_pushed, again.assets_pulled, again.assets_pushed), (0, 0, 0, 0));
+    }
 }
 
 /// 封面（资源通道）：本机有、对端没有 → 推过去，对端拿到的是**原文**（data URL）。

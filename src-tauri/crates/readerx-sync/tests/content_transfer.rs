@@ -181,3 +181,21 @@ fn content_is_skipped_when_the_peer_has_no_source() {
     assert_eq!((report.content_pushed, report.content_pulled), (0, 0));
     assert!(readerx_sync::net::lock_engine(&b).staged_bodies("b-1").is_empty());
 }
+
+/// 空设备主动发起时也要点名没有正文的书，不能只同步元信息。
+#[test]
+fn empty_device_pulls_the_peers_book() {
+    let a_content = Arc::new(MemContent::default());
+    let b_content = Arc::new(MemContent::default());
+    let a = engine("empty-pull-a", a_content);
+    let b = engine("empty-pull-b", b_content.clone());
+    b_content.put("b-1", "c1", "正文一");
+    readerx_sync::net::lock_engine(&b)
+        .create_entity("book", Some("b-1".into()), [("title", serde_json::json!("三体"))])
+        .unwrap();
+    let report = sync_once(&a, &b);
+    assert_eq!((report.content_pulled, report.content_pushed), (1, 0));
+    assert_eq!(effective(&a, "b-1"), effective(&b, "b-1"));
+    let again = sync_once(&a, &b);
+    assert_eq!((again.content_pulled, again.content_pushed), (0, 0));
+}

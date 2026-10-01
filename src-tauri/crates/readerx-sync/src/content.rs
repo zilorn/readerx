@@ -65,14 +65,19 @@ impl ChapterContent {
     }
 }
 
-/// 结构化块里是否有真正的正文（`img` 之类的纯图片块不算）。
+/// 结构化块里是否有可阅读内容：文字与图片引用都算，扫描 PDF / 漫画也需要搬运。
 fn has_content(blocks: &Value) -> bool {
     match blocks {
         Value::Array(items) => items.iter().any(has_content),
         Value::Object(map) => map
             .get("text")
             .and_then(Value::as_str)
-            .is_some_and(|text| !text.trim().is_empty()),
+            .is_some_and(|text| !text.trim().is_empty())
+            || (map.get("kind").and_then(Value::as_str) == Some("img")
+                && ["local", "src", "remote"].iter().any(|key| {
+                    map.get(*key).and_then(Value::as_str).is_some_and(|v| !v.trim().is_empty())
+                }))
+            || map.get("imgs").is_some_and(has_content),
         _ => false,
     }
 }
@@ -262,7 +267,19 @@ fn asset_ref_of(block: &Value, inline: bool) -> Option<AssetRef> {
     }
     let text = |key: &str| block.get(key).and_then(Value::as_str).filter(|v| !v.is_empty());
     // 身份优先取网络地址：它有内容以外的语义（旧数据里 src 可能只是 data URL）
-    let identity = text("remote").or_else(|| text("src"))?;
+    let identity = match text("remote").or_else(|| text("src")) {
+        Some(identity) => identity,
+        None => {
+            let local = text("local")?;
+            let (stem, ext) = local.rsplit_once('.')?;
+            let hash = stem.rsplit('_').next()?;
+            if hash.len() != 40 || !hash.bytes().all(|b| b.is_ascii_hexdigit())
+                || ext.is_empty() || !ext.bytes().all(|b| b.is_ascii_alphanumeric()) {
+                return None;
+            }
+            return Some(AssetRef { name: format!("{hash}.{ext}"), identity: local.to_string() });
+        }
+    };
     Some(AssetRef { name: image_asset_name(identity), identity: identity.to_string() })
 }
 
@@ -416,7 +433,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_or_image_only_chapters_have_no_body() {
+    fn empty_chapters_have_no_body_but_images_are_readable() {
         assert!(!chapter("c1", "").has_body());
         let empty = ChapterContent::default();
         assert!(!empty.has_body());
@@ -426,7 +443,7 @@ mod tests {
             blocks: Some(json!([{ "kind": "img", "src": "https://example.com/a.png" }])),
             ..ChapterContent::default()
         };
-        assert!(!image_only.has_body(), "纯图片块不算正文");
+        assert!(image_only.has_body(), "纯图片章也需要同步");
     }
 
     /// 插图资源名必须**设备无关**：只有地址进名字，本机书 id / 章节号都不进 ——
