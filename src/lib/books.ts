@@ -4,7 +4,7 @@
  *   但启动 / 书架只拉「章节头 + 字数」这份轻量数据（readerx_book_list_meta）；
  * - 单本书「全量（含正文）」只有在打开阅读页等真正需要内容时才按需取回
  *   （readerx_book_get）并进入本模块的响应式全量缓存；
- * - 提供 txt（正则/字数分章）、epub（按目录结构）与 pdf（按书签 / 页）三种导入解析入口；
+ * - 提供 txt（正则/字数分章）、epub（按目录结构）、mobi（按内容结构）与 pdf（按书签 / 页）导入解析入口；
  * - 分组 / 元信息编辑走 Rust 侧就地打补丁（readerx_book_patch_meta），
  *   正文不整本经 IPC 传回 WebView。
  */
@@ -477,13 +477,14 @@ export function detectBookFormat(fileName: string): BookFormat | null {
   const lower = fileName.toLowerCase();
   if (lower.endsWith(".txt")) return "txt";
   if (lower.endsWith(".epub") || lower.endsWith(".equb")) return "epub";
+  if (lower.endsWith(".mobi")) return "mobi";
   if (lower.endsWith(".pdf")) return "pdf";
   return null;
 }
 
 function titleFromFileName(fileName: string): string {
   const name = fileName
-    .replace(/\.(txt|epub|equb|pdf)$/i, "")
+    .replace(/\.(txt|epub|equb|mobi|pdf)$/i, "")
     .trim();
   return name || "未命名书籍";
 }
@@ -584,6 +585,15 @@ export async function parseTxtFile(
     `ms=${Math.round(performance.now() - started)}`,
   );
   return draft;
+}
+
+/** 解析 MOBI：后端解压正文与资源，共用 HTML 阅读排版。 */
+export async function parseMobiFileDraft(file: File): Promise<BookDraft> {
+  const { parseMobiFile } = await import("./mobi");
+  const parsed = await parseMobiFile(file);
+  return toDraft(file, "mobi", parsed.title, parsed.author,
+    `按 MOBI 内容结构（${parsed.chapters.length} 章）`,
+    parsed.chapters, parsed.cover, parsed.intro);
 }
 
 /** 解析 EPUB：沿用 EPUB 自带的目录结构（spine）逐文件成章 */
@@ -981,6 +991,7 @@ export async function parseBookFile(file: File): Promise<BookDraft> {
   try {
     if (!format) throw new Error(t("shelf.import.errorUnsupported"));
     if (format === "txt") return await parseTxtFile(file, { kind: "auto" });
+    if (format === "mobi") return await parseMobiFileDraft(file);
     if (format === "pdf") return await parsePdfFileDraft(file);
     return await parseEpubFileDraft(file);
   } catch (err) {

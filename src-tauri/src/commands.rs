@@ -306,7 +306,7 @@ pub async fn readerx_pick_book_file(app: AppHandle) -> Result<Option<PickedBookF
     let picked = app
         .dialog()
         .file()
-        .add_filter("电子书", &["txt", "epub", "equb", "pdf"])
+        .add_filter("电子书", &["txt", "epub", "equb", "mobi", "pdf"])
         .blocking_pick_file();
     let Some(path) = picked else {
         return Ok(None);

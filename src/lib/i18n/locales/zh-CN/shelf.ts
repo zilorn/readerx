@@ -29,7 +29,7 @@ export const shelf = {
 
   // 空状态
   "shelf.empty.noBooks": "书架空空如也",
-  "shelf.empty.noBooksHint": "导入 TXT / EPUB / PDF 到本地书架",
+  "shelf.empty.noBooksHint": "导入 TXT / EPUB / MOBI / PDF 到本地书架",
   "shelf.empty.allHidden": "全部书籍均已隐藏",
   "shelf.empty.allHiddenHint": "点上方「隐藏」分组即可查看",
   "shelf.empty.group": "该分组暂无书籍",
@@ -40,7 +40,7 @@ export const shelf = {
   // 导入入口
   "shelf.import.title": "导入书籍",
   "shelf.import.local": "导入本地书",
-  "shelf.import.localDesc": "从设备选择 TXT / EPUB / PDF",
+  "shelf.import.localDesc": "从设备选择 TXT / EPUB / MOBI / PDF",
   "shelf.import.webdav": "从 WebDAV 导入",
   "shelf.import.webdavDesc": "浏览 WebDAV 云盘书库",
   "shelf.import.importing": "正在导入…",
@@ -53,7 +53,7 @@ export const shelf = {
   "shelf.import.reimportCancelled": "已取消重新导入",
   "shelf.import.readFailed": "读取所选文件失败",
   /** 解析阶段的三条错误（books.ts 抛出后直接进 Toast） */
-  "shelf.import.errorUnsupported": "仅支持导入 .txt / .epub / .pdf 文件",
+  "shelf.import.errorUnsupported": "仅支持导入 .txt / .epub / .mobi / .pdf 文件",
   "shelf.import.errorEmptyTxt": "TXT 文件内容为空，无法导入",
   "shelf.import.errorNoContent": "没有读取到可阅读的正文内容",
 

@@ -38,6 +38,12 @@ export const library = {
   "library.login.appOnly": "网页登录仅在应用内可用",
   "library.login.clearFailed": "清除登录状态失败",
 
+  "library.mobi.appOnly": "MOBI 导入需要在应用中使用",
+  "library.mobi.encrypted": "MOBI 文件已加密，无法导入",
+  "library.mobi.unsupported": "不支持纯 KF8 / AZW3 格式，请转换为 EPUB 后导入",
+  "library.mobi.invalid": "无法解析 MOBI，文件可能损坏或使用不支持的编码",
+  "library.mobi.sectionFallback": "第 {index} 节",
+
   // EPUB 解析
   "library.epub.unzipFailed": "无法解压 EPUB（文件可能损坏或不是有效的 ZIP）",
   "library.epub.noContainer": "EPUB 缺少 META-INF/container.xml，不是标准 EPUB",

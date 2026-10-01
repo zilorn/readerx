@@ -43,6 +43,14 @@ tauri-plugin-tts-api（MIT）
 
 【后端 / Rust】
 
+mobi（MIT）
+    解析 MOBI 元信息
+    https://github.com/vv9k/mobi-rs
+
+encoding_rs（Apache-2.0 OR MIT）
+    解码 MOBI 的 Windows-1252 正文
+    https://github.com/hsivonen/encoding_rs
+
 tauri（Apache-2.0 OR MIT）
     应用外壳：IPC、窗口与资源打包
     https://github.com/tauri-apps/tauri

@@ -34,7 +34,7 @@ export const shelf = {
 
   // Empty states
   "shelf.empty.noBooks": "Your bookshelf is empty",
-  "shelf.empty.noBooksHint": "Import TXT / EPUB / PDF files to your shelf",
+  "shelf.empty.noBooksHint": "Import TXT / EPUB / MOBI / PDF files to your shelf",
   "shelf.empty.allHidden": "All books are hidden",
   "shelf.empty.allHiddenHint": "Tap the Hidden group above to see them",
   "shelf.empty.group": "No books in this group",
@@ -45,7 +45,7 @@ export const shelf = {
   // Import entry
   "shelf.import.title": "Import books",
   "shelf.import.local": "Import a local book",
-  "shelf.import.localDesc": "Pick a TXT / EPUB / PDF from this device",
+  "shelf.import.localDesc": "Pick a TXT / EPUB / MOBI / PDF from this device",
   "shelf.import.webdav": "Import from WebDAV",
   "shelf.import.webdavDesc": "Browse your WebDAV library",
   "shelf.import.importing": "Importing…",
@@ -58,7 +58,7 @@ export const shelf = {
   "shelf.import.reimportCancelled": "Re-import cancelled",
   "shelf.import.readFailed": "Couldn't read the selected file",
   /** The three parse errors (thrown by books.ts, shown straight in a toast) */
-  "shelf.import.errorUnsupported": "Only .txt, .epub, and .pdf files can be imported",
+  "shelf.import.errorUnsupported": "Only .txt, .epub, .mobi, and .pdf files can be imported",
   "shelf.import.errorEmptyTxt": "This TXT file is empty and can't be imported",
   "shelf.import.errorNoContent": "No readable content found in this file",
 

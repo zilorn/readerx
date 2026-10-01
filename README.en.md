@@ -33,7 +33,7 @@ of pages and the same local library.
   concurrency); online reading prefetches and caches a window of "current chapter ±5", the
   reading view only loads "current chapter ±1", and chapter text can also be batch-downloaded
   for offline reading (optionally only chapters x–y)
-- **Import**: the `+` button on the bookshelf / the empty-state button picks a TXT / EPUB / PDF
+- **Import**: the `+` button on the bookshelf / the empty-state button picks a TXT / EPUB / MOBI / PDF
   file directly, parses it and adds it to the shelf right away, without navigating away
 - **Settings** `/settings`: light / dark / sepia themes, body font size, UI language
   (follow system / Simplified Chinese / English); chapter-splitting rules live on their own

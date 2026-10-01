@@ -1,6 +1,6 @@
 /** 本地书籍的共享类型定义 */
 
-export type BookFormat = "txt" | "epub" | "pdf" | "online";
+export type BookFormat = "txt" | "epub" | "mobi" | "pdf" | "online";
 
 /** 书籍导入来源：webdav 导入带 "webdav" 标记；在线书为 "online"，其余视为本地导入 */
 export type BookSource = "local" | "webdav" | "online";

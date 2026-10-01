@@ -703,3 +703,28 @@ export async function openWebviewPage(url: string, title: string): Promise<void>
   log.debug("打开应用内网页", title);
   await invoke("readerx_webview_open", { url, title });
 }
+
+interface MobiContent {
+  title: string;
+  author: string;
+  intro?: string;
+  html: string;
+  images: Record<number, string>;
+  cover?: string;
+}
+
+/** 解压 MOBI 由 Rust 负责；浏览器预览没有该宿主能力。 */
+export async function extractMobi(bytes: Uint8Array): Promise<MobiContent> {
+  if (!tauri) throw new Error(t("library.mobi.appOnly"));
+  let binary = "";
+  for (let at = 0; at < bytes.length; at += 32768) {
+    binary += String.fromCharCode(...bytes.subarray(at, at + 32768));
+  }
+  try {
+    return await invoke<MobiContent>("readerx_parse_mobi", { dataBase64: btoa(binary) });
+  } catch (error) {
+    const key = error === "encrypted" ? "library.mobi.encrypted"
+      : error === "unsupported" ? "library.mobi.unsupported" : "library.mobi.invalid";
+    throw new Error(t(key));
+  }
+}

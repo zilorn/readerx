@@ -38,6 +38,12 @@ export const library = {
   "library.login.appOnly": "Web sign-in is only available in the app",
   "library.login.clearFailed": "Couldn't clear the sign-in state",
 
+  "library.mobi.appOnly": "MOBI import requires the app",
+  "library.mobi.encrypted": "This MOBI is encrypted and cannot be imported",
+  "library.mobi.unsupported": "Pure KF8 / AZW3 is not supported; convert it to EPUB first",
+  "library.mobi.invalid": "Could not parse MOBI; the file may be damaged or use an unsupported encoding",
+  "library.mobi.sectionFallback": "Section {index}",
+
   // EPUB parsing
   "library.epub.unzipFailed": "Couldn't unpack the EPUB (the file may be damaged or not a valid ZIP)",
   "library.epub.noContainer": "EPUB is missing META-INF/container.xml, not a standard EPUB",

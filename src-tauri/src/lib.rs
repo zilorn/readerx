@@ -1,5 +1,7 @@
 mod book_images;
 mod book_store;
+mod mobi;
+mod mobi_huff;
 mod chapter_runs;
 mod commands;
 // 全量数据导出 / 导入：备份是一个 zip（含正文与插图），与「同步」分工见模块文档
@@ -162,6 +164,7 @@ pub fn run() {
             commands::readerx_tts_cache_clear,
             commands::readerx_license_text,
             commands::readerx_pick_book_file,
+            mobi::readerx_parse_mobi,
             commands::readerx_open_devtools,
             commands::readerx_third_party_notices,
             commands::readerx_sources_list,

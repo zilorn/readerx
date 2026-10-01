@@ -10,6 +10,7 @@ import { httpFetch } from "./http";
 import {
   detectBookFormat,
   parseEpubFileDraft,
+  parseMobiFileDraft,
   parsePdfFileDraft,
   parseTxtFile,
   persistBookDraft,
@@ -373,12 +374,13 @@ function decodePathname(pathname: string): string {
 // 下载与导入
 
 export function isBookFileName(name: string): boolean {
-  return /\.(txt|epub|equb|pdf)$/i.test(name);
+  return /\.(txt|epub|equb|mobi|pdf)$/i.test(name);
 }
 
 export function bookExtOf(name: string): string {
   const lower = name.toLowerCase();
   if (lower.endsWith(".txt")) return "txt";
+  if (lower.endsWith(".mobi")) return "mobi";
   if (lower.endsWith(".pdf")) return "pdf";
   return "epub";
 }
@@ -450,7 +452,9 @@ export async function fetchDavBookDraft(
       ? await parseTxtFile(file, { kind: "auto" })
       : format === "pdf"
         ? await parsePdfFileDraft(file)
-        : await parseEpubFileDraft(file);
+        : format === "mobi"
+          ? await parseMobiFileDraft(file)
+          : await parseEpubFileDraft(file);
   log.debug(
     "WebDAV 书籍解析完成",
     `server=${server.url}`,
@@ -465,6 +469,7 @@ export async function fetchDavBookDraft(
 
 /** 交给解析器的文件 MIME（TXT 需带编码提示，PDF / EPUB 用各自的正式类型） */
 function mimeOfFormat(format: BookFormat): string {
+  if (format === "mobi") return "application/x-mobipocket-ebook";
   if (format === "pdf") return "application/pdf";
   if (format === "epub") return "application/epub+zip";
   return "text/plain;charset=utf-8";

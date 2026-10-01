@@ -30,6 +30,7 @@ import { bookDisplayAuthor, bookDisplayTitle, isFallbackBookAuthor } from "../li
 function formatName(format: BookFormat): string {
   if (format === "online") return t("book.detail.online");
   if (format === "epub") return "EPUB";
+  if (format === "mobi") return "MOBI";
   if (format === "pdf") return "PDF";
   if (format === "txt") return "TXT";
   return format;

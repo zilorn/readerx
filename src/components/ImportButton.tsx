@@ -198,7 +198,7 @@ export function ImportButton(props: ImportButtonProps) {
         ref={input}
         class="sr-only"
         type="file"
-        accept=".txt,.epub,.equb,.pdf,text/plain,application/epub+zip,application/pdf"
+        accept=".txt,.epub,.equb,.mobi,.pdf,application/x-mobipocket-ebook,text/plain,application/epub+zip,application/pdf"
         aria-hidden="true"
         tabindex={-1}
         onChange={(event) => {
