@@ -27,7 +27,7 @@ use crate::id::now_ms;
 use crate::net::{PeerInfo, Transport};
 use crate::progress::SyncProgress;
 use crate::proto::{
-    Request, Response, ASSET_BATCH_BYTES, ASSET_BATCH_ITEMS, CONTENT_BATCH_BYTES,
+    Request, Response, ASSET_BATCH_BYTES, CONTENT_BATCH_BYTES,
     CONTENT_BATCH_CHAPTERS, DEFAULT_BATCH,
 };
 use crate::version::VersionVector;
@@ -615,6 +615,7 @@ fn asset_pass(
         .collect();
 
     let i_win = engine.with(|e| e.device_id() .to_string()) > peer.device_id;
+    let mut receiver = crate::asset_transfer::AssetTransfer::new(engine.with(|e| e.asset_transfer_root()));
 
     let book_count = books.len();
     for (book_index, book) in books.into_iter().enumerate() {
@@ -698,23 +699,37 @@ fn asset_pass(
         let mut pull_iter = pull.chunks(1);
         loop {
 
-            let room = ASSET_BATCH_BYTES as u64;
             let push_batch = push_iter.next();
             let pull_batch = pull_iter.next();
             if push_batch.is_none() && pull_batch.is_none() {
                 break;
             }
-            let pushed = match push_batch {
+            let mut pushed = match push_batch {
                 Some(batch) => {
-                    let (items, size) = assets::fit_batch(
-                        engine.with(|e| e.asset_bodies(&book, batch)),
-                        room,
-                        ASSET_BATCH_ITEMS,
-                    );
+                    let items = engine.with(|e| e.asset_bodies(&book, batch));
+                    if items.len() != batch.len() || items.iter().any(|item| !batch.contains(&item.name)) {
+                        return Err(SyncError::Protocol(format!("本机资源无法读取 book={book} name={}", batch[0])));
+                    }
+                    let size = items.iter().map(|item| item.size()).sum();
                     (items, size)
                 }
                 None => (Vec::new(), 0),
             };
+            // 单次只推一份；按实际 JSON 大小判断，封面原文也占帧空间。
+            if pushed.0.first().is_some_and(|item| item.size() > ASSET_BATCH_BYTES as u64)
+                || pushed.0.first().map(crate::asset_transfer::encode).transpose()?.is_some_and(|bytes| bytes.len() > ASSET_BATCH_BYTES)
+            {
+                if !peer.asset_chunks {
+                    return Err(SyncError::Protocol("对端不支持超大资源分片，请更新两端应用".into()));
+                }
+                crate::asset_transfer::push(transport, &book, &pushed.0[0], &mut |bytes| {
+                    report.bytes += bytes;
+                    notify_progress(engine, report, progress, "assets", Some(&book), book_index + 1, book_count,
+                        report.assets_pushed + report.assets_pulled - before, Some(planned))
+                })?;
+                report.assets_pushed += 1;
+                pushed = (Vec::new(), 0);
+            }
             let requested: Vec<String> = pull_batch.map(<[String]>::to_vec).unwrap_or_default();
 
             let response = transport.request(&Request::ExchangeAssets {
@@ -722,7 +737,7 @@ fn asset_pass(
                 push: pushed.0.clone(),
                 pull: requested.clone(),
             })?;
-            let (stored, items) = match response {
+            let (stored, mut items) = match response {
                 Response::Assets { stored, items, .. } => (stored, items),
                 Response::Error { code, message } => {
                     return Err(SyncError::Protocol(format!(
@@ -749,22 +764,31 @@ fn asset_pass(
             if confirmed != pushed.0.len() {
                 return Err(SyncError::Protocol(format!("资源推送未完整确认 book={book} sent={} confirmed={confirmed}", pushed.0.len())));
             }
-            if push_batch.is_some_and(|batch| batch.len() != pushed.0.len()) {
-                return Err(SyncError::Protocol(format!("本机资源无法读取或超过单帧预算 book={book} limit={ASSET_BATCH_BYTES}")));
+            if items.iter().any(|item| !requested.contains(&item.name)) || items.len() > requested.len() {
+                return Err(SyncError::Protocol(format!("对端返回了未请求的资源 book={book}")));
             }
-            if items.len() != requested.len() || items.iter().any(|item| !requested.contains(&item.name)) {
-                return Err(SyncError::Protocol(format!("对端资源未完整返回或超过单帧预算 book={book} requested={} received={} limit={ASSET_BATCH_BYTES}", requested.len(), items.len())));
+            let missing: Vec<_> = requested.iter().filter(|name| !items.iter().any(|item| &item.name == *name)).collect();
+            let ordinary_bytes: u64 = items.iter().map(|item| item.size()).sum();
+            for name in missing {
+                if !peer.asset_chunks {
+                    return Err(SyncError::Protocol(format!("对端资源无法读取或超过预算，且不支持分片，请更新两端应用 book={book} name={name}")));
+                }
+                let asset = crate::asset_transfer::pull(transport, &book, name, &mut receiver, &mut |bytes| {
+                    report.bytes += bytes;
+                    notify_progress(engine, report, progress, "assets", Some(&book), book_index + 1, book_count,
+                        report.assets_pushed + report.assets_pulled - before, Some(planned))
+                })?;
+                items.push(asset);
             }
             report.assets_pushed += confirmed;
             report.bytes += pushed.1;
 
             if !items.is_empty() {
-                let size: u64 = items.iter().map(|item| item.size()).sum();
                 let count = items.len();
                 match engine.with(|e| e.stage_assets(&book, &items)) {
                     Ok(_) => {
                         report.assets_pulled += count;
-                        report.bytes += size;
+                        report.bytes += ordinary_bytes;
                     }
                     Err(error) => {
                         log::warn!("资源暂存失败（{book}）：{error}");

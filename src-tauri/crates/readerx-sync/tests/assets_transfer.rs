@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 /// 引擎从这里算出「本机引用了哪些资源」，因此插图的名字来自正文块而不是 `host`。
 #[derive(Default)]
 struct MemContent {
-    host: Mutex<HashMap<String, BTreeMap<String, Vec<u8>>>>,
+    host: Mutex<HashMap<String, BTreeMap<String, Asset>>>,
     chapters: Mutex<HashMap<String, BTreeMap<String, ChapterContent>>>,
 }
 
@@ -30,7 +30,7 @@ impl MemContent {
             .unwrap()
             .entry(book.to_string())
             .or_default()
-            .insert(asset.name.clone(), asset.bytes);
+            .insert(asset.name.clone(), asset);
     }
 
     /// 给某本书放一章节正文（块里带着插图引用）。
@@ -52,7 +52,7 @@ impl MemContent {
             .unwrap_or_default()
     }
 
-    fn host_of(&self, book: &str) -> BTreeMap<String, Vec<u8>> {
+    fn host_of(&self, book: &str) -> BTreeMap<String, Asset> {
         self.host.lock().unwrap().get(book).cloned().unwrap_or_default()
     }
 }
@@ -75,8 +75,8 @@ impl ContentSource for MemContent {
     fn assets(&self, book: &str) -> Vec<AssetDigest> {
         self.host_of(book)
             .into_iter()
-            .map(|(name, bytes)| AssetDigest {
-                hash: readerx_sync::content::asset_digest(&bytes),
+            .map(|(name, asset)| AssetDigest {
+                hash: readerx_sync::content::asset_digest(&asset.bytes),
                 name,
             })
             .collect()
@@ -86,16 +86,7 @@ impl ContentSource for MemContent {
         let host = self.host_of(book);
         names
             .iter()
-            .filter_map(|name| {
-                let bytes = host.get(name)?;
-                Some(Asset::new(
-                    name,
-                    readerx_sync::assets::derive_kind(name),
-                    "image/png",
-                    name.rsplit_once('.').map(|(_, ext)| ext).unwrap_or(""),
-                    bytes.clone(),
-                ))
-            })
+            .filter_map(|name| host.get(name).cloned())
             .collect()
     }
 
@@ -236,7 +227,7 @@ fn conflicting_covers_converge_on_the_bigger_device() {
     // 败方把自己的封面就地替换成赢家那一份（宿主落地时做，这里手动模拟）
     let staged = readerx_sync::net::lock_engine(client).staged_assets("b-1");
     assert_eq!(staged.len(), 1);
-    let winner_bytes = server_content.host_of("b-1")[COVER_ASSET].clone();
+    let winner_bytes = server_content.host_of("b-1")[COVER_ASSET].bytes.clone();
     assert_eq!(staged[0].bytes, winner_bytes, "收下的必须是赢家那一份");
     let _ = client_content;
 
@@ -289,7 +280,7 @@ fn illustrations_follow_the_body_winner_only() {
     let staged = readerx_sync::net::lock_engine(loser).staged_assets("b-1");
     assert_eq!(staged.len(), 1);
     assert_eq!(staged[0].name, winner_name);
-    assert_eq!(staged[0].bytes, winner_content.host_of("b-1")[&winner_name]);
+    assert_eq!(staged[0].bytes, winner_content.host_of("b-1")[&winner_name].bytes);
 
     // 败方原来那张图（如果有）没有名字冲突，但赢家那边**一个字节都没多**
     assert!(
@@ -435,7 +426,7 @@ fn duplicate_push_is_confirmed_but_missing_data_still_fails() {
 }
 
 #[test]
-fn oversized_cover_reports_the_book_and_budget_in_both_directions() {
+fn oversized_cover_transfers_losslessly_in_both_directions() {
     for push in [false, true] {
         let a_source = Arc::new(MemContent::default());
         let b_source = Arc::new(MemContent::default());
@@ -444,10 +435,17 @@ fn oversized_cover_reports_the_book_and_budget_in_both_directions() {
         create_book(&a, "b-large");
         let source = if push { &a_source } else { &b_source };
         source.put("b-large", Asset::new(COVER_ASSET, AssetKind::Cover, "image/png", "png",
-            vec![1; readerx_sync::proto::ASSET_BATCH_BYTES + 1]));
+            vec![1; readerx_sync::proto::MAX_FRAME_BYTES + 1]));
         let mut transport = LoopbackTransport::new(b.clone());
-        let error = readerx_sync::sync_with(&mut readerx_sync::net::lock_engine(&a), &mut transport).unwrap_err().to_string();
-        assert!(error.contains("b-large") && error.contains("单帧预算"), "{error}");
+        let report = readerx_sync::sync_with(&mut readerx_sync::net::lock_engine(&a), &mut transport).unwrap();
+        assert_eq!(report.assets_pushed + report.assets_pulled, 1);
+        let target = if push { &b } else { &a };
+        let staged = readerx_sync::net::lock_engine(target).staged_assets("b-large");
+        assert_eq!(staged.len(), 1);
+        assert_eq!(staged[0].bytes, vec![1; readerx_sync::proto::MAX_FRAME_BYTES + 1]);
+        let report = sync_once(&a, &b);
+        assert_eq!(report.assets_pushed + report.assets_pulled, 0);
+        assert!(!report.more_assets);
         drop(transport);
         drop(a);
         drop(b);
@@ -455,5 +453,171 @@ fn oversized_cover_reports_the_book_and_budget_in_both_directions() {
             let dir = std::env::temp_dir().join(format!("readerx-sync-assets-oversize-{side}-{push}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(dir);
         }
+    }
+}
+
+/// 真 TCP + MAC 信封：字节与封面原文加起来远超单帧上限，仍可完成传输。
+#[test]
+fn large_cover_and_illustration_cross_real_tcp_losslessly_in_both_directions() {
+    use readerx_sync::net::{PeerServer, ServerOptions};
+    use std::time::Duration;
+    for push in [false, true] {
+        let a_source = Arc::new(MemContent::default());
+        let b_source = Arc::new(MemContent::default());
+        let a = engine(&format!("tcp-large-a-{push}"), a_source.clone());
+        let b = engine(&format!("tcp-large-b-{push}"), b_source.clone());
+        let code = readerx_sync::net::lock_engine(&a).pairing_code();
+        readerx_sync::net::lock_engine(&b).join_group(&code).unwrap();
+        create_book(&a, "b-tcp-large");
+        let source = if push { a_source } else { b_source };
+        let bytes = vec![0x42; readerx_sync::proto::MAX_FRAME_BYTES + 1];
+        let data_url = format!("data:image/png;base64,{}", readerx_sync::content::encode_base64(&bytes));
+        source.put("b-tcp-large", Asset::new(COVER_ASSET, AssetKind::Cover, "image/png", "png", bytes.clone())
+            .with_data_url(Some(data_url.clone())));
+        let image_bytes = vec![0x43; readerx_sync::proto::ASSET_BATCH_BYTES + 1];
+        let url = "https://img.example.com/large.png";
+        let (image_name, image) = illustration(url, &image_bytes);
+        source.put("b-tcp-large", image);
+        source.put_chapter("b-tcp-large", chapter_with("c1", "图文", &[url]));
+        let options = ServerOptions::from_engine(&readerx_sync::net::lock_engine(&b)).unwrap()
+            .with_bind(([127, 0, 0, 1], 0).into());
+        let server = PeerServer::start(b.clone(), options).unwrap();
+        let report = readerx_sync::sync_with_addr(&mut readerx_sync::net::lock_engine(&a),
+            &server.local_addr().to_string(), Duration::from_secs(15)).unwrap();
+        assert_eq!(if push { report.assets_pushed } else { report.assets_pulled }, 2);
+        let target = if push { &b } else { &a };
+        let staged = readerx_sync::net::lock_engine(target).staged_assets("b-tcp-large");
+        let cover = staged.iter().find(|asset| asset.name == COVER_ASSET).unwrap();
+        assert_eq!(cover.bytes, bytes);
+        assert_eq!(cover.data_url.as_deref(), Some(data_url.as_str()));
+        let image = staged.iter().find(|asset| asset.name == image_name).unwrap();
+        assert_eq!(image.bytes, image_bytes);
+        assert_eq!(image.kind, AssetKind::Illustration);
+        drop(server);
+        drop(a);
+        drop(b);
+        for side in ["a", "b"] {
+            let dir = std::env::temp_dir().join(format!("readerx-sync-assets-tcp-large-{side}-{push}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
+struct InterruptedChunks {
+    inner: LoopbackTransport,
+    pull: bool,
+    chunks: usize,
+}
+impl readerx_sync::net::Transport for InterruptedChunks {
+    fn peer(&self) -> readerx_sync::net::PeerInfo {
+        readerx_sync::net::Transport::peer(&self.inner)
+    }
+    fn request(&mut self, request: &readerx_sync::proto::Request) -> readerx_sync::Result<readerx_sync::proto::Response> {
+        let is_chunk = if self.pull {
+            matches!(request, readerx_sync::proto::Request::PullAssetChunk { .. })
+        } else {
+            matches!(request, readerx_sync::proto::Request::PushAssetChunk { .. })
+        };
+        if is_chunk {
+            self.chunks += 1;
+            if self.chunks == 2 { return Err(readerx_sync::SyncError::Cancelled); }
+        }
+        readerx_sync::net::Transport::request(&mut self.inner, request)
+    }
+}
+
+#[test]
+fn interrupted_resource_is_not_staged_and_retries_successfully() {
+    for pull in [false, true] {
+        let a_source = Arc::new(MemContent::default());
+        let b_source = Arc::new(MemContent::default());
+        let a = engine(&format!("interrupted-a-{pull}"), a_source.clone());
+        let b = engine(&format!("interrupted-b-{pull}"), b_source.clone());
+        create_book(&a, "b-interrupted");
+        let source = if pull { b_source } else { a_source };
+        source.put("b-interrupted", Asset::new(COVER_ASSET, AssetKind::Cover, "image/png", "png",
+            vec![1; readerx_sync::proto::ASSET_BATCH_BYTES + 1]));
+        let mut transport = InterruptedChunks { inner: LoopbackTransport::new(b.clone()), pull, chunks: 0 };
+        let error = readerx_sync::sync_with(&mut readerx_sync::net::lock_engine(&a), &mut transport).unwrap_err();
+        assert_eq!(error, readerx_sync::SyncError::Cancelled);
+        let target = if pull { &a } else { &b };
+        assert!(readerx_sync::net::lock_engine(target).staged_assets("b-interrupted").is_empty());
+        drop(transport);
+        let report = sync_once(&a, &b);
+        assert_eq!(report.assets_pushed + report.assets_pulled, 1);
+        assert_eq!(readerx_sync::net::lock_engine(target).staged_assets("b-interrupted").len(), 1);
+        drop(a);
+        drop(b);
+        for side in ["a", "b"] {
+            let dir = std::env::temp_dir().join(format!("readerx-sync-assets-interrupted-{side}-{pull}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
+struct MissingCover;
+impl ContentSource for MissingCover {
+    fn digests(&self, _: &str) -> Vec<ChapterDigest> { vec![] }
+    fn load(&self, _: &str, _: &[String]) -> Vec<ChapterContent> { vec![] }
+    fn assets(&self, _: &str) -> Vec<AssetDigest> {
+        vec![AssetDigest { name: COVER_ASSET.into(), hash: "advertised-but-unreadable".into() }]
+    }
+}
+
+#[test]
+fn unreadable_resource_reports_its_name_without_claiming_a_size_failure() {
+    let a = engine("missing-a", Arc::new(MemContent::default()));
+    let root = temp_dir("missing-b");
+    let b = shared(SyncEngine::open(&root, EngineOptions::new("missing-b")
+        .with_schemas(SchemaRegistry::readerx_defaults()).with_content(Arc::new(MissingCover))).unwrap());
+    create_book(&a, "b-unreadable");
+    let mut transport = LoopbackTransport::new(b.clone());
+    let error = readerx_sync::sync_with(&mut readerx_sync::net::lock_engine(&a), &mut transport).unwrap_err().to_string();
+    assert!(error.contains("资源无法读取") && error.contains("b-unreadable") && error.contains("cover"), "{error}");
+    assert!(!error.contains("超过"));
+    drop(transport);
+    drop(a);
+    drop(b);
+    for side in ["a", "b"] {
+        let dir = std::env::temp_dir().join(format!("readerx-sync-assets-missing-{side}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+struct WithoutChunkCapability(LoopbackTransport);
+impl readerx_sync::net::Transport for WithoutChunkCapability {
+    fn peer(&self) -> readerx_sync::net::PeerInfo {
+        let mut peer = readerx_sync::net::Transport::peer(&self.0);
+        peer.asset_chunks = false;
+        peer
+    }
+    fn request(&mut self, request: &readerx_sync::proto::Request) -> readerx_sync::Result<readerx_sync::proto::Response> {
+        assert!(!matches!(request, readerx_sync::proto::Request::PullAssetChunk { .. }
+            | readerx_sync::proto::Request::PushAssetChunk { .. }), "不能给旧构建发送分片请求");
+        readerx_sync::net::Transport::request(&mut self.0, request)
+    }
+}
+
+#[test]
+fn older_peer_gets_no_unknown_requests() {
+    let source = Arc::new(MemContent::default());
+    let a = engine("old-cap-a", source.clone());
+    let b = engine("old-cap-b", Arc::new(MemContent::default()));
+    create_book(&a, "b-old-cap");
+    source.put("b-old-cap", Asset::new(COVER_ASSET, AssetKind::Cover, "image/png", "png", vec![1]));
+    let mut transport = WithoutChunkCapability(LoopbackTransport::new(b.clone()));
+    assert_eq!(readerx_sync::sync_with(&mut readerx_sync::net::lock_engine(&a), &mut transport).unwrap().assets_pushed, 1);
+    source.put("b-old-cap", Asset::new(COVER_ASSET, AssetKind::Cover, "image/png", "png",
+        vec![2; readerx_sync::proto::ASSET_BATCH_BYTES + 1]));
+    // 清掉接收端的旧封面，保证下一轮必须推送大资源，不受冲突赢家影响。
+    readerx_sync::net::lock_engine(&b).clear_staged_assets("b-old-cap", &[(AssetKind::Cover, COVER_ASSET.into())]).unwrap();
+    let error = readerx_sync::sync_with(&mut readerx_sync::net::lock_engine(&a), &mut transport).unwrap_err().to_string();
+    assert!(error.contains("更新两端应用"), "{error}");
+    drop(transport);
+    drop(a);
+    drop(b);
+    for side in ["a", "b"] {
+        let dir = std::env::temp_dir().join(format!("readerx-sync-assets-old-cap-{side}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

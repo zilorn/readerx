@@ -16,10 +16,11 @@ use crate::PROTOCOL_VERSION;
 ///
 /// 注意：`Hello` / `Auth` 属于握手，由各自的传输实现在更早的阶段处理，
 /// 走到这里说明握手已完成，因此把它们当协议错误返回。
-pub fn handle_request(
+pub(crate) fn handle_request(
     engine: &mut SyncEngine,
     peer_device: Option<&str>,
     request: &Request,
+    transfers: &mut crate::asset_transfer::AssetTransfer,
 ) -> Response {
     match request {
         Request::Pull { since, limit } => {
@@ -172,7 +173,9 @@ pub fn handle_request(
                 }
             };
             // 按帧预算装箱：装不下的资源这次不给，对端下次同步会重新算差集
-            let bodies = engine.asset_bodies(book, pull);
+            let bodies = engine.asset_bodies(book, pull).into_iter().filter(|asset| {
+                crate::asset_transfer::encode(asset).is_ok_and(|bytes| bytes.len() <= ASSET_BATCH_BYTES)
+            }).collect();
             let (items, bytes) =
                 assets::fit_batch(bodies, ASSET_BATCH_BYTES as u64, ASSET_BATCH_ITEMS);
             if items.len() < pull.len() {
@@ -182,6 +185,35 @@ pub fn handle_request(
                 );
             }
             Response::Assets { book: book.clone(), stored, items }
+        }
+        Request::PullAssetChunk { book, name, offset, hash } => {
+            match transfers.pull(engine, book, name, *offset, hash) {
+                Ok(chunk) => Response::AssetChunk { chunk },
+                Err(error) => Response::error("asset_chunk_failed", error.to_string()),
+            }
+        }
+        Request::PushAssetChunk { book, chunk } => {
+            if !engine.entity(book).is_some_and(|entity| !engine.is_effectively_deleted(entity)) {
+                return Response::error("asset_chunk_failed", "资源分片对应书籍不存在");
+            }
+            if engine.is_read_only() {
+                return Response::error("asset_chunk_failed", "只读打开不能写资源分片");
+            }
+            match transfers.receive(chunk).and_then(|asset| {
+                let complete = asset.is_some();
+                if let Some(asset) = asset {
+                    let name = asset.name.clone();
+                    let hash = crate::content::asset_digest(&asset.bytes);
+                    engine.stage_assets(book, &[asset])?;
+                    if !engine.asset_bodies(book, &[name]).iter().any(|stored| stored.digest == hash) {
+                        return Err(crate::SyncError::Protocol("完整资源未能暂存".into()));
+                    }
+                }
+                Ok(complete)
+            }) {
+                Ok(complete) => Response::AssetChunkAck { offset: chunk.offset + chunk.bytes.len() as u64, complete },
+                Err(error) => Response::error("asset_chunk_failed", error.to_string()),
+            }
         }
         Request::Ping => Response::Pong { at_ms: now_ms() },
         Request::Hello { .. } | Request::Auth { .. } => {

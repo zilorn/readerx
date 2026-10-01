@@ -1,7 +1,7 @@
 //! 线协议：局域网对端之间的请求 / 响应消息。
 //!
-//! 帧格式（[`crate::net::frame`]）：`[u32 大端长度][JSON 消息]`，未鉴权前最大 256 KiB、
-//! 鉴权后 16 MiB（批量操作）。消息本身用 serde 的 tag 形式，加字段对旧版本是兼容的
+//! 帧格式（[`crate::net::frame`]）：`[u32 大端长度][JSON 消息]`，未鉴权前最大 64 KiB、
+//! 鉴权后 8 MiB（批量操作）。消息本身用 serde 的 tag 形式，加字段对旧版本是兼容的
 //! （未知字段被忽略），因此协议演进不需要额外握手协商——但 [`PROTOCOL_VERSION`]
 //! 不一致仍然直接拒绝：语义变了（比如字段合并规则改了）不能靠忽略字段兜住。
 //!
@@ -9,7 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::assets::{Asset, AssetDigest, BookAssets};
+use crate::assets::{Asset, AssetChunk, AssetDigest, BookAssets};
 use crate::content::{BookDigest, ChapterContent, ChapterDigest};
 use crate::id::{DeviceId, OpId};
 use crate::model::Operation;
@@ -38,6 +38,9 @@ pub const ASSET_BATCH_BYTES: usize = 3 * 1024 * 1024;
 /// 一批资源最多几份（避免一堆小图把 JSON 数组本身撑大）。
 pub const ASSET_BATCH_ITEMS: usize = 64;
 
+/// 分块资源的单片预算，编码后仍远小于帧上限。
+pub const ASSET_CHUNK_BYTES: usize = 512 * 1024;
+
 /// 客户端 → 服务端。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -64,6 +67,9 @@ pub enum Request {
         /// 协议版本相同才允许同步；此字段只决定是否启用正文通道。
         #[serde(default)]
         content: bool,
+        /// 是否支持超大资源分片；旧构建缺字段时不发送新请求。
+        #[serde(default)]
+        asset_chunks: bool,
     },
     /// 鉴权应答：`proof = HMAC(密钥, 握手文本)`
     Auth { proof: String },
@@ -105,6 +111,9 @@ pub enum Request {
         #[serde(default)]
         pull: Vec<String>,
     },
+    /// 超大资源按序列化后的字节分块；hash 首次为空，后续固定为首片的整份指纹。
+    PullAssetChunk { book: String, name: String, offset: u64, hash: String },
+    PushAssetChunk { book: String, chunk: AssetChunk },
     /// 查询对端状态（CLI `discover` / 状态页用）
     Stat,
     Ping,
@@ -125,6 +134,8 @@ impl Request {
             Request::AssetIndex { .. } => "asset_index",
             Request::AssetDigests { .. } => "asset_digests",
             Request::ExchangeAssets { .. } => "exchange_assets",
+            Request::PullAssetChunk { .. } => "pull_asset_chunk",
+            Request::PushAssetChunk { .. } => "push_asset_chunk",
             Request::Stat => "stat",
             Request::Ping => "ping",
         }
@@ -151,6 +162,9 @@ pub enum Response {
         /// 本机是否参与正文同步（与 [`Request::Hello`] 同一口径；旧对端缺字段 = false）
         #[serde(default)]
         content: bool,
+        /// 是否支持超大资源分片；旧构建缺字段时不发送新请求。
+        #[serde(default)]
+        asset_chunks: bool,
     },
     /// 对 Auth 的回应（含服务端自己的 proof，做双向认证）
     Auth {
@@ -224,6 +238,8 @@ pub enum Response {
         stored: usize,
         items: Vec<Asset>,
     },
+    AssetChunk { chunk: AssetChunk },
+    AssetChunkAck { offset: u64, complete: bool },
     Pong {
         at_ms: u64,
     },
@@ -249,6 +265,8 @@ impl Response {
             Response::AssetIndex { .. } => "asset_index",
             Response::AssetDigests { .. } => "asset_digests",
             Response::Assets { .. } => "assets",
+            Response::AssetChunk { .. } => "asset_chunk",
+            Response::AssetChunkAck { .. } => "asset_chunk_ack",
             Response::Pong { .. } => "pong",
             Response::Error { .. } => "error",
         }
@@ -343,6 +361,15 @@ mod tests {
         // 新版本多带一个字段：旧版本必须还能解析（协议演进靠这个）
         let json = r#"{"type":"ping","future_field":42}"#;
         assert_eq!(serde_json::from_str::<Request>(json).unwrap(), Request::Ping);
+    }
+
+    #[test]
+    fn older_hello_has_no_chunk_capability() {
+        let response: Response = serde_json::from_value(serde_json::json!({
+            "type": "hello", "ok": true, "protocol": crate::PROTOCOL_VERSION,
+            "group": "group", "device": "peer", "name": "peer", "nonce": "nonce", "content": true
+        })).unwrap();
+        assert!(matches!(response, Response::Hello { asset_chunks: false, .. }));
     }
 
     #[test]

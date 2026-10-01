@@ -263,6 +263,7 @@ fn notify_peer_seen(
     name: &str,
     addr: Option<String>,
     content: bool,
+    asset_chunks: bool,
 ) {
     let Some(callback) = &options.on_peer_seen else {
         return;
@@ -272,6 +273,7 @@ fn notify_peer_seen(
         name: name.to_string(),
         addr,
         content,
+        asset_chunks,
     });
 }
 
@@ -301,9 +303,10 @@ fn serve_connection(
         client_nonce,
         client_port,
         client_content,
+        client_asset_chunks,
     ) = match hello {
-        Request::Hello { protocol, group, device, name, knowledge, nonce, port, content } => {
-            (protocol, group, device, name, knowledge, nonce, port, content)
+        Request::Hello { protocol, group, device, name, knowledge, nonce, port, content, asset_chunks } => {
+            (protocol, group, device, name, knowledge, nonce, port, content, asset_chunks)
         }
         other => {
             let _ = write_message(
@@ -334,6 +337,7 @@ fn serve_connection(
                 message: Some(reason.to_string()),
                 code: Some(code.as_str().to_string()),
                 content: has_content,
+                asset_chunks: true,
             },
             MAX_HANDSHAKE_BYTES,
         )
@@ -383,6 +387,7 @@ fn serve_connection(
             message: None,
             code: None,
             content: has_content,
+            asset_chunks: true,
         },
         MAX_HANDSHAKE_BYTES,
     )?;
@@ -481,8 +486,9 @@ fn serve_connection(
     }
     // 地址 / 名字刚更新过：通知宿主刷一次界面（推送与自动同步是后台线程，
     // 界面不主动查就看不到新设备与新地址）
-    notify_peer_seen(&options, &client_device, &client_name, peer_addr.clone(), client_content);
+    notify_peer_seen(&options, &client_device, &client_name, peer_addr.clone(), client_content, client_asset_chunks);
 
+    let mut transfers = crate::asset_transfer::AssetTransfer::new(lock_engine(&engine).asset_transfer_root());
     // 3) 请求循环
     let mut recv_seq = 0u64;
     let mut send_seq = 0u64;
@@ -494,12 +500,13 @@ fn serve_connection(
 
         let response = {
             let mut engine = lock_engine(&engine);
-            handle_request(&mut engine, Some(&client_device), &request)
+            handle_request(&mut engine, Some(&client_device), &request, &mut transfers)
         };
         // 在应答前落地，包括元数据、正文、资源；即使应答写失败也已保存。
         if let Some(callback) = &options.on_checkpoint { callback()?; }
         let applied = matches!(&response, Response::ContentAck { stored } if *stored > 0)
             || matches!(&response, Response::Assets { stored, .. } if *stored > 0)
+            || matches!(&response, Response::AssetChunkAck { complete: true, .. })
             || matches!(&response, Response::Ack { .. });
         if applied { if let Some(callback) = &options.on_applied { callback(); } }
         send_seq += 1;

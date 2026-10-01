@@ -57,6 +57,8 @@ pub struct PeerInfo {
     /// 对端是否参与**正文**同步（握手时自报；旧对端 / CLI 为 false）。
     /// false 时同步会话不发起正文对账 —— 对端会把未知请求当协议错误断连接。
     pub content: bool,
+    /// 支持超大资源分片（握手时协商）。
+    pub asset_chunks: bool,
 }
 
 /// 一次同步所需的传输抽象。

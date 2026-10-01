@@ -267,6 +267,15 @@ impl SyncEngine {
         } else {
             Some(LockGuard::acquire(store.root(), store.device_id())?)
         };
+        // 拿到独占目录锁后才能清理上次异常退出留下的未完成分片。
+        // 完整资源仍走原有 assets/，这里没有需要迁移或恢复的书库数据。
+        if !options.read_only {
+            if let Err(error) = std::fs::remove_dir_all(store.root().join("asset-transfers")) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    return Err(SyncError::Io(format!("清理旧资源分片失败：{error}")));
+                }
+            }
+        }
         let mut engine = SyncEngine {
             store,
             _lock: lock,
@@ -1063,6 +1072,11 @@ impl SyncEngine {
     /// 宿主数据根（宿主落地时按它写回；见 [`ContentSource::data_root`]）。
     pub fn content_data_root(&self) -> Option<PathBuf> {
         self.content.as_ref().and_then(|source| source.data_root())
+    }
+
+    /// 分块工作区不参与对账，由每条连接独立管理并在结束时清理。
+    pub(crate) fn asset_transfer_root(&self) -> PathBuf {
+        self.store.root().join("asset-transfers")
     }
 
     /// 资源暂存区根目录。

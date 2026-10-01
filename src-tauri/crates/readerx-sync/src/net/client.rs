@@ -86,6 +86,7 @@ impl TcpTransport {
                 nonce: client_nonce.clone(),
                 port: *listen_port,
                 content: *content,
+                asset_chunks: true,
             },
             MAX_HANDSHAKE_BYTES,
         )?;
@@ -94,10 +95,10 @@ impl TcpTransport {
             // 连上了、一句话没说就断：多半不是 ReaderX 的同步端口
             SyncError::from(WireError::NotReaderx)
         })?;
-        let (ok, server_device, server_name, server_nonce, message, protocol, peer_group, code, content) =
+        let (ok, server_device, server_name, server_nonce, message, protocol, peer_group, code, content, asset_chunks) =
             match hello {
-                Response::Hello { ok, protocol, group: peer_group, device, name, nonce, message, code, content } => {
-                    (ok, device, name, nonce, message, protocol, peer_group, code, content)
+                Response::Hello { ok, protocol, group: peer_group, device, name, nonce, message, code, content, asset_chunks } => {
+                    (ok, device, name, nonce, message, protocol, peer_group, code, content, asset_chunks)
                 }
                 Response::Error { code, message } => {
                     return Err(SyncError::from(WireError::from_wire(&code))
@@ -180,6 +181,7 @@ impl TcpTransport {
                 name: server_name,
                 addr: Some(addr.to_string()),
                 content,
+                asset_chunks,
             },
             keys,
             send_seq: 0,

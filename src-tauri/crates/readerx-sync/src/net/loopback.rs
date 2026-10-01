@@ -18,6 +18,7 @@ use crate::proto::{Request, Response};
 pub struct LoopbackTransport {
     engine: SharedEngine,
     peer: PeerInfo,
+    transfers: crate::asset_transfer::AssetTransfer,
 }
 
 impl LoopbackTransport {
@@ -31,9 +32,11 @@ impl LoopbackTransport {
                 addr: None,
                 // 与真 TCP 握手同一口径：对端能不能收正文，看它有没有注册正文来源
                 content: engine.has_content_source(),
+                asset_chunks: true,
             }
         };
-        LoopbackTransport { engine, peer }
+        let transfers = crate::asset_transfer::AssetTransfer::new(lock_engine(&engine).asset_transfer_root());
+        LoopbackTransport { engine, peer, transfers }
     }
 }
 
@@ -44,6 +47,6 @@ impl Transport for LoopbackTransport {
 
     fn request(&mut self, request: &Request) -> Result<Response> {
         let mut engine = lock_engine(&self.engine);
-        Ok(handle_request(&mut engine, Some(&self.peer.device_id), request))
+        Ok(handle_request(&mut engine, Some(&self.peer.device_id), request, &mut self.transfers))
     }
 }

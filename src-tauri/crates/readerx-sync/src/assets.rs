@@ -200,15 +200,14 @@ pub fn valid_name(name: &str) -> bool {
 
 /// 按帧预算装箱：返回（装得下的资源, 它们的字节数）。
 ///
-/// 单个超过预算的资源直接跳过并留日志：**不静默丢**，但也不能让一个超大文件
-/// 卡住整条通道（下一次同步还会重算差集，用户能自己决定删掉那张图）。
+/// 普通批次中装不下的资源留给分片通道，不提高单帧上限。
 pub fn fit_batch(items: Vec<Asset>, max_bytes: u64, max_items: usize) -> (Vec<Asset>, u64) {
     let mut out = Vec::new();
     let mut bytes = 0u64;
     for item in items {
         let size = item.size();
         if size > max_bytes {
-            log::warn!("资源超过单帧预算，跳过 name={} bytes={size}", item.name);
+            log::debug!("资源超过普通批次预算，留给分片 name={} bytes={size}", item.name);
             continue;
         }
         if out.len() >= max_items || bytes + size > max_bytes {
@@ -226,7 +225,7 @@ pub fn missing(name: &str) -> AssetDigest {
 }
 
 /// 资源字节的 serde 形态：线上是 base64，内存里是 `Vec<u8>`。
-mod base64_bytes {
+pub(crate) mod base64_bytes {
     use serde::de::Error as _;
     use serde::{Deserialize, Deserializer, Serializer};
 
@@ -347,4 +346,16 @@ mod tests {
         assert_eq!(batch.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), vec!["a", "b"]);
         assert_eq!(bytes, 16, "被跳过的资源不计入预算");
     }
+}
+
+/// 序列化资源的一个片段，完整重组并校验后才成为可落库的资源。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetChunk {
+    pub name: String,
+    pub hash: String,
+    pub offset: u64,
+    pub total: u64,
+    #[serde(with = "base64_bytes")]
+    pub bytes: Vec<u8>,
 }
