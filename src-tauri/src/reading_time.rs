@@ -30,6 +30,44 @@ fn legacy_version() -> u32 {
     1
 }
 
+/// 前端使用本机书籍 id；持久化与同步仍使用跨设备 uid。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadingTimeView {
+    schema_version: u32,
+    days: BTreeMap<String, u64>,
+    books: BTreeMap<String, u64>,
+}
+
+fn local_book_totals(
+    books: BTreeMap<String, u64>,
+    local_ids: &BTreeMap<String, String>,
+) -> BTreeMap<String, u64> {
+    let mut totals: BTreeMap<String, u64> = BTreeMap::new();
+    for (uid, value) in books {
+        // 本机不存在的书保留 uid，让统计页继续显示已移出书库。
+        let id = local_ids.get(&uid).cloned().unwrap_or(uid);
+        let total = totals.entry(id).or_default();
+        *total = total.saturating_add(value);
+    }
+    totals
+}
+
+fn view<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    stats: ReadingTime,
+) -> Result<ReadingTimeView, String> {
+    let local_ids = crate::book_store::list_sync_meta(app)?
+        .into_iter()
+        .map(|meta| (crate::sync::bridge::book_uid_of(app, &meta), meta.id))
+        .collect();
+    Ok(ReadingTimeView {
+        schema_version: stats.schema_version,
+        days: stats.days,
+        books: local_book_totals(stats.books, &local_ids),
+    })
+}
+
 impl ReadingTime {
     fn summarize(&mut self) {
         self.days.clear();
@@ -182,11 +220,11 @@ fn add(
 }
 
 #[tauri::command]
-pub async fn readerx_reading_time_get(app: AppHandle) -> Result<ReadingTime, String> {
+pub async fn readerx_reading_time_get(app: AppHandle) -> Result<ReadingTimeView, String> {
     crate::commands::blocking("读取阅读时长", move || {
         crate::sync::service_hook(&app).refresh_reading_time()?;
         let _guard = LOCK.lock().map_err(|_| "阅读时长锁不可用")?;
-        load(&app)
+        view(&app, load(&app)?)
     })
     .await
 }
@@ -197,7 +235,7 @@ pub async fn readerx_reading_time_add(
     book_id: String,
     day: String,
     milliseconds: u64,
-) -> Result<ReadingTime, String> {
+) -> Result<ReadingTimeView, String> {
     crate::commands::blocking("保存阅读时长", move || {
         let stats = {
             let _guard = LOCK.lock().map_err(|_| "阅读时长锁不可用")?;
@@ -212,7 +250,7 @@ pub async fn readerx_reading_time_add(
         };
         // 必须先释放时长锁，再进引擎，避免与同步落地的锁顺序相反。
         crate::sync::service_hook(&app).on_reading_time_changed();
-        Ok(stats)
+        view(&app, stats)
     })
     .await
 }
@@ -220,6 +258,22 @@ pub async fn readerx_reading_time_add(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn view_resolves_present_books_and_preserves_removed_books() {
+        let books = BTreeMap::from([
+            ("uid-present".into(), 15_000),
+            ("uid-removed".into(), 5_000),
+        ]);
+        let local_ids = BTreeMap::from([("uid-present".into(), "local-book".into())]);
+        let totals = local_book_totals(books.clone(), &local_ids);
+        assert_eq!(totals["local-book"], 15_000);
+        assert_eq!(totals["uid-removed"], 5_000);
+        assert!(!totals.contains_key("uid-present"));
+        assert_eq!(totals.values().sum::<u64>(), books.values().sum::<u64>());
+        // 书库加载前后及删除后都重新按当前本机清单解析，不改写存储键。
+        assert_eq!(local_book_totals(books.clone(), &BTreeMap::new()), books);
+    }
+
     #[test]
     fn offline_devices_merge_idempotently_and_preserve_newer_local_time() {
         let mut a = ReadingTime {
