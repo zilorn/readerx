@@ -6,6 +6,7 @@ import { Toasts } from "./components/Toasts";
 import { GroupPicker } from "./components/GroupPicker";
 import { SourcePromptDialog } from "./components/SourcePromptDialog";
 import { MobileStage } from "./shell/MobileStage";
+import { DesktopTitleBar } from "./shell/DesktopTitleBar";
 import { DesktopStage } from "./shell/DesktopStage";
 import { bookMetaById, ensureLocalBooksLoaded } from "./lib/books";
 import {
@@ -13,7 +14,7 @@ import {
   closeGroupAssign,
   groupAssignBookId,
 } from "./lib/groups";
-import { isDesktopShell } from "./lib/platform";
+import { isDesktopShell, isDesktopPlatform } from "./lib/platform";
 import { attachSyncNavigator } from "./lib/sync";
 import { t } from "./lib/i18n";
 
@@ -63,41 +64,43 @@ const AppShell: Component<RouteSectionProps> = (props) => {
   onMount(() => attachSyncNavigator((path) => navigate(path)));
 
   return (
-    <div
-      class="relative mx-auto flex h-screen w-full flex-col overflow-hidden bg-bg"
-      classList={{
-        // 手机端（含桌面窗口拉窄到断点以下）：始终是居中的手机列
-        "max-w-[var(--app-column)] min-[521px]:border-x min-[521px]:border-border min-[521px]:shadow-[0_0_44px_rgb(0_0_0/0.16)]":
-          !isDesktopShell(),
-        // 桌面端：铺满窗口，由侧边栏与内容区分栏
-        "max-w-none": isDesktopShell(),
-      }}
-      style={{ height: "100dvh" }}
-    >
-      <Show
-        when={isDesktopShell()}
-        fallback={<MobileStage kept={KEPT_PAGES}>{props.children}</MobileStage>}
+    <div class="flex h-dvh flex-col overflow-hidden bg-bg">
+      <Show when={isDesktopPlatform()}><DesktopTitleBar /></Show>
+      <div
+        class="relative mx-auto flex min-h-0 flex-1 w-full flex-col overflow-hidden bg-bg"
+        classList={{
+          // 手机端（含桌面窗口拉窄到断点以下）：始终是居中的手机列
+          "max-w-[var(--app-column)] min-[521px]:border-x min-[521px]:border-border min-[521px]:shadow-[0_0_44px_rgb(0_0_0/0.16)]":
+            !isDesktopShell(),
+          // 桌面端：铺满窗口，由侧边栏与内容区分栏
+          "max-w-none": isDesktopShell(),
+        }}
       >
-        <DesktopStage kept={KEPT_PAGES}>{props.children}</DesktopStage>
-      </Show>
+        <Show
+          when={isDesktopShell()}
+          fallback={<MobileStage kept={KEPT_PAGES}>{props.children}</MobileStage>}
+        >
+          <DesktopStage kept={KEPT_PAGES}>{props.children}</DesktopStage>
+        </Show>
 
-      <Toasts />
+        <Toasts />
 
-      {/* 书源输入表单（input.prompt）：书源引擎在等这份输入，弹层必须盖在任何页面之上 */}
-      <SourcePromptDialog />
+        {/* 书源输入表单（input.prompt）：书源引擎在等这份输入，弹层必须盖在任何页面之上 */}
+        <SourcePromptDialog />
 
-      {/* 入架提示里的「加入分组」：移入分组抽屉 */}
-      <Show when={groupAssignBookId()}>
-        {(bookId) => (
-          <GroupPicker
-            value={bookMetaById(bookId())?.groupId ?? null}
-            onSelect={(groupId) => {
-              void assignBookGroup(bookId(), groupId);
-            }}
-            onClose={closeGroupAssign}
-          />
-        )}
-      </Show>
+        {/* 入架提示里的「加入分组」：移入分组抽屉 */}
+        <Show when={groupAssignBookId()}>
+          {(bookId) => (
+            <GroupPicker
+              value={bookMetaById(bookId())?.groupId ?? null}
+              onSelect={(groupId) => {
+                void assignBookGroup(bookId(), groupId);
+              }}
+              onClose={closeGroupAssign}
+            />
+          )}
+        </Show>
+      </div>
     </div>
   );
 };

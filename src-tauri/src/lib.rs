@@ -114,6 +114,10 @@ pub fn run() {
             }
         })
         .setup(|app| {
+            #[cfg(desktop)]
+            if let Some(window) = app.get_webview_window("main") {
+                window.set_decorations(false)?;
+            }
             // panic hook 需要 AppHandle 才能把内部异常推给前端
             let _ = APP_HANDLE.set(app.handle().clone());
             // 日志文件目标挂到应用数据目录，并把用户设置的级别应用上去

@@ -27,6 +27,12 @@ export const shell = {
   "shell.sidebar.expand": "Expand sidebar",
   "shell.sidebar.collapse": "Collapse sidebar",
 
+  "shell.window.minimize": "Minimize",
+  "shell.window.maximize": "Maximize",
+  "shell.window.restore": "Restore",
+  "shell.window.close": "Close",
+  "shell.window.failed": "Couldn't control the window",
+
   // Startup
   "shell.startup.settingsFailed": "Couldn't load local settings",
   "shell.startup.libraryFailed": "Couldn't load the library",

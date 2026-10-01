@@ -3,6 +3,12 @@
  * 主 Tab 文案由 src/shell/routes.ts 的 key 引用，手机底部导航与桌面侧边栏共用。
  */
 export const shell = {
+  "shell.window.minimize": "最小化",
+  "shell.window.maximize": "最大化",
+  "shell.window.restore": "还原",
+  "shell.window.close": "关闭",
+  "shell.window.failed": "窗口操作失败",
+
   /** 文档 / 窗口标题 */
   "app.title": "ReaderX · 阅读",
 

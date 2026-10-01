@@ -621,3 +621,13 @@ export function TerminalIcon(p: SvgIconProps) {
     </Icon>
   );
 }
+
+export function WindowMinimizeIcon(p: SvgIconProps) {
+  return <Icon {...p}><path d="M5 12h14" /></Icon>;
+}
+export function WindowMaximizeIcon(p: SvgIconProps) {
+  return <Icon {...p}><rect x="5" y="5" width="14" height="14" rx="1" /></Icon>;
+}
+export function WindowRestoreIcon(p: SvgIconProps) {
+  return <Icon {...p}><path d="M9 5h10v10" /><rect x="5" y="9" width="10" height="10" rx="1" /></Icon>;
+}
