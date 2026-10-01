@@ -226,6 +226,9 @@ pub fn local_uid<R: tauri::Runtime>(app: &AppHandle<R>, book_id: &str) -> String
     book_uid_of_id(app, book_id)
 }
 
+/// 内置隐藏分组不在分组清单中，使用固定身份跨设备传递。
+const HIDDEN_GROUP_ID: &str = "__hidden__";
+
 /// 本机侧的事实：分组归属与书源地址（发布书籍元信息时要把本机 id 翻译成跨设备身份）。
 #[derive(Debug, Default)]
 struct LocalFacts {
@@ -247,7 +250,13 @@ impl LocalFacts {
     }
 
     fn group_sync_id(&self, local_group_id: Option<&str>) -> Option<String> {
-        local_group_id.and_then(|id| self.groups.get(id).cloned())
+        local_group_id.and_then(|id| {
+            if id == HIDDEN_GROUP_ID {
+                Some(HIDDEN_GROUP_ID.to_string())
+            } else {
+                self.groups.get(id).cloned()
+            }
+        })
     }
 
     /// 书源分组的同步 id（书源归属发布时用）。
@@ -1864,6 +1873,9 @@ fn same_source(a: &BookSource, b: &BookSource) -> bool {
 fn local_group_id<R: tauri::Runtime>(
     app: &AppHandle<R>, sync_group: Option<&str>,
 ) -> Result<Option<String>, String> {
+    if sync_group == Some(HIDDEN_GROUP_ID) {
+        return Ok(Some(HIDDEN_GROUP_ID.to_string()));
+    }
     local_group_id_in(app, GROUPS_KEY, identity::group_uid, sync_group)
 }
 

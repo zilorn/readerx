@@ -1716,3 +1716,38 @@ fn renaming_a_source_group_keeps_source_membership() {
     bridge::republish_grouped_sources(&handle, &local).unwrap();
     assert_eq!(lock_engine(&local).op_count(), before, "归属没变时重发布应无操作");
 }
+
+/// 内置隐藏分组不存于 readerx.groups，书籍归属仍要发布并在新设备落地。
+#[test]
+fn hidden_group_membership_survives_sync_and_can_be_cleared() {
+    let _serial = SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (handle, app_data) = setup();
+    let local = local_engine(&handle, &app_data);
+    let peer = RealPeer::start("hidden-group", Some(&lock_engine(&local).pairing_code()));
+    seed_local_book(&app_data, "local-1", "三体");
+    let path = app_data.join("books/local-1/bookdetail.json");
+    let mut detail = read_json(&path);
+    detail["groupId"] = json!("__hidden__");
+    write_json(&path, &detail);
+    let mut index = BookIndex::default();
+    bridge::reconcile(&handle, &local, &mut index).unwrap();
+    let uid = bridge::local_uid(&handle, "local-1");
+    assert_eq!(lock_engine(&local).entity(&uid).unwrap().field("group"), Some(json!("__hidden__")));
+    sync_once(&local, &peer.engine);
+    // 将远端暂存作为新设备数据拉回：本地书库清空，验证建书时也保留归属。
+    std::fs::remove_dir_all(app_data.join("books")).unwrap();
+    drop(local);
+    let fresh = local_engine(&handle, &app_data);
+    sync_once(&fresh, &peer.engine);
+    let mut index = BookIndex::default();
+    bridge::materialize(&handle, &fresh, 0, &mut index).unwrap();
+    let ids = list_files(&app_data.join("books"));
+    assert_eq!(ids.len(), 1);
+    let path = app_data.join("books").join(&ids[0]).join("bookdetail.json");
+    assert_eq!(read_json(&path)["groupId"], "__hidden__");
+    assert!(!app_data.join("state/readerx.groups.json").exists(), "不能额外创建普通分组");
+    lock_engine(&peer.engine).set_field(&uid, "group", json!(null)).unwrap();
+    sync_once(&fresh, &peer.engine);
+    bridge::materialize(&handle, &fresh, 0, &mut index).unwrap();
+    assert!(read_json(&path)["groupId"].is_null(), "移出隐藏分组也应同步");
+}
