@@ -205,9 +205,16 @@ export function shelfEntries(): Record<string, ShelfEntry> {
   return shelfMap();
 }
 
-/** 按最近阅读排序的书架条目 */
-export function shelfOrder(): ShelfEntry[] {
-  return Object.values(shelfMap()).sort((a, b) => b.updatedAt - a.updatedAt);
+/** 按书库生成书架，阅读进度只决定位置与排序；同步来的未读书也必须可见。 */
+export function shelfOrder(books: readonly { id: string; importedAt: number }[]): ShelfEntry[] {
+  const progress = shelfMap();
+  return books
+    .map((book) => progress[book.id] ?? {
+      bookId: book.id,
+      chapter: 0,
+      updatedAt: book.importedAt,
+    })
+    .sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
 export function isOnShelf(bookId: string): boolean {

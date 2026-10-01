@@ -7,6 +7,7 @@ import { ChevronRightIcon, CloseIcon, SearchIcon } from "../components/icons";
 import {
   ensureLocalBooksLoaded,
   bookMetaById,
+  bookMetaList,
   bookMetasReady,
 } from "../lib/books";
 import type { BookMeta } from "../lib/booksTypes";
@@ -91,7 +92,7 @@ export default function ShelfSearchPage() {
   });
 
   const items = createMemo<ShelfItem[]>(() =>
-    shelfOrder()
+    shelfOrder(bookMetaList())
       .map((entry) => {
         const book = bookMetaById(entry.bookId);
         return book ? { entry, book } : null;

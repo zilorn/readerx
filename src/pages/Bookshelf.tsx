@@ -25,6 +25,7 @@ import {
 import {
   ensureLocalBooksLoaded,
   bookMetaById,
+  bookMetaList,
   bookMetasReady,
   removeLocalBook,
   setLocalBookGroup,
@@ -376,7 +377,7 @@ export default function BookshelfPage() {
 
   // 书架卡片读显示副本：简繁转换只改书名 / 作者 / 简介 / 标签，其余字段（来源、分组、章节数）原样
   const items = createMemo<ShelfItem[]>(() =>
-    shelfOrder()
+    shelfOrder(bookMetaList())
       .map((entry) => {
         const book = bookMetaById(entry.bookId);
         return book ? { entry, book: withHanMeta(book) ?? book } : null;
