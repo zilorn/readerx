@@ -741,6 +741,25 @@ pub fn publish_structure<R: tauri::Runtime>(
     Ok(())
 }
 
+/// 升级修复：旧同步把内置隐藏归属漏写成 null，在落地旧操作之前保住本机隐藏书。
+/// 仅由服务在首次升级时调用，普通分组变更与已删除书不受影响。
+pub(crate) fn migrate_hidden_groups<R: tauri::Runtime>(
+    app: &AppHandle<R>, engine: &SharedEngine,
+) -> Result<(), SyncError> {
+    for meta in book_store::list_sync_meta(app).map_err(SyncError::Io)? {
+        if meta.group_id.as_deref() != Some(HIDDEN_GROUP_ID) { continue; }
+        let uid = book_uid_of(app, &meta);
+        let mut guard = lock_engine(engine);
+        let needs_repair = guard.entity(&uid).is_some_and(|entity| {
+            !guard.is_effectively_deleted(entity)
+                && entity.field("group").is_none_or(|group| group.is_null())
+        });
+        if needs_repair { guard.set_field(&uid, "group", json!(HIDDEN_GROUP_ID))?; }
+    }
+    lock_engine(engine).flush()?;
+    Ok(())
+}
+
 /// 启动对账：本地有、引擎里没有的记录补进去。
 ///
 /// 覆盖三种情况：首次启用同步（引擎是空的）、引擎数据被清过、上次运行到这里就退出了。

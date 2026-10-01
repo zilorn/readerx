@@ -43,6 +43,8 @@ pub struct SyncSettings {
     pub materialized_ops: usize,
     /// 上次成功同步的时间（毫秒时间戳；仅用于界面展示与自动同步节流）
     pub last_sync_ms: u64,
+    /// 升级时只恢复一次旧版本漏发的隐藏归属，之后尊重正常同步结果。
+    pub hidden_group_migrated: bool,
 }
 
 impl Default for SyncSettings {
@@ -54,6 +56,7 @@ impl Default for SyncSettings {
             auto_interval_secs: AUTO_INTERVAL_DEFAULT,
             materialized_ops: 0,
             last_sync_ms: 0,
+            hidden_group_migrated: false,
         }
     }
 }

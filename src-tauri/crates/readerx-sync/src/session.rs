@@ -25,6 +25,7 @@ use crate::engine::SyncEngine;
 use crate::error::{Result, SyncError};
 use crate::id::now_ms;
 use crate::net::{PeerInfo, Transport};
+use crate::progress::SyncProgress;
 use crate::proto::{
     Request, Response, ASSET_BATCH_BYTES, ASSET_BATCH_ITEMS, CONTENT_BATCH_BYTES,
     CONTENT_BATCH_CHAPTERS, DEFAULT_BATCH,
@@ -37,7 +38,7 @@ pub const MAX_ROUNDS: usize = 64;
 /// 一次会话最多搬运的**正文**章节数。
 ///
 /// 正文通道要抱着引擎锁走（同步会话整体持锁），长时间占用会让本机的进度 / 书签
-/// 写入排队。大书库因此在多次同步里慢慢搬完 —— 差集每次重算，断点续传天然成立。
+/// 写入排队。宿主可根据续传标志释放锁、落地，再自动启动下一批；差集每次重算。
 pub const MAX_CONTENT_CHAPTERS: usize = 200;
 
 /// 一次会话最多搬运的**正文字节数**（约 32 MiB，与章节数上限取先到者）。
@@ -46,7 +47,7 @@ pub const MAX_CONTENT_BYTES: u64 = 32 * 1024 * 1024;
 /// 一次会话最多搬运的**资源份数**（封面 + 章节插图）。
 ///
 /// 与正文同样的理由：资源通道要抱着引擎锁走。漫画书动辄几百张图，
-/// 因此在多次同步里慢慢搬完 —— 差集每次重算，断点续传天然成立。
+/// 因此宿主应逐批释放锁并续传，差集每次重算，断点续传天然成立。
 pub const MAX_ASSETS: usize = 200;
 
 /// 一次会话最多搬运的**资源字节数**（约 32 MiB，与份数上限取先到者）。
@@ -79,6 +80,11 @@ pub struct SyncReport {
     pub assets_pushed: usize,
     /// 本次会话从对端取回并存进暂存区的资源份数
     pub assets_pulled: usize,
+    /// 本次实际搬运的正文 / 资源字节数。
+    pub bytes: u64,
+    /// 达到本次传输预算，宿主应释放锁、落地后自动续传。
+    pub more_content: bool,
+    pub more_assets: bool,
     /// 对端同步后的版本向量
     pub peer_knowledge: VersionVector,
     pub finished_at_ms: u64,
@@ -116,6 +122,15 @@ impl SyncReport {
 
 /// 用给定传输与对端同步一次。
 pub fn sync_with(engine: &mut SyncEngine, transport: &mut dyn Transport) -> Result<SyncReport> {
+    sync_with_progress(engine, transport, &mut |_| {})
+}
+
+/// 与同步同时报告每批进度；回调不可重新获取引擎锁。
+pub fn sync_with_progress(
+    engine: &mut SyncEngine,
+    transport: &mut dyn Transport,
+    progress: &mut dyn FnMut(SyncProgress),
+) -> Result<SyncReport> {
     let peer = transport.peer();
     let mut report = SyncReport::new(&peer);
     log::info!(
@@ -124,7 +139,7 @@ pub fn sync_with(engine: &mut SyncEngine, transport: &mut dyn Transport) -> Resu
         peer.name
     );
 
-    match run_session(engine, transport, &mut report) {
+    match run_session(engine, transport, &mut report, progress) {
         Ok(()) => {
             engine.record_peer_sync(
                 &peer.device_id,
@@ -157,8 +172,10 @@ fn run_session(
     engine: &mut SyncEngine,
     transport: &mut dyn Transport,
     report: &mut SyncReport,
+    progress: &mut dyn FnMut(SyncProgress),
 ) -> Result<()> {
     let peer_device = report.peer_device.clone();
+    notify_progress(engine, report, progress, "metadata", None, 0, 0, 0, None);
 
     // ---- 1) 拉：我缺的操作 ----
     let mut since = engine.knowledge();
@@ -195,6 +212,7 @@ fn run_session(
         report.rejected += batch.rejected;
         report.conflicts += batch.conflicts;
         since = engine.knowledge();
+        notify_progress(engine, report, progress, "metadata", None, 0, 0, report.pulled + report.pushed, None);
 
         if !has_more {
             break;
@@ -244,6 +262,7 @@ fn run_session(
                 }
                 peer_knowledge = knowledge.clone();
                 report.peer_knowledge = knowledge;
+                notify_progress(engine, report, progress, "metadata", None, 0, 0, report.pulled + report.pushed, None);
                 if !has_more {
                     break;
                 }
@@ -260,18 +279,9 @@ fn run_session(
         }
     }
 
-    // ---- 3) 正文：指纹对账 + 按章搬运（不参与操作日志，见 crate::content）----
-    // 失败不算整次同步失败：操作已经合并完毕，正文下次同步还能继续搬。
-    // （旧对端握手时 content=false，这一步直接跳过，不会向它发未知请求。）
-    if let Err(error) = content_pass(engine, transport, report) {
-        log::warn!("正文同步未完成（下次同步继续）：{error}");
-    }
-
-    // ---- 4) 资源：封面 / 章节插图（同样的对账思路，见 crate::assets）----
-    // 排在正文之后：本机要先知道「正文块引用了哪些图」（正文刚落进暂存区）。
-    if let Err(error) = asset_pass(engine, transport, report) {
-        log::warn!("资源同步未完成（下次同步继续）：{error}");
-    }
+    // 操作已持久化；正文 / 资源失败也必须反馈给宿主，不能显示为全部完成。
+    content_pass(engine, transport, report, progress)?;
+    asset_pass(engine, transport, report, progress)?;
 
     // 一次会话只拉一轮：局域网里对端的数据在一次会话内不会变（它要么在等我们，
     // 要么自己在跟第三台设备同步——那种情况下下一轮定时同步会补齐）。
@@ -290,6 +300,7 @@ fn content_pass(
     engine: &mut SyncEngine,
     transport: &mut dyn Transport,
     report: &mut SyncReport,
+    progress: &mut dyn FnMut(SyncProgress),
 ) -> Result<()> {
     let peer = transport.peer();
     if !engine.has_content_source() || !peer.content {
@@ -329,11 +340,14 @@ fn content_pass(
     let mut chapters = 0usize;
     let mut bytes = 0u64;
 
-    for book in books {
+    let book_count = books.len();
+    for (book_index, book) in books.into_iter().enumerate() {
         if chapters >= MAX_CONTENT_CHAPTERS || bytes >= MAX_CONTENT_BYTES {
-            log::debug!("本次会话的正文预算用尽，剩余章节下次同步继续");
+            log::debug!("本次正文批次预算用尽，通知宿主自动续传剩余章节");
             break;
         }
+        notify_progress(engine, report, progress, "content", Some(&book), book_index + 1, book_count, 0, None);
+        let before = report.content_pushed + report.content_pulled;
         let mine = engine.content_index(&book);
         let theirs = their_map.remove(&book);
         let same = match (&theirs, mine.chapters) {
@@ -375,6 +389,19 @@ fn content_pass(
             .map(|digest| (digest.cid.as_str(), digest.hash.as_str()))
             .collect::<HashMap<_, _>>();
 
+        let planned = mine_digests.iter().filter(|digest| {
+            !digest.hash.is_empty() && match peer_map.get(digest.cid.as_str()) {
+                None => true,
+                Some(hash) => i_win && *hash != digest.hash,
+            }
+        }).count() + peer_chapters.iter().filter(|digest| {
+            !digest.hash.is_empty() && match mine_map.get(digest.cid.as_str()) {
+                None => true,
+                Some(hash) => !i_win && *hash != digest.hash,
+            }
+        }).count();
+        notify_progress(engine, report, progress, "content", Some(&book), book_index + 1, book_count, 0, Some(planned));
+
         // 推：对端没有的章；两边都有但指纹不同时只有「我赢」才推
         if chapters < MAX_CONTENT_CHAPTERS && bytes < MAX_CONTENT_BYTES {
             let mut wanted: Vec<String> = Vec::new();
@@ -405,6 +432,8 @@ fn content_pass(
                         chapters += count;
                         bytes += size;
                         report.content_pushed += stored;
+                        report.bytes += size;
+                        notify_progress(engine, report, progress, "content", Some(&book), book_index + 1, book_count, report.content_pushed + report.content_pulled - before, Some(planned));
                     }
                     Response::Error { code, message } => {
                         return Err(SyncError::Protocol(format!(
@@ -465,6 +494,8 @@ fn content_pass(
                     chapters += count;
                     bytes += size;
                     report.content_pulled += count;
+                    report.bytes += size;
+                    notify_progress(engine, report, progress, "content", Some(&book), book_index + 1, book_count, report.content_pushed + report.content_pulled - before, Some(planned));
                 }
                 Err(error) => {
                     log::warn!("正文暂存失败（{book}）：{error}");
@@ -472,8 +503,10 @@ fn content_pass(
                 }
             }
         }
+        report.more_content |= report.content_pushed + report.content_pulled - before < planned;
     }
 
+    report.more_content |= chapters >= MAX_CONTENT_CHAPTERS || bytes >= MAX_CONTENT_BYTES;
     if report.content_pushed > 0 || report.content_pulled > 0 {
         log::info!(
             "正文同步完成：推送 {} 章 / 取回 {} 章",
@@ -516,6 +549,7 @@ fn asset_pass(
     engine: &mut SyncEngine,
     transport: &mut dyn Transport,
     report: &mut SyncReport,
+    progress: &mut dyn FnMut(SyncProgress),
 ) -> Result<()> {
     let peer = transport.peer();
     if !engine.has_asset_source() || !peer.content {
@@ -561,11 +595,14 @@ fn asset_pass(
     let mut moved = 0usize;
     let mut bytes = 0u64;
 
-    for book in books {
+    let book_count = books.len();
+    for (book_index, book) in books.into_iter().enumerate() {
         if moved >= MAX_ASSETS || bytes >= MAX_ASSET_BYTES {
-            log::debug!("本次会话的资源预算用尽，剩余资源下次同步继续");
+            log::debug!("本次资源批次预算用尽，通知宿主自动续传剩余资源");
             break;
         }
+        notify_progress(engine, report, progress, "assets", Some(&book), book_index + 1, book_count, 0, None);
+        let before = report.assets_pushed + report.assets_pulled;
         let mine = engine.asset_index_of(&book);
         let theirs = their_map.remove(&book);
         // 一致 = 对端把这本书算过、而且结果与本机相同。对端没算过（不在清单里）时
@@ -637,6 +674,8 @@ fn asset_pass(
         }
 
         // 推与取按同一个预算装箱，一次请求一起发（见 Request::ExchangeAssets）
+        let planned = wanted.len() + pull.len();
+        notify_progress(engine, report, progress, "assets", Some(&book), book_index + 1, book_count, 0, Some(planned));
         let mut push_iter = wanted.chunks(ASSET_BATCH_ITEMS);
         let mut pull_iter = pull.chunks(ASSET_BATCH_ITEMS);
         loop {
@@ -684,6 +723,7 @@ fn asset_pass(
             report.assets_pushed += stored;
             moved += pushed.0.len();
             bytes += pushed.1;
+            report.bytes += pushed.1;
 
             if !items.is_empty() {
                 let size: u64 = items.iter().map(|item| item.size()).sum();
@@ -693,6 +733,7 @@ fn asset_pass(
                         moved += count;
                         bytes += size;
                         report.assets_pulled += count;
+                        report.bytes += size;
                     }
                     Err(error) => {
                         log::warn!("资源暂存失败（{book}）：{error}");
@@ -700,9 +741,12 @@ fn asset_pass(
                     }
                 }
             }
+            notify_progress(engine, report, progress, "assets", Some(&book), book_index + 1, book_count, report.assets_pushed + report.assets_pulled - before, Some(planned));
         }
+        report.more_assets |= report.assets_pushed + report.assets_pulled - before < planned;
     }
 
+    report.more_assets |= moved >= MAX_ASSETS || bytes >= MAX_ASSET_BYTES;
     if report.assets_pushed > 0 || report.assets_pulled > 0 {
         log::info!(
             "资源同步完成：推送 {} 份 / 取回 {} 份",
@@ -731,6 +775,15 @@ pub fn sync_with_addr(
     addr: &str,
     timeout: std::time::Duration,
 ) -> Result<SyncReport> {
+    sync_with_addr_progress(engine, addr, timeout, &mut |_| {})
+}
+
+pub fn sync_with_addr_progress(
+    engine: &mut SyncEngine,
+    addr: &str,
+    timeout: std::time::Duration,
+    progress: &mut dyn FnMut(SyncProgress),
+) -> Result<SyncReport> {
     let secret = engine.secret_bytes()?;
     let knowledge = engine.knowledge();
     let device = engine.device_id().to_string();
@@ -749,7 +802,38 @@ pub fn sync_with_addr(
         },
         timeout,
     )?;
-    sync_with(engine, &mut transport)
+    sync_with_progress(engine, &mut transport, progress)
+}
+
+/// 构造独立快照，宿主可以直接发事件而无需再次查询引擎。
+#[allow(clippy::too_many_arguments)]
+fn notify_progress(
+    engine: &SyncEngine,
+    report: &SyncReport,
+    progress: &mut dyn FnMut(SyncProgress),
+    phase: &str,
+    book: Option<&str>,
+    book_index: usize,
+    book_count: usize,
+    completed: usize,
+    total: Option<usize>,
+) {
+    progress(SyncProgress {
+        phase: phase.to_string(),
+        peer_name: report.peer_name.clone(),
+        book_title: book.and_then(|uid| engine.entity(uid))
+            .and_then(|entity| entity.field("title"))
+            .and_then(|value| value.as_str().map(str::to_string)),
+        book_index,
+        book_count,
+        completed,
+        total,
+        content_pushed: report.content_pushed,
+        content_pulled: report.content_pulled,
+        assets_pushed: report.assets_pushed,
+        assets_pulled: report.assets_pulled,
+        bytes: report.bytes,
+    });
 }
 
 #[cfg(test)]

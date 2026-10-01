@@ -1751,3 +1751,98 @@ fn hidden_group_membership_survives_sync_and_can_be_cleared() {
     bridge::materialize(&handle, &fresh, 0, &mut index).unwrap();
     assert!(read_json(&path)["groupId"].is_null(), "移出隐藏分组也应同步");
 }
+
+/// 升级时不能先用旧引擎的 null 归属覆盖本机尚在隐藏分组的书。
+#[test]
+fn startup_migrates_legacy_hidden_membership_once() {
+    let _serial = SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (handle, app_data) = setup();
+    seed_local_book(&app_data, "local-1", "三体");
+    let old = local_engine(&handle, &app_data);
+    bridge::reconcile(&handle, &old, &mut BookIndex::default()).unwrap();
+    lock_engine(&old).flush().unwrap();
+    drop(old);
+    let path = app_data.join("books/local-1/bookdetail.json");
+    let mut detail = read_json(&path);
+    detail["groupId"] = json!("__hidden__");
+    write_json(&path, &detail);
+    write_json(&app_data.join("sync/settings.json"), &json!({"activated": true}));
+    let service = SyncService::new(handle.clone());
+    service.bootstrap();
+    assert_eq!(read_json(&path)["groupId"], "__hidden__");
+    assert_eq!(read_json(&app_data.join("sync/settings.json"))["hiddenGroupMigrated"], true);
+    service.shutdown();
+    drop(service);
+    // 标记迁移后，远端正常的移出隐藏分组应得到尊重，不能再次强制隐藏。
+    let engine = local_engine(&handle, &app_data);
+    let uid = bridge::local_uid(&handle, "local-1");
+    lock_engine(&engine).set_field(&uid, "group", json!(null)).unwrap();
+    lock_engine(&engine).flush().unwrap();
+    drop(engine);
+    let service = SyncService::new(handle);
+    service.bootstrap();
+    assert!(read_json(&path)["groupId"].is_null());
+    service.shutdown();
+}
+
+/// 点一次同步即连续搬完超过单会话预算的书，并逐批发送真实进度。
+#[test]
+fn sync_service_continues_large_books_and_reports_live_progress() {
+    use tauri::Listener;
+    let _serial = SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (handle, app_data) = setup();
+    write_json(&app_data.join("sync/settings.json"), &json!({"activated": true}));
+    let service = SyncService::new(handle.clone());
+    service.bootstrap();
+    let peer = RealPeer::start("large-book-progress", Some(&service.pairing_code().unwrap()));
+    seed_peer_book(&peer.data_root, "peer-local", "peer-local", "三体", true);
+    let chapters: Vec<Value> = (0..450).map(|index| json!({
+        "cid": format!("c{index:04}"), "title": format!("第{index}章"), "paragraphs": ["正文"]
+    })).collect();
+    write_json(&peer.data_root.join("books/peer-local/content.json"), &json!({
+        "schemaVersion": 1, "chapters": chapters
+    }));
+    let uid = identity::book_uid(&identity::BookKey {
+        file_name: "三体.epub", size: 1024, ..Default::default()
+    });
+    peer.publish_book(&uid);
+    let options = ServerOptions::from_engine(&lock_engine(&peer.engine)).unwrap()
+        .with_bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)));
+    let server = PeerServer::start(peer.engine.clone(), options).unwrap();
+    let events = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let captured = events.clone();
+    let listener = handle.listen("readerx-sync-progress", move |event| {
+        captured.lock().unwrap().push(serde_json::from_str(event.payload()).unwrap());
+    });
+    let outcome = service.sync_with_addr_now(&server.local_addr().to_string()).unwrap();
+    assert_eq!(outcome.content_pulled, 450);
+    assert_eq!(outcome.assets_pulled, 1);
+    assert!(outcome.bytes > 0);
+    let progress = serde_json::to_value(service.status()).unwrap()["progress"].clone();
+    assert_eq!(progress["phase"], "done");
+    assert_eq!(progress["batch"], 3);
+    assert_eq!(progress["contentPulled"], 450);
+    let ids = list_files(&app_data.join("books"));
+    assert_eq!(ids.len(), 1);
+    assert_eq!(read_json(&app_data.join("books").join(&ids[0]).join("content.json"))["chapters"].as_array().unwrap().len(), 450);
+    let events = events.lock().unwrap();
+    assert!(events.iter().any(|event| event["phase"] == "continuing"));
+    assert!(events.iter().any(|event| event["phase"] == "content" && event["completed"].as_u64().unwrap() > 0));
+    assert!(events.windows(2).all(|pair| pair[0]["sequence"].as_u64() < pair[1]["sequence"].as_u64()));
+    assert!(events.windows(2).all(|pair| pair[0]["contentPulled"].as_u64() <= pair[1]["contentPulled"].as_u64()));
+    drop(events);
+    // 单章超过帧上限时不能假报全部完成，也不能无限空转。
+    let path = peer.data_root.join("books/peer-local/content.json");
+    let mut content = read_json(&path);
+    content["chapters"].as_array_mut().unwrap().push(json!({
+        "cid": "oversized", "title": "超大章", "paragraphs": ["x".repeat(5 * 1024 * 1024)]
+    }));
+    write_json(&path, &content);
+    assert!(service.sync_with_addr_now(&server.local_addr().to_string()).is_err());
+    let failed = serde_json::to_value(service.status()).unwrap()["progress"].clone();
+    assert_eq!(failed["phase"], "failed");
+    assert!(!service.status().syncing);
+    handle.unlisten(listener);
+    drop(server);
+    service.shutdown();
+}

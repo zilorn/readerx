@@ -8,6 +8,24 @@
 export const sync = {
   "sync.title": "同步",
 
+  "sync.progress.connecting": "正在连接设备…",
+  "sync.progress.metadata": "正在同步书籍信息与设置…",
+  "sync.progress.content": "正在传输正文",
+  "sync.progress.assets": "正在传输封面与图片",
+  "sync.progress.applying": "正在写入本地书库…",
+  "sync.progress.continuing": "正在继续下一批…",
+  "sync.progress.done": "同步完成",
+  "sync.progress.failed": "同步未完成",
+  "sync.progress.batch": "第 {count} 批",
+  "sync.progress.bar": "当前同步阶段进度",
+  "sync.progress.chapters": "当前书籍：{done} / {total} 章",
+  "sync.progress.resources": "当前书籍：{done} / {total} 张",
+  "sync.progress.sentChapters": "已发送 {count} 章",
+  "sync.progress.receivedChapters": "已接收 {count} 章",
+  "sync.progress.sentImages": "已发送 {count} 张图片",
+  "sync.progress.receivedImages": "已接收 {count} 张图片",
+  "sync.progress.bytes": "已传输 {size} MiB",
+
   // 分区
   "sync.section.enable": "同步",
   "sync.section.status": "状态",

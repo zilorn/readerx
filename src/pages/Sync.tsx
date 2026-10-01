@@ -1,6 +1,7 @@
 import { createEffect, createSignal, For, onMount, Show } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 import { PageHeader } from "../components/PageHeader";
+import { SyncProgressPanel } from "../components/SyncProgress";
 import { ToggleSwitch } from "../components/ToggleSwitch";
 import {
   CheckIcon,
@@ -369,6 +370,8 @@ export default function SyncPage() {
                 {t("sync.action.syncNow")}
               </button>
             </div>
+
+            <SyncProgressPanel />
 
             {/* 冲突入口：有冲突时给出计数，点进去裁决 */}
             <button

@@ -40,6 +40,7 @@ use crate::storage;
 
 use super::bridge::{self, AppliedChanges, BookIndex, PublishMode};
 use super::settings::{self, SyncSettings};
+use super::progress::{self, ProgressSnapshot, ProgressState};
 
 /// 前端监听的事件名：同步状态变化（开关、同步结果、冲突数…）。
 pub const SYNC_EVENT: &str = "readerx-sync-status";
@@ -74,6 +75,7 @@ pub struct SyncStatus {
     pub listen_addr: Option<String>,
     /// 正在同步
     pub syncing: bool,
+    pub progress: Option<ProgressSnapshot>,
     /// 上次成功同步时间（毫秒）
     pub last_sync_ms: u64,
     /// 上次失败原因（成功一次后清空）
@@ -131,6 +133,9 @@ pub struct SyncOutcome {
     pub content_pushed: usize,
     /// 本次从对端取回的正文章节数
     pub content_pulled: usize,
+    pub assets_pushed: usize,
+    pub assets_pulled: usize,
+    pub bytes: u64,
     /// 新产生的冲突数
     pub conflicts: usize,
     pub applied: Option<AppliedChanges>,
@@ -200,6 +205,7 @@ struct Inner {
 pub struct SyncService<R: tauri::Runtime = tauri::Wry> {
     app: AppHandle<R>,
     inner: Mutex<Inner>,
+    progress: ProgressState,
     wake: Condvar,
     stop: AtomicBool,
     auto_started: AtomicBool,
@@ -225,6 +231,7 @@ impl<R: tauri::Runtime> SyncService<R> {
                 last_shelf: None,
                 startup_sync_done: true,
             }),
+            progress: ProgressState::default(),
             wake: Condvar::new(),
             stop: AtomicBool::new(false),
             auto_started: AtomicBool::new(false),
@@ -299,6 +306,9 @@ impl<R: tauri::Runtime> SyncService<R> {
         )
         .map_err(|e| e.to_string())?;
         let shared = net::shared(engine);
+        if !settings.hidden_group_migrated {
+            bridge::migrate_hidden_groups(&self.app, &shared).map_err(|e| e.to_string())?;
+        }
         let ops = lock_engine(&shared).op_count();
         // 历史数据里可能留着 `0.0.0.0:47821` 这类「记下来也连不上」的对端地址
         // （旧版本把通配的来源 IP 当成了对端地址）：启动时清掉，别让它继续显示在设备列表里
@@ -316,6 +326,7 @@ impl<R: tauri::Runtime> SyncService<R> {
             // 保留上次的落地游标（clamp 到当前日志长度）：进程在「同步完成」与
             // 「写回本地」之间被杀时，要靠它找出还没落地的那一段远端操作
             inner.settings.materialized_ops = settings.materialized_ops.min(ops);
+            inner.settings.hidden_group_migrated = true;
             inner.settings.activated = true;
             inner.settings.enabled = settings.enabled;
             inner.settings.auto_sync = settings.auto_sync;
@@ -591,6 +602,9 @@ impl<R: tauri::Runtime> SyncService<R> {
                 pushed: report.pushed,
                 content_pushed: report.content_pushed,
                 content_pulled: report.content_pulled,
+                assets_pushed: report.assets_pushed,
+                assets_pulled: report.assets_pulled,
+                bytes: report.bytes,
                 conflicts: report.conflicts,
                 ..SyncOutcome::default()
             },
@@ -599,15 +613,19 @@ impl<R: tauri::Runtime> SyncService<R> {
                 ..SyncOutcome::default()
             },
         };
-        let applied = self.materialize_pending()?;
-        if !applied.is_empty() {
-            self.emit_applied(&applied);
-        }
+        let applied = match self.materialize_pending() {
+            Ok(applied) => applied,
+            Err(error) => {
+                self.finish_sync(0, Some(error.clone()));
+                return Err(error);
+            }
+        };
+        if !applied.is_empty() { self.emit_applied(&applied); }
         outcome.applied = Some(applied);
         self.finish_sync(outcome.synced.len(), result.as_ref().err().map(|e| e.to_string()));
         if result.is_ok() {
-            // 刚配对上的设备：让自动同步按正常节奏接管
-            self.schedule_auto_soon();
+            // 刚同步完按正常间隔接管，不能立刻再连对端与它的主动同步相撞。
+            self.wake.notify_all();
         }
         result.map(|_| outcome).map_err(|e| e.to_string())
     }
@@ -664,6 +682,9 @@ impl<R: tauri::Runtime> SyncService<R> {
                     outcome.pushed += report.pushed;
                     outcome.content_pushed += report.content_pushed;
                     outcome.content_pulled += report.content_pulled;
+                    outcome.assets_pushed += report.assets_pushed;
+                    outcome.assets_pulled += report.assets_pulled;
+                    outcome.bytes += report.bytes;
                     outcome.conflicts += report.conflicts;
                     outcome
                         .synced
@@ -690,14 +711,63 @@ impl<R: tauri::Runtime> SyncService<R> {
             .collect()
     }
 
-    /// 与一个地址同步一次（引擎锁在这里被持有整个会话）。
+    /// 与一个地址同步，达到预算就释放引擎锁、落地，再接着传下一批。
     fn sync_with(
         &self,
         engine: &SharedEngine,
         addr: &str,
     ) -> Result<readerx_sync::SyncReport, SyncError> {
-        let mut guard = lock_engine(engine);
-        readerx_sync::sync_with_addr(&mut guard, addr, SYNC_TIMEOUT)
+        let mut total = readerx_sync::SyncReport::default();
+        let mut batch = 1;
+        loop {
+            self.progress.publish(&self.app, ProgressSnapshot {
+                transfer: readerx_sync::SyncProgress {
+                    phase: "connecting".into(), peer_name: addr.to_string(),
+                    content_pushed: total.content_pushed, content_pulled: total.content_pulled,
+                    assets_pushed: total.assets_pushed, assets_pulled: total.assets_pulled,
+                    bytes: total.bytes, ..Default::default()
+                }, batch, ..Default::default()
+            });
+            let result = {
+                let mut guard = lock_engine(engine);
+                readerx_sync::sync_with_addr_progress(&mut guard, addr, SYNC_TIMEOUT, &mut |mut current| {
+                    current.content_pushed += total.content_pushed;
+                    current.content_pulled += total.content_pulled;
+                    current.assets_pushed += total.assets_pushed;
+                    current.assets_pulled += total.assets_pulled;
+                    current.bytes += total.bytes;
+                    self.progress.publish(&self.app, ProgressSnapshot {
+                        transfer: current, batch, ..Default::default()
+                    });
+                })
+            };
+            let report = match result {
+                Ok(report) => report,
+                Err(error) => {
+                    self.progress.phase(&self.app, "failed", Some(error.to_string()));
+                    return Err(error);
+                }
+            };
+            let moved = report.content_pushed + report.content_pulled + report.assets_pushed + report.assets_pulled;
+            let more = report.more_content || report.more_assets;
+            progress::accumulate(&mut total, report);
+            self.progress.phase(&self.app, "applying", None);
+            let applied = self.materialize_pending().map_err(|error| {
+                self.progress.phase(&self.app, "failed", Some(error.clone()));
+                SyncError::Io(error)
+            })?;
+            if !applied.is_empty() {
+                self.emit_applied(&applied);
+            }
+            if !more { return Ok(total); }
+            if moved == 0 {
+                let error = SyncError::Protocol("续传未取得进展，剩余内容将在下次同步重试".into());
+                self.progress.phase(&self.app, "failed", Some(error.to_string()));
+                return Err(error);
+            }
+            self.progress.phase(&self.app, "continuing", None);
+            batch += 1;
+        }
     }
 
     fn begin_sync(&self) -> Result<(), String> {
@@ -707,11 +777,17 @@ impl<R: tauri::Runtime> SyncService<R> {
         }
         inner.syncing = true;
         drop(inner);
+        self.progress.publish(&self.app, ProgressSnapshot {
+            transfer: readerx_sync::SyncProgress { phase: "connecting".into(), ..Default::default() },
+            batch: 1, ..Default::default()
+        });
         self.emit_status();
         Ok(())
     }
 
     fn finish_sync(&self, synced: usize, error: Option<String>) {
+        let current_error = error.clone().or_else(|| self.progress.snapshot().and_then(|p| p.error));
+        self.progress.phase(&self.app, if current_error.is_some() { "failed" } else { "done" }, current_error);
         {
             let mut inner = self.lock();
             inner.syncing = false;
@@ -719,6 +795,7 @@ impl<R: tauri::Runtime> SyncService<R> {
                 inner.settings.last_sync_ms = now_ms();
                 inner.last_error = None;
                 inner.auto_failures = 0;
+                inner.next_auto_ms = now_ms() + inner.settings.auto_interval_secs * 1000;
             } else if let Some(error) = error {
                 inner.last_error = Some(error);
             }
@@ -835,13 +912,16 @@ impl<R: tauri::Runtime> SyncService<R> {
             auto_sync: settings.auto_sync,
             auto_interval_secs: settings.auto_interval_secs,
             syncing: inner.syncing,
+            progress: self.progress.snapshot(),
             last_sync_ms: settings.last_sync_ms,
             last_error: inner.last_error.clone(),
             listen_addr: inner.server.as_ref().map(|s| s.local_addr().to_string()),
             ..SyncStatus::default()
         };
-        if let Some(engine) = &inner.engine {
-            let guard = lock_engine(engine);
+        let engine = inner.engine.clone();
+        drop(inner);
+        if let Some(engine) = engine {
+            let guard = lock_engine(&engine);
             let engine_status = guard.status();
             status.device_id = engine_status.device_id;
             status.device_name = engine_status.device_name;
@@ -1400,10 +1480,10 @@ impl<R: tauri::Runtime> SyncService<R> {
         let Some(engine) = self.engine() else {
             return AutoRound::NoPeers;
         };
+        let failures = self.lock().auto_failures;
         let targets: Vec<(String, String, String)> = {
             let guard = lock_engine(&engine);
             let self_id = guard.device_id().to_string();
-            let failures = self.lock().auto_failures;
             guard
                 .peers()
                 .values()
@@ -1465,6 +1545,7 @@ impl<R: tauri::Runtime> SyncService<R> {
                 last_error.unwrap_or_else(|| "没有连上任何已配对的设备".to_string()),
             );
         }
+        self.progress.phase(&self.app, if last_error.is_some() { "failed" } else { "done" }, last_error);
         self.emit_status();
         AutoRound::Synced
     }

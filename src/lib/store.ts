@@ -622,3 +622,28 @@ export function shelfSelectingMode(): boolean {
 export function setShelfSelecting(on: boolean): void {
   setShelfSelectingSignal(on);
 }
+
+/** 同步中的实时进度，只存在内存中，刷新后由 Rust 状态恢复。 */
+export interface SyncProgress {
+  phase: "connecting" | "metadata" | "content" | "assets" | "applying" | "continuing" | "done" | "failed";
+  peerName: string;
+  bookTitle: string | null;
+  bookIndex: number;
+  bookCount: number;
+  completed: number;
+  total: number | null;
+  contentPushed: number;
+  contentPulled: number;
+  assetsPushed: number;
+  assetsPulled: number;
+  bytes: number;
+  batch: number;
+  sequence: number;
+  error: string | null;
+}
+
+const [syncProgress, updateSyncProgress] = createSignal<SyncProgress | null>(null);
+export { syncProgress };
+export function setSyncProgress(next: SyncProgress): void {
+  updateSyncProgress((current) => !current || next.sequence >= current.sequence ? next : current);
+}

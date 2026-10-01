@@ -70,6 +70,7 @@ pub mod order;
 pub mod proto;
 pub mod schema;
 pub mod session;
+pub mod progress;
 pub mod store;
 pub mod version;
 
@@ -85,7 +86,8 @@ pub use model::{
 };
 pub use schema::{CascadeAction, CascadeRule, DeletePolicy, MergeKind, Schema, SchemaRegistry};
 pub use proto::{Request, Response};
-pub use session::{sync_with, sync_with_addr, SyncReport};
+pub use progress::SyncProgress;
+pub use session::{sync_with, sync_with_addr, sync_with_addr_progress, sync_with_progress, SyncReport};
 pub use store::{DeviceConfig, EntitySnapshot, PeerState, SyncStore, FORMAT_VERSION};
 pub use version::{Relation, VersionVector};
 

@@ -18,7 +18,7 @@ import { reloadChapterRules } from "./chapterRules";
 import { refreshBookSources } from "./bookSources";
 import { describeError, reportFailure } from "./errorReport";
 import { reloadGroups } from "./groups";
-import { reloadReadingProgress } from "./store";
+import { reloadReadingProgress, setSyncProgress, type SyncProgress } from "./store";
 import { reloadSourceGroups } from "./sourceGroups";
 import { reloadTextReplacements } from "./textReplacements";
 import { t, type MessageKey } from "./i18n";
@@ -46,6 +46,7 @@ export interface SyncStatus {
   groupId: string;
   listenAddr: string | null;
   syncing: boolean;
+  progress: SyncProgress | null;
   lastSyncMs: number;
   lastError: string | null;
   pendingConflicts: number;
@@ -87,6 +88,9 @@ export interface SyncOutcome {
   contentPushed: number;
   /** 本次从对端取回的正文章节数 */
   contentPulled: number;
+  assetsPushed: number;
+  assetsPulled: number;
+  bytes: number;
   conflicts: number;
   applied: AppliedChanges | null;
 }
@@ -180,6 +184,7 @@ const EMPTY_STATUS: SyncStatus = {
   groupId: "",
   listenAddr: null,
   syncing: false,
+  progress: null,
   lastSyncMs: 0,
   lastError: null,
   pendingConflicts: 0,
@@ -238,6 +243,9 @@ export async function initSync(): Promise<void> {
     await listen<SyncStatus>(SYNC_EVENT, (event) => {
       applyStatus(event.payload);
     });
+    await listen<SyncProgress>("readerx-sync-progress", (event) => {
+      setSyncProgress(event.payload);
+    });
     await listen<AppliedChanges>(SYNC_APPLIED_EVENT, (event) => {
       void applyChanges(event.payload);
     });
@@ -264,6 +272,7 @@ export async function refreshSyncStatus(): Promise<SyncStatus> {
 function applyStatus(next: SyncStatus): void {
   const previous = status();
   setStatus(next);
+  if (next.progress) setSyncProgress(next.progress);
   const conflicts = next.pendingConflicts;
   if (conflicts > lastConflictCount && previous.activated) {
     // 「冲突提示」：多出来的待裁决项要让用户看见，并给一个直接去处理的入口
