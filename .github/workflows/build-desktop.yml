@@ -1,7 +1,7 @@
 # ReaderX 桌面端普通构建（不发布）
 #
 # 用途：手动触发，按 **ABI 分别**构建 Linux 与 Windows 的桌面包并作为 artifact 上传，
-#       便于在合并前拿到真机可安装的产物；不发 GitHub Release，可选 Windows 签名。
+#       便于在合并前拿到真机可安装的产物；不发 GitHub Release、不签名。
 #
 # 使用：Actions -> 左侧选本工作流 -> Run workflow（可指定分支/tag）。
 #
@@ -22,11 +22,6 @@ name: Build Desktop (no publish)
 
 on:
   workflow_dispatch:
-    inputs:
-      sign-windows:
-        description: 使用仓库证书签名 Windows 应用与安装包
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -67,36 +62,7 @@ jobs:
         with:
           rust-targets: ${{ matrix.target }}
 
-      - name: Configure Windows signing
-        if: runner.os == 'Windows' && inputs.sign-windows
-        id: signing
-        uses: ./.github/actions/windows-signing
-        with:
-          certificate-base64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
-          certificate-password: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-          timestamp-url: ${{ vars.WINDOWS_TIMESTAMP_URL || 'http://timestamp.digicert.com' }}
-
-      - name: Build signed Windows bundles
-        if: runner.os == 'Windows' && inputs.sign-windows
-        run: pnpm tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --config "${{ steps.signing.outputs.config }}"
-        timeout-minutes: 70
-
-      - name: Verify Windows signatures
-        if: runner.os == 'Windows' && inputs.sign-windows
-        shell: pwsh
-        run: ./scripts/verify-windows-signing.ps1 -Target '${{ matrix.target }}'
-
-      - name: Clean Windows signing material
-        if: always() && (runner.os == 'Windows' && inputs.sign-windows)
-        shell: pwsh
-        run: |
-          if ($env:READERX_SIGNING_THUMBPRINT) {
-            Remove-Item "Cert:\CurrentUser\My\$env:READERX_SIGNING_THUMBPRINT" -Force -ErrorAction SilentlyContinue
-          }
-          Remove-Item "${{ runner.temp }}/readerx-signing.json" -Force -ErrorAction SilentlyContinue
-
       - name: Build desktop bundles
-        if: runner.os != 'Windows' || !inputs.sign-windows
         run: pnpm tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
         timeout-minutes: 70
 

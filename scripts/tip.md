@@ -30,9 +30,9 @@ WebView2 运行时由 Windows 10/11 自带，无需另外安装。
 
 ### 关于签名
 
-Android APK 与 Windows 应用 / 安装包已签名；Linux 安装包未做代码签名：
+Android APK 已签名；**Linux 与 Windows 安装包未做代码签名**：
 
-- Windows 新版本仍可能因 SmartScreen 信誉积累而出现提示，请确认发布来源与数字签名；
+- Windows 安装时可能出现 SmartScreen 提示，选择「仍要运行」即可；
 - Linux 下 AppImage 需要自行赋予可执行权限。
 
 使用中遇到问题欢迎到 [Issues](https://github.com/zilorn/readerx/issues) 反馈，请附上平台、设备型号与系统版本。
