@@ -7,6 +7,22 @@
  * 这里只有容器的标题 / 说明 / 无障碍标签。
  */
 export const settings = {
+  "settings.readingTime.lessThanMinute": "不足 1 分钟",
+  "settings.readingTime.details": "查看详情",
+  "settings.readingTime.collapse": "收起详情",
+  "settings.readingTime.trend": "每日阅读",
+  "settings.readingTime.period": "统计范围",
+  "settings.readingTime.month": "近三十天",
+  "settings.readingTime.activeDays": "阅读天数",
+  "settings.readingTime.dailyAverage": "日均（含未读日）",
+  "settings.readingTime.streak": "连续阅读",
+  "settings.readingTime.days": "{count} 天",
+  "settings.readingTime.emptyPeriod": "这段时间暂无阅读记录",
+  "settings.readingTime.bookRanking": "书籍累计时长排行",
+  "settings.readingTime.emptyBooks": "暂无书籍阅读记录",
+  "settings.readingTime.removedBook": "已移出书库的书籍",
+  "settings.readingTime.showAll": "查看全部 {count} 本",
+  "settings.readingTime.showLess": "收起排行",
   "settings.readingTime.title": "阅读时长",
   "settings.readingTime.today": "今日",
   "settings.readingTime.week": "近七天",
