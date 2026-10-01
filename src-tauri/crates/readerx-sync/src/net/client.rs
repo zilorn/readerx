@@ -108,6 +108,12 @@ impl TcpTransport {
                         .with_context(format!("握手期望 hello，收到 {}", other.kind())))
                 }
             };
+        if protocol != crate::PROTOCOL_VERSION {
+            return Err(SyncError::from(WireError::ProtocolMismatch).with_context(format!(
+                "协议版本不一致：本机 {} / 对端 {protocol}",
+                crate::PROTOCOL_VERSION
+            )));
+        }
         if !ok {
             // 拒绝原因优先按对端给的码出文案（群组不一致 / 已被移除 / 版本不一致…）
             let wire = code.as_deref().map(WireError::from_wire);
@@ -116,12 +122,6 @@ impl TcpTransport {
                 (None, Some(message)) => SyncError::Auth(message),
                 (None, None) => SyncError::Auth("对端拒绝了本次连接".to_string()),
             });
-        }
-        if protocol != crate::PROTOCOL_VERSION {
-            return Err(SyncError::from(WireError::ProtocolMismatch).with_context(format!(
-                "协议版本不一致：本机 {} / 对端 {protocol}",
-                crate::PROTOCOL_VERSION
-            )));
         }
         if peer_group != *group {
             return Err(SyncError::from(WireError::GroupMismatch));

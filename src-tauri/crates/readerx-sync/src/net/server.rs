@@ -25,7 +25,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use crate::crypto::{self, derive_keys, nonce, proof, ROLE_CLIENT, ROLE_SERVER, ROLE_SESSION};
-use crate::error::{Result, SyncError};
+use crate::error::{Result, SyncError, WireError};
 use crate::net::frame::{read_message, read_secure, write_message, write_secure};
 use crate::net::handler::handle_request;
 use crate::net::{lock_engine, PeerInfo, SharedEngine};
@@ -341,7 +341,10 @@ fn serve_connection(
 
     if protocol != crate::PROTOCOL_VERSION {
         reject(&mut writer, HandshakeCode::ProtocolMismatch, "协议版本不一致")?;
-        return Err(SyncError::Protocol(format!("协议版本不一致：{protocol}")));
+        return Err(SyncError::from(WireError::ProtocolMismatch).with_context(format!(
+            "协议版本不一致：本机 {} / 对端 {protocol}",
+            crate::PROTOCOL_VERSION
+        )));
     }
     if group != options.group {
         // 群组不同 = 不是同一份数据，绝不能同步（多租户隔离，见场景 25）
