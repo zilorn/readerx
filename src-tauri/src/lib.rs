@@ -130,8 +130,8 @@ pub fn run() {
                 log::warn!("无法定位应用数据目录，书源与登录态将退回默认目录");
             }
             // 本地书的旧布局（整本 books/<id>.json、全库一份的 state/readerx.bookmarks.json）
-            // 由 book_store 在首次书籍 / 书签读写时迁移（book_store::migrate_legacy_layout）：
-            // 那是磁盘 I/O，跟着调用它的 blocking 线程跑，不占用启动线程。
+            // 先转为目录布局，再统一书籍 ID；必须早于界面与同步线程访问书库。
+            sync::book_ids::migrate(app.handle()).map_err(std::io::Error::other)?;
             // 网页登录后端：把「插件（Android 原生浮层 / 桌面独立登录窗口）」注册为引擎的认证实现
             webview_login::install(app.handle().clone());
             // 用户输入表单后端：书源 `input.prompt` 弹的是前端弹层（见 source_prompt 模块）

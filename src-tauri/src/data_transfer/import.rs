@@ -80,6 +80,8 @@ pub(super) fn apply<R: tauri::Runtime>(
         )?;
     }
 
+    crate::sync::book_ids::migrate(app)?;
+
     // 同步已启用时做一次全量对账，让导入的书 / 书源进入同步引擎（没启用是空操作）
     crate::sync::service_hook(app).on_data_imported();
 

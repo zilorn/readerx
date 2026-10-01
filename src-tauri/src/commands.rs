@@ -85,13 +85,14 @@ pub async fn readerx_state_remove(app: AppHandle, key: String) -> Result<(), Str
 }
 
 #[tauri::command]
-pub async fn readerx_book_put(app: AppHandle, book: LocalBook) -> Result<(), String> {
+pub async fn readerx_book_put(app: AppHandle, mut book: LocalBook) -> Result<String, String> {
     blocking("书籍写入", move || {
+        book.id = sync::book_ids::id_for_book(&book);
         book_store::put_book(&app, book.clone())?;
         // 导入同一本书的另一台设备可能改过书名 / 标签：同步里已有记录时以它为准；
         // 章节目录一起发布（目录以本机这份为准，见 SyncService::on_book_written）
         sync::service_hook(&app).on_book_written(&book, sync::PublishMode::Imported);
-        Ok(())
+        Ok(book.id)
     })
     .await
 }

@@ -21,7 +21,7 @@
 //! - **待裁决的字段不再自动改写**：字段进了冲突队列后，本地再发布同一个字段会把
 //!   对端那一次写入顶掉（用户还没裁决就被「自动解决」了），因此发布时跳过冲突字段。
 //! - **字段名口径**：引擎里所有 `book_id` 字段装的都是**书实体 id（uid）**，
-//!   不是本地书籍 id（本地 id 每台设备各自生成，见 [`super::identity`]）。
+//!   迁移后的本地书籍 ID 与 uid 一致（见 [`super::book_ids`]）。
 
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -207,6 +207,7 @@ impl BookIndex {
 
 /// 书籍的跨设备身份：在线书按「书源地址 + 书籍地址」，导入书按「文件名 + 字节数」。
 pub(crate) fn book_uid_of<R: tauri::Runtime>(_app: &AppHandle<R>, meta: &BookSyncMeta) -> String {
+    if super::book_ids::canonical_id(&meta.id) { return meta.id.clone(); }
     let source_url = meta
         .book_source_id
         .as_deref()
@@ -229,6 +230,7 @@ fn book_source_url(book_source_id: &str) -> Option<String> {
 
 /// 按本机书籍 id 直接算 uid（书已被删除 / 元信息读不到时的兜底路径）。
 fn book_uid_of_id<R: tauri::Runtime>(app: &AppHandle<R>, book_id: &str) -> String {
+    if super::book_ids::canonical_id(book_id) { return book_id.to_string(); }
     match book_store::get_sync_meta(app, book_id) {
         Ok(Some(meta)) => book_uid_of(app, &meta),
         // 元信息读不出来（文件已删）：用本机 id 兜底。它不会和别的设备对齐，
@@ -1192,7 +1194,10 @@ fn create_local_book_from_sync<R: tauri::Runtime>(
         return Ok(None);
     }
     let group_id = local_group_id(app, fields.group.as_deref()).map_err(SyncError::Io)?;
-    let local_id = new_local_id("local");
+    if !super::book_ids::canonical_id(book_uid) {
+        return Err(SyncError::Io("同步书籍 ID 格式无效".into()));
+    }
+    let local_id = book_uid.to_string();
     let online = book_source_id.is_some();
     let book = crate::models::LocalBook {
         id: local_id.clone(),
@@ -2067,6 +2072,7 @@ fn book_values(facts: &mut LocalFacts, meta: &BookSyncMeta) -> BTreeMap<String, 
 
 /// 算 uid 时的 `LocalFacts` 版本（要先把本机书源 id 翻译成地址）。
 fn book_uid_of_parts(facts: &mut LocalFacts, meta: &BookSyncMeta) -> String {
+    if super::book_ids::canonical_id(&meta.id) { return meta.id.clone(); }
     let source_url = facts.source_url(meta.book_source_id.as_deref());
     identity::book_uid(&BookKey {
         source_url: source_url.as_deref(),

@@ -88,6 +88,7 @@ fn local_source_urls() -> HashMap<String, String> {
 /// 书籍身份：与 `readerx_sync::bridge` 同一口径，只是书源地址的来源由调用方给
 /// （归档里的书要用**归档自己的**书源地址，否则跨设备对不上）
 fn book_uid(meta: &BookSyncMeta, source_urls: &HashMap<String, String>) -> String {
+    if crate::sync::book_ids::canonical_id(&meta.id) { return meta.id.clone(); }
     let source_url = meta
         .book_source_id
         .as_deref()

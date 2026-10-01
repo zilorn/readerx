@@ -89,6 +89,13 @@ impl<R: tauri::Runtime> AppContent<R> {
 
     /// 书实体 id → 本机书 id（未命中时重建一次索引）。
     fn local_id(&self, uid: &str) -> Option<String> {
+        // 迁移后的书直接按同步 ID 定位，新增 / 恢复书籍不受旧索引节流影响。
+        if super::book_ids::canonical_id(uid)
+            && crate::storage::data_root_at(&self.app, self.root()).ok()?
+                .join("books").join(uid).join("bookdetail.json").is_file()
+        {
+            return Some(uid.to_string());
+        }
         let mut cache = self
             .books
             .lock()

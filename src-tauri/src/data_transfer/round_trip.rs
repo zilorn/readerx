@@ -266,15 +266,15 @@ fn export_and_merge_import_restores_everything() {
     assert!(summary.state_keys.len() >= 5, "{:?}", summary.state_keys);
 
     // 正文按字节回来（含中文与章节结构）
-    let content = read_json(&root.join("books/local-a/content.json"));
+    let content = read_json(&root.join("books/b-5e20dcb39c59dc92/content.json"));
     assert_eq!(content["chapters"][0]["paragraphs"][0], "三体 的正文");
-    let detail = read_json(&root.join("books/local-a/bookdetail.json"));
+    let detail = read_json(&root.join("books/b-5e20dcb39c59dc92/bookdetail.json"));
     assert_eq!(detail["title"], "三体");
     assert_eq!(detail["groupId"], "grp-1");
 
     // 书签、分组、规则、插图、书源、登录态
     assert_eq!(
-        read_json(&root.join("books/local-a/bookmarks.json"))["bookmarks"][0]["id"],
+        read_json(&root.join("books/b-5e20dcb39c59dc92/bookmarks.json"))["bookmarks"][0]["id"],
         "bm-local-a"
     );
     assert_eq!(
@@ -377,11 +377,11 @@ fn merge_keeps_local_extras_and_newer_progress() {
     assert_eq!(summary.books_removed, 0);
 
     // 本机多出来的书一本都不动
-    assert!(root.join("books/local-c/bookdetail.json").is_file());
+    assert!(root.join("books/b-3e75c5b1cc830167/bookdetail.json").is_file());
     // 进度按 updatedAt 取新的：本机那份更靠后 → 保留本机
     let shelf = read_json(&root.join("state/readerx.shelf.json"));
-    assert_eq!(shelf["local-a"]["chapter"], 9);
-    assert_eq!(shelf["local-c"]["chapter"], 3);
+    assert_eq!(shelf["b-5e20dcb39c59dc92"]["chapter"], 9);
+    assert_eq!(shelf["b-3e75c5b1cc830167"]["chapter"], 3);
     // 偏好类状态合并模式下一律保持本机
     assert_eq!(
         read_json(&root.join("state/readerx.theme.json")),
@@ -436,7 +436,7 @@ fn replace_rewrites_content_state_and_removes_local_extras() {
     assert!(!root.join("book_sources/src-9.json").exists());
     // 内容类状态完全按归档来：进度回到归档那一刻
     let shelf = read_json(&root.join("state/readerx.shelf.json"));
-    assert_eq!(shelf["local-a"]["chapter"], 1, "{shelf}");
+    assert_eq!(shelf["b-5e20dcb39c59dc92"]["chapter"], 1, "{shelf}");
     assert!(shelf.get("local-c").is_none());
     assert_eq!(
         read_json(&root.join("state/readerx.sourceGroups.json"))[0]["name"],
@@ -485,7 +485,7 @@ fn merge_matches_the_same_book_from_another_device_by_identity() {
     );
 
     // 归档里《三体》的书签被并进本机那本（bookId 跟着本机 id 改写）
-    let bookmarks = read_json(&root.join("books/local-other/bookmarks.json"));
+    let bookmarks = read_json(&root.join("books/b-5e20dcb39c59dc92/bookmarks.json"));
     let ids: Vec<&str> = bookmarks["bookmarks"]
         .as_array()
         .unwrap()
@@ -498,10 +498,10 @@ fn merge_matches_the_same_book_from_another_device_by_identity() {
         .as_array()
         .unwrap()
         .iter()
-        .all(|item| item["bookId"] == "local-other"));
+        .all(|item| item["bookId"] == "b-5e20dcb39c59dc92"));
     // 进度按身份落到本机那本上，且本机那份更新（5000 > 1000）→ 保持本机
     let shelf = read_json(&root.join("state/readerx.shelf.json"));
-    assert_eq!(shelf["local-other"]["chapter"], 5);
+    assert_eq!(shelf["b-5e20dcb39c59dc92"]["chapter"], 5);
     assert!(shelf.get("local-a").is_none(), "{shelf}");
 }
 

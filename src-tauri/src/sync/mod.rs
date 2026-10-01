@@ -25,6 +25,8 @@ pub mod bridge;
 pub mod content;
 #[doc(hidden)]
 pub mod identity;
+#[doc(hidden)]
+pub mod book_ids;
 mod lan;
 mod service;
 mod progress;

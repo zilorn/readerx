@@ -1136,6 +1136,7 @@ fn synced_content_creates_the_book_locally() {
         .collect();
     assert_eq!(book_ids.len(), 1, "应该正好新建一本：{book_ids:?}");
     let book_id = &book_ids[0];
+    assert_eq!(book_id, &uid, "接收端必须直接使用同步书籍 ID");
 
     let detail = read_json(&app_data.join("books").join(book_id).join("bookdetail.json"));
     assert_eq!(detail["title"], json!("三体"));
@@ -2014,4 +2015,49 @@ fn reading_time_migrates_merges_and_survives_replay_restore_and_restart() {
     let reopened = local_engine(&app, &root_a);
     bridge::materialize(&app, &reopened, 0, &mut index_a).unwrap();
     assert_eq!(read_json(&state_a)["days"]["2026-10-01"], 30_000);
+}
+
+/// 升级迁移保留既有同步历史，旧本机引用全部改为稳定 ID。
+#[test]
+fn upgrade_migrates_book_ids_without_recreating_sync_entities() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let (handle, root) = setup();
+    seed_local_book(&root, "local-old", "三体");
+    seed_local_progress(&root, "local-old", 1, 55);
+    write_json(&root.join("state/readerx.textReplacements.json"), &json!([
+        {"id":"rule", "scope":"book", "bookId":"local-old", "find":"甲", "replace":"乙", "regex":false, "createdAt":1}
+    ]));
+    write_json(&root.join("state/readerx.readingTime.json"), &json!({
+        "schemaVersion":1, "days":{"2026-09-30":500}, "books":{"local-old":500}
+    }));
+    std::fs::create_dir_all(root.join("tts-audio/local-old")).unwrap();
+    std::fs::write(root.join("tts-audio/local-old/audio"), b"cached").unwrap();
+    let local = local_engine(&handle, &root);
+    let mut index = BookIndex::default();
+    bridge::reconcile(&handle, &local, &mut index).unwrap();
+    let uid = bridge::local_uid(&handle, "local-old");
+    let before = lock_engine(&local).entities_of_kind("book", true)[0].clone();
+    readerx_lib::sync::book_ids::migrate(&handle).unwrap();
+    assert!(!root.join("books/local-old").exists());
+    assert_eq!(read_json(&root.join("books").join(&uid).join("bookdetail.json"))["id"], uid);
+    assert_eq!(read_json(&root.join("books").join(&uid).join("bookmarks.json"))["bookmarks"][0]["bookId"], uid);
+    let shelf = read_json(&root.join("state/readerx.shelf.json"));
+    assert!(shelf.get("local-old").is_none());
+    assert_eq!(shelf[&uid]["bookId"], uid);
+    assert_eq!(shelf[&uid]["charOffset"], 55);
+    assert_eq!(read_json(&root.join("state/readerx.textReplacements.json"))[0]["bookId"], uid);
+    let stats = read_json(&root.join("state/readerx.readingTime.json"));
+    assert_eq!(stats["books"][&uid], 500);
+    assert!(stats["books"].get("local-old").is_none());
+    assert!(root.join("tts-audio").join(&uid).join("audio").is_file());
+    assert_eq!(bridge::local_uid(&handle, &uid), uid);
+    // 新索引模拟升级后重新启动；再迁移、落地、对账不应新建重复实体或书。
+    readerx_lib::sync::book_ids::migrate(&handle).unwrap();
+    let mut restarted = BookIndex::default();
+    bridge::materialize(&handle, &local, 0, &mut restarted).unwrap();
+    bridge::reconcile(&handle, &local, &mut restarted).unwrap();
+    let guard = lock_engine(&local);
+    let books = guard.entities_of_kind("book", true);
+    assert_eq!(books.len(), 1);
+    assert_eq!(serde_json::to_value(books[0]).unwrap(), serde_json::to_value(before).unwrap());
 }

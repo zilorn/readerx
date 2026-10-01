@@ -101,7 +101,7 @@ export async function saveRemoteBook(book: LocalBook): Promise<void> {
     memoryBooks.set(book.id, book);
     return;
   }
-  await invoke("readerx_book_put", { book });
+  book.id = await invoke<string>("readerx_book_put", { book });
 }
 
 /**
