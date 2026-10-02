@@ -10,6 +10,7 @@ export function createReaderPageTurn() {
   let width = 1;
   let direction: 1 | -1 = 1;
   let settling = false;
+  let onSettled: (() => void) | undefined;
 
   function cancel(): void {
     window.cancelAnimationFrame(frame);
@@ -17,7 +18,17 @@ export function createReaderPageTurn() {
     root?.remove();
     root = front = back = shade = crease = undefined;
     settling = false;
+    onSettled = undefined;
     progress = 0;
+  }
+
+  /** 新输入立即结束收尾动画，先落实已确认的翻页或回弹，再接受下一次操作。 */
+  function interrupt(): boolean {
+    if (!settling) return false;
+    const done = onSettled;
+    cancel();
+    done?.();
+    return true;
   }
 
   function snapshot(source: HTMLElement): HTMLDivElement {
@@ -93,7 +104,9 @@ export function createReaderPageTurn() {
 
   function finish(commit: boolean, done: () => void): void {
     if (!root) { done(); return; }
+    window.cancelAnimationFrame(frame);
     settling = true;
+    onSettled = done;
     const from = progress;
     const target = commit ? 1 : 0;
     const duration = window.matchMedia("(prefers-reduced-motion: reduce)").matches
@@ -103,10 +116,10 @@ export function createReaderPageTurn() {
       const t = duration === 0 ? 1 : Math.min(1, (now - start) / duration);
       draw(from + (target - from) * (1 - (1 - t) ** 3));
       if (t < 1) frame = window.requestAnimationFrame(tick);
-      else { cancel(); done(); }
+      else interrupt();
     };
     frame = window.requestAnimationFrame(tick);
   }
 
-  return { begin, draw, finish, cancel, active: () => !!root };
+  return { begin, draw, finish, cancel, interrupt, active: () => !!root };
 }

@@ -2963,7 +2963,7 @@ export default function ReaderPage() {
 
   /** 点按、键盘和音量键与横滑共用纸张翻页。 */
   function userFlip(dir: 1 | -1): void {
-    if (pageTurn.active()) return;
+    if (pageTurn.active() && !pageTurn.interrupt()) return;
     if (beginPageDrag(dir)) {
       pageTurn.finish(true, () => {
         setPagePreviewIndex(null);
@@ -3616,7 +3616,8 @@ export default function ReaderPage() {
 
   function onSurfacePointerDown(e: PointerEvent) {
     if (e.pointerType === "mouse" && e.button !== 0) return;
-    if (!e.isPrimary || isUiTarget(e) || remoteReloading() || pageTurn.active()) return;
+    if (!e.isPrimary || isUiTarget(e) || remoteReloading()) return;
+    if (pageTurn.active() && !pageTurn.interrupt()) return;
     // 自绘选区：记录按下候选（触屏等待长按；鼠标/笔等待拖拽起选）
     if (!selDrag && selEngineUsable()) {
       const pointerType = e.pointerType;
