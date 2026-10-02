@@ -142,6 +142,7 @@ import {
   currentFontSize,
   currentMenuSliderEnabled,
   currentPageMode,
+  currentVolumeKeyPaging,
   currentParaSpacing,
   currentProgressScope,
   currentStatusBarEnabled,
@@ -149,6 +150,7 @@ import {
   shelfEntries,
   updateReadingLocation,
 } from "../lib/store";
+import { setVolumeKeysActive } from "../lib/volumeKeys";
 import { isDesktopShell } from "../lib/platform";
 import { progressContextAt, readingPercent, resolveReadingTarget } from "../lib/progress";
 import {
@@ -3683,6 +3685,83 @@ export default function ReaderPage() {
       },
     ),
   );
+
+  // Android 音量键只在正文可操作时接管；卸载、后台和弹层期间恢复系统音量。
+  const [volumeScrollEndCid, setVolumeScrollEndCid] = createSignal<string | null>(null);
+  const [volumeKeysForeground, setVolumeKeysForeground] = createSignal(!document.hidden);
+  const [volumeKeysEditing, setVolumeKeysEditing] = createSignal(false);
+  const volumeKeysActive = createMemo(() =>
+    currentVolumeKeyPaging() && volumeKeysForeground() && !volumeKeysEditing() &&
+    !!chapter() && !volumeScrollEndCid() && !resumeTarget() &&
+    !contentPendingGate() && !remoteReloading() &&
+    !menuOpen() && !tocOpen() && !bmPanelOpen() && !bookSearchOpen() &&
+    !readerSettingsOpen() && !replaceSheetOpen() && !downloadOpen() &&
+    !ttsSettingsOpen() && !ttsDecodeGuideOpen() && !reloadRisk() && !updateConflict() &&
+    !selSpan() && !selMenu(),
+  );
+  createEffect(() => {
+    const cid = volumeScrollEndCid();
+    if (!cid) return;
+    if (chapter()?.cid !== cid || isPaged()) {
+      setVolumeScrollEndCid(null);
+      return;
+    }
+    if (remoteMissing() || remoteBodyEmpty() || scrollShown() < units().length) return;
+    // 等整章正文挂载完成再滚到底，也覆盖没有文本锚点的图片章节。
+    const frame = window.requestAnimationFrame(() => {
+      if (volumeScrollEndCid() !== cid || chapter()?.cid !== cid || isPaged()) return;
+      if (scrollRef) scrollRef.scrollTop = scrollRef.scrollHeight;
+      setVolumeScrollEndCid(null);
+      armFollowPageCheck();
+    });
+    onCleanup(() => window.cancelAnimationFrame(frame));
+  });
+  createEffect(() => setVolumeKeysActive(volumeKeysActive()));
+  onMount(() => {
+    const syncFocus = () => {
+      const focused = document.activeElement;
+      setVolumeKeysEditing(focused instanceof HTMLElement &&
+        (focused.matches("input, textarea, select") || focused.isContentEditable));
+    };
+    const syncVisibility = () => setVolumeKeysForeground(!document.hidden);
+    const onVolumeKey = (event: Event) => {
+      if (!volumeKeysActive()) return;
+      const dir = (event as CustomEvent<unknown>).detail;
+      if (dir !== 1 && dir !== -1) return;
+      if (isPaged()) {
+        userFlip(dir);
+        return;
+      }
+      const root = scrollRef;
+      if (!root) return;
+      cancelFollowIfActive();
+      const max = Math.max(0, root.scrollHeight - root.clientHeight);
+      if (dir > 0 && root.scrollTop >= max - 1) {
+        goToChapter(chapterIdx() + 1, true);
+      } else if (dir < 0 && root.scrollTop <= 1 && !isFirstChapter()) {
+        const previous = renderBook()?.chapters[chapterIdx() - 1];
+        if (!previous) return;
+        goToChapter(chapterIdx() - 1, true);
+        // 上一章下载与分片挂载完成后落到章末。
+        setVolumeScrollEndCid(previous.cid);
+      } else {
+        root.scrollTop = Math.max(0, Math.min(max, root.scrollTop + dir * root.clientHeight * 0.9));
+        armFollowPageCheck();
+      }
+    };
+    syncFocus();
+    document.addEventListener("focusin", syncFocus);
+    document.addEventListener("focusout", syncFocus);
+    document.addEventListener("visibilitychange", syncVisibility);
+    window.addEventListener("readerx-volume-key", onVolumeKey);
+    onCleanup(() => {
+      document.removeEventListener("focusin", syncFocus);
+      document.removeEventListener("focusout", syncFocus);
+      document.removeEventListener("visibilitychange", syncVisibility);
+      window.removeEventListener("readerx-volume-key", onVolumeKey);
+      setVolumeKeysActive(false);
+    });
+  });
 
   // 键盘左右方向键翻页（桌面便利）
   onMount(() => {

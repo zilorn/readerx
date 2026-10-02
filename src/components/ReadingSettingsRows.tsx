@@ -5,6 +5,8 @@
  * 状态存于全局 store（src/lib/store.ts）与 lib/hanConvert.ts，改动实时联动阅读页排版。
  * 简繁转换只对中文界面有意义（英文界面不显示该行，偏好仍保留）。
  */
+import { isAndroidPlatform } from "../lib/platform";
+import { ToggleSwitch } from "./ToggleSwitch";
 import { Show } from "solid-js";
 import {
   FONT_MAX,
@@ -14,6 +16,8 @@ import {
   PARA_SPACING_STEP,
   currentFontSize,
   currentPageMode,
+  currentVolumeKeyPaging,
+  setVolumeKeyPaging,
   currentParaSpacing,
   setFontSize,
   setPageMode,
@@ -158,13 +162,26 @@ function HanModeRow() {
   );
 }
 
-/** 阅读设置四行（需放入带 divide-y 的卡片容器内使用；简繁转换仅中文界面可见） */
+/** 共用阅读设置行（需放入带 divide-y 的卡片容器内使用；简繁转换仅中文界面可见） */
 export function ReadingSettingsRows() {
   return (
     <>
       <FontSizeRow />
       <ParaSpacingRow />
       <PageModeRow />
+      <Show when={isAndroidPlatform()}>
+        <div class="flex w-full items-center gap-3 px-4 py-[13px] text-left">
+          <span class="flex min-w-0 flex-1 flex-col gap-0.5">
+            <span class="text-[14.5px] font-medium">{t("readerChrome.reading.volumeKeys")}</span>
+            <span class="text-[11.5px] text-text-3">{t("readerChrome.reading.volumeKeysDesc")}</span>
+          </span>
+          <ToggleSwitch
+            on={currentVolumeKeyPaging()}
+            label={t("readerChrome.reading.volumeKeys")}
+            onChange={() => setVolumeKeyPaging(!currentVolumeKeyPaging())}
+          />
+        </div>
+      </Show>
       <Show when={currentLocale() === "zh-CN"}>
         <HanModeRow />
       </Show>

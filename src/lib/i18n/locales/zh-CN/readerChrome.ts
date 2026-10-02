@@ -6,6 +6,9 @@
  * 阅读页正文（src/pages/Reader.tsx）用 `reader.` 前缀，两边不要互相引用。
  */
 export const readerChrome = {
+  "readerChrome.reading.volumeKeys": "音量键翻页",
+  "readerChrome.reading.volumeKeysDesc": "音量减下一页，音量加上一页",
+  "readerChrome.reading.volumeKeysFailed": "音量键翻页设置失败",
   // 阅读设置抽屉
   "readerChrome.settings.title": "阅读设置",
   "readerChrome.settings.closeLabel": "关闭阅读设置",

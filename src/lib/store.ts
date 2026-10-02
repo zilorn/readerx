@@ -18,6 +18,7 @@ const THEME_KEY = "readerx.theme";
 const SHELF_KEY = "readerx.shelf";
 const FONT_KEY = "readerx.fontSize";
 const PARA_SPACING_KEY = "readerx.paragraphSpacing";
+const VOLUME_KEYS_KEY = "readerx.volumeKeyPaging";
 const PAGE_MODE_KEY = "readerx.pageMode";
 const STATUS_BAR_KEY = "readerx.statusBar";
 const PROGRESS_SCOPE_KEY = "readerx.progressScope";
@@ -82,6 +83,7 @@ export async function initReaderState(): Promise<void> {
     storedSourceGroupFilter,
     storedSidebarCollapsed,
     storedTtsCacheLimit,
+    storedVolumeKeyPaging,
   ] = await Promise.all([
     readState<string>(THEME_KEY),
     readState<Record<string, ShelfEntry>>(SHELF_KEY),
@@ -97,7 +99,10 @@ export async function initReaderState(): Promise<void> {
     readState<string>(SOURCE_GROUP_FILTER_KEY),
     readState<boolean>(SIDEBAR_COLLAPSED_KEY),
     readState<number>(TTS_CACHE_LIMIT_KEY),
+    readState<boolean>(VOLUME_KEYS_KEY),
   ]);
+
+  setVolumeKeyPagingSignal(storedVolumeKeyPaging === true);
 
   // 未保存过偏好时默认护眼(sepia)，不再跟随系统深浅色
   const mode = normalizeTheme(storedTheme) ?? "sepia";
@@ -354,6 +359,22 @@ function persistPageMode(next: PageMode): void {
 export function setPageMode(mode: PageMode): void {
   setPageModeSignal(mode);
   persistPageMode(mode);
+}
+
+// ---------------------------------------------------------------------------
+// Android 音量键翻页：旧数据没有该字段时默认关闭。
+const [volumeKeyPaging, setVolumeKeyPagingSignal] = createSignal(false);
+let volumeKeyPagingWriteQueue: Promise<void> = Promise.resolve();
+
+export function currentVolumeKeyPaging(): boolean {
+  return volumeKeyPaging();
+}
+
+export function setVolumeKeyPaging(on: boolean): void {
+  setVolumeKeyPagingSignal(on);
+  volumeKeyPagingWriteQueue = volumeKeyPagingWriteQueue.then(() =>
+    writeState(VOLUME_KEYS_KEY, on),
+  );
 }
 
 // ---------------------------------------------------------------------------

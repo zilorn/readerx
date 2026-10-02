@@ -17,6 +17,7 @@ mod single_instance;
 pub mod source_prompt;
 mod storage;
 mod reading_time;
+mod volume_keys;
 
 /// 数据根覆盖入口（集成测试专用；见 `storage::pin_data_root`）。
 pub use storage::{pin_data_root, DataRootPin};
@@ -96,6 +97,7 @@ pub fn run() {
     let builder = builder.plugin(single_instance::plugin());
 
     let result = builder
+        .plugin(volume_keys::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_fs::init())
@@ -150,6 +152,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            volume_keys::readerx_volume_keys_set_enabled,
             commands::greet,
             app_updates::readerx_update_check,
             reading_time::readerx_reading_time_get,

@@ -60,3 +60,8 @@ export function isMobilePlatform(): boolean {
 export function isDesktopPlatform(): boolean {
   return isTauriHost() && !isMobilePlatform();
 }
+
+/** Android 宿主提供实体音量键接入，与外壳宽度无关。 */
+export function isAndroidPlatform(): boolean {
+  return isTauriHost() && /Android/i.test(navigator.userAgent);
+}
