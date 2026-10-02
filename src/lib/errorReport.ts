@@ -9,6 +9,7 @@
  * 相同文案短时间内只提示一次：批量下载 / 逐章落盘这类循环失败时不会刷屏。
  */
 import { isTauri } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { t } from "./i18n";
 import { createLogger, type LogLevel } from "./logger";
 import { showToast } from "./toast";
@@ -100,7 +101,6 @@ export function installGlobalErrorReporting(): void {
 export async function listenBackendErrors(): Promise<void> {
   if (!isTauri()) return;
   try {
-    const { listen } = await import("@tauri-apps/api/event");
     await listen<string>(BACKEND_ERROR_EVENT, (event) => {
       // 无法补救的内部异常：按 error 记日志，提示也停留久一点，确保用户看得到
       reportFailure(t("misc.error.internal"), event.payload, 8_000, "error");

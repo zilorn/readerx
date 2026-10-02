@@ -12,6 +12,7 @@
  */
 import { createSignal } from "solid-js";
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { reloadBookContent, reloadLocalBooks } from "./books";
 import { reloadBookBookmarks } from "./bookmarks";
 import { loadReadingTime } from "./readingTime";
@@ -241,7 +242,6 @@ export async function initSync(): Promise<void> {
   if (!isTauri() || listening) return;
   listening = true;
   try {
-    const { listen } = await import("@tauri-apps/api/event");
     await listen<SyncStatus>(SYNC_EVENT, (event) => {
       applyStatus(event.payload);
     });

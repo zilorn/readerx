@@ -10,6 +10,7 @@
  */
 import { createSignal } from "solid-js";
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { createLogger } from "./logger";
 import { t } from "./i18n";
 
@@ -74,7 +75,6 @@ export async function initSourcePrompts(): Promise<void> {
   if (!isTauri() || listening.started) return;
   listening.started = true;
   try {
-    const { listen } = await import("@tauri-apps/api/event");
     await listen<SourcePromptRequest>(PROMPT_EVENT, (event) => enqueue(event.payload));
     await listen<number>(PROMPT_CLOSE_EVENT, (event) => dismiss(event.payload));
     const pending = await invoke<SourcePromptRequest[]>("readerx_source_prompt_pending");
