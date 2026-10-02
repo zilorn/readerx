@@ -2995,9 +2995,15 @@ export default function ReaderPage() {
   } | null = null;
 
   function beginPageDrag(dir: 1 | -1): boolean {
+    if (!pageAnimRef || !isPaged() || contentPendingGate()) return false;
     const next = snapPage(pageIdx()) + dir * pageColumns();
-    // 跨章正文可能仍需下载和排版，沿用切章门闩，避免预览错误正文。
-    if (!pageAnimRef || !isPaged() || contentPendingGate() || next < 0 || next >= totalPages()) return false;
+    if (next < 0 || next >= totalPages()) {
+      if (dir > 0 ? isLastChapter() : isFirstChapter()) return false;
+      // 跨章也翻起当前纸张；目标正文尚未下载/排版时不拿本章内容作预览。
+      // 确认翻页后才由 turnPage 切章，回弹不切章，加载门闩与上一章末页定位照旧。
+      setPagePreviewIndex(null);
+      return pageTurn.begin(pageAnimRef, undefined, dir);
+    }
     setPagePreviewIndex(next);
     return !!pagePreviewRef && pageTurn.begin(pageAnimRef, pagePreviewRef, dir);
   }
