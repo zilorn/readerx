@@ -12,6 +12,8 @@ const { outputText } = ts.transpileModule(source.replace('"solid-js"', JSON.stri
 const { createReaderAutoPage } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString("base64")}`);
 
 let now = 0;
+const originalDateNow = Date.now;
+Date.now = () => now;
 let nextId = 0;
 const timers = new Map();
 let selection = false;
@@ -39,14 +41,16 @@ function advanceTime(ms) {
 
 const [enabled, setEnabled] = createSignal(false);
 const [ready, setReady] = createSignal(true);
+const [availabilityVersion, setAvailabilityVersion] = createSignal(0);
 const [interval, setInterval] = createSignal(5);
 const [position, setPosition] = createSignal(0);
 let turns = 0;
 let ended = 0;
 let atEnd = false;
+let autoPage;
 const dispose = createRoot((cleanup) => {
-  createReaderAutoPage({
-    enabled, ready, interval, position,
+  autoPage = createReaderAutoPage({
+    enabled, ready: () => ready() && availabilityVersion() >= 0, interval, position,
     advance: () => { turns++; return !atEnd; },
     onEnd: () => { ended++; setEnabled(false); },
   });
@@ -55,7 +59,14 @@ const dispose = createRoot((cleanup) => {
 advanceTime(10_000);
 assert.equal(turns, 0);
 setEnabled(true);
-advanceTime(4_999);
+assert.equal(autoPage.running(), true);
+assert.equal(autoPage.remainingSeconds(), 5);
+advanceTime(1_000);
+assert.equal(autoPage.remainingSeconds(), 4);
+// 正文状态有更新但仍可翻页时，不应把已经走过的倒计时清零重来。
+setAvailabilityVersion(1);
+assert.equal(autoPage.remainingSeconds(), 4);
+advanceTime(3_999);
 assert.equal(turns, 0);
 advanceTime(1);
 assert.equal(turns, 1);
@@ -63,9 +74,12 @@ advanceTime(5_000);
 assert.equal(turns, 2); // 同一章节连续翻页 / 滚动能够持续计时
 
 setReady(false); // 菜单、下载和听书等门闩共用这一条件
+assert.equal(autoPage.running(), false);
 advanceTime(60_000);
 assert.equal(turns, 2);
 setReady(true);
+assert.equal(autoPage.running(), true);
+assert.equal(autoPage.remainingSeconds(), 5);
 advanceTime(4_000);
 setPosition(1); // 手动翻页和跨章重新完整计时
 advanceTime(4_999);
@@ -110,4 +124,5 @@ dispose();
 assert.equal(timers.size, 0);
 advanceTime(30_000);
 assert.equal(turns, 6);
+Date.now = originalDateNow;
 process.stdout.write("自动翻页计时检查通过：连续翻页、暂停恢复、位置/间隔变化、后台/失焦/选区、书末和卸载清理\n");

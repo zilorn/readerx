@@ -7,6 +7,12 @@
  */
 export const readerChrome = {
   "readerChrome.settings.autoPage": "自动翻页",
+  "readerChrome.autoPage.started": "已开启自动翻页，每 {seconds} 秒翻一屏",
+  "readerChrome.autoPage.stopped": "已停止自动翻页",
+  "readerChrome.autoPage.ended": "已到书末，自动翻页已停止",
+  "readerChrome.autoPage.countdown": "自动翻页 · {seconds} 秒",
+  "readerChrome.autoPage.paused": "自动翻页已暂停",
+  "readerChrome.autoPage.stop": "停止",
   "readerChrome.settings.autoPageDesc": "菜单、选区、听书和后台期间暂停",
   "readerChrome.settings.autoPageInterval": "翻页间隔",
   "readerChrome.settings.autoPageSeconds": "{seconds} 秒",

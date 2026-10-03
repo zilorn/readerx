@@ -7,6 +7,12 @@
  */
 export const readerChrome = {
   "readerChrome.settings.autoPage": "Auto page turn",
+  "readerChrome.autoPage.started": "Auto page turn started: every {seconds} seconds",
+  "readerChrome.autoPage.stopped": "Auto page turn stopped",
+  "readerChrome.autoPage.ended": "End of book: auto page turn stopped",
+  "readerChrome.autoPage.countdown": "Auto page turn · {seconds} s",
+  "readerChrome.autoPage.paused": "Auto page turn paused",
+  "readerChrome.autoPage.stop": "Stop",
   "readerChrome.settings.autoPageDesc": "Pauses for menus, selection, narration and background",
   "readerChrome.settings.autoPageInterval": "Turn interval",
   "readerChrome.settings.autoPageSeconds": "{seconds} s",

@@ -1,4 +1,4 @@
-import { createEffect, createSignal, onCleanup, onMount, untrack } from "solid-js";
+import { createEffect, createMemo, createSignal, onCleanup, onMount, untrack } from "solid-js";
 
 export interface ReaderAutoPageOptions {
   enabled: () => boolean;
@@ -12,10 +12,12 @@ export interface ReaderAutoPageOptions {
 }
 
 /** 每次只安排一次翻页；暂停恢复后完整计时，不补翻后台期间的页面。 */
-export function createReaderAutoPage(options: ReaderAutoPageOptions): void {
+export function createReaderAutoPage(options: ReaderAutoPageOptions) {
   const [foreground, setForeground] = createSignal(!document.hidden);
   const [selected, setSelected] = createSignal(false);
   const [tick, setTick] = createSignal(0);
+  const [remainingSeconds, setRemainingSeconds] = createSignal(0);
+  const running = createMemo(() => options.enabled() && options.ready() && foreground() && !selected());
   onMount(() => {
     const onVisibility = () => setForeground(!document.hidden);
     const onBlur = () => setForeground(false);
@@ -40,7 +42,15 @@ export function createReaderAutoPage(options: ReaderAutoPageOptions): void {
     options.position();
     tick();
     const seconds = options.interval();
-    if (!options.enabled() || !options.ready() || !foreground() || selected()) return;
+    setRemainingSeconds(seconds);
+    if (!running()) return;
+    let countdown: number | undefined;
+    const deadline = Date.now() + seconds * 1000;
+    const updateCountdown = () => {
+      setRemainingSeconds(Math.max(0, Math.ceil((deadline - Date.now()) / 1000)));
+      countdown = window.setTimeout(updateCountdown, 1000);
+    };
+    countdown = window.setTimeout(updateCountdown, 1000);
     const timer = window.setTimeout(() => {
       untrack(() => {
         if (!document.hidden && foreground() && !selected() && options.enabled() && options.ready()) {
@@ -49,6 +59,10 @@ export function createReaderAutoPage(options: ReaderAutoPageOptions): void {
         setTick((value) => value + 1);
       });
     }, seconds * 1000);
-    onCleanup(() => window.clearTimeout(timer));
+    onCleanup(() => {
+      window.clearTimeout(timer);
+      window.clearTimeout(countdown);
+    });
   });
+  return { running, remainingSeconds };
 }

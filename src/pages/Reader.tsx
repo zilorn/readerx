@@ -900,9 +900,12 @@ export default function ReaderPage() {
   const bookId = () => params.id ?? "";
   const [autoPageEnabled, setAutoPageEnabled] = createSignal(false);
   const [autoPageScrollTick, setAutoPageScrollTick] = createSignal(0);
+  // 提示栏单独占用顶部空间，分页与滚动正文采用同一留白，避免盖住首行。
+  const readerTopPad = () => topPad() + (autoPageEnabled() ? 32 : 0);
   function stopAutoPage(): void {
     if (!autoPageEnabled()) return;
     setAutoPageEnabled(false);
+    showToast(t("readerChrome.autoPage.stopped"));
     log.info("停止自动翻页");
   }
   createEffect(on(bookId, stopAutoPage, { defer: true }));
@@ -1549,7 +1552,7 @@ export default function ReaderPage() {
   const geometry = createMemo<ReaderGeometry | null>(() =>
     resolveReaderGeometry(
       { w: readerContentWidth(area().w, isDesktopShell()), h: area().h },
-      { top: topPad(), bottom: bottomPadPaged() },
+      { top: readerTopPad(), bottom: bottomPadPaged() },
     ),
   );
 
@@ -2659,7 +2662,7 @@ export default function ReaderPage() {
       textLeft + flow * 0.84,
     ];
     for (let row = 0; row < 5; row++) {
-      const y = rect.top + topPad() + lineH * (0.35 + row);
+      const y = rect.top + readerTopPad() + lineH * (0.35 + row);
       for (const x of xs) {
         const g = probe(x, y);
         if (g !== null) return g;
@@ -2701,7 +2704,7 @@ export default function ReaderPage() {
       range.collapse(true);
       const r = range.getBoundingClientRect();
       if (r && (r.height > 0 || r.width > 0)) {
-        const targetY = cr.top + topPad() + lineH * 0.35;
+        const targetY = cr.top + readerTopPad() + lineH * 0.35;
         suppressFollowCancelUntil = performance.now() + 250;
         root.scrollTop += r.top - targetY;
         return true;
@@ -3779,7 +3782,7 @@ export default function ReaderPage() {
   const [volumeKeysForeground, setVolumeKeysForeground] = createSignal(!document.hidden);
   const [volumeKeysEditing, setVolumeKeysEditing] = createSignal(false);
   const readerBodyAvailable = createMemo(() =>
-    volumeKeysForeground() && !volumeKeysEditing() &&
+    volumeKeysForeground() &&
     !!chapter() && !volumeScrollEndCid() && !resumeTarget() &&
     !contentPendingGate() && !remoteReloading() &&
     !menuOpen() && !tocOpen() && !bmPanelOpen() && !bookSearchOpen() &&
@@ -3787,8 +3790,8 @@ export default function ReaderPage() {
     !ttsSettingsOpen() && !ttsDecodeGuideOpen() && !reloadRisk() && !updateConflict() &&
     !selSpan() && !selMenu(),
   );
-  const volumeKeysActive = createMemo(() => currentVolumeKeyPaging() && readerBodyAvailable());
-  createReaderAutoPage({
+  const volumeKeysActive = createMemo(() => currentVolumeKeyPaging() && !volumeKeysEditing() && readerBodyAvailable());
+  const autoPage = createReaderAutoPage({
     enabled: autoPageEnabled,
     interval: currentAutoPageInterval,
     position: () => [chapterIdx(), pageIdx(), autoPageScrollTick(), layout(), isPaged()],
@@ -3814,7 +3817,11 @@ export default function ReaderPage() {
       goToChapter(chapterIdx() + 1, true);
       return true;
     },
-    onEnd: stopAutoPage,
+    onEnd: () => {
+      setAutoPageEnabled(false);
+      showToast(t("readerChrome.autoPage.ended"));
+      log.info("自动翻页到达书末");
+    },
   });
   function toggleAutoPage(): void {
     if (autoPageEnabled()) {
@@ -3827,6 +3834,7 @@ export default function ReaderPage() {
     setMenuOpen(false);
     setTocOpen(false);
     setBmPanelOpen(false);
+    showToast(t("readerChrome.autoPage.started", { seconds: currentAutoPageInterval() }));
     log.info("开始自动翻页", { interval: currentAutoPageInterval() });
   }
   createEffect(() => {
@@ -3917,7 +3925,7 @@ export default function ReaderPage() {
   // 桌面端贴边呼出（鼠标操作，手机端不参与）：上 / 下边缘 → 顶栏 + 底栏一起弹出，
   // 右边缘 → 目录侧栏滑出；鼠标离开边缘与浮层后只收起「悬浮呼出」的这一份
   createEdgeHoverReveal({
-    enabled: isDesktopShell,
+    enabled: () => isDesktopShell() && !autoPageEnabled(),
     frameEl: () => frameRef,
     onMenuEdge: () => {
       if (menuOpen()) return; // 已经开着（点按呼出的也算）：不动它，也不接管收起
@@ -4205,7 +4213,7 @@ export default function ReaderPage() {
             ...asCss(readingBaseStyle(layout()!)),
           }}
         >
-          <div style={{ height: `${topPad()}px`, "flex": "none" }} />
+          <div style={{ height: `${readerTopPad()}px`, "flex": "none" }} />
           <div
             ref={(el) => { if (live) colRef = el; }}
             class="relative flex w-full flex-none overflow-hidden"
@@ -4351,7 +4359,7 @@ export default function ReaderPage() {
                   class="absolute inset-0 overflow-y-auto overscroll-contain scrollbar-none"
                   classList={{ invisible: resumeTarget() !== null }}
                   style={{
-                    padding: `${topPad()}px ${READER_PAGE_PAD_X}px ${bottomPadScroll()}px`,
+                    padding: `${readerTopPad()}px ${READER_PAGE_PAD_X}px ${bottomPadScroll()}px`,
                   }}
                 >
                   <div
@@ -4605,6 +4613,23 @@ export default function ReaderPage() {
                     </button>
                   )}
                 </Show>
+              </div>
+            </Show>
+
+            <Show when={autoPageEnabled()}>
+              <div
+                data-reader-ui
+                class="absolute right-4 z-[25] flex items-center gap-2 rounded-full border border-border bg-surface px-3 py-2 text-xs text-text-2 shadow-sm"
+                style={{ top: `${safeInsets().top + 4}px` }}
+              >
+                <span role="status">
+                  {autoPage.running()
+                    ? t("readerChrome.autoPage.countdown", { seconds: autoPage.remainingSeconds() })
+                    : t("readerChrome.autoPage.paused")}
+                </span>
+                <button type="button" class="text-accent" onClick={stopAutoPage}>
+                  {t("readerChrome.autoPage.stop")}
+                </button>
               </div>
             </Show>
 
