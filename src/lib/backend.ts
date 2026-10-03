@@ -64,6 +64,29 @@ export async function writeState(key: string, value: unknown): Promise<void> {
   }
 }
 
+/** 后端在事务中应用书架增量，避免旧快照覆盖同步来的其它书进度。 */
+export async function patchShelf(entries: Record<string, unknown>, mode: "ensure" | "update" | "reset"): Promise<void> {
+  if (!tauri) {
+    const current = { ...(memoryState.get("readerx.shelf") as Record<string, unknown> | undefined) };
+    if (mode === "reset") {
+      for (const id of Object.keys(current)) current[id] = { bookId: id, chapter: 0, updatedAt: Date.now() };
+    } else {
+      for (const [id, entry] of Object.entries(entries)) {
+        if (mode === "ensure" && id in current) continue;
+        if (entry === null) delete current[id];
+        else current[id] = entry;
+      }
+    }
+    memoryState.set("readerx.shelf", current);
+    return;
+  }
+  try {
+    await invoke("readerx_shelf_patch", { entries, mode });
+  } catch (err) {
+    reportFailure(t("library.state.writeFailed"), err);
+  }
+}
+
 export async function removeState(key: string): Promise<void> {
   if (!tauri) {
     memoryState.delete(key);
@@ -106,7 +129,7 @@ export async function saveRemoteBook(book: LocalBook): Promise<void> {
 }
 
 /**
- * 只回写一本书的若干章节（按下标）——在线书逐章下载正文用（写盘按小批合并）。
+ * 只回写一本书的若干章节（按 cid）——在线书逐章下载正文用（写盘按小批合并）。
  * 相比每次整本 JSON 经 IPC 传一遍（图片章节会把整本 data URL 反复拷贝，
  * 大书会明显卡 UI 甚至内存暴涨闪退），这里只传本次真正变动的章节；
  * Rust 侧读回书文件、原位替换后再落盘（I/O 在 blocking 线程池）。
@@ -118,9 +141,15 @@ export async function saveRemoteBookChapters(
   if (!tauri) {
     const book = memoryBooks.get(bookId);
     if (book) {
-      for (const update of updates) {
-        book.chapters[update.index] = update.chapter;
-      }
+      const chapters = updates.map((update) => {
+        const matches = book.chapters.filter((item) => item.cid === update.chapter.cid);
+        if (matches.length !== 1 || !update.chapter.cid) throw new Error("章节目录已变化");
+        return matches[0];
+      });
+      updates.forEach((update, index) => {
+        chapters[index].paragraphs = update.chapter.paragraphs;
+        chapters[index].blocks = update.chapter.blocks;
+      });
     }
     return;
   }

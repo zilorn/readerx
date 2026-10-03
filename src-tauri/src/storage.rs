@@ -114,39 +114,128 @@ pub(crate) fn valid_component(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
-pub(crate) fn read_state<R: tauri::Runtime>(
-    app: &AppHandle<R>, key: &str,
-) -> Result<Option<Value>, String> {
+fn state_transaction() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|error| error.into_inner())
+}
+
+fn state_path<R: tauri::Runtime>(app: &AppHandle<R>, key: &str) -> Result<PathBuf, String> {
     if !valid_state_key(key) {
         return Err("非法的状态 key".to_string());
     }
-    let path = state_dir(app)?.join(format!("{key}.json"));
+    Ok(state_dir(app)?.join(format!("{key}.json")))
+}
+
+fn read_state_path(path: &Path) -> Result<Option<Value>, String> {
     if !path.exists() {
         return Ok(None);
     }
-    let text = fs::read_to_string(&path).map_err(|e| format!("读取状态失败: {e}"))?;
-    let value = serde_json::from_str(&text).map_err(|e| format!("解析状态失败: {e}"))?;
-    Ok(Some(value))
+    let text = fs::read_to_string(path).map_err(|e| format!("读取状态失败: {e}"))?;
+    serde_json::from_str(&text)
+        .map(Some)
+        .map_err(|e| format!("解析状态失败: {e}"))
+}
+
+fn write_state_path(path: &Path, value: &Value) -> Result<(), String> {
+    let tmp = path.with_extension("json.tmp");
+    let file = fs::File::create(&tmp).map_err(|e| format!("写入状态失败: {e}"))?;
+    serde_json::to_writer_pretty(&file, value).map_err(|e| format!("序列化失败: {e}"))?;
+    file.sync_all().map_err(|e| format!("写入状态失败: {e}"))?;
+    drop(file);
+    fs::rename(&tmp, path).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        format!("写入状态失败: {e}")
+    })
+}
+
+pub(crate) fn read_state<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    key: &str,
+) -> Result<Option<Value>, String> {
+    let _transaction = state_transaction();
+    read_state_path(&state_path(app, key)?)
 }
 
 pub(crate) fn write_state<R: tauri::Runtime>(
-    app: &AppHandle<R>, key: &str, value: &Value,
+    app: &AppHandle<R>,
+    key: &str,
+    value: &Value,
 ) -> Result<(), String> {
-    if !valid_state_key(key) {
-        return Err("非法的状态 key".to_string());
+    let _transaction = state_transaction();
+    write_state_path(&state_path(app, key)?, value)
+}
+
+/// 读、合并、比较和原子落盘在同一事务内；闭包不能再调用状态存储或同步引擎。
+pub(crate) fn update_state<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    key: &str,
+    update: impl FnOnce(&mut Option<Value>) -> Result<(), String>,
+) -> Result<bool, String> {
+    update_state_path(&state_path(app, key)?, update)
+}
+
+fn update_state_path(
+    path: &Path,
+    update: impl FnOnce(&mut Option<Value>) -> Result<(), String>,
+) -> Result<bool, String> {
+    let _transaction = state_transaction();
+    let current = read_state_path(path)?;
+    let mut next = current.clone();
+    update(&mut next)?;
+    if next == current {
+        return Ok(false);
     }
-    let path = state_dir(app)?.join(format!("{key}.json"));
-    let text = serde_json::to_string_pretty(value).map_err(|e| format!("序列化失败: {e}"))?;
-    fs::write(&path, text).map_err(|e| format!("写入状态失败: {e}"))
+    match next {
+        Some(value) => write_state_path(path, &value)?,
+        None => {
+            if path.exists() {
+                fs::remove_file(path).map_err(|e| format!("删除状态失败: {e}"))?;
+            }
+        }
+    }
+    Ok(true)
+}
+
+/// 书架增量：初始化仅补缺失记录，更新/删除仅影响请求指定的书。
+pub(crate) fn patch_shelf(
+    state: &mut Option<Value>,
+    entries: &serde_json::Map<String, Value>,
+    mode: &str,
+) -> Result<Value, String> {
+    let shelf = state.get_or_insert_with(|| serde_json::json!({}));
+    let map = shelf.as_object_mut().ok_or("书架状态格式错误")?;
+    match mode {
+        "ensure" | "update" => {
+            for (id, entry) in entries {
+                if mode == "ensure" && map.contains_key(id) {
+                    continue;
+                }
+                if entry.is_null() {
+                    map.remove(id);
+                } else {
+                    map.insert(id.clone(), entry.clone());
+                }
+            }
+        }
+        "reset" => {
+            let now = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            for (id, entry) in map.iter_mut() {
+                *entry = serde_json::json!({"bookId": id, "chapter": 0, "updatedAt": now});
+            }
+        }
+        _ => return Err("非法的书架更新模式".to_string()),
+    }
+    Ok(shelf.clone())
 }
 
 pub(crate) fn remove_state<R: tauri::Runtime>(app: &AppHandle<R>, key: &str) -> Result<(), String> {
-    if !valid_state_key(key) {
-        return Err("非法的状态 key".to_string());
-    }
-    let path = state_dir(app)?.join(format!("{key}.json"));
+    let _transaction = state_transaction();
+    let path = state_path(app, key)?;
     if path.exists() {
-        fs::remove_file(&path).map_err(|e| format!("删除状态失败: {e}"))?;
+        fs::remove_file(path).map_err(|e| format!("删除状态失败: {e}"))?;
     }
     Ok(())
 }
@@ -471,6 +560,59 @@ pub(crate) fn remove_source_login_cookie<R: tauri::Runtime>(
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn concurrent_state_updates_preserve_every_entry() {
+        let dir =
+            std::env::temp_dir().join(format!("readerx-state-transaction-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("shelf.json");
+        write_state_path(&path, &serde_json::json!({})).unwrap();
+        let start = std::sync::Barrier::new(8);
+        std::thread::scope(|scope| {
+            for i in 0..8 {
+                let start = &start;
+                let path = &path;
+                scope.spawn(move || {
+                    start.wait();
+                    update_state_path(path, |state| {
+                        let map = state.as_mut().unwrap().as_object_mut().unwrap();
+                        std::thread::yield_now();
+                        map.insert(i.to_string(), serde_json::json!({"chapter": i}));
+                        Ok(())
+                    })
+                    .unwrap();
+                });
+            }
+        });
+        assert_eq!(
+            read_state_path(&path)
+                .unwrap()
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .len(),
+            8
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn shelf_delta_preserves_remote_progress_and_ensure_does_not_reset_it() {
+        let mut state = Some(serde_json::json!({"remote": {"chapter": 7}, "local": {"chapter": 2}}));
+        let ensure = serde_json::json!({"remote": {"chapter": 0}});
+        patch_shelf(&mut state, ensure.as_object().unwrap(), "ensure").unwrap();
+        assert_eq!(state.as_ref().unwrap()["remote"]["chapter"], 7);
+        let update = serde_json::json!({"local": {"chapter": 3}});
+        patch_shelf(&mut state, update.as_object().unwrap(), "update").unwrap();
+        assert_eq!(state.as_ref().unwrap()["remote"]["chapter"], 7);
+        assert_eq!(state.as_ref().unwrap()["local"]["chapter"], 3);
+        let delete = serde_json::json!({"local": null});
+        patch_shelf(&mut state, delete.as_object().unwrap(), "update").unwrap();
+        assert!(state.as_ref().unwrap().get("local").is_none());
+        patch_shelf(&mut state, &serde_json::Map::new(), "reset").unwrap();
+        assert_eq!(state.as_ref().unwrap()["remote"]["chapter"], 0);
+    }
 
     /// 造 n 个条目，修改时间从旧到新递增（下标越大越新）
     fn audios(n: usize) -> Vec<(SystemTime, PathBuf)> {

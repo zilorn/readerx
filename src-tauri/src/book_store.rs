@@ -336,9 +336,8 @@ fn legacy_book_file<R: tauri::Runtime>(app: &AppHandle<R>, id: &str) -> Result<P
     Ok(crate::storage::data_root(app)?.join("books").join(format!("{id}.json")))
 }
 
-/// 写路径用的书籍目录：不存在则建（旧布局的书先迁移过来）。
+/// 写路径用的书籍目录：不存在则建；调用方已持事务锁并完成旧布局迁移。
 fn ensure_book_dir<R: tauri::Runtime>(app: &AppHandle<R>, id: &str) -> Result<PathBuf, String> {
-    migrate_legacy_layout(app);
     let dir = book_dir(app, id)?;
     if dir.is_dir() {
         return Ok(dir);
@@ -561,11 +560,18 @@ fn legacy_migration() -> &'static Mutex<LegacyMigration> {
     STATE.get_or_init(|| Mutex::new(LegacyMigration::default()))
 }
 
+/// 所有书库入口共用事务锁；不持锁调用同步引擎，避免引擎与磁盘锁顺序反转。
+/// 读操作也参与，保证元信息、正文和派生缓存来自同一次完整写入。
+fn library_transaction() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|error| error.into_inner())
+}
+
 /// 旧布局迁移（幂等）。每次运行最多走一遍：单本书失败只记日志并把旧文件留着
 /// （该书的列表与阅读都留有旧布局回退），不在这次运行里反复重试 ——
 /// 失败的书已记进账本，下次启动（新的账本）才会再试。
 /// 各书籍 / 书签读写入口都会先调用它兜底，因此不必在别处手动触发。
-pub(crate) fn migrate_legacy_layout<R: tauri::Runtime>(app: &AppHandle<R>) {
+fn migrate_legacy_layout<R: tauri::Runtime>(app: &AppHandle<R>) {
     let Ok(mut state) = legacy_migration().lock() else {
         // 锁中毒：别的线程在迁移中 panic 了，本次跳过（下次启动再来）
         return;
@@ -674,6 +680,7 @@ fn split_legacy_bookmarks(legacy: &Path, books_dir: &Path) -> Result<(u64, u64),
 pub(crate) fn get_book<R: tauri::Runtime>(
     app: &AppHandle<R>, id: &str,
 ) -> Result<Option<LocalBook>, String> {
+    let _transaction = library_transaction();
     migrate_legacy_layout(app);
     let dir = book_dir(app, id)?;
     if let Some(mut book) = read_book_from_dir(&dir)? {
@@ -700,6 +707,8 @@ pub(crate) fn get_book<R: tauri::Runtime>(
 pub(crate) fn put_book<R: tauri::Runtime>(
     app: &AppHandle<R>, mut book: LocalBook,
 ) -> Result<(), String> {
+    let _transaction = library_transaction();
+    migrate_legacy_layout(app);
     let dir = ensure_book_dir(app, &book.id)?;
     if let Ok(root) = crate::book_images::images_root(app) {
         crate::book_images::migrate_book(&root, &mut book);
@@ -714,6 +723,7 @@ pub(crate) fn put_book_chapters<R: tauri::Runtime>(
     id: &str,
     updates: &[BookChapterPatch],
 ) -> Result<(), String> {
+    let _transaction = library_transaction();
     migrate_legacy_layout(app);
     let dir = book_dir(app, id)?;
     let path = dir.join(CONTENT_FILE);
@@ -731,22 +741,48 @@ pub(crate) fn put_book_chapters<R: tauri::Runtime>(
                 .zip(content.chapters.iter())
                 .all(|(digest, chapter)| digest.cid == chapter.cid)
     });
-    for update in updates {
-        if update.index >= content.chapters.len() {
-            return Err(format!("章节下标越界: {}", update.index));
-        }
-        content.chapters[update.index] = update.chapter.clone();
-    }
+    let indices = patch_chapters(&mut content.chapters, updates)?;
     // 迁移结果只在内存里，写盘时自然落定；写盘失败也不影响本次章节回写的数据
     if let Ok(root) = crate::book_images::images_root(app) {
         crate::book_images::migrate_chapters(&root, id, &mut content.chapters);
     }
     if let Some(digests) = digests.as_mut() {
-        for update in updates {
-            digests[update.index] = chapter_digest(&content.chapters[update.index]);
+        for index in indices {
+            digests[index] = chapter_digest(&content.chapters[index]);
         }
     }
     write_book_content_with_digests(&dir, &content.chapters, digests)
+}
+
+/// 下标仅是旧客户端的提示；身份必须以 cid 为准，目录变更不能改变正文归属。
+fn patch_chapters(
+    chapters: &mut [LocalBookChapter],
+    updates: &[BookChapterPatch],
+) -> Result<Vec<usize>, String> {
+    let mut indices = Vec::with_capacity(updates.len());
+    for update in updates {
+        let cid = &update.chapter.cid;
+        if cid.is_empty() {
+            return Err("章节补丁缺少 cid".to_string());
+        }
+        let mut matches = chapters
+            .iter()
+            .enumerate()
+            .filter(|(_, chapter)| chapter.cid == *cid);
+        let Some((index, _)) = matches.next() else {
+            return Err("章节目录已变化，补丁对应章节不存在".to_string());
+        };
+        if matches.next().is_some() {
+            return Err("章节 cid 重复，无法定位补丁".to_string());
+        }
+        indices.push(index);
+    }
+    // 先验证整批，再修改；只写正文，目录里的标题和地址保留最新值。
+    for (update, &index) in updates.iter().zip(&indices) {
+        chapters[index].paragraphs = update.chapter.paragraphs.clone();
+        chapters[index].blocks = update.chapter.blocks.clone();
+    }
+    Ok(indices)
 }
 
 /// 只改元信息（分组 / 书名 / 封面 / 标签…）：只读写 `bookdetail.json`，
@@ -756,6 +792,7 @@ pub(crate) fn patch_book_meta<R: tauri::Runtime>(
     id: &str,
     patch: &BookMetaPatch,
 ) -> Result<(), String> {
+    let _transaction = library_transaction();
     migrate_legacy_layout(app);
     let path = book_dir(app, id)?.join(BOOKDETAIL_FILE);
     if !path.is_file() {
@@ -783,6 +820,7 @@ fn missing_book_error<R: tauri::Runtime>(app: &AppHandle<R>, id: &str) -> Result
 pub(crate) fn get_bookmarks<R: tauri::Runtime>(
     app: &AppHandle<R>, id: &str,
 ) -> Result<Vec<Value>, String> {
+    let _transaction = library_transaction();
     migrate_legacy_layout(app);
     let path = book_dir(app, id)?.join(BOOKMARKS_FILE);
     read_bookmarks_file(&path)
@@ -794,6 +832,7 @@ pub(crate) fn put_bookmarks<R: tauri::Runtime>(
     id: &str,
     bookmarks: &[Value],
 ) -> Result<(), String> {
+    let _transaction = library_transaction();
     migrate_legacy_layout(app);
     let dir = book_dir(app, id)?;
     if !dir.is_dir() {
@@ -806,6 +845,7 @@ pub(crate) fn put_bookmarks<R: tauri::Runtime>(
 
 /// 删除一本书：整个书籍目录（含书签）连同听书缓存、章节插图一起清掉。
 pub(crate) fn delete_book<R: tauri::Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), String> {
+    let _transaction = library_transaction();
     migrate_legacy_layout(app);
     if !crate::storage::valid_component(id) {
         return Err("非法的书籍 id".to_string());
@@ -829,6 +869,7 @@ pub(crate) fn normalize_book_images<R: tauri::Runtime>(
     root: Option<&Path>,
     id: &str,
 ) -> Result<bool, String> {
+    let _transaction = library_transaction();
     let dir = book_dir_at(app, root, id)?;
     if !dir.join(BOOKDETAIL_FILE).is_file() {
         return Ok(false);
@@ -962,6 +1003,7 @@ fn remaining_image_locals(books: &Path) -> Result<HashSet<String>, String> {
 pub(crate) fn list_book_meta<R: tauri::Runtime>(
     app: &AppHandle<R>,
 ) -> Result<Vec<BookMeta>, String> {
+    let _transaction = library_transaction();
     migrate_legacy_layout(app);
     scan_books_dir(&books_root(app)?)
 }
@@ -1106,6 +1148,7 @@ impl BookSyncMeta {
 pub(crate) fn get_sync_meta<R: tauri::Runtime>(
     app: &AppHandle<R>, id: &str,
 ) -> Result<Option<BookSyncMeta>, String> {
+    let _transaction = library_transaction();
     migrate_legacy_layout(app);
     if let Some(meta) = sync_meta_from_dir(&book_dir(app, id)?)? {
         return Ok(Some(meta));
@@ -1143,6 +1186,7 @@ pub(crate) fn list_sync_meta_at<R: tauri::Runtime>(
     app: &AppHandle<R>,
     root: Option<&Path>,
 ) -> Result<Vec<BookSyncMeta>, String> {
+    let _transaction = library_transaction();
     migrate_legacy_layout(app);
     let dir = match root {
         Some(root) => root.join("books"),
@@ -1187,6 +1231,7 @@ pub(crate) fn apply_sync_meta<R: tauri::Runtime>(
     id: &str,
     want: &BookSyncMeta,
 ) -> Result<bool, String> {
+    let _transaction = library_transaction();
     migrate_legacy_layout(app);
     apply_sync_meta_in_dir(&book_dir(app, id)?, want)
 }
@@ -1299,6 +1344,7 @@ fn scan_chapter_refs(path: &Path) -> Result<Vec<ChapterRef>, String> {
 pub(crate) fn list_sync_structures<R: tauri::Runtime>(
     app: &AppHandle<R>,
 ) -> Result<Vec<(String, Vec<ChapterRef>)>, String> {
+    let _transaction = library_transaction();
     migrate_legacy_layout(app);
     let dir = books_root(app)?;
     let mut books = Vec::new();
@@ -1361,6 +1407,7 @@ pub(crate) fn apply_sync_structure<R: tauri::Runtime>(
     id: &str,
     want: &[ChapterRef],
 ) -> Result<bool, String> {
+    let _transaction = library_transaction();
     migrate_legacy_layout(app);
     let dir = book_dir(app, id)?;
     if !dir.join(BOOKDETAIL_FILE).is_file() {
@@ -1581,6 +1628,7 @@ pub(crate) fn read_sync_digests_at<R: tauri::Runtime>(
     root: Option<&Path>,
     id: &str,
 ) -> Result<Vec<ChapterDigest>, String> {
+    let _transaction = library_transaction();
     migrate_legacy_layout(app);
     let dir = book_dir_at(app, root, id)?;
     if !dir.join(BOOKDETAIL_FILE).is_file() {
@@ -1602,6 +1650,7 @@ pub(crate) fn get_cover_at<R: tauri::Runtime>(
     root: Option<&Path>,
     id: &str,
 ) -> Result<Option<String>, String> {
+    let _transaction = library_transaction();
     migrate_legacy_layout(app);
     let path = book_dir_at(app, root, id)?.join(BOOKDETAIL_FILE);
     if path.is_file() {
@@ -1627,6 +1676,7 @@ pub(crate) fn set_cover_at<R: tauri::Runtime>(
     id: &str,
     cover: Option<&str>,
 ) -> Result<bool, String> {
+    let _transaction = library_transaction();
     migrate_legacy_layout(app);
     let path = book_dir_at(app, root, id)?.join(BOOKDETAIL_FILE);
     if !path.is_file() {
@@ -1653,6 +1703,7 @@ pub(crate) fn read_sync_asset_refs_at<R: tauri::Runtime>(
     root: Option<&Path>,
     id: &str,
 ) -> Result<Vec<(String, String)>, String> {
+    let _transaction = library_transaction();
     migrate_legacy_layout(app);
     let dir = book_dir_at(app, root, id)?;
     if !dir.join(BOOKDETAIL_FILE).is_file() {
@@ -1685,6 +1736,7 @@ pub(crate) fn read_chapters_by_cid_at<R: tauri::Runtime>(
     id: &str,
     cids: &[String],
 ) -> Result<Vec<LocalBookChapter>, String> {
+    let _transaction = library_transaction();
     migrate_legacy_layout(app);
     let path = book_dir_at(app, root, id)?.join(CONTENT_FILE);
     if !path.is_file() || cids.is_empty() {
@@ -1795,6 +1847,7 @@ pub(crate) fn apply_sync_chapters<R: tauri::Runtime>(
     id: &str,
     bodies: &[ChapterContent],
 ) -> Result<usize, String> {
+    let _transaction = library_transaction();
     migrate_legacy_layout(app);
     let dir = book_dir(app, id)?;
     if !dir.join(BOOKDETAIL_FILE).is_file() {
@@ -1869,6 +1922,96 @@ fn has_body(body: &ChapterContent) -> bool {
 #[cfg(test)]
 mod tests {    use super::*;
     use crate::models::ChapterBlock;
+
+    #[test]
+    fn chapter_patch_follows_identity_after_reorder_and_keeps_directory_fields() {
+        let mut chapters = vec![
+            sample_chapter("b", "新标题", "旧正文"),
+            sample_chapter("a", "A", "A正文"),
+        ];
+        let patch = BookChapterPatch {
+            index: 1,
+            chapter: sample_chapter("b", "旧标题", "新正文"),
+        };
+        assert_eq!(patch_chapters(&mut chapters, &[patch]).unwrap(), vec![0]);
+        assert_eq!(chapters[0].title, "新标题");
+        assert_eq!(chapters[0].paragraphs, vec!["新正文"]);
+        assert_eq!(chapters[1].paragraphs, vec!["A正文"]);
+        let patches = [
+            BookChapterPatch {
+                index: 0,
+                chapter: sample_chapter("a", "A", "不应写入"),
+            },
+            BookChapterPatch {
+                index: 1,
+                chapter: sample_chapter("deleted", "删除章", "正文"),
+            },
+        ];
+        assert!(patch_chapters(&mut chapters, &patches).is_err());
+        assert_eq!(chapters[1].paragraphs, vec!["A正文"]);
+        chapters[1].cid = "b".into();
+        assert!(patch_chapters(
+            &mut chapters,
+            &[BookChapterPatch {
+                index: 0,
+                chapter: sample_chapter("b", "B", "正文")
+            }]
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn concurrent_structure_and_body_updates_keep_both_changes() {
+        let dir = temp_dir("concurrent");
+        let chapters = vec![
+            sample_chapter("a", "A", "旧正文"),
+            sample_chapter("b", "B", "B正文"),
+        ];
+        write_book_content(&dir, &chapters).unwrap();
+        let start = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                start.wait();
+                let _transaction = library_transaction();
+                apply_sync_structure_in_dir(
+                    &dir,
+                    &[
+                        ChapterRef {
+                            cid: "b".into(),
+                            title: "B".into(),
+                            url: None,
+                        },
+                        ChapterRef {
+                            cid: "a".into(),
+                            title: "新A".into(),
+                            url: None,
+                        },
+                    ],
+                )
+                .unwrap();
+            });
+            scope.spawn(|| {
+                start.wait();
+                let _transaction = library_transaction();
+                let mut content: BookContent = read_json_file(&dir.join(CONTENT_FILE), "正文").unwrap();
+                patch_chapters(
+                    &mut content.chapters,
+                    &[BookChapterPatch {
+                        index: 0,
+                        chapter: sample_chapter("a", "旧A", "下载正文"),
+                    }],
+                )
+                .unwrap();
+                std::thread::yield_now();
+                write_book_content(&dir, &content.chapters).unwrap();
+            });
+        });
+        let content: BookContent = read_json_file(&dir.join(CONTENT_FILE), "正文").unwrap();
+        assert_eq!(content.chapters[0].cid, "b");
+        assert_eq!(content.chapters[1].title, "新A");
+        assert_eq!(content.chapters[1].paragraphs, vec!["下载正文"]);
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(

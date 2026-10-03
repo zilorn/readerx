@@ -7,7 +7,7 @@
  * 持久化统一交给 Rust 后端（readerx.* key），WebView 不落盘。
  */
 import { createSignal } from "solid-js";
-import { readState, removeState, writeState } from "./backend";
+import { patchShelf, readState, removeState, writeState } from "./backend";
 
 export type ThemeMode = "light" | "dark" | "sepia";
 export type PageMode = "paged" | "scroll";
@@ -206,9 +206,8 @@ export interface ShelfEntry {
 const [shelfMap, setShelfMap] = createSignal<Record<string, ShelfEntry>>({});
 let shelfWriteQueue: Promise<void> = Promise.resolve();
 
-function persistShelf(): void {
-  const snapshot = { ...shelfMap() };
-  shelfWriteQueue = shelfWriteQueue.then(() => writeState(SHELF_KEY, snapshot));
+function persistShelf(entries: Record<string, ShelfEntry | null>, mode: "ensure" | "update" | "reset" = "update"): void {
+  shelfWriteQueue = shelfWriteQueue.then(() => patchShelf(entries, mode));
 }
 
 /** 响应式书架记录表 */
@@ -238,7 +237,7 @@ export function ensureShelfEntry(bookId: string, chapter = 0): void {
   if (bookId in map) return;
   map[bookId] = { bookId, chapter, updatedAt: Date.now() };
   setShelfMap(map);
-  persistShelf();
+  persistShelf({ [bookId]: map[bookId] }, "ensure");
 }
 
 /**
@@ -267,7 +266,7 @@ export function updateReadingLocation(
     updatedAt: Date.now(),
   };
   setShelfMap(map);
-  persistShelf();
+  persistShelf({ [bookId]: map[bookId] });
 }
 
 /** 从书架移除某本书（通常在删除本地书时调用） */
@@ -276,7 +275,7 @@ export function removeShelfEntry(bookId: string): void {
   if (!(bookId in map)) return;
   delete map[bookId];
   setShelfMap(map);
-  persistShelf();
+  persistShelf({ [bookId]: null });
 }
 
 /**
@@ -299,7 +298,7 @@ export function resetReadingProgress(): void {
     next[entry.bookId] = { bookId: entry.bookId, chapter: 0, updatedAt: Date.now() };
   }
   setShelfMap(next);
-  persistShelf();
+  persistShelf({}, "reset");
 }
 
 // ---------------------------------------------------------------------------

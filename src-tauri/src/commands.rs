@@ -80,6 +80,32 @@ pub async fn readerx_state_set(app: AppHandle, key: String, value: Value) -> Res
 }
 
 #[tauri::command]
+pub async fn readerx_shelf_patch(
+    app: AppHandle,
+    entries: serde_json::Map<String, Value>,
+    mode: String,
+) -> Result<(), String> {
+    blocking("阅读进度写入", move || {
+        let mut next = Value::Null;
+        let changed = storage::update_state(&app, "readerx.shelf", |state| {
+            next = storage::patch_shelf(state, &entries, &mode)?;
+            Ok(())
+        })?;
+        if changed {
+            // 仅发布本次用户改动，避免把其它书的旧进度重新发布到引擎。
+            if mode != "reset" {
+                if let Some(map) = next.as_object_mut() {
+                    map.retain(|id, _| entries.contains_key(id));
+                }
+            }
+            sync::service_hook(&app).on_shelf_changed(&next);
+        }
+        Ok(())
+    })
+    .await
+}
+
+#[tauri::command]
 pub async fn readerx_state_remove(app: AppHandle, key: String) -> Result<(), String> {
     blocking("状态删除", move || storage::remove_state(&app, &key)).await
 }

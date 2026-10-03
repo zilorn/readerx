@@ -355,14 +355,16 @@ fn write_state<R: tauri::Runtime>(
         else {
             continue;
         };
-        let local = storage::read_state(app, key)?;
-        let value = match mode {
-            ImportMode::Merge => merge::merge_state(key, local.as_ref(), &incoming, remap),
-            ImportMode::Replace => incoming,
-        };
-        // 只在真的变了时落盘与计数：合并模式下「本机本来就是这样」不该报成一次更新
-        if local.as_ref() != Some(&value) {
-            storage::write_state(app, key, &value)?;
+        let changed = storage::update_state(app, key, |local| {
+            let value = match mode {
+                ImportMode::Merge => merge::merge_state(key, local.as_ref(), &incoming, remap),
+                ImportMode::Replace => incoming,
+            };
+            // 只在真的变了时落盘与计数：合并模式下「本机本来就是这样」不该报成一次更新
+            *local = Some(value);
+            Ok(())
+        })?;
+        if changed {
             summary.state_keys.push(key.clone());
         }
     }

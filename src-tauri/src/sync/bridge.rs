@@ -1735,26 +1735,27 @@ fn apply_progress<R: tauri::Runtime>(
     let Some(entry) = entry else {
         return Ok(false);
     };
-    let mut shelf = storage::read_state(app, SHELF_KEY)?.unwrap_or_else(|| json!({}));
-    let Some(map) = shelf.as_object_mut() else {
-        return Ok(false);
-    };
-    let current = map.get(&local_id).cloned().unwrap_or_else(|| json!({}));
-    let mut merged = current.as_object().cloned().unwrap_or_default();
-    let mut changed = false;
-    for (key, value) in entry.as_object().into_iter().flatten() {
-        if merged.get(key) != Some(value) {
-            merged.insert(key.clone(), value.clone());
-            changed = true;
+    storage::update_state(app, SHELF_KEY, |state| {
+        let shelf = state.get_or_insert_with(|| json!({}));
+        let Some(map) = shelf.as_object_mut() else {
+            return Ok(());
+        };
+        let current = map.get(&local_id).cloned().unwrap_or_else(|| json!({}));
+        let mut merged = current.as_object().cloned().unwrap_or_default();
+        let mut changed = false;
+        for (key, value) in entry.as_object().into_iter().flatten() {
+            if merged.get(key) != Some(value) {
+                merged.insert(key.clone(), value.clone());
+                changed = true;
+            }
         }
-    }
-    if !changed {
-        return Ok(false);
-    }
-    merged.insert("bookId".to_string(), json!(local_id));
-    map.insert(local_id, Value::Object(merged));
-    storage::write_state(app, SHELF_KEY, &shelf)?;
-    Ok(true)
+        if !changed {
+            return Ok(());
+        }
+        merged.insert("bookId".to_string(), json!(local_id));
+        map.insert(local_id, Value::Object(merged));
+        Ok(())
+    })
 }
 
 /// 按引擎里的书签实体重写某本书的 `bookmarks.json`。
@@ -1890,12 +1891,10 @@ fn write_state_if_changed<R: tauri::Runtime>(
     key: &str,
     next: &Value,
 ) -> Result<bool, String> {
-    let current = storage::read_state(app, key)?;
-    if current.as_ref() == Some(next) {
-        return Ok(false);
-    }
-    storage::write_state(app, key, next)?;
-    Ok(true)
+    storage::update_state(app, key, |state| {
+        *state = Some(next.clone());
+        Ok(())
+    })
 }
 
 /// 实体上的字符串字段（缺省空串）。
@@ -1943,42 +1942,49 @@ fn apply_group_list<R: tauri::Runtime>(
     if names.is_empty() {
         return Ok(false);
     }
-    let mut groups = storage::read_state(app, key)?
-        .and_then(|value| value.as_array().cloned())
-        .unwrap_or_default();
-    let mut changed = false;
-    for (deleted, uid, name) in names {
-        let existing = groups.iter().position(|group| {
-            let id = group.get("id").and_then(Value::as_str).unwrap_or_default();
-            let prefix = if key == SOURCE_GROUPS_KEY { "sg-" } else { "g-" };
-            id == uid || (!identity::stable_id(id, prefix) && group_name(group) == Some(name))
-        });
-        match (deleted, existing) {
-            (true, Some(index)) => {
-                groups.remove(index);
-                changed = true;
-            }
-            (false, None) => {
-                groups.push(json!({
-                    "id": uid,
-                    "name": name,
-                    "createdAt": now_ms(),
-                }));
-                changed = true;
-            }
-            (false, Some(index)) => {
-                if groups[index]["name"] != name {
-                    groups[index]["name"] = json!(name);
+    storage::update_state(app, key, |state| {
+        let mut groups = state
+            .clone()
+            .and_then(|value| value.as_array().cloned())
+            .unwrap_or_default();
+        let mut changed = false;
+        for (deleted, uid, name) in names {
+            let existing = groups.iter().position(|group| {
+                let id = group.get("id").and_then(Value::as_str).unwrap_or_default();
+                let prefix = if key == SOURCE_GROUPS_KEY {
+                    "sg-"
+                } else {
+                    "g-"
+                };
+                id == uid || (!identity::stable_id(id, prefix) && group_name(group) == Some(name))
+            });
+            match (deleted, existing) {
+                (true, Some(index)) => {
+                    groups.remove(index);
                     changed = true;
                 }
+                (false, None) => {
+                    groups.push(json!({
+                        "id": uid,
+                        "name": name,
+                        "createdAt": now_ms(),
+                    }));
+                    changed = true;
+                }
+                (false, Some(index)) => {
+                    if groups[index]["name"] != name {
+                        groups[index]["name"] = json!(name);
+                        changed = true;
+                    }
+                }
+                _ => {}
             }
-            _ => {}
         }
-    }
-    if changed {
-        storage::write_state(app, key, &Value::Array(groups))?;
-    }
-    Ok(changed)
+        if changed {
+            *state = Some(Value::Array(groups));
+        }
+        Ok(())
+    })
 }
 
 fn group_name(group: &Value) -> Option<&str> {

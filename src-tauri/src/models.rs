@@ -206,7 +206,7 @@ pub struct BookMeta {
     pub source_tags: Option<Vec<String>>,
 }
 
-/// 一次「只回写单章正文」的下标 + 章节数据（在线书逐批下载用）。
+/// 一次单章正文补丁；index 保留兼容，后端以 chapter.cid 定位。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BookChapterPatch {

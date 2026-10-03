@@ -159,6 +159,7 @@ pub fn run() {
             reading_time::readerx_reading_time_add,
             commands::readerx_state_get,
             commands::readerx_state_set,
+            commands::readerx_shelf_patch,
             commands::readerx_state_remove,
             commands::readerx_book_put,
             commands::readerx_book_chapters_put,
