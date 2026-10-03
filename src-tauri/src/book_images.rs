@@ -299,8 +299,8 @@ pub(crate) fn info(root: &Path, locals: &[String]) -> Vec<BookImageInfo> {
 ///
 /// 名字归一之后不能再按「文件名前缀 = 本机书 id」扫目录：归一名里没有书 id，
 /// 一张图还可能被两本书同时引用（同一个地址 → 同一个文件）。因此按引用删，
-/// 并且**只删这张图确实是它自己的那些**（`owned_by`：旧名字一定属于这本书，
-/// 归一名则要求没有别的书也在引用它）。宁可留下几个孤儿文件，也不删掉别人的图。
+/// 并且**只删没有别的书引用的文件**（`owned_by`：调用方确认该文件无人引用，
+/// 旧名字与归一名都要检查）。宁可留下几个孤儿文件，也不删掉别人的图。
 pub(crate) fn remove_book_images(root: &Path, locals: &[String], owned_by: impl Fn(&str) -> bool) -> u64 {
     let mut removed = 0;
     for local in locals {

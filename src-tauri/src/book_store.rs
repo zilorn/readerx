@@ -810,27 +810,10 @@ pub(crate) fn delete_book<R: tauri::Runtime>(app: &AppHandle<R>, id: &str) -> Re
     if !crate::storage::valid_component(id) {
         return Err("非法的书籍 id".to_string());
     }
-    let dir = book_dir(app, id)?;
-    if dir.is_dir() {
-        fs::remove_dir_all(&dir).map_err(|e| format!("删除书籍失败: {e}"))?;
-    }
-    // 迁移没成功留下的旧文件同样要删（否则书会一直在书架上）
-    let legacy = legacy_book_file(app, id)?;
-    if legacy.is_file() {
-        fs::remove_file(&legacy).map_err(|e| format!("删除书籍失败: {e}"))?;
-    }
+    let books = books_root(app)?;
+    let images = crate::book_images::images_root(app).ok();
+    delete_book_files(&books, images.as_deref(), id)?;
     crate::storage::remove_book_tts_cache(app, id)?;
-    if let Ok(root) = crate::book_images::images_root(app) {
-        // 名字归一之后插图文件名里没有书 id，不能再按前缀扫目录；按这本书**引用到的**
-        // 名字删（含旧名字与 PDF 页图），归一名还要确认没有别的书引用它
-        let locals = book_image_locals(&dir);
-        let referenced = locals.clone();
-        crate::book_images::remove_book_images(&root, &locals, |name| {
-            crate::book_images::asset_name(name)
-                .map(|asset| asset != name || referenced.iter().any(|item| item == name))
-                .unwrap_or(false)
-        });
-    }
     log::info!("书籍已删除 id={id}（含书签、听书缓存与章节插图）");
     Ok(())
 }
@@ -863,34 +846,114 @@ pub(crate) fn normalize_book_images<R: tauri::Runtime>(
     Ok(true)
 }
 
-/// 一本书引用到的图片文件名（章节块里的整行图与段内图；含 PDF 页图）。
-///
-/// 读的是 `content.json`；读不出来（文件已删 / 损坏）时返回空清单 —— 调用方
-/// （删书）那时已经按更保守的方式清理过了。
-fn book_image_locals(dir: &Path) -> Vec<String> {
-    let path = dir.join(CONTENT_FILE);
-    if !path.is_file() {
-        return Vec::new();
+/// 先保存待删书的插图引用，再删书籍文件；只清理其余书籍不再引用的文件。
+fn delete_book_files(books: &Path, images: Option<&Path>, id: &str) -> Result<(), String> {
+    let dir = books.join(id);
+    let legacy = books.join(format!("{id}.json"));
+    let mut locals = HashSet::new();
+    // 旧布局迁移失败时仍有可能带着本地图片引用，两份文件都要在删除前读取。
+    for path in [dir.join(CONTENT_FILE), legacy.clone()] {
+        match image_locals_from_file(&path) {
+            Ok(names) => locals.extend(names),
+            Err(error) => log::warn!(
+                "待删书籍插图引用读取失败 id={id}：{}",
+                readerx_log::redact::urls_in_text(&error)
+            ),
+        }
     }
-    let Ok(content) = read_json_file::<BookContent>(&path, "书籍正文") else {
-        return Vec::new();
-    };
-    let mut locals: Vec<String> = Vec::new();
-    for chapter in &content.chapters {
-        for block in chapter.blocks.iter().flatten() {
-            if let Some(local) = block.local.as_ref() {
-                locals.push(local.clone());
+    if dir.is_dir() {
+        fs::remove_dir_all(&dir).map_err(|e| format!("删除书籍失败: {e}"))?;
+    }
+    if legacy.is_file() {
+        fs::remove_file(&legacy).map_err(|e| format!("删除书籍失败: {e}"))?;
+    }
+    if let Some(images) = images.filter(|_| !locals.is_empty()) {
+        match remaining_image_locals(books) {
+            Ok(referenced) => {
+                let locals: Vec<_> = locals.into_iter().collect();
+                crate::book_images::remove_book_images(images, &locals, |name| {
+                    !referenced.contains(name)
+                });
             }
-            for image in block.imgs.iter().flatten() {
-                if let Some(local) = image.local.as_ref() {
-                    locals.push(local.clone());
-                }
+            // 无法确认是否共用时保留图片，删书仍成功，避免破坏其他书的插图。
+            Err(error) => log::warn!(
+                "书库插图引用检查失败，已跳过图片清理 id={id}：{}",
+                readerx_log::redact::urls_in_text(&error)
+            ),
+        }
+    }
+    Ok(())
+}
+
+// 插图引用扫描只保留 local，跳过正文和 data URL；新旧布局共用 chapters 字段。
+#[derive(Deserialize)]
+struct ImageContentScan {
+    #[serde(default)]
+    chapters: Vec<ImageChapterScan>,
+}
+
+#[derive(Deserialize)]
+struct ImageChapterScan {
+    #[serde(default)]
+    blocks: Option<Vec<ImageBlockScan>>,
+}
+
+#[derive(Deserialize)]
+struct ImageBlockScan {
+    #[serde(default)]
+    local: Option<String>,
+    #[serde(default)]
+    imgs: Option<Vec<ImageLocalScan>>,
+}
+
+#[derive(Deserialize)]
+struct ImageLocalScan {
+    #[serde(default)]
+    local: Option<String>,
+}
+
+/// 一本书引用到的图片文件名（整行图、段内图、PDF 页图），不读取图片载荷。
+/// 文件不存在视为无引用；损坏或无法读取必须上报，不能误判为无人引用。
+fn image_locals_from_file(path: &Path) -> Result<HashSet<String>, String> {
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(HashSet::new()),
+        Err(error) => return Err(format!("读取插图引用失败: {error}")),
+    };
+    let content: ImageContentScan = serde_json::from_reader(BufReader::new(file))
+        .map_err(|error| format!("解析插图引用失败: {error}"))?;
+    let mut locals = HashSet::new();
+    for chapter in content.chapters {
+        for block in chapter.blocks.into_iter().flatten() {
+            locals.extend(block.local);
+            for image in block.imgs.into_iter().flatten() {
+                locals.extend(image.local);
             }
         }
     }
-    locals.sort();
-    locals.dedup();
-    locals
+    Ok(locals)
+}
+
+/// 删除待删书之后扫描剩余引用，两种布局都认；旧文件仍存在时也保留它的引用。
+fn remaining_image_locals(books: &Path) -> Result<HashSet<String>, String> {
+    let entries = fs::read_dir(books).map_err(|e| format!("读取书库失败: {e}"))?;
+    let mut referenced = HashSet::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("读取书库条目失败: {e}"))?;
+        let path = entry.path();
+        let kind = entry
+            .file_type()
+            .map_err(|e| format!("读取书库条目失败: {e}"))?;
+        let content = if kind.is_dir() {
+            path.join(CONTENT_FILE)
+        } else if path.extension().and_then(|s| s.to_str()) == Some("json") {
+            path
+        } else {
+            continue;
+        };
+        referenced.extend(image_locals_from_file(&content)?);
+    }
+    Ok(referenced)
 }
 
 /// 书库元数据列表（不含任何章节正文）：应用启动 / 书架只拉这一份，
@@ -1857,6 +1920,107 @@ mod tests {    use super::*;
             tags: Some(vec!["标签".to_string()]),
             source_tags: Some(vec!["源标签".to_string()]),
         }
+    }
+
+    fn write_image_book(books: &Path, id: &str, locals: &[&str], legacy: bool, inline: bool) {
+        let blocks: Vec<_> = locals
+            .iter()
+            .map(|local| {
+                if inline {
+                    serde_json::json!({"kind": "p", "text": "正文", "imgs": [{"local": local}]})
+                } else {
+                    serde_json::json!({"kind": "img", "local": local})
+                }
+            })
+            .collect();
+        let value = serde_json::json!({"id": id, "chapters": [{"blocks": blocks}]});
+        let path = if legacy {
+            books.join(format!("{id}.json"))
+        } else {
+            let dir = books.join(id);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join(BOOKMARKS_FILE), "{}").unwrap();
+            dir.join(CONTENT_FILE)
+        };
+        write_json_atomic(&path, &value, "测试书籍").unwrap();
+    }
+
+    #[test]
+    fn delete_book_removes_exclusive_images_before_losing_references() {
+        let root = temp_dir("delete-exclusive");
+        let books = root.join("books");
+        let images = root.join("images");
+        fs::create_dir_all(&books).unwrap();
+        fs::create_dir_all(&images).unwrap();
+        let block = "1111111111111111111111111111111111111111.png";
+        let inline = "2222222222222222222222222222222222222222.jpg";
+        let pdf = "b1_3333333333333333333333333333333333333333.png";
+        let unrelated = "4444444444444444444444444444444444444444.png";
+        write_image_book(&books, "b1", &[block, pdf, block], false, false);
+        // 同一书的旧文件也必须在删除前取引用，段内图不能漏掉。
+        write_image_book(&books, "b1", &[inline], true, true);
+        for name in [block, inline, pdf, unrelated] {
+            fs::write(images.join(name), b"image").unwrap();
+        }
+
+        delete_book_files(&books, Some(&images), "b1").unwrap();
+        assert!(!books.join("b1").exists());
+        assert!(!books.join("b1.json").exists());
+        for name in [block, inline, pdf] {
+            assert!(!images.join(name).exists(), "独占插图应被删除: {name}");
+        }
+        assert!(images.join(unrelated).exists(), "不能清理本书未引用的图片");
+        // 重复删除不存在的书仍成功。
+        delete_book_files(&books, Some(&images), "b1").unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn delete_book_preserves_shared_images_until_last_reference_is_deleted() {
+        let root = temp_dir("delete-shared");
+        let books = root.join("books");
+        let images = root.join("images");
+        fs::create_dir_all(&books).unwrap();
+        fs::create_dir_all(&images).unwrap();
+        // 两种书籍布局、两种图片命名都要检查其他书的引用。
+        for deleted_legacy in [false, true] {
+            for remaining_legacy in [false, true] {
+                for name in [
+                    "1111111111111111111111111111111111111111.png",
+                    "b1_1111111111111111111111111111111111111111.png",
+                ] {
+                    write_image_book(&books, "b1", &[name], deleted_legacy, false);
+                    write_image_book(&books, "b2", &[name], remaining_legacy, true);
+                    fs::write(images.join(name), b"shared image").unwrap();
+
+                    delete_book_files(&books, Some(&images), "b1").unwrap();
+                    assert_eq!(fs::read(images.join(name)).unwrap(), b"shared image");
+                    delete_book_files(&books, Some(&images), "b2").unwrap();
+                    assert!(!images.join(name).exists(), "最后一个引用删除后应清理插图");
+                }
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn delete_book_keeps_images_when_remaining_references_cannot_be_read() {
+        let root = temp_dir("delete-corrupt");
+        let books = root.join("books");
+        let images = root.join("images");
+        fs::create_dir_all(&books).unwrap();
+        fs::create_dir_all(&images).unwrap();
+        let name = "1111111111111111111111111111111111111111.png";
+        write_image_book(&books, "b1", &[name], false, false);
+        write_image_book(&books, "b2", &[name], false, true);
+        fs::write(books.join("b2").join(CONTENT_FILE), "{broken").unwrap();
+        fs::write(images.join(name), b"shared image").unwrap();
+
+        delete_book_files(&books, Some(&images), "b1").unwrap();
+        assert!(!books.join("b1").exists());
+        assert!(books.join("b2").exists());
+        assert!(images.join(name).exists(), "读取失败不能当成无人引用");
+        fs::remove_dir_all(root).unwrap();
     }
 
     /// 元信息文件与 LocalBook 的字段必须一一对应：加了字段却忘记同步时在这里失败，
