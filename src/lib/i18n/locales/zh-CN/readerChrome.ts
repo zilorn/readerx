@@ -6,6 +6,11 @@
  * 阅读页正文（src/pages/Reader.tsx）用 `reader.` 前缀，两边不要互相引用。
  */
 export const readerChrome = {
+  "readerChrome.settings.autoPage": "自动翻页",
+  "readerChrome.settings.autoPageDesc": "菜单、选区、听书和后台期间暂停",
+  "readerChrome.settings.autoPageInterval": "翻页间隔",
+  "readerChrome.settings.autoPageSeconds": "{seconds} 秒",
+
   "readerChrome.reading.volumeKeys": "音量键翻页",
   "readerChrome.reading.volumeKeysDesc": "音量减下一页，音量加上一页",
   "readerChrome.reading.volumeKeysFailed": "音量键翻页设置失败",

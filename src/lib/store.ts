@@ -19,6 +19,7 @@ const SHELF_KEY = "readerx.shelf";
 const FONT_KEY = "readerx.fontSize";
 const PARA_SPACING_KEY = "readerx.paragraphSpacing";
 const VOLUME_KEYS_KEY = "readerx.volumeKeyPaging";
+const AUTO_PAGE_INTERVAL_KEY = "readerx.autoPageInterval";
 const PAGE_MODE_KEY = "readerx.pageMode";
 const STATUS_BAR_KEY = "readerx.statusBar";
 const PROGRESS_SCOPE_KEY = "readerx.progressScope";
@@ -84,6 +85,7 @@ export async function initReaderState(): Promise<void> {
     storedSidebarCollapsed,
     storedTtsCacheLimit,
     storedVolumeKeyPaging,
+    storedAutoPageInterval,
   ] = await Promise.all([
     readState<string>(THEME_KEY),
     readState<Record<string, ShelfEntry>>(SHELF_KEY),
@@ -100,9 +102,13 @@ export async function initReaderState(): Promise<void> {
     readState<boolean>(SIDEBAR_COLLAPSED_KEY),
     readState<number>(TTS_CACHE_LIMIT_KEY),
     readState<boolean>(VOLUME_KEYS_KEY),
+    readState<number>(AUTO_PAGE_INTERVAL_KEY),
   ]);
 
   setVolumeKeyPagingSignal(storedVolumeKeyPaging === true);
+  if (typeof storedAutoPageInterval === "number" && Number.isFinite(storedAutoPageInterval)) {
+    setAutoPageIntervalSignal(clampAutoPageInterval(storedAutoPageInterval));
+  }
 
   // 未保存过偏好时默认护眼(sepia)，不再跟随系统深浅色
   const mode = normalizeTheme(storedTheme) ?? "sepia";
@@ -698,4 +704,25 @@ export const [autoAppUpdate, setAutoAppUpdate] = createSignal(true);
 export async function setAutoAppUpdateEnabled(value: boolean): Promise<void> {
   setAutoAppUpdate(value);
   await writeState("readerx.autoAppUpdate", value);
+}
+
+// 自动翻页只保存间隔，开始状态由当前阅读会话管理。
+export const AUTO_PAGE_INTERVAL_MIN = 5;
+export const AUTO_PAGE_INTERVAL_MAX = 120;
+const [autoPageInterval, setAutoPageIntervalSignal] = createSignal(30);
+let autoPageIntervalWriteQueue: Promise<void> = Promise.resolve();
+
+function clampAutoPageInterval(seconds: number): number {
+  return Math.min(AUTO_PAGE_INTERVAL_MAX, Math.max(AUTO_PAGE_INTERVAL_MIN, Math.round(seconds)));
+}
+
+export function currentAutoPageInterval(): number {
+  return autoPageInterval();
+}
+
+export function setAutoPageInterval(seconds: number): void {
+  if (!Number.isFinite(seconds)) return;
+  const next = clampAutoPageInterval(seconds);
+  setAutoPageIntervalSignal(next);
+  autoPageIntervalWriteQueue = autoPageIntervalWriteQueue.then(() => writeState(AUTO_PAGE_INTERVAL_KEY, next));
 }

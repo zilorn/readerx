@@ -3,8 +3,10 @@
  * - 顶部为与「设置」页共用的阅读设置（正文字号 / 段落间距 / 翻页方式），
  *   由 ReadingSettingsRows 提供，改动一处两处同步；
  * - 下方调整阅读页底部状态栏的显示（开/关）与进度百分比口径（整本书 / 当前章节）。
- * 状态栏本体渲染在 Reader.tsx 阅读区底部，此处只改全局偏好。
+ * - 自动翻页开关控制当前阅读会话，间隔作为全局偏好保存。
+ * 状态栏和自动翻页逻辑由 Reader.tsx 接线。
  */
+import { ReaderAutoPageControls } from "./ReaderAutoPageControls";
 import { Drawer } from "./Drawer";
 import { For, Show, type JSX } from "solid-js";
 import { t, type MessageKey } from "../lib/i18n";
@@ -32,6 +34,8 @@ import { ScrollArea } from "./ScrollArea";
 export interface ReaderSettingsSheetProps {
   open: boolean;
   onClose: () => void;
+  autoPageEnabled: boolean;
+  onAutoPageChange: () => void;
   /** 打开文本替换抽屉（列出本书可用替换并支持增删改） */
   onOpenReplace: () => void;
   /** 在线书「重新加载本章」：提供即在设置中显示该入口（本章正在重新加载时 disabled） */
@@ -126,6 +130,12 @@ export function ReaderSettingsSheet(props: ReaderSettingsSheetProps) {
           <Card>
             <ReadingSettingsRows />
           </Card>
+
+          <div class="mt-3">
+            <Card>
+              <ReaderAutoPageControls enabled={props.autoPageEnabled} onChange={props.onAutoPageChange} />
+            </Card>
+          </div>
 
           <div class="mt-3">
             <Card>

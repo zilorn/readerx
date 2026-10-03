@@ -1,3 +1,4 @@
+import { createReaderAutoPage } from "../lib/readerAutoPage";
 import { createReaderPageTurn } from "../lib/readerPageTurn";
 import { trackReadingTime } from "../lib/readingTime";
 import { Drawer } from "../components/Drawer";
@@ -140,6 +141,7 @@ import {
   splitParagraphPieces,
 } from "../lib/pagination";
 import {
+  currentAutoPageInterval,
   currentFontSize,
   currentMenuSliderEnabled,
   currentPageMode,
@@ -165,6 +167,7 @@ import { createEdgeHoverReveal } from "../lib/readerEdgeHover";
 import { sameRenderWindow } from "../lib/renderWindow";
 import { centerInScroller } from "../lib/scrollWithin";
 import { showToast } from "../lib/toast";
+import { createLogger } from "../lib/logger";
 import { reportFailure } from "../lib/errorReport";
 import { openWebviewPage } from "../lib/backend";
 import { openExternal } from "../lib/external";
@@ -888,11 +891,21 @@ interface ReaderSearchSession {
 // 阅读页
 // ---------------------------------------------------------------------------
 
+const log = createLogger("reader");
+
 export default function ReaderPage() {
   const navigate = useNavigate();
   const params = useParams();
   const location = useLocation();
   const bookId = () => params.id ?? "";
+  const [autoPageEnabled, setAutoPageEnabled] = createSignal(false);
+  const [autoPageScrollTick, setAutoPageScrollTick] = createSignal(0);
+  function stopAutoPage(): void {
+    if (!autoPageEnabled()) return;
+    setAutoPageEnabled(false);
+    log.info("停止自动翻页");
+  }
+  createEffect(on(bookId, stopAutoPage, { defer: true }));
 
   createEffect(() => {
     void ensureLocalBooksLoaded();
@@ -2743,6 +2756,7 @@ export default function ReaderPage() {
         return;
       const root = scrollRef;
       if (!root) return;
+      setAutoPageScrollTick((value) => value + 1);
       if (
         userScrolled &&
         followEnabled() &&
@@ -3764,8 +3778,8 @@ export default function ReaderPage() {
   const [volumeScrollEndCid, setVolumeScrollEndCid] = createSignal<string | null>(null);
   const [volumeKeysForeground, setVolumeKeysForeground] = createSignal(!document.hidden);
   const [volumeKeysEditing, setVolumeKeysEditing] = createSignal(false);
-  const volumeKeysActive = createMemo(() =>
-    currentVolumeKeyPaging() && volumeKeysForeground() && !volumeKeysEditing() &&
+  const readerBodyAvailable = createMemo(() =>
+    volumeKeysForeground() && !volumeKeysEditing() &&
     !!chapter() && !volumeScrollEndCid() && !resumeTarget() &&
     !contentPendingGate() && !remoteReloading() &&
     !menuOpen() && !tocOpen() && !bmPanelOpen() && !bookSearchOpen() &&
@@ -3773,6 +3787,48 @@ export default function ReaderPage() {
     !ttsSettingsOpen() && !ttsDecodeGuideOpen() && !reloadRisk() && !updateConflict() &&
     !selSpan() && !selMenu(),
   );
+  const volumeKeysActive = createMemo(() => currentVolumeKeyPaging() && readerBodyAvailable());
+  createReaderAutoPage({
+    enabled: autoPageEnabled,
+    interval: currentAutoPageInterval,
+    position: () => [chapterIdx(), pageIdx(), autoPageScrollTick(), layout(), isPaged()],
+    ready: () => readerBodyAvailable() && !ttsActive() && searchSession() === null &&
+      contentLoad() === "ready" && location.pathname === `/book/${encodeURIComponent(bookId())}` &&
+      (isPaged() ? !pagedBusy() && totalPages() > 0 : scrollShown() >= units().length),
+    advance: () => {
+      // 手指仍在正文上或纸张正在翻动时等待，避免打断拖动和长按。
+      if (gestureStart || pageTurn.active() || hasActiveTextSelection()) return true;
+      if (isPaged()) {
+        if (snapPage(pageIdx()) + pageColumns() >= totalPages() && isLastChapter()) return false;
+        userFlip(1);
+        return true;
+      }
+      const root = scrollRef;
+      if (!root || root.clientHeight <= 0) return true;
+      const max = Math.max(0, root.scrollHeight - root.clientHeight);
+      if (root.scrollTop < max - 1) {
+        root.scrollTop = Math.min(max, root.scrollTop + root.clientHeight * 0.9);
+        return true;
+      }
+      if (isLastChapter()) return false;
+      goToChapter(chapterIdx() + 1, true);
+      return true;
+    },
+    onEnd: stopAutoPage,
+  });
+  function toggleAutoPage(): void {
+    if (autoPageEnabled()) {
+      stopAutoPage();
+      return;
+    }
+    ttsPlayer.stop();
+    setAutoPageEnabled(true);
+    setReaderSettingsOpen(false);
+    setMenuOpen(false);
+    setTocOpen(false);
+    setBmPanelOpen(false);
+    log.info("开始自动翻页", { interval: currentAutoPageInterval() });
+  }
   createEffect(() => {
     const cid = volumeScrollEndCid();
     if (!cid) return;
@@ -5124,6 +5180,8 @@ export default function ReaderPage() {
             {/* 阅读设置（底部状态栏显示与进度口径） */}
             <ReaderSettingsSheet
               open={readerSettingsOpen()}
+              autoPageEnabled={autoPageEnabled()}
+              onAutoPageChange={toggleAutoPage}
               onClose={() => setReaderSettingsOpen(false)}
               onOpenReplace={openReplaceManager}
               onlineReload={

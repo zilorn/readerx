@@ -6,6 +6,11 @@
  * The reading page itself (src/pages/Reader.tsx) owns the `reader.` prefix.
  */
 export const readerChrome = {
+  "readerChrome.settings.autoPage": "Auto page turn",
+  "readerChrome.settings.autoPageDesc": "Pauses for menus, selection, narration and background",
+  "readerChrome.settings.autoPageInterval": "Turn interval",
+  "readerChrome.settings.autoPageSeconds": "{seconds} s",
+
   "readerChrome.reading.volumeKeys": "Volume key page turning",
   "readerChrome.reading.volumeKeysDesc": "Volume down: next page; volume up: previous page",
   "readerChrome.reading.volumeKeysFailed": "Failed to configure volume key page turning",
