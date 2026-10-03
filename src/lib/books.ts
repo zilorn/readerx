@@ -48,7 +48,6 @@ import {
 } from "./booksTypes";
 import { ensureShelfEntry } from "./store";
 import { clearAllBookmarks, removeBookmarksForBook } from "./bookmarks";
-import { invalidateBookLengths } from "./progress";
 import { createLogger } from "./logger";
 import { t } from "./i18n";
 
@@ -955,7 +954,6 @@ export async function replaceBookContent(
     cover: draft.cover,
     importedAt: Date.now(),
   };
-  invalidateBookLengths(next.id);
   // 整本替换同样排队：重新导入期间可能有章节回写在飞，避免互相覆盖
   await enqueueBookWrite(next.id, async () => {
     await saveRemoteBook(next);
