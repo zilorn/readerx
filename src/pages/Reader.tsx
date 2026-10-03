@@ -5,6 +5,7 @@ import { Drawer } from "../components/Drawer";
 import {
   For,
   Show,
+  createComputed,
   createEffect,
   createMemo,
   createSignal,
@@ -2351,19 +2352,27 @@ export default function ReaderPage() {
     armFollowPageCheck(); // 跳到的这一屏是朗读句所在屏时恢复跟读跟随
   }
 
-  // 单页 ↔ 双页切换（窗口宽度跨过阈值）：一屏页数、列宽、总页数全变了，同一个页码不再对应
-  // 同一段文字 —— 按当前页首行的**文本偏移**重新落位（与打开书恢复进度共用 applyResume）。
-  // 用 viewOffset（已提交的阅读位置）而不是分页结果：本效果可能在整章重新排版清空分页之后才跑。
-  createEffect(
-    on(pageColumns, () => {
-      if (!isPaged()) return;
+  // 阅读模式 / 单双页切换：旧页码和新视图不对应，按字符偏移共用 applyResume。
+  // computed 在正文 DOM 更新与进度 effect 之前置位，避免新视图先把章首 / 旧页码落库；
+  // 滚动转分页还要采样旧视口，补上尚未执行的滚动帧，不能只用上次提交的 viewOffset。
+  createComputed(
+    on([isPaged, pageColumns], ([mode], prev) => {
+      if (!prev) return; // 首次挂载由存档恢复流程定位。
+      const modeChanged = mode !== prev[0];
+      if (!mode && !modeChanged) return;
       const ch = chapter();
-      const char = viewOffset();
-      if (ch && char > 0) {
+      if (!ch) return;
+      // 快速连续切换 / 打开书尚未恢复时，沿用未落定的目标，不能退回旧位置。
+      const pending = resumeTarget();
+      if (pending?.cid === ch.cid) return;
+      const char = modeChanged && !prev[0] && scrollRef?.isConnected
+        ? visibleCharAtTop(scrollRef) ?? viewOffset()
+        : viewOffset();
+      if (modeChanged || char > 0) {
         setResumeTarget({ cid: ch.cid, char });
         return;
       }
-      // 章首 / 无正文可锚定：只需把页码夹回屏首
+      // 单双页切换且在章首 / 无正文可锚定：只需把页码夹回屏首。
       const next = spreadStart(pageIdx(), pageColumns());
       if (next !== pageIdx()) setPageIdx(next);
     }),
@@ -2717,7 +2726,7 @@ export default function ReaderPage() {
     return true;
   }
 
-  /** 精确恢复：等章节 / 排版 / 正文就绪后，把视口定位到存档文本位置（仅打开书一次） */
+  /** 精确恢复：等章节 / 排版 / 正文就绪后，把视口定位到存档文本位置（打开书、阅读模式与单双页切换） */
   function applyResume(): void {
     const target = resumeTarget();
     if (!target) return;
