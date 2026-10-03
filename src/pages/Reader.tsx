@@ -3139,8 +3139,8 @@ export default function ReaderPage() {
    * 双页模式下本屏 = 并排的两页，区间取两页之和（见 `visibleSpan`）。
    */
   function pageSelLayout(): {
-    lo: { x: number; y: number } | null;
-    hi: { x: number; y: number } | null;
+    lo: { x: number; y: number; top: number } | null;
+    hi: { x: number; y: number; top: number } | null;
     top: number;
     bottom: number;
   } | null {
@@ -3229,8 +3229,8 @@ export default function ReaderPage() {
       return { lo: null, hi: null, top: zTop, bottom: zBottom };
     }
     return {
-      lo: loP ? { x: loP.x, y: loP.y } : null,
-      hi: hiP ? { x: hiP.x, y: hiP.y } : null,
+      lo: loP ? { x: loP.x, y: loP.y, top: loP.top } : null,
+      hi: hiP ? { x: hiP.x, y: hiP.y, top: hiP.top } : null,
       top: zTop,
       bottom: zBottom,
     };
@@ -3514,8 +3514,8 @@ export default function ReaderPage() {
 
   // 选区手柄位置（相对阅读区容器；两端落在当前页内才显示）
   const [selHandles, setSelHandles] = createSignal<{
-    lo?: { x: number; y: number };
-    hi?: { x: number; y: number };
+    lo?: { x: number; y: number; top: number };
+    hi?: { x: number; y: number; top: number };
   } | null>(null);
 
   function refreshSelHandles(): void {
@@ -3524,7 +3524,10 @@ export default function ReaderPage() {
       setSelHandles(null);
       return;
     }
-    const out: { lo?: { x: number; y: number }; hi?: { x: number; y: number } } = {};
+    const out: {
+      lo?: { x: number; y: number; top: number };
+      hi?: { x: number; y: number; top: number };
+    } = {};
     if (geo.lo) out.lo = geo.lo;
     if (geo.hi) out.hi = geo.hi;
     setSelHandles(out.lo || out.hi ? out : null);
@@ -4590,7 +4593,11 @@ export default function ReaderPage() {
                         beginHandleDrag("lo", e);
                       }}
                     >
-                      <span class="block h-4 w-4 rounded-full border-2 border-white bg-accent shadow-[0_1px_6px_rgb(0_0_0/0.35)]" />
+                      <span
+                        class="pointer-events-none absolute bottom-1/2 left-1/2 w-0.5 -translate-x-1/2 rounded-full bg-accent"
+                        style={{ height: `${Math.max(0, p().y - p().top)}px` }}
+                      />
+                      <span class="relative block h-4 w-4 rounded-full border-2 border-white bg-accent shadow-[0_1px_6px_rgb(0_0_0/0.35)]" />
                     </button>
                   )}
                 </Show>
@@ -4609,7 +4616,11 @@ export default function ReaderPage() {
                         beginHandleDrag("hi", e);
                       }}
                     >
-                      <span class="block h-4 w-4 rounded-full border-2 border-white bg-accent shadow-[0_1px_6px_rgb(0_0_0/0.35)]" />
+                      <span
+                        class="pointer-events-none absolute bottom-1/2 left-1/2 w-0.5 -translate-x-1/2 rounded-full bg-accent"
+                        style={{ height: `${Math.max(0, p().y - p().top)}px` }}
+                      />
+                      <span class="relative block h-4 w-4 rounded-full border-2 border-white bg-accent shadow-[0_1px_6px_rgb(0_0_0/0.35)]" />
                     </button>
                   )}
                 </Show>
