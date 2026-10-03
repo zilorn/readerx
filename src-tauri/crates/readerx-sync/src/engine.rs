@@ -1621,10 +1621,11 @@ impl SyncEngine {
     }
 
     /// 应用一条已确认「因果就绪」的操作（远端路径）。
+    /// 与本地提交一致，先落盘并 fsync，再改实体与索引；写入失败不改变内存状态。
     fn apply_ready(&mut self, op: &Operation, peer_device: Option<&str>) -> Result<MergeOutcome> {
         self.ensure_writable()?;
-        let outcome = self.merge_into_model(op, peer_device);
         self.store.append_op(op)?;
+        let outcome = self.merge_into_model(op, peer_device);
         let index = self.ops.len();
         self.op_index.insert(op.op_id.clone(), index);
         self.origin_index.insert((op.origin.clone(), op.seq), index);
@@ -1879,6 +1880,7 @@ mod tests {
             Schema::new("book")
                 .field("title", MergeKind::Lww)
                 .field("author", MergeKind::Lww)
+                .field("count", MergeKind::Counter)
                 .field("tags", MergeKind::set())
                 .field("order", MergeKind::List)
                 .field("format", MergeKind::Frozen)
@@ -1943,6 +1945,114 @@ mod tests {
             "快照之后的日志尾部必须被重放"
         );
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn remote_append_failure_preserves_state_and_retry_applies_once() {
+        let mut a = engine("append-failure-a");
+        let mut b = engine("append-failure-b");
+        let id = a
+            .create_entity("book", None, [("title", serde_json::json!("一"))])
+            .unwrap();
+        b.apply_remote(&a.ops()[0], None).unwrap();
+        a.increment(&id, "count", 7).unwrap();
+        let op = a.ops()[1].clone();
+        b.flush().unwrap();
+        b.knowledge_cache = Some(b.knowledge());
+        let before = serde_json::to_value(b.entity(&id)).unwrap();
+        let clock = serde_json::to_value(HlcState::from_clock(&b.clock)).unwrap();
+        let knowledge = b.knowledge_cache.clone();
+        let op_index = b.op_index.clone();
+        let origin_index = b.origin_index.clone();
+        let conflicts = serde_json::to_value(&b.conflicts).unwrap();
+        let log_path = b.store.root().join("oplog.jsonl");
+        let backup = b.store.root().join("oplog.saved");
+        fs::rename(&log_path, &backup).unwrap();
+        fs::create_dir(&log_path).unwrap(); // 不依赖权限或剩余磁盘空间的追加失败。
+        assert!(b.apply_remote(&op, None).is_err());
+        assert_eq!(serde_json::to_value(b.entity(&id)).unwrap(), before);
+        assert_eq!(
+            serde_json::to_value(HlcState::from_clock(&b.clock)).unwrap(),
+            clock
+        );
+        assert_eq!(b.op_index, op_index);
+        assert_eq!(b.origin_index, origin_index);
+        assert_eq!(b.op_count(), 1);
+        assert_eq!(serde_json::to_value(&b.conflicts).unwrap(), conflicts);
+        assert_eq!(b.knowledge_cache, knowledge);
+        assert!(!b.dirty);
+        fs::remove_dir(&log_path).unwrap();
+        fs::rename(&backup, &log_path).unwrap();
+        assert!(matches!(
+            b.apply_remote(&op, None).unwrap(),
+            ApplyResult::Applied { .. }
+        ));
+        assert_eq!(b.field(&id, "count"), Some(serde_json::json!(7)));
+        assert_eq!(b.apply_remote(&op, None).unwrap(), ApplyResult::Duplicate);
+        let dir = b.store.root().to_path_buf();
+        drop(b); // 不刷快照，重放日志尾部。
+        let mut reopened =
+            SyncEngine::open(&dir, EngineOptions::new("B").with_schemas(schemas())).unwrap();
+        assert_eq!(reopened.field(&id, "count"), Some(serde_json::json!(7)));
+        assert_eq!(
+            reopened.apply_remote(&op, None).unwrap(),
+            ApplyResult::Duplicate
+        );
+        assert_eq!(reopened.op_count(), 2);
+    }
+
+    #[test]
+    fn deferred_append_failure_remains_retryable() {
+        let mut a = engine("deferred-append-a");
+        let mut b = engine("deferred-append-b");
+        let id = a
+            .create_entity("book", None, [("title", serde_json::json!("一"))])
+            .unwrap();
+        a.increment(&id, "count", 7).unwrap();
+        let op = a.ops()[1].clone();
+        assert!(matches!(
+            b.apply_remote(&op, None).unwrap(),
+            ApplyResult::Deferred { .. }
+        ));
+        b.commit_local(a.ops()[0].clone()).unwrap(); // 补前序但不自动重试缓冲。
+        b.flush().unwrap();
+        let before = serde_json::to_value(b.entity(&id)).unwrap();
+        let log_path = b.store.root().join("oplog.jsonl");
+        let backup = b.store.root().join("oplog.saved");
+        fs::rename(&log_path, &backup).unwrap();
+        fs::create_dir(&log_path).unwrap();
+        assert_eq!(b.retry_deferred(), 0);
+        assert_eq!(serde_json::to_value(b.entity(&id)).unwrap(), before);
+        assert_eq!(b.deferred_ops(), &[op.clone()]);
+        assert_eq!(b.op_count(), 1);
+        assert!(!b.dirty);
+        fs::remove_dir(&log_path).unwrap();
+        fs::rename(&backup, &log_path).unwrap();
+        assert_eq!(b.retry_deferred(), 1);
+        assert!(b.deferred_ops().is_empty());
+        assert_eq!(b.field(&id, "count"), Some(serde_json::json!(7)));
+        assert_eq!(b.apply_remote(&op, None).unwrap(), ApplyResult::Duplicate);
+    }
+
+    #[test]
+    fn remote_log_written_before_memory_is_replayed_after_restart() {
+        let mut a = engine("remote-crash-a");
+        let b = engine("remote-crash-b");
+        let id = a
+            .create_entity("book", None, [("title", serde_json::json!("一"))])
+            .unwrap();
+        let op = a.ops()[0].clone();
+        b.store.append_op(&op).unwrap(); // 模拟 fsync 后、合并内存前被杀。
+        let dir = b.store.root().to_path_buf();
+        drop(b);
+        let mut reopened =
+            SyncEngine::open(&dir, EngineOptions::new("B").with_schemas(schemas())).unwrap();
+        assert_eq!(reopened.field(&id, "title"), Some(serde_json::json!("一")));
+        assert_eq!(
+            reopened.apply_remote(&op, None).unwrap(),
+            ApplyResult::Duplicate
+        );
+        assert_eq!(reopened.op_count(), 1);
     }
 
     #[test]
