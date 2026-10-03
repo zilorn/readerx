@@ -41,6 +41,7 @@ import {
 } from "../lib/store";
 import { appVersion, loadAppVersion } from "../lib/version";
 import { t, type MessageKey } from "../lib/i18n";
+import { isAndroidPlatform } from "../lib/platform";
 import { ReadingSettingsRows } from "../components/ReadingSettingsRows";
 import { LanguageRow } from "../components/LanguageRow";
 
@@ -177,9 +178,22 @@ export default function SettingsPage() {
         <section class="mb-6">
           <h2 class="mx-1 mb-2 text-[12.5px] font-medium tracking-[0.04em] text-text-3">
             {t("settings.section.reading")}
-          </h2>          <div class="divide-y divide-border overflow-hidden rounded-[14px] border border-border bg-surface">
-            <ReadingSettingsRows />
-            <ReadingTimeSummary />
+          </h2>
+          <div class="space-y-3">
+            <div class="divide-y divide-border overflow-hidden rounded-[14px] border border-border bg-surface">
+              <ReadingSettingsRows group="adjustments" />
+            </div>
+            <div class="divide-y divide-border overflow-hidden rounded-[14px] border border-border bg-surface">
+              <ReadingSettingsRows group="options" />
+            </div>
+            <Show when={isAndroidPlatform()}>
+              <div class="divide-y divide-border overflow-hidden rounded-[14px] border border-border bg-surface">
+                <ReadingSettingsRows group="switches" />
+              </div>
+            </Show>
+            <div class="overflow-hidden rounded-[14px] border border-border bg-surface">
+              <ReadingTimeSummary />
+            </div>
           </div>
         </section>
 

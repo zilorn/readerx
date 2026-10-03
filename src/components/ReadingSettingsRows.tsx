@@ -73,29 +73,23 @@ function FontSizeRow() {
 /** 段落间距：数值 + 滑块 */
 function ParaSpacingRow() {
   return (
-    <div class="flex w-full cursor-default items-center gap-3 px-4 py-[13px] text-left">
+    <label class="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-[13px]">
       <span class="flex min-w-0 flex-1 flex-col gap-0.5">
         <span class="text-[14.5px] font-medium">{t("readerChrome.reading.paraSpacing")}</span>
-        <span class="text-[11.5px] text-text-3">
-          {t("readerChrome.reading.paraSpacingDesc")}
-        </span>
+        <span class="text-[11.5px] text-text-3">{t("readerChrome.reading.paraSpacingDesc")}</span>
       </span>
-      <div class="flex flex-none items-center gap-3">
-        <span class="min-w-[42px] text-right text-[13px] font-semibold tabular-nums">
-          {currentParaSpacing().toFixed(2)}
-        </span>
-        <input
-          type="range"
-          class="accent-accent"
-          min={PARA_SPACING_MIN}
-          max={PARA_SPACING_MAX}
-          step={PARA_SPACING_STEP}
-          value={currentParaSpacing()}
-          aria-label={t("readerChrome.reading.paraSpacing")}
-          onInput={(e) => setParaSpacing(Number(e.currentTarget.value))}
-        />
-      </div>
-    </div>
+      <span class="text-[13px] font-semibold tabular-nums text-text-2">{currentParaSpacing().toFixed(2)}</span>
+      <input
+        type="range"
+        class="w-full accent-accent"
+        min={PARA_SPACING_MIN}
+        max={PARA_SPACING_MAX}
+        step={PARA_SPACING_STEP}
+        value={currentParaSpacing()}
+        aria-label={t("readerChrome.reading.paraSpacing")}
+        onInput={(e) => setParaSpacing(Number(e.currentTarget.value))}
+      />
+    </label>
   );
 }
 
@@ -163,13 +157,20 @@ function HanModeRow() {
 }
 
 /** 共用阅读设置行（需放入带 divide-y 的卡片容器内使用；简繁转换仅中文界面可见） */
-export function ReadingSettingsRows() {
+export function ReadingSettingsRows(props: { group: "adjustments" | "options" | "switches" }) {
   return (
     <>
-      <FontSizeRow />
-      <ParaSpacingRow />
-      <PageModeRow />
-      <Show when={isAndroidPlatform()}>
+      <Show when={props.group === "adjustments"}>
+        <FontSizeRow />
+        <ParaSpacingRow />
+      </Show>
+      <Show when={props.group === "options"}>
+        <PageModeRow />
+        <Show when={currentLocale() === "zh-CN"}>
+          <HanModeRow />
+        </Show>
+      </Show>
+      <Show when={props.group === "switches" && isAndroidPlatform()}>
         <div class="flex w-full items-center gap-3 px-4 py-[13px] text-left">
           <span class="flex min-w-0 flex-1 flex-col gap-0.5">
             <span class="text-[14.5px] font-medium">{t("readerChrome.reading.volumeKeys")}</span>
@@ -181,9 +182,6 @@ export function ReadingSettingsRows() {
             onChange={() => setVolumeKeyPaging(!currentVolumeKeyPaging())}
           />
         </div>
-      </Show>
-      <Show when={currentLocale() === "zh-CN"}>
-        <HanModeRow />
       </Show>
     </>
   );

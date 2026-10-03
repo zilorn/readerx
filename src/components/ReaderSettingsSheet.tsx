@@ -126,57 +126,14 @@ export function ReaderSettingsSheet(props: ReaderSettingsSheetProps) {
         </div>
 
         <ScrollArea class="min-h-0 flex-1" contentClass="px-4 pb-[calc(20px+env(safe-area-inset-bottom))] pt-3">
-          {/* 与「设置」页共用的阅读设置（字号 / 段落间距 / 翻页方式） */}
           <Card>
-            <ReadingSettingsRows />
+            <ReadingSettingsRows group="adjustments" />
+            <ReaderAutoPageControls group="adjustments" enabled={props.autoPageEnabled} onChange={props.onAutoPageChange} />
           </Card>
 
           <div class="mt-3">
             <Card>
-              <ReaderAutoPageControls enabled={props.autoPageEnabled} onChange={props.onAutoPageChange} />
-            </Card>
-          </div>
-
-          <div class="mt-3">
-            <Card>
-              <button
-                type="button"
-                class="flex w-full items-center gap-3 px-4 py-[13px] text-left transition-colors active:bg-surface-2"
-                onClick={props.onOpenReplace}
-              >
-                <span class="grid h-9 w-9 flex-none place-items-center rounded-[10px] bg-surface-2 text-accent">
-                  <ReplaceIcon size={18} />
-                </span>
-                <span class="flex min-w-0 flex-1 flex-col gap-0.5">
-                  <span class="text-[14.5px] font-medium">
-                    {t("readerChrome.settings.textReplace")}
-                  </span>
-                  <span class="text-[11.5px] text-text-3">
-                    {t("readerChrome.settings.textReplaceDesc")}
-                  </span>
-                </span>
-                <ChevronRightIcon size={17} class="flex-none text-text-3" />
-              </button>
-            </Card>
-          </div>
-
-          <div class="mt-3">
-            <Card>
-              <div class="flex w-full items-center gap-3 px-4 py-[13px] text-left">
-                <span class="flex min-w-0 flex-1 flex-col gap-0.5">
-                  <span class="text-[14.5px] font-medium">
-                    {t("readerChrome.settings.statusBar")}
-                  </span>
-                  <span class="text-[11.5px] text-text-3">
-                    {t("readerChrome.settings.statusBarDesc")}
-                  </span>
-                </span>
-                <ToggleSwitch
-                  on={currentStatusBarEnabled()}
-                  label={t("readerChrome.settings.statusBar")}
-                  onChange={() => setStatusBarEnabled(!currentStatusBarEnabled())}
-                />
-              </div>
+              <ReadingSettingsRows group="options" />
               <div class="flex w-full items-center gap-3 px-4 py-[13px] text-left">
                 <span class="flex min-w-0 flex-1 flex-col gap-0.5">
                   <span class="text-[14.5px] font-medium">
@@ -212,6 +169,28 @@ export function ReaderSettingsSheet(props: ReaderSettingsSheetProps) {
                   </For>
                 </div>
               </div>
+            </Card>
+          </div>
+
+          <div class="mt-3">
+            <Card>
+              <ReadingSettingsRows group="switches" />
+              <ReaderAutoPageControls group="switches" enabled={props.autoPageEnabled} onChange={props.onAutoPageChange} />
+              <div class="flex w-full items-center gap-3 px-4 py-[13px] text-left">
+                <span class="flex min-w-0 flex-1 flex-col gap-0.5">
+                  <span class="text-[14.5px] font-medium">
+                    {t("readerChrome.settings.statusBar")}
+                  </span>
+                  <span class="text-[11.5px] text-text-3">
+                    {t("readerChrome.settings.statusBarDesc")}
+                  </span>
+                </span>
+                <ToggleSwitch
+                  on={currentStatusBarEnabled()}
+                  label={t("readerChrome.settings.statusBar")}
+                  onChange={() => setStatusBarEnabled(!currentStatusBarEnabled())}
+                />
+              </div>
               <div class="flex w-full items-center gap-3 px-4 py-[13px] text-left">
                 <span class="flex min-w-0 flex-1 flex-col gap-0.5">
                   <span class="text-[14.5px] font-medium">
@@ -227,6 +206,29 @@ export function ReaderSettingsSheet(props: ReaderSettingsSheetProps) {
                   onChange={() => setMenuSliderEnabled(!currentMenuSliderEnabled())}
                 />
               </div>
+            </Card>
+          </div>
+
+          <div class="mt-3">
+            <Card>
+              <button
+                type="button"
+                class="flex w-full items-center gap-3 px-4 py-[13px] text-left transition-colors active:bg-surface-2"
+                onClick={props.onOpenReplace}
+              >
+                <span class="grid h-9 w-9 flex-none place-items-center rounded-[10px] bg-surface-2 text-accent">
+                  <ReplaceIcon size={18} />
+                </span>
+                <span class="flex min-w-0 flex-1 flex-col gap-0.5">
+                  <span class="text-[14.5px] font-medium">
+                    {t("readerChrome.settings.textReplace")}
+                  </span>
+                  <span class="text-[11.5px] text-text-3">
+                    {t("readerChrome.settings.textReplaceDesc")}
+                  </span>
+                </span>
+                <ChevronRightIcon size={17} class="flex-none text-text-3" />
+              </button>
             </Card>
           </div>
 
