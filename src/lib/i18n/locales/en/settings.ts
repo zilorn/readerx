@@ -21,6 +21,7 @@ export const settings = {
   "settings.readingTime.bookRanking": "Books by total reading time",
   "settings.readingTime.emptyBooks": "No book reading recorded yet",
   "settings.readingTime.removedBook": "Book removed from library",
+  "settings.readingTime.hiddenBooks": "Hidden books",
   "settings.readingTime.showAll": "Show all {count} books",
   "settings.readingTime.showAll_one": "Show all {count} book",
   "settings.readingTime.showAll_other": "Show all {count} books",

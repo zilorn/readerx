@@ -3,6 +3,7 @@ import { readingTimeStats } from "../lib/store";
 import { formatReadingDuration, readingDay } from "../lib/readingTime";
 import { bookMetaById, ensureLocalBooksLoaded } from "../lib/books";
 import { bookDisplayTitle } from "../lib/bookDisplay";
+import { isHiddenGroupId } from "../lib/groups";
 import { currentLocale, t } from "../lib/i18n";
 import { useNavigate } from "@solidjs/router";
 import { PageHeader } from "../components/PageHeader";
@@ -48,9 +49,17 @@ export default function ReadingTimePage() {
     }
     return count;
   });
-  const rankedBooks = createMemo(() => Object.entries(readingTimeStats().books)
-    .filter(([, milliseconds]) => milliseconds > 0)
-    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])));
+  const rankedBooks = createMemo(() => {
+    const entries: [string | null, number][] = [];
+    let hiddenMilliseconds = 0;
+    for (const [id, milliseconds] of Object.entries(readingTimeStats().books)) {
+      if (milliseconds <= 0) continue;
+      if (isHiddenGroupId(bookMetaById(id)?.groupId)) hiddenMilliseconds += milliseconds;
+      else entries.push([id, milliseconds]);
+    }
+    if (hiddenMilliseconds > 0) entries.push([null, hiddenMilliseconds]);
+    return entries.sort((a, b) => b[1] - a[1] || (a[0] ?? "").localeCompare(b[0] ?? ""));
+  });
   const bookTotal = createMemo(() => rankedBooks().reduce((sum, [, value]) => sum + value, 0));
   const dateLabel = (date: Date) => new Intl.DateTimeFormat(currentLocale(), { month: "short", day: "numeric" }).format(date);
   const fullDateLabel = (date: Date) => new Intl.DateTimeFormat(currentLocale(), { year: "numeric", month: "short", day: "numeric", weekday: "short" }).format(date);
@@ -98,7 +107,7 @@ export default function ReadingTimePage() {
                   <span class="w-4 shrink-0 text-[12px] tabular-nums text-text-3">{index() + 1}</span>
                   <div class="min-w-0 flex-1">
                     <div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 text-[12px]">
-                      <span class="min-w-0 break-words">{bookMetaById(id) ? bookDisplayTitle(bookMetaById(id)?.title) : t("settings.readingTime.removedBook")}</span>
+                      <span class="min-w-0 break-words">{id === null ? t("settings.readingTime.hiddenBooks") : bookMetaById(id) ? bookDisplayTitle(bookMetaById(id)?.title) : t("settings.readingTime.removedBook")}</span>
                       <span class="shrink-0 tabular-nums text-text-2">{formatReadingDuration(milliseconds)} · {Math.round(milliseconds / bookTotal() * 100)}%</span>
                     </div>
                     <div class="mt-2 h-1 overflow-hidden rounded-full bg-border" aria-hidden="true"><div class="h-full rounded-full bg-accent" style={{ width: `${milliseconds / bookTotal() * 100}%` }} /></div>
