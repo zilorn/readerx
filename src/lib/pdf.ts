@@ -283,8 +283,8 @@ export async function parsePdfFile(file: File, options: ParsePdfOptions): Promis
   // 直接把 ArrayBuffer 交给 pdf.js：它会转移给 worker（不再复制一份），大文件省一半内存
   const bytes = await file.arrayBuffer();
   const task = pdfjs.getDocument({ data: bytes, isEvalSupported: false });
-  const doc = await task.promise;
   try {
+    const doc = await task.promise;
     const pageCount = doc.numPages;
     if (pageCount <= 0) throw new Error(t("library.pdf.noPages"));
     const fallbackTitle = file.name.replace(/\.pdf$/i, "").trim() || t("common.unnamed");
