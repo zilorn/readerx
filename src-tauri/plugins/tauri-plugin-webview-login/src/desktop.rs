@@ -334,21 +334,22 @@ fn wait_for_completion(
         cookies.len(),
         url_host(&final_url)
     );
-    if cookies.is_empty() {
-        log::warn!("登录窗口没有取到任何 Cookie（closed={closed} timed_out={timed_out}）");
-        return LoginOutcome::failure(
-            final_url,
-            if closed {
-                "登录窗口已关闭，且没有取到任何 Cookie（站点若用 localStorage 记登录态，请点窗口里的「完成」收尾）"
-                    .to_string()
-            } else {
-                "没有取到任何 Cookie，请确认已在窗口里完成登录".to_string()
-            },
-        );
-    }
+    // Cookie 为空也要采集：站点可能只用页面存储保存登录凭证。
+    // 与 Android 一样，正常收尾不以 Cookie 是否存在判断用户是否完成登录。
+    let probe_result = request_probe_result(window, &final_url, request.probe.as_ref());
+    completion_outcome(&final_url, &cookies, probe_result, timed_out, timeout_secs)
+}
+
+fn completion_outcome(
+    final_url: &str,
+    cookies: &[Cookie<'static>],
+    probe_result: Option<String>,
+    timed_out: bool,
+    timeout_secs: u64,
+) -> LoginOutcome {
     let mut outcome =
-        LoginOutcome::success(&final_url, cookie_header(&cookies), cookies.len() as u64);
-    outcome.probe_result = request_probe_result(window, fallback_url, request.probe.as_ref());
+        LoginOutcome::success(final_url, cookie_header(cookies), cookies.len() as u64);
+    outcome.probe_result = probe_result;
     if timed_out {
         outcome.message = format!(
             "等待超过 {timeout_secs} 秒，已按当前状态收尾（Cookie {} 条）",
@@ -560,7 +561,7 @@ fn request_probe_result(
     loop {
         match eval_page_text(window, &probe.read, POLL_INTERVAL) {
             // 非空且不是「还没采完」才是结果；空串可能是首轮尚未写入，继续等
-            Some(text) if !text.trim().is_empty() && !text.contains(&probe.pending) => {
+            Some(text) if probe_result_is_ready(&text, &probe.pending) => {
                 // 探针内容是登录凭证，只记长度不记内容
                 log::debug!("存储探针已返回结果 bytes={}", text.len());
                 return Some(text);
@@ -577,6 +578,15 @@ fn request_probe_result(
         }
         std::thread::sleep(Duration::from_millis(200));
     }
+}
+
+/// Linux 返回原始字符串，WebView2 / WKWebView 回调可能返回 JSON 编码的字符串。
+/// 仅解开求值结果的字符串包装来比较完整等待标记，不检查快照的内部结构。
+fn probe_result_is_ready(raw: &str, pending: &str) -> bool {
+    let text = raw.trim();
+    let decoded = serde_json::from_str::<String>(text).ok();
+    let value = decoded.as_deref().unwrap_or(text);
+    !value.trim().is_empty() && value != pending
 }
 
 /// 求值一段 JS 并取回字符串结果（Tauri 的 eval；在 WebKitGTK 上跑隔离世界）。
@@ -609,6 +619,62 @@ fn eval_text(window: &WebviewWindow, script: &str, timeout: Duration) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completion_preserves_storage_without_cookies() {
+        let snapshot = r#"{"localStorage":{"token":"pending-login"}}"#;
+        let outcome = completion_outcome(
+            "https://example.com/home",
+            &[],
+            Some(snapshot.into()),
+            false,
+            60,
+        );
+        assert!(outcome.ok);
+        assert!(outcome.cookies.is_empty());
+        assert_eq!(outcome.count, 0);
+        assert_eq!(outcome.probe_result.as_deref(), Some(snapshot));
+        assert_eq!(outcome.url, "https://example.com/home");
+        assert!(outcome.message.is_empty());
+    }
+
+    #[test]
+    fn completion_preserves_cookie_and_timeout_behavior() {
+        let cookies = vec![Cookie::new("session", "test")];
+        let outcome = completion_outcome("https://example.com", &cookies, None, true, 60);
+        assert!(outcome.ok);
+        assert_eq!(outcome.cookies, "session=test");
+        assert_eq!(outcome.count, 1);
+        assert!(outcome.probe_result.is_none());
+        assert_eq!(
+            outcome.message,
+            "等待超过 60 秒，已按当前状态收尾（Cookie 1 条）"
+        );
+        // 无 Cookie 且探针不可用时，仍按 Android 的正常收尾语义返回。
+        assert!(completion_outcome("https://example.com", &[], None, false, 60).ok);
+    }
+
+    #[test]
+    fn probe_wait_marker_matches_the_entire_decoded_value() {
+        for raw in [
+            "",
+            "  ",
+            r#""""#,
+            "pending",
+            r#""pending""#,
+            "  \"pending\"  ",
+        ] {
+            assert!(!probe_result_is_ready(raw, "pending"), "{raw:?}");
+        }
+        let snapshot = r#"{"localStorage":{"pending":"pending-token"}}"#;
+        assert!(probe_result_is_ready(snapshot, "pending"));
+        assert!(probe_result_is_ready(
+            &serde_json::to_string(snapshot).unwrap(),
+            "pending"
+        ));
+        assert!(!probe_result_is_ready(r#""waiting""#, "waiting"));
+        assert!(probe_result_is_ready("pending", "waiting"));
+    }
 
     #[test]
     fn domain_candidates_walk_up_labels() {
