@@ -34,7 +34,7 @@ use crate::version::VersionVector;
 
 /// 当前存储格式版本。**只增不改**：新增字段一律用 `#[serde(default)]`，
 /// 这样旧版本读到新文件不会炸（但版本号更高时仍会拒绝加载，避免语义错位）。
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 
 /// 群组密钥长度（字节）
 pub const SECRET_BYTES: usize = 32;
@@ -638,19 +638,22 @@ pub(crate) fn cleanup_temporary_files(root: &Path) -> std::io::Result<()> {
 
 /// 把旧版本的文件内容升级到当前版本。
 ///
-/// 目前只有 v1，函数体是空的；保留这个入口是为了以后加字段 / 改语义时
-/// **只改这一处**，而不是在每个 load 里散落 `if version < N` 分支。
+/// v1 实体快照按新合并语义从完整日志重建；其他文件结构保持兼容。
+/// 格式迁移集中在此处，加载时只修改派生数据，保留操作日志。
 pub fn migrate(value: &mut serde_json::Value, target: u32) -> Result<()> {
     let Some(object) = value.as_object_mut() else {
         return Ok(());
     };
-    let version = object.get("format").and_then(|v| v.as_u64()).unwrap_or(FORMAT_VERSION as u64) as u32;
+    let version = object.get("format").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
     if version > target {
         return Err(SyncError::Unsupported(format!(
             "数据格式版本 {version} 高于本程序支持的 {target}"
         )));
     }
-    // 未来：if version < 2 { … 把 v1 结构改写成 v2 … }
+    if version < 2 && target >= 2 && object.contains_key("applied_ops") && object.contains_key("entities") {
+        object.insert("applied_ops".into(), serde_json::json!(0));
+        object.insert("entities".into(), serde_json::json!([]));
+    }
     object.insert("format".to_string(), serde_json::Value::from(target));
     Ok(())
 }

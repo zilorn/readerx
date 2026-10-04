@@ -216,6 +216,7 @@ pub fn apply(entity: &mut Entity, op: &Operation, ctx: &MergeCtx) -> MergeOutcom
         .map(|c| (c.entity_id.clone(), c.field.clone()))
         .collect();
     for (_, field) in pending {
+        out.settled.retain(|settled| settled != &field);
         if !field.is_empty() {
             entity.conflicted.insert(field);
         }
@@ -242,7 +243,7 @@ fn deleted_gate(
         ConflictSide::new(Some(field_snapshot(&tomb)), tomb.hlc.clone(), tomb.origin.clone());
     let remote = ConflictSide::new(Some(op_value(op)), op.hlc.clone(), op.stamp());
 
-    if saw_delete {
+    if saw_delete && !ctx.schema.resurrect_on_write {
         // 已删除的记录被顺序改写：默认不复活（记录进队列，数据不丢）
         out.conflicts.push(ctx.conflict(
             entity,
@@ -255,6 +256,12 @@ fn deleted_gate(
         ));
         out.reject = Some(Rejection::Deleted { field: op.field.clone() });
         return true;
+    }
+
+    if saw_delete && ctx.schema.resurrect_on_write {
+        entity.deleted = None;
+        out.touched();
+        return false;
     }
 
     // 并发：写入者没看到删除
@@ -481,8 +488,6 @@ fn seed_field(
                 ConflictStatus::Pending,
                 Some(format!("唯一键 {field} 已被实体 {owner} 占用，两边都保留")),
             ));
-            out.reject = Some(Rejection::UniqueKey { field: field.to_string(), owner });
-            return;
         }
     }
 
@@ -492,27 +497,10 @@ fn seed_field(
         MergeKind::Frozen => write_frozen(entity, field, value, op, ctx, out),
         MergeKind::MultiValue => push_multi(entity, field, value, op, ctx, out),
         MergeKind::Counter => {
-            let FieldState::Counter { total, parts, hlc } = entity
-                .fields
-                .entry(field.to_string())
-                .or_insert_with(|| FieldState::Counter {
-                    total: 0,
-                    parts: BTreeMap::new(),
-                    hlc: Hlc::default(),
-                })
-            else {
-                // 该字段历史上不是计数器（schema 改过）：按 LWW 覆盖
-                write_lww(entity, field, value, op, ctx, out, false);
-                return;
-            };
-            if op.hlc > *hlc {
-                if let Some(n) = value.as_i64() {
-                    *total = n;
-                    parts.clear();
-                    parts.insert(op.origin.clone(), n);
-                    *hlc = op.hlc.clone();
-                    out.touched();
-                }
+            if let Some(n) = value.as_i64() {
+                write_counter(entity, field, n, false, op, ctx, out);
+            } else {
+                out.reject = Some(Rejection::FieldKind { field: field.into(), expected: "counter" });
             }
         }
         MergeKind::Set { .. } => {
@@ -527,8 +515,7 @@ fn seed_field(
         }
         MergeKind::List => {
             if let Some(items) = value.as_array() {
-                let existing: Vec<String> = list_positions(entity, field);
-                let mut last = existing.last().cloned();
+                let mut last: Option<String> = None;
                 for item in items {
                     let key = element_key(item);
                     let position = match order::key_between(last.as_deref(), None) {
@@ -574,8 +561,6 @@ fn apply_lww(
                     ConflictStatus::Pending,
                     Some(format!("唯一键 {} 已被实体 {owner} 占用，两边都保留", op.field)),
                 ));
-                out.reject = Some(Rejection::UniqueKey { field: op.field.clone(), owner });
-                return;
             }
             write_lww(entity, &op.field, value, op, ctx, out, silent);
         }
@@ -673,8 +658,6 @@ fn apply_multi(
                     ConflictStatus::Pending,
                     Some(format!("唯一键 {} 已被实体 {owner} 占用", op.field)),
                 ));
-                out.reject = Some(Rejection::UniqueKey { field: op.field.clone(), owner });
-                return;
             }
             push_multi(entity, &op.field, value, op, ctx, out);
         }
@@ -787,61 +770,60 @@ fn write_frozen(
     }
 }
 
-/// 计数器：增量相加、整体赋值按 HLC 裁决。
+/// 计数器：整体赋值取 HLC 最大者，只覆盖它因果基线内的增量。
 fn apply_counter_op(entity: &mut Entity, op: &Operation, ctx: &MergeCtx, out: &mut MergeOutcome) {
-    match &op.op {
-        OpKind::Increment { delta } => {
-            let FieldState::Counter { total, parts, .. } = entity
-                .fields
-                .entry(op.field.clone())
-                .or_insert_with(|| FieldState::Counter {
-                    total: 0,
-                    parts: BTreeMap::new(),
-                    hlc: Hlc::default(),
-                })
-            else {
-                out.reject =
-                    Some(Rejection::FieldKind { field: op.field.clone(), expected: "counter" });
-                return;
-            };
-            // 幂等由引擎的操作去重保证（同一条 op 不会应用两次）
-            *total += delta;
-            *parts.entry(op.origin.clone()).or_insert(0) += delta;
-            out.touched();
+    let (number, increment) = match &op.op {
+        OpKind::Increment { delta } => (Some(*delta), true),
+        OpKind::Set { value } => (value.as_i64(), false),
+        OpKind::Unset => (Some(0), false),
+        _ => (None, false),
+    };
+    if let Some(number) = number {
+        write_counter(entity, &op.field, number, increment, op, ctx, out);
+    } else {
+        out.reject = Some(Rejection::FieldKind { field: op.field.clone(), expected: "counter" });
+    }
+}
+
+fn write_counter(
+    entity: &mut Entity, field: &str, number: i64, increment: bool,
+    op: &Operation, ctx: &MergeCtx, out: &mut MergeOutcome,
+) {
+    let state = entity.fields.entry(field.into()).or_insert_with(|| FieldState::Counter {
+        total: 0, parts: BTreeMap::new(), hlc: Hlc::default(), reset: None, increments: Vec::new(),
+    });
+    let FieldState::Counter { total, parts, hlc, reset, increments } = state else {
+        if !increment {
+            // schema 改过时沿用标量降级与旧值留档。
+            write_lww(entity, field, Value::from(number), op, ctx, out, false);
+            return;
         }
-        OpKind::Set { .. } | OpKind::Unset => {
-            let Some(n) = (match &op.op {
-                OpKind::Set { value } => value.as_i64(),
-                _ => Some(0),
-            }) else {
-                out.reject =
-                    Some(Rejection::FieldKind { field: op.field.clone(), expected: "counter" });
-                return;
-            };
-            let FieldState::Counter { total, parts, hlc } = entity
-                .fields
-                .entry(op.field.clone())
-                .or_insert_with(|| FieldState::Counter {
-                    total: 0,
-                    parts: BTreeMap::new(),
-                    hlc: Hlc::default(),
-                })
-            else {
-                write_lww(entity, &op.field, op_value(op), op, ctx, out, false);
-                return;
-            };
-            if op.hlc > *hlc {
-                *total = n;
-                parts.clear();
-                parts.insert(op.origin.clone(), n);
-                *hlc = op.hlc.clone();
-                out.touched();
-            }
+        out.reject = Some(Rejection::FieldKind { field: field.into(), expected: "counter" });
+        return;
+    };
+    let incoming = StampedValue {
+        value: Value::from(number), hlc: op.hlc.clone(), origin: op.stamp(), base: op.base.clone(),
+    };
+    if increment {
+        if !increments.iter().any(|v| v.origin == incoming.origin) {
+            increments.push(incoming);
+            increments.sort_by(|a, b| a.origin.cmp(&b.origin));
         }
-        _ => {
-            out.reject = Some(Rejection::FieldKind { field: op.field.clone(), expected: "counter" });
+    } else if reset.as_ref().is_none_or(|r| (op.hlc.clone(), op.stamp()) > (r.hlc.clone(), r.origin.clone())) {
+        *hlc = op.hlc.clone();
+        *reset = Some(incoming);
+    }
+    parts.clear();
+    if let Some(r) = reset.as_ref() {
+        parts.insert(r.origin.device.clone(), r.value.as_i64().unwrap_or(0));
+    }
+    for delta in increments.iter() {
+        if reset.as_ref().is_none_or(|r| !r.base.contains(&delta.origin.device, delta.origin.seq)) {
+            *parts.entry(delta.origin.device.clone()).or_default() += delta.value.as_i64().unwrap_or(0);
         }
     }
+    *total = parts.values().sum();
+    out.touched();
 }
 
 /// 集合（OR-Set）：加入 / 移除。
@@ -1212,6 +1194,69 @@ mod tests {
     }
 
     #[test]
+    fn counter_reset_only_overwrites_observed_increments() {
+        let schema = schema_book();
+        let empty = book_entity();
+        let mut a = OpBuilder::device("A").wall(1000);
+        let mut b = OpBuilder::device("B").wall(2000).offline();
+        let inc = a.op(&empty, ("book", "pages"), OpKind::Increment { delta: 3 });
+        let set = b.op(&empty, ("book", "pages"), set_num(10));
+        let mut left = empty.clone(); let mut right = empty.clone();
+        apply_op(&mut left, &inc, &schema); apply_op(&mut left, &set, &schema);
+        apply_op(&mut right, &set, &schema); apply_op(&mut right, &inc, &schema);
+        assert_eq!(left.fields, right.fields);
+        assert_eq!(left.field("pages"), Some(Value::from(13)));
+        let mut c = OpBuilder::device("C").wall(3000);
+        let reset = c.op(&left, ("book", "pages"), set_num(20));
+        apply_op(&mut left, &reset, &schema); apply_op(&mut right, &reset, &schema);
+        assert_eq!(left.fields, right.fields);
+        assert_eq!(left.field("pages"), Some(Value::from(20)));
+    }
+
+    #[test]
+    fn concurrent_counter_resets_and_negative_increment_converge() {
+        let schema = schema_book();
+        let empty = book_entity();
+        let mut a = OpBuilder::device("A").wall(1000).offline();
+        let mut b = OpBuilder::device("B").wall(2000).offline();
+        let mut c = OpBuilder::device("C").wall(3000).offline();
+        for winner in [set_num(20), OpKind::Unset] {
+            let ops = [
+                a.op(&empty, ("book", "pages"), OpKind::Create {
+                    fields: BTreeMap::from([("pages".into(), Value::from(10))]),
+                }),
+                b.op(&empty, ("book", "pages"), OpKind::Increment { delta: -3 }),
+                c.op(&empty, ("book", "pages"), winner.clone()),
+            ];
+            let expected = if matches!(winner, OpKind::Unset) { -3 } else { 17 };
+            let mut states = Vec::new();
+            for order in [[0,1,2], [0,2,1], [1,0,2], [1,2,0], [2,0,1], [2,1,0]] {
+                let mut entity = empty.clone();
+                for index in order { apply_op(&mut entity, &ops[index], &schema); }
+                assert_eq!(entity.field("pages"), Some(Value::from(expected)));
+                states.push(entity.fields);
+            }
+            assert!(states.windows(2).all(|pair| pair[0] == pair[1]));
+        }
+    }
+
+    #[test]
+    fn concurrent_list_creates_use_payload_positions() {
+        let schema = schema_book();
+        let empty = book_entity();
+        let mut a = OpBuilder::device("A").wall(1000);
+        let mut b = OpBuilder::device("B").wall(2000).offline();
+        let create = |items| OpKind::Create { fields: BTreeMap::from([("order".into(), items)]) };
+        let first = a.op(&empty, ("book", ""), create(serde_json::json!(["x", "y"])));
+        let second = b.op(&empty, ("book", ""), create(serde_json::json!(["z", "x"])));
+        let mut left = empty.clone(); let mut right = empty;
+        apply_op(&mut left, &first, &schema); apply_op(&mut left, &second, &schema);
+        apply_op(&mut right, &second, &schema); apply_op(&mut right, &first, &schema);
+        assert_eq!(left.fields, right.fields);
+        assert_eq!(left.field("order"), right.field("order"));
+    }
+
+    #[test]
     fn different_fields_merge_without_conflict() {
         // 场景 2：甲改书名、乙改简介 → 字段级合并
         let schema = schema_book();
@@ -1292,7 +1337,7 @@ mod tests {
     #[test]
     fn silent_lww_still_reports_unique_key_conflicts() {
         // 静默只针对「同一字段并发写成不同值」；两条记录抢同一个唯一键是真冲突，
-        // 必须留档并拒绝写入（否则书架里会出现两条同键记录，谁也发现不了）
+        // 必须保留字段并标记冲突，避免到达顺序影响收敛
         let schema = Schema::new("book").unique("isbn").field("isbn", MergeKind::LwwSilent);
         let mut entity = book_entity();
         let mut a = OpBuilder::device("A");
@@ -1301,8 +1346,8 @@ mod tests {
         let ctx = MergeCtx::new(&schema, "local", 0).with_unique_lookup(&lookup);
 
         let out = apply(&mut entity, &op, &ctx);
-        assert!(matches!(out.reject, Some(Rejection::UniqueKey { .. })));
-        assert!(entity.field("isbn").is_none(), "唯一键冲突时两边都不写");
+        assert!(out.reject.is_none());
+        assert_eq!(entity.field("isbn"), Some(Value::String("978-7".into())));
         assert!(out.has_pending(), "唯一键冲突必须进冲突队列");
     }
 
@@ -1630,8 +1675,8 @@ mod tests {
         let lookup = |_field: &str, _value: &Value, _self_id: &str| Some("book-2".to_string());
         let ctx = MergeCtx::new(&schema, "local", 0).with_unique_lookup(&lookup);
         let out = apply(&mut entity, &op, &ctx);
-        assert!(matches!(out.reject, Some(Rejection::UniqueKey { .. })));
-        assert!(entity.field("isbn").is_none(), "唯一键冲突时两边都不写");
+        assert!(out.reject.is_none());
+        assert_eq!(entity.field("isbn"), Some(Value::String("978-7".into())));
         assert!(out.has_pending());
     }
 

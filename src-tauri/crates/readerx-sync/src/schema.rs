@@ -30,7 +30,7 @@ pub enum MergeKind {
     MultiValue,
     /// 不可变：只有创建时能写（改动会被记为冲突并保留原值）
     Frozen,
-    /// PN-Counter：并发增量相加
+    /// 因果重置计数器：并发增量相加，整体赋值只覆盖已见增量
     Counter,
     /// 集合：OR-Set
     Set { policy: SetPolicy },
@@ -129,7 +129,7 @@ pub struct Schema {
     /// 未声明字段的兜底策略
     #[serde(default = "MergeKind::lww")]
     pub default_kind: MergeKind,
-    /// 业务唯一键（并发占用同一值时进冲突队列，见场景 8）
+    /// 业务唯一键（重复值保留双方字段并进冲突队列，人工裁决前允许重复）
     #[serde(default)]
     pub unique_fields: Vec<String>,
     /// 删除 vs 更新的裁决

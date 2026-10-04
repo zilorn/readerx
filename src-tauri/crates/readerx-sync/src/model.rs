@@ -166,13 +166,19 @@ pub enum FieldState {
     Multi { values: Vec<StampedValue> },
     /// 不可变字段：只在创建时写入一次（如 book_id、created_at）
     Frozen { value: Value, hlc: Hlc, origin: Stamp },
-    /// PN-Counter：可加可减、并发增量自动相加
+    /// 因果重置计数器：可加可减、并发增量自动相加
     Counter {
         total: i64,
         parts: BTreeMap<DeviceId, i64>,
         /// 最近一次「整体赋值」（Create / Set）的时间；增量不加时间戳
         #[serde(default = "Hlc::default")]
         hlc: Hlc,
+        /// 最近赋值及其因果基线；旧快照由引擎从操作日志重建。
+        #[serde(default)]
+        reset: Option<StampedValue>,
+        /// 保留增量身份，供未来赋值区分已见与并发增量。
+        #[serde(default)]
+        increments: Vec<StampedValue>,
     },
     /// OR-Set：集合元素的增删
     Set { elements: BTreeMap<String, SetElement> },
@@ -551,7 +557,7 @@ mod tests {
         };
         assert_eq!(value.display_value(SetPolicy::AddWins), Value::String("张三".into()));
 
-        let counter = FieldState::Counter { total: 5, parts: BTreeMap::new(), hlc: hlc(1, 0, "A") };
+        let counter = FieldState::Counter { total: 5, parts: BTreeMap::new(), hlc: hlc(1, 0, "A"), reset: None, increments: Vec::new() };
         assert_eq!(counter.display_value(SetPolicy::AddWins), Value::from(5));
 
         let mut set = FieldState::Set { elements: BTreeMap::new() };

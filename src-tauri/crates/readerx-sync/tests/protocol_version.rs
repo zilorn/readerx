@@ -20,7 +20,7 @@ fn client_rejects_old_protocol_before_auth() {
             let hello: Request = read_message(&mut reader, MAX_HANDSHAKE_BYTES).unwrap().unwrap();
             assert!(matches!(hello, Request::Hello { protocol, .. } if protocol == PROTOCOL_VERSION));
             write_message(&mut stream, &Response::Hello {
-                ok, protocol: "readerx-sync/1".into(), group: "group".into(),
+                ok, protocol: "readerx-sync/2".into(), group: "group".into(),
                 device: "old-server".into(), name: "old".into(), nonce: "nonce".into(),
                 message: None, code: None, content: true, asset_chunks: false, chapter_chunks: false,
             }, MAX_HANDSHAKE_BYTES).unwrap();
@@ -50,7 +50,7 @@ fn server_rejects_old_protocol_before_registering_peer() {
     let mut stream = std::net::TcpStream::connect(server.local_addr()).unwrap();
     stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     write_message(&mut stream, &Request::Hello {
-        protocol: "readerx-sync/1".into(), group, device: "old-client".into(),
+        protocol: "readerx-sync/2".into(), group, device: "old-client".into(),
         name: "old".into(), knowledge: VersionVector::default(), nonce: "nonce".into(),
         port: 0, content: true, asset_chunks: false, chapter_chunks: false,
     }, MAX_HANDSHAKE_BYTES).unwrap();

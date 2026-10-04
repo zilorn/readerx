@@ -35,7 +35,7 @@ use crate::content::{
 use crate::error::{Result, SyncError};
 use crate::hlc::{HlcClock, HlcState};
 use crate::id::{new_id, now_ms, DeviceId, EntityId, OpId};
-use crate::merge::{self, MergeCtx, MergeOutcome, Rejection};
+use crate::merge::{self, MergeCtx, MergeOutcome};
 use crate::model::{
     Conflict, ConflictReason, ConflictStatus, Entity, FieldState, OpKind, Operation, Resolution,
     SetPolicy,
@@ -316,6 +316,7 @@ impl SyncEngine {
             engine.settle_conflicts(&op.entity_id, &settled);
         }
 
+        engine.dirty |= applied < engine.ops.len();
         engine.retry_deferred();
 
         log::info!(
@@ -404,14 +405,20 @@ impl SyncEngine {
         }
     }
 
-    /// 已并入的操作向量（增量同步的游标：告诉对端「我有哪些」）。
+    /// 已并入的操作向量，截断在各来源最早的缓冲空洞前（增量同步游标）。
     pub fn knowledge(&self) -> VersionVector {
         match &self.knowledge_cache {
             Some(v) => v.clone(),
             None => {
                 let mut vector = VersionVector::new();
+                let mut holes: BTreeMap<&str, u64> = BTreeMap::new();
+                for op in &self.deferred {
+                    holes.entry(&op.origin).and_modify(|seq| *seq = (*seq).min(op.seq)).or_insert(op.seq);
+                }
                 for op in &self.ops {
-                    vector.observe(&op.origin, op.seq);
+                    if holes.get(op.origin.as_str()).is_none_or(|seq| op.seq < *seq) {
+                        vector.observe(&op.origin, op.seq);
+                    }
                 }
                 vector
             }
@@ -845,6 +852,7 @@ impl SyncEngine {
                 }
             }
             self.deferred = remaining;
+            self.knowledge_cache = None;
             if !progressed || self.deferred.is_empty() {
                 break;
             }
@@ -861,10 +869,11 @@ impl SyncEngine {
     pub fn ops_for_peer(&self, peer_knowledge: &VersionVector, limit: usize) -> (Vec<Operation>, bool) {
         let limit = limit.max(1);
         let mut picked: Vec<Operation> = Vec::new();
-        for (device, from_seq) in self.knowledge().ahead_of(peer_knowledge) {
+        let knowledge = self.knowledge();
+        for (device, from_seq) in knowledge.ahead_of(peer_knowledge) {
             let start = (device.clone(), from_seq + 1);
             for ((origin, _seq), index) in self.origin_index.range(start..) {
-                if origin != &device {
+                if origin != &device || *_seq > knowledge.get(&device) {
                     break;
                 }
                 picked.push(self.ops[*index].clone());
@@ -1387,6 +1396,7 @@ impl SyncEngine {
         let added = self.store.set_device_removed(peer_device, true);
         let deferred_before = self.deferred.len();
         self.deferred.retain(|op| op.origin != peer_device);
+        self.knowledge_cache = None;
         let dropped = deferred_before - self.deferred.len();
         if !was_known && !added && dropped == 0 {
             // 既没同步过、也不在名单里：没有再可做的，但也不必报错（幂等）
@@ -1527,6 +1537,7 @@ impl SyncEngine {
             op.base.to_short_string()
         );
         self.deferred.push(op);
+        self.knowledge_cache = None;
         self.dirty = true;
     }
 
@@ -1557,7 +1568,6 @@ impl SyncEngine {
             schema_ver: self.schema_version,
             at_ms: now_ms(),
         };
-        self.next_seq += 1;
         self.commit_local(op)
     }
 
@@ -1577,7 +1587,6 @@ impl SyncEngine {
             schema_ver: self.schema_version,
             at_ms: now_ms(),
         };
-        self.next_seq += 1;
         self.commit_local(op)
     }
 
@@ -1588,14 +1597,19 @@ impl SyncEngine {
     fn commit_local(&mut self, op: Operation) -> Result<()> {
         self.ensure_writable()?;
         self.store.append_op(&op)?;
+        self.next_seq = self.next_seq.max(op.seq + 1);
         let index = self.ops.len();
         self.op_index.insert(op.op_id.clone(), index);
         self.origin_index.insert((op.origin.clone(), op.seq), index);
         let outcome = self.merge_into_model(&op, None);
         self.ops.push(op);
+        let rejected = outcome.reject.as_ref().map(|r| r.code());
         self.absorb_conflicts(outcome);
         self.knowledge_cache = None;
         self.dirty = true;
+        if let Some(code) = rejected {
+            return Err(SyncError::Schema(format!("本地操作被拒绝：{code}")));
+        }
         Ok(())
     }
 
@@ -1622,6 +1636,17 @@ impl SyncEngine {
         entity.version.observe(&op.origin, op.seq);
         entity.updated = entity.updated.clone().max(op.hlc.clone());
         self.clock.observe(&op.hlc);
+        for conflict in &outcome.conflicts {
+            if conflict.reason == ConflictReason::UniqueKey {
+                for (field, _, owner) in &candidates {
+                    if field == &conflict.field {
+                        if let Some(owner) = self.entities.get_mut(owner) {
+                            owner.conflicted.insert(field.clone());
+                        }
+                    }
+                }
+            }
+        }
         outcome
     }
 
@@ -1638,12 +1663,6 @@ impl SyncEngine {
         self.knowledge_cache = None;
         self.dirty = true;
 
-        // 唯一键冲突：占用者也要标成「待裁决」，否则用户只看到一边
-        if let Some(Rejection::UniqueKey { field, owner }) = &outcome.reject {
-            if let Some(entity) = self.entities.get_mut(owner) {
-                entity.conflicted.insert(field.clone());
-            }
-        }
         Ok(outcome)
     }
 
@@ -1893,6 +1912,107 @@ mod tests {
     fn engine(tag: &str) -> SyncEngine {
         let dir = temp_dir(tag);
         SyncEngine::open(dir, EngineOptions::new(tag).with_schemas(schemas())).unwrap()
+    }
+
+    #[test]
+    fn deferred_hole_is_not_relayed_to_a_third_device() {
+        let mut a = engine("hole-a");
+        let mut b = engine("hole-b");
+        let mut c = engine("hole-c");
+        a.create_entity("book", Some("one".into()), [("title", serde_json::json!("old"))]).unwrap();
+        a.set_field("one", "title", serde_json::json!("new")).unwrap();
+        a.create_entity("book", Some("two".into()), [("title", serde_json::json!("other"))]).unwrap();
+        let ops = a.ops().to_vec();
+        assert!(matches!(b.apply_remote(&ops[1], None).unwrap(), ApplyResult::Deferred { .. }));
+        b.apply_remote(&ops[2], None).unwrap();
+        assert_eq!(b.knowledge().get(a.device_id()), 0);
+        let (relay, more) = b.ops_for_peer(&c.knowledge(), 1);
+        assert!(relay.is_empty());
+        assert!(!more);
+        b.flush().unwrap();
+        let root = b.store.root().to_path_buf();
+        drop(b);
+        let mut b = SyncEngine::open(root, EngineOptions::new("hole-b").with_schemas(schemas())).unwrap();
+        assert_eq!(b.knowledge().get(a.device_id()), 0);
+        b.apply_remote(&ops[0], None).unwrap();
+        assert_eq!(b.knowledge().get(a.device_id()), 3);
+        loop {
+            let (relay, more) = b.ops_for_peer(&c.knowledge(), 1);
+            c.apply_many(&relay, None).unwrap();
+            if !more { break; }
+        }
+        assert_eq!(c.field("one", "title"), a.field("one", "title"));
+        assert_eq!(c.field("two", "title"), a.field("two", "title"));
+        assert_eq!(c.knowledge(), a.knowledge());
+    }
+
+    #[test]
+    fn unique_create_and_set_converge_in_both_orders() {
+        for create in [true, false] {
+            let mut registry = SchemaRegistry::new();
+            registry.register(Schema::new("item").unique("key").field("key", MergeKind::Lww));
+            let mut a = SyncEngine::open(temp_dir("unique-a"), EngineOptions::new("a").with_schemas(registry.clone())).unwrap();
+            let mut b = SyncEngine::open(temp_dir("unique-b"), EngineOptions::new("b").with_schemas(registry)).unwrap();
+            if create {
+                a.create_entity("item", Some("a".into()), [("key", serde_json::json!("same"))]).unwrap();
+                b.create_entity("item", Some("b".into()), [("key", serde_json::json!("same"))]).unwrap();
+            } else {
+                a.create_entity("item", Some("a".into()), [("key", serde_json::json!("a"))]).unwrap();
+                b.create_entity("item", Some("b".into()), [("key", serde_json::json!("b"))]).unwrap();
+                let ao = a.ops().to_vec(); let bo = b.ops().to_vec();
+                a.apply_many(&bo, None).unwrap(); b.apply_many(&ao, None).unwrap();
+                a.set_field("a", "key", serde_json::json!("same")).unwrap();
+                b.set_field("b", "key", serde_json::json!("same")).unwrap();
+            }
+            let ao = a.ops().to_vec(); let bo = b.ops().to_vec();
+            a.apply_many(&bo, None).unwrap(); b.apply_many(&ao, None).unwrap();
+            for id in ["a", "b"] {
+                assert_eq!(a.entity(id).unwrap().fields, b.entity(id).unwrap().fields);
+                assert!(a.conflicted_fields(id).contains("key"));
+                assert!(b.conflicted_fields(id).contains("key"));
+            }
+        }
+    }
+
+    #[test]
+    fn resurrect_on_write_and_local_rejections_are_reported() {
+        let mut registry = SchemaRegistry::new();
+        let mut schema = Schema::new("item").field("fixed", MergeKind::Frozen);
+        schema.resurrect_on_write = true;
+        registry.register(schema);
+        let mut a = SyncEngine::open(temp_dir("resurrect"), EngineOptions::new("a").with_schemas(registry)).unwrap();
+        a.create_entity("item", Some("one".into()), [("fixed", serde_json::json!(1))]).unwrap();
+        a.delete_entity("one", None).unwrap();
+        a.set_field("one", "title", serde_json::json!("alive")).unwrap();
+        assert!(!a.entity("one").unwrap().is_deleted());
+        assert_eq!(a.field("one", "title"), Some(serde_json::json!("alive")));
+        assert!(a.set_field("one", "fixed", serde_json::json!(2)).is_err());
+        let mut b = SyncEngine::open(temp_dir("resurrect-peer"), EngineOptions::new("b").with_schemas(a.schemas.clone())).unwrap();
+        b.apply_many(a.ops(), None).unwrap();
+        assert_eq!(a.entity("one").unwrap().fields, b.entity("one").unwrap().fields);
+        assert_eq!(a.entity("one").unwrap().deleted, b.entity("one").unwrap().deleted);
+    }
+
+    #[test]
+    fn v1_counter_snapshot_rebuilds_from_the_log() {
+        let root = temp_dir("counter-migrate");
+        let options = EngineOptions::new("a").with_schemas(schemas());
+        let mut a = SyncEngine::open(&root, options.clone()).unwrap();
+        a.create_entity("book", Some("one".into()), [("count", serde_json::json!(10))]).unwrap();
+        a.increment("one", "count", 3).unwrap();
+        a.flush().unwrap(); drop(a);
+        let path = root.join("entities.json");
+        let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        value["format"] = serde_json::json!(1);
+        value["entities"][0]["fields"]["count"]["total"] = serde_json::json!(999);
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        let mut a = SyncEngine::open(&root, options.clone()).unwrap();
+        assert_eq!(a.field("one", "count"), Some(serde_json::json!(13)));
+        a.set_field("one", "count", serde_json::json!(20)).unwrap();
+        assert_eq!(a.field("one", "count"), Some(serde_json::json!(20)));
+        a.flush().unwrap(); drop(a);
+        let a = SyncEngine::open(&root, options).unwrap();
+        assert_eq!(a.field("one", "count"), Some(serde_json::json!(20)));
     }
 
     #[test]
