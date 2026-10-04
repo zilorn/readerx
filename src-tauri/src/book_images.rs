@@ -16,6 +16,7 @@ use base64::Engine;
 use std::fs;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tauri::http;
 use tauri::AppHandle;
 
@@ -119,7 +120,39 @@ fn mime_for_ext(ext: &str) -> &'static str {
     }
 }
 
-/// 落盘一张图片，返回本地副本文件名（幂等：同一地址已存在则不重复写）。
+/// 在同目录的独立临时文件中写完并同步后再替换目标，读者只会看到完整副本。
+/// 每次写入使用 create_new 独占临时文件，并发下载 / 同步不会截断彼此的文件。
+fn write_image_atomic(
+    root: &Path,
+    name: &str,
+    write: impl FnOnce(&mut fs::File) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+    fs::create_dir_all(root)?;
+    let (tmp, mut file) = loop {
+        let sequence = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+        let tmp = root.join(format!(".{name}.{}.{sequence}.tmp", std::process::id()));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+        {
+            Ok(file) => break (tmp, file),
+            // 进程重启后可能遇到上次中断留下的临时文件，跳过而不覆盖。
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    };
+    let result = write(&mut file).and_then(|()| file.sync_all());
+    drop(file);
+    let result = result.and_then(|()| fs::rename(&tmp, root.join(name)));
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
+/// 落盘一张图片，返回本地副本文件名（同一地址原子覆盖，不留新旧两份）。
 ///
 /// 文件名 = `sha1(图片地址) + 扩展名`（**不带本机书 id**）：这个名字就是同步通道里的
 /// 资源名（见 [`asset_name`]），两台设备对同一段正文才会算出同一个指纹。
@@ -137,8 +170,8 @@ pub(crate) fn store(
         return Err("非法的书籍 id".to_string());
     }
     let name = format!("{}.{}", crate::host::sha1_hex(identity), ext_for_mime(mime));
-    fs::create_dir_all(root).map_err(|e| format!("创建图片目录失败: {e}"))?;
-    fs::write(root.join(&name), bytes).map_err(|e| format!("写入图片失败: {e}"))?;
+    write_image_atomic(root, &name, |file| file.write_all(bytes))
+        .map_err(|e| format!("写入图片失败: {e}"))?;
     log::debug!(
         "章节插图已落盘 book={book_id} file={name} mime={mime} bytes={}",
         bytes.len()
@@ -150,27 +183,12 @@ pub(crate) fn store(
 ///
 /// 与 [`store`] 的区别只有一处：文件名直接用资源名，不再对它算哈希 ——
 /// 资源名本来就是 `sha1(图片地址) + 扩展名`，正文块里引用的也是它。
-pub(crate) fn store_asset(
-    root: &Path,
-    asset: &str,
-    bytes: &[u8],
-) -> Result<String, String> {
+pub(crate) fn store_asset(root: &Path, asset: &str, bytes: &[u8]) -> Result<String, String> {
     if !valid_asset_name(asset) {
         return Err("非法的资源名".to_string());
     }
-    fs::create_dir_all(root).map_err(|e| format!("创建图片目录失败: {e}"))?;
-    let path = root.join(asset);
-    let tmp = path.with_extension("sync.tmp");
-    let result = (|| -> std::io::Result<()> {
-        let mut file = fs::File::create(&tmp)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        fs::rename(&tmp, &path)
-    })();
-    if let Err(error) = result {
-        let _ = fs::remove_file(&tmp);
-        return Err(format!("写入图片失败: {error}"));
-    }
+    write_image_atomic(root, asset, |file| file.write_all(bytes))
+        .map_err(|e| format!("写入图片失败: {e}"))?;
     log::debug!("同步插图已落盘 file={asset} bytes={}", bytes.len());
     Ok(asset.to_string())
 }
@@ -1041,6 +1059,91 @@ mod tests {
         assert_eq!(remove_book_images(&root, std::slice::from_ref(&first), |_| true), 1);
         assert!(!exists(&root, first.as_str()));
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn atomic_store_hides_partial_writes_and_preserves_old_copy_on_failure() {
+        let root = temp_root("atomic-failure");
+        let name = format!("{}.png", "a".repeat(HASH_LEN));
+        let path = root.join(&name);
+        // 首次写入失败不能留下会被缓存命中的半文件；重试仍可成功。
+        let fail = |file: &mut fs::File| -> std::io::Result<()> {
+            file.write_all(b"partial")?;
+            assert!(!exists(&root, &name));
+            Err(std::io::Error::other("injected write failure"))
+        };
+        assert!(write_image_atomic(&root, &name, fail).is_err());
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        store_asset(&root, &name, b"old complete copy").unwrap();
+        // 覆盖写到一半时，缓存 / 协议读者仍只能看到旧的完整副本。
+        let fail = |file: &mut fs::File| -> std::io::Result<()> {
+            file.write_all(b"partial")?;
+            assert_eq!(fs::read(&path)?, b"old complete copy");
+            Err(std::io::Error::other("injected write failure"))
+        };
+        assert!(write_image_atomic(&root, &name, fail).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"old complete copy");
+        write_image_atomic(&root, &name, |file| {
+            file.write_all(b"new ")?;
+            assert_eq!(fs::read(&path)?, b"old complete copy");
+            file.write_all(b"complete copy")
+        })
+        .unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"new complete copy");
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn atomic_store_cleans_temp_file_when_publish_fails() {
+        let root = temp_root("atomic-publish-failure");
+        let name = format!("{}.png", "b".repeat(HASH_LEN));
+        // 用目录模拟不能被替换的目标；失败必须保留目标并清理本次临时文件。
+        fs::create_dir(root.join(&name)).unwrap();
+        assert!(store_asset(&root, &name, b"complete copy").is_err());
+        assert!(root.join(&name).is_dir());
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn concurrent_downloads_and_sync_publish_only_complete_images() {
+        use std::sync::{Arc, Barrier};
+        let root = temp_root("atomic-concurrent");
+        let identity = "https://img/concurrent.png";
+        let name = format!("{}.png", crate::host::sha1_hex(identity));
+        let payloads: Vec<Vec<u8>> = (1..=12).map(|n| vec![n as u8; n * 64 * 1024]).collect();
+        store_asset(&root, &name, &payloads[0]).unwrap();
+        let barrier = Arc::new(Barrier::new(payloads.len() + 1));
+        std::thread::scope(|scope| {
+            let mut writers = Vec::new();
+            for (index, bytes) in payloads.iter().enumerate() {
+                let (root, name, barrier) = (&root, &name, barrier.clone());
+                writers.push(scope.spawn(move || {
+                    barrier.wait();
+                    for _ in 0..4 {
+                        let result = if index % 2 == 0 {
+                            store(root, "book-1", identity, "image/png", bytes)
+                        } else {
+                            store_asset(root, name, bytes)
+                        };
+                        assert_eq!(result.unwrap(), *name);
+                    }
+                }));
+            }
+            barrier.wait();
+            while writers.iter().any(|writer| !writer.is_finished()) {
+                let bytes = fs::read(root.join(&name)).unwrap();
+                assert!(payloads.contains(&bytes), "读者不得看到截断或混写的文件");
+                std::thread::yield_now();
+            }
+            for writer in writers {
+                writer.join().unwrap();
+            }
+        });
+        assert!(payloads.contains(&fs::read(root.join(&name)).unwrap()));
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        fs::remove_dir_all(root).unwrap();
     }
 
     /// 旧名字（带本机书 id 前缀）能被识别并**就地归一**：正文块里存的是名字，
