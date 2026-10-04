@@ -59,6 +59,8 @@ impl Default for Options {
 
 /// 执行一次 CDP 认证。`source_id` 仅用于日志。
 pub fn authenticate(source_id: &str, url: &str, options: &Options) -> Result<LoginOutcome, String> {
+    // 先确定 Cookie 作用域；非法地址不得连接或启动浏览器。
+    let host = url_host(url)?;
     let started = Instant::now();
     let mut session = CdpSession::connect(options)?;
     if let Some(note) = session.note.clone() {
@@ -79,7 +81,6 @@ pub fn authenticate(source_id: &str, url: &str, options: &Options) -> Result<Log
     let cookies = session.all_cookies()?;
     session.close_spawned();
 
-    let host = url_host(url);
     let matched: Vec<ScopedCookie> = cookies
         .into_iter()
         .filter(|cookie| domain_hits(&cookie.domain, &host))
@@ -209,22 +210,33 @@ fn entries(pairs: Vec<(String, String)>) -> Vec<storage::StorageEntry> {
 
 /// 域名匹配（`.example.com` 命中 `www.example.com`；`www.` 前缀视为同站）
 fn domain_hits(cookie_domain: &str, host: &str) -> bool {
-    let domain = cookie_domain.trim().trim_start_matches('.').to_ascii_lowercase();
-    if domain.is_empty() || host.is_empty() {
-        return true;
-    }
-    let host = host.trim_start_matches("www.").to_ascii_lowercase();
+    let domain = cookie_domain
+        .trim()
+        .trim_start_matches('.')
+        .to_ascii_lowercase();
+    let host = host.trim().to_ascii_lowercase();
+    let host = host.trim_start_matches("www.");
     let domain_bare = domain.trim_start_matches("www.");
+    // CDP Cookie 必须有域名；缺失作用域不能解释为匹配所有站点。
+    if domain_bare.is_empty() || host.is_empty() {
+        return false;
+    }
     host == domain_bare
         || host.ends_with(&format!(".{domain_bare}"))
         || domain_bare.ends_with(&format!(".{host}"))
 }
 
-fn url_host(url: &str) -> String {
-    reqwest::Url::parse(url)
-        .ok()
-        .and_then(|parsed| parsed.host_str().map(|h| h.to_string()))
-        .unwrap_or_default()
+fn url_host(url: &str) -> Result<String, String> {
+    let invalid = || "仅支持带主机名的 http/https 认证地址".to_string();
+    let parsed = reqwest::Url::parse(url).map_err(|_| invalid())?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(invalid());
+    }
+    parsed
+        .host_str()
+        .filter(|host| !host.is_empty())
+        .map(String::from)
+        .ok_or_else(invalid)
 }
 
 /// 一个最短可用的 CDP 会话（只用到目标管理 + 网络 Cookie + 页面存储）
@@ -754,8 +766,55 @@ mod tests {
     fn domain_matching_is_host_scoped() {
         assert!(domain_hits(".example.com", "www.example.com"));
         assert!(domain_hits("cf.example.com", "cf.example.com"));
-        assert!(domain_hits("", "example.com"));
+        assert!(domain_hits(".example.com", "example.com"));
+        assert!(domain_hits("www.example.com", "example.com"));
+        assert!(domain_hits(".EXAMPLE.COM", "WWW.Example.Com"));
+        assert!(!domain_hits("", "example.com"));
+        assert!(!domain_hits("example.com", ""));
+        assert!(!domain_hits("", ""));
+        assert!(!domain_hits(" . ", "example.com"));
+        assert!(!domain_hits("example.com", "   "));
+        assert!(!domain_hits("other.net", "example.com"));
         assert!(!domain_hits("example.com", "notexample.com"));
         assert!(!domain_hits("example.com", "example.com.evil.net"));
+    }
+
+    #[test]
+    fn authentication_rejects_invalid_urls_before_browser_access() {
+        // 不可用的端点与浏览器：如果校验发生在连接之后，会返回不同的环境错误。
+        let options = Options {
+            endpoint: "invalid-endpoint".to_string(),
+            browser: Some("/nonexistent/readerx-test-browser".to_string()),
+            quiet: true,
+            ..Options::default()
+        };
+        for url in [
+            "about:blank",
+            "data:text/html,hello",
+            "file:///tmp/login.html",
+            "javascript:void(0)",
+            "ftp://example.com/login",
+            "",
+            "example.com",
+            "https://",
+        ] {
+            assert_eq!(
+                authenticate("cdp-invalid-url-test", url, &options).unwrap_err(),
+                "仅支持带主机名的 http/https 认证地址",
+                "url={url}"
+            );
+        }
+    }
+
+    #[test]
+    fn authentication_urls_have_a_valid_cookie_host() {
+        for (url, host) in [
+            ("https://www.example.com/login", "www.example.com"),
+            ("http://localhost:8080/login", "localhost"),
+            ("https://127.0.0.1/login", "127.0.0.1"),
+            ("HTTPS://EXAMPLE.COM/login", "example.com"),
+        ] {
+            assert_eq!(url_host(url).unwrap(), host);
+        }
     }
 }

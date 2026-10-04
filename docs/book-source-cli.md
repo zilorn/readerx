@@ -124,7 +124,9 @@ readerx-source --source demo auth cdp --browser /usr/bin/google-chrome
 ```
 
 在浏览器里完成登录 / 人机验证后**按回车**即取回该站点 Cookie；非交互环境下等待约 8 秒后
-自动取当前 Cookie。
+自动取当前 Cookie。认证地址必须是带主机名的 HTTP(S) URL；`about:blank`、
+`file:` 等地址会在连接或启动浏览器前被拒绝。只保留匹配该站点域名的 Cookie，
+缺失域名的浏览器 Cookie 不会导入。
 
 ### 查看与清理
 
