@@ -113,6 +113,7 @@ fn merge_max(local: &mut BTreeMap<String, u64>, incoming: BTreeMap<String, u64>)
 fn save<R: tauri::Runtime>(app: &AppHandle<R>, stats: &ReadingTime) -> Result<(), String> {
     let dir = crate::storage::state_dir(app)?;
     let temporary = dir.join(format!("{KEY}.tmp"));
+    let _temporary = crate::temporary_file::TemporaryFile(temporary.clone());
     let bytes = serde_json::to_vec(stats).map_err(|e| format!("序列化阅读时长失败: {e}"))?;
     fs::write(&temporary, bytes).map_err(|e| format!("保存阅读时长失败: {e}"))?;
     fs::rename(temporary, dir.join(format!("{KEY}.json")))

@@ -572,13 +572,67 @@ pub fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
         path.extension().and_then(|e| e.to_str()).map(|e| format!("{e}.")).unwrap_or_default()
     ));
     let data = serde_json::to_vec_pretty(value)?;
-    {
-        let mut file = File::create(&tmp)?;
-        file.write_all(&data)?;
+    write_bytes_atomic(path, &tmp, &data)?;
+    Ok(())
+}
+
+/// 文件句柄在替换或清理前关闭，兼容 Windows。所有提交前失败均清理临时文件。
+pub(crate) fn write_bytes_atomic(path: &Path, tmp: &Path, data: &[u8]) -> std::io::Result<()> {
+    let result = (|| {
+        let mut file = File::create(tmp)?;
+        file.write_all(data)?;
         file.flush()?;
-        file.sync_data()?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(tmp, path)
+    })();
+    if result.is_err() {
+        remove_temporary(tmp);
     }
-    fs::rename(&tmp, path)?;
+    result
+}
+
+fn remove_temporary(path: &Path) {
+    if let Err(error) = fs::remove_file(path) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            log::warn!("清理同步临时文件失败：{error}");
+        }
+    }
+}
+
+/// 仅在引擎获得写锁后调用；不跟随符号链接，不删除正式暂存与未知文件。
+pub(crate) fn cleanup_temporary_files(root: &Path) -> std::io::Result<()> {
+    remove_temporary(&root.join(".lock.tmp")); // 旧目录锁的临时文件
+    for name in [
+        "device.json", "clock.json", "entities.json", "conflicts.json", "deferred.json", "peers.json",
+    ] {
+        remove_temporary(&root.join(format!("{name}.tmp")));
+    }
+    for name in ["content", "assets"] {
+        let dir = root.join(name);
+        match fs::symlink_metadata(&dir) {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+        }
+        for book in fs::read_dir(dir)? {
+            let book = book?;
+            if !book.file_type()?.is_dir() {
+                continue;
+            }
+            for file in fs::read_dir(book.path())? {
+                let file = file?;
+                if file.file_type()?.is_file()
+                    && file.file_name().to_str().is_some_and(|name| {
+                        name.ends_with(".json.tmp") || name.ends_with(".sync.tmp")
+                    })
+                {
+                    remove_temporary(&file.path());
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -889,6 +943,18 @@ mod tests {
         assert!(matches!(err, SyncError::Invalid(_)), "{err}");
         assert!(err.to_string().contains("另一个进程"), "{err}");
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rename_failure_removes_temporary_and_preserves_target() {
+        let dir = temp_dir("rename-failure");
+        let path = dir.join("x.json");
+        fs::create_dir_all(&path).unwrap();
+        fs::write(path.join("keep"), b"old").unwrap();
+        assert!(write_json_atomic(&path, &serde_json::json!({"a": 1})).is_err());
+        assert!(!dir.join("x.json.tmp").exists());
+        assert_eq!(fs::read(path.join("keep")).unwrap(), b"old");
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

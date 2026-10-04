@@ -354,6 +354,7 @@ fn ensure_book_dir<R: tauri::Runtime>(app: &AppHandle<R>, id: &str) -> Result<Pa
 /// 原子写 JSON：先写临时文件再替换（中途失败 / 进程被杀不会留下半截文件）
 fn write_json_atomic<T: Serialize>(path: &Path, value: &T, what: &str) -> Result<(), String> {
     let tmp = path.with_extension("json.tmp");
+    let _temporary = crate::temporary_file::TemporaryFile(tmp.clone());
     {
         let file = fs::File::create(&tmp).map_err(|e| format!("写入{what}失败: {e}"))?;
         let mut writer = BufWriter::new(file);
@@ -361,10 +362,7 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T, what: &str) -> Result
         std::io::Write::flush(&mut writer).map_err(|e| format!("写入{what}失败: {e}"))?;
         writer.get_ref().sync_all().map_err(|e| format!("写入{what}失败: {e}"))?;
     }
-    fs::rename(&tmp, path).map_err(|e| {
-        let _ = fs::remove_file(&tmp);
-        format!("写入{what}失败: {e}")
-    })
+    fs::rename(&tmp, path).map_err(|e| format!("写入{what}失败: {e}"))
 }
 
 /// 读整份 JSON（流式：不把整份文本读进内存）
@@ -1920,7 +1918,35 @@ fn has_body(body: &ChapterContent) -> bool {
 }
 
 #[cfg(test)]
-mod tests {    use super::*;
+mod tests {
+    use super::*;
+    #[test]
+    fn atomic_failures_clean_temporary_and_preserve_old_data() {
+        struct Interrupted;
+        impl serde::Serialize for Interrupted {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                use serde::ser::SerializeMap;
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("partial", &1)?;
+                Err(serde::ser::Error::custom("interrupted"))
+            }
+        }
+        let dir = temp_dir("atomic-failures");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("content.json");
+        fs::write(&path, b"old").unwrap();
+        assert!(write_json_atomic(&path, &Interrupted, "正文").is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"old");
+        assert!(!dir.join("content.json.tmp").exists());
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("keep"), b"old").unwrap();
+        assert!(write_json_atomic(&path, &serde_json::json!({"new": 1}), "正文").is_err());
+        assert!(!dir.join("content.json.tmp").exists());
+        assert_eq!(fs::read(path.join("keep")).unwrap(), b"old");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     use crate::models::ChapterBlock;
 
     #[test]

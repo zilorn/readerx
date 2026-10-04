@@ -174,9 +174,11 @@ fn atomic_write(path: &Path, value: &Value) -> Result<(), String> {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let temporary = path.with_extension("id-migration.tmp");
+    let _temporary = crate::temporary_file::TemporaryFile(temporary.clone());
     let mut file = fs::File::create(&temporary).map_err(|e| e.to_string())?;
     serde_json::to_writer(&mut file, value).map_err(|e| e.to_string())?;
     file.sync_all().map_err(|e| e.to_string())?;
+    drop(file);
     fs::rename(temporary, path).map_err(|e| format!("保存迁移数据失败: {e}"))
 }
 

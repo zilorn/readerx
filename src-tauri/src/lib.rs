@@ -16,6 +16,7 @@ mod single_instance;
 // 对外可见同样是为了让集成测试直接验证桥接（见 tests/source_prompt_bridge.rs）。
 pub mod source_prompt;
 mod storage;
+mod temporary_file;
 mod reading_time;
 mod volume_keys;
 
@@ -130,6 +131,10 @@ pub fn run() {
                 readerx_source::store::init_data_root(dir);
             } else {
                 log::warn!("无法定位应用数据目录，书源与登录态将退回默认目录");
+            }
+            // 只在后台任务启动前回收上次异常退出遗留的 App 临时文件。
+            if let Err(error) = temporary_file::cleanup(&storage::data_root(app.handle())?) {
+                log::warn!("启动清理存储临时文件失败：{error}");
             }
             // 本地书的旧布局（整本 books/<id>.json、全库一份的 state/readerx.bookmarks.json）
             // 先转为目录布局，再统一书籍 ID；必须早于界面与同步线程访问书库。

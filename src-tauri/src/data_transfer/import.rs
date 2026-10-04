@@ -423,6 +423,7 @@ fn write_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
         fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {e}"))?;
     }
     let temp = path.with_file_name(format!("{}.tmp", name.to_string_lossy()));
+    let _temporary = crate::temporary_file::TemporaryFile(temp.clone());
     fs::write(&temp, bytes).map_err(|e| format!("写入文件失败: {e}"))?;
     fs::rename(&temp, path).map_err(|e| format!("写入文件失败: {e}"))
 }

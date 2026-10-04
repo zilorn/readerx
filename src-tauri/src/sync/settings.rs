@@ -96,13 +96,11 @@ pub fn save(root: &Path, settings: &SyncSettings) -> Result<(), SyncError> {
         .map_err(|e| SyncError::Io(format!("创建同步目录失败: {e}")))?;
     let path = root.join(SETTINGS_FILE);
     let tmp = root.join("settings.json.tmp");
+    let _temporary = crate::temporary_file::TemporaryFile(tmp.clone());
     let text = serde_json::to_string_pretty(settings)
         .map_err(|e| SyncError::Json(format!("同步设置序列化失败: {e}")))?;
     std::fs::write(&tmp, text).map_err(|e| SyncError::Io(format!("写入同步设置失败: {e}")))?;
-    std::fs::rename(&tmp, &path).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        SyncError::Io(format!("写入同步设置失败: {e}"))
-    })
+    std::fs::rename(&tmp, &path).map_err(|e| SyncError::Io(format!("写入同步设置失败: {e}")))
 }
 
 #[cfg(test)]

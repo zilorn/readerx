@@ -239,6 +239,9 @@ impl SyncEngine {
         } else {
             Some(LockGuard::acquire(store.root(), store.device_id())?)
         };
+        if !options.read_only {
+            crate::store::cleanup_temporary_files(store.root())?;
+        }
         let clock = store.load_clock()?.restore(&device_id);
 
         let ops = if options.read_only { store.read_oplog()? } else { store.recover_oplog()? };
@@ -1012,6 +1015,7 @@ impl SyncEngine {
         };
         let mut chapters: Vec<ChapterContent> = entries
             .flatten()
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
             .filter_map(|entry| read_staged(&entry.path()).ok())
             .collect();
         chapters.sort_by(|a, b| a.cid.cmp(&b.cid));
@@ -1208,6 +1212,7 @@ impl SyncEngine {
         };
         let mut items: Vec<Asset> = entries
             .flatten()
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
             .filter_map(|entry| read_staged_asset(&entry.path()).ok())
             .collect();
         items.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1847,17 +1852,7 @@ fn read_staged_asset(path: &Path) -> std::io::Result<Asset> {
 /// 原子写（临时文件 + rename）：半截文件不会被当成一份正文读出来。
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let tmp = path.with_extension("json.tmp");
-    use std::io::Write;
-    let mut file = std::fs::File::create(&tmp)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    match std::fs::rename(&tmp, path) {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            let _ = std::fs::remove_file(&tmp);
-            Err(error)
-        }
-    }
+    crate::store::write_bytes_atomic(path, &tmp, bytes)
 }
 
 #[cfg(test)]
@@ -1945,6 +1940,79 @@ mod tests {
             "快照之后的日志尾部必须被重放"
         );
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn stale_temporary_files_are_cleaned_only_by_writer() {
+        let dir = temp_dir("stale-temporary");
+        let options = EngineOptions::new("A").with_schemas(schemas());
+        drop(SyncEngine::open(&dir, options.clone()).unwrap());
+        fs::create_dir_all(dir.join("content/book-1")).unwrap();
+        fs::create_dir_all(dir.join("assets/book-1")).unwrap();
+        let stale = [
+            "entities.json.tmp",
+            ".lock.tmp",
+            "content/book-1/chapter.json.tmp",
+            "assets/book-1/image.sync.tmp",
+        ];
+        for name in stale {
+            fs::write(dir.join(name), b"incomplete").unwrap();
+        }
+        fs::write(
+            dir.join("content/book-1/chapter.json.tmp"),
+            br#"{"cid":"uncommitted","paragraphs":["body"]}"#,
+        )
+        .unwrap();
+        let retained = [
+            "content/book-1/keep.json",
+            "assets/book-1/keep.json",
+            "unknown.tmp",
+        ];
+        for name in retained {
+            fs::write(dir.join(name), b"original").unwrap();
+        }
+        fs::create_dir(dir.join("content/book-1/keep.json.tmp")).unwrap();
+        #[cfg(unix)]
+        {
+            fs::create_dir_all(dir.join("external")).unwrap();
+            fs::write(dir.join("external/keep.json.tmp"), b"original").unwrap();
+            std::os::unix::fs::symlink(dir.join("external"), dir.join("assets/linked")).unwrap();
+        }
+        {
+            let reader = SyncEngine::open(&dir, options.clone().read_only()).unwrap();
+            assert!(reader.staged_bodies("book-1").is_empty());
+            for name in stale {
+                assert!(dir.join(name).is_file(), "{name}");
+            }
+        }
+        let writer = SyncEngine::open(&dir, options.clone()).unwrap();
+        for name in stale {
+            assert!(!dir.join(name).exists(), "{name}");
+        }
+        for name in retained {
+            assert_eq!(fs::read(dir.join(name)).unwrap(), b"original");
+        }
+        assert!(dir.join("content/book-1/keep.json.tmp").is_dir());
+        #[cfg(unix)]
+        assert!(dir.join("external/keep.json.tmp").is_file());
+        // 清理不能影响持锁写者正在生成的文件。
+        fs::write(dir.join("entities.json.tmp"), b"active").unwrap();
+        drop(SyncEngine::open(&dir, options.read_only()).unwrap());
+        assert_eq!(fs::read(dir.join("entities.json.tmp")).unwrap(), b"active");
+        drop(writer);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn staged_rename_failure_cleans_temporary_file() {
+        let dir = temp_dir("staged-rename-failure");
+        let path = dir.join("chapter.json");
+        fs::create_dir_all(&path).unwrap();
+        fs::write(path.join("keep"), b"old").unwrap();
+        assert!(write_atomic(&path, b"new").is_err());
+        assert!(!dir.join("chapter.json.tmp").exists());
+        assert_eq!(fs::read(path.join("keep")).unwrap(), b"old");
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
