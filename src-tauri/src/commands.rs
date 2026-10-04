@@ -791,12 +791,23 @@ pub async fn readerx_webview_open(
     title: String,
 ) -> Result<(), String> {
     blocking("打开网页", move || {
+        let url = validate_webview_url(&url)?;
         if !webview_login::is_supported() {
             return Err("当前平台不支持应用内 WebView".to_string());
         }
         webview_login::view(&app, &url, &title)
     })
     .await
+}
+
+/// 在平台分派前校验书源提供的地址，并传递解析后的规范地址。
+fn validate_webview_url(url: &str) -> Result<String, String> {
+    let parsed = tauri::Url::parse(url.trim())
+        .map_err(|_| "网页地址无效，仅支持带主机名的 http/https 地址".to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err("网页地址无效，仅支持带主机名的 http/https 地址".to_string());
+    }
+    Ok(parsed.to_string())
 }
 
 /// 清空某个书源已保存的登录态（Cookie + 存储快照文件 + 当前会话），返回移除的 Cookie 行数。
@@ -845,6 +856,44 @@ pub fn readerx_open_devtools(webview: Webview) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn webview_url_rejects_non_web_schemes_and_invalid_addresses() {
+        for url in [
+            "file:///etc/passwd",
+            " FILE:///etc/passwd ",
+            "javascript:alert(1)",
+            "data:text/html,<h1>test</h1>",
+            "about:blank",
+            "content://readerx/books/1",
+            "ftp://example.com/book",
+            "tauri://localhost",
+            "https://",
+            "http://?token=secret",
+            "https://example.com:invalid/",
+            "//example.com/book",
+            "/book.html",
+            "",
+        ] {
+            let error = validate_webview_url(url).expect_err("必须拒绝非法网页地址");
+            assert_eq!(error, "网页地址无效，仅支持带主机名的 http/https 地址");
+        }
+    }
+
+    #[test]
+    fn webview_url_accepts_and_normalizes_http_https() {
+        for (input, expected) in [
+            ("http://example.com/book", "http://example.com/book"),
+            (
+                " HTTPS://EXAMPLE.COM/book?q=1#part ",
+                "https://example.com/book?q=1#part",
+            ),
+            ("https://127.0.0.1:8080/", "https://127.0.0.1:8080/"),
+            ("http://[::1]/", "http://[::1]/"),
+        ] {
+            assert_eq!(validate_webview_url(input).unwrap(), expected);
+        }
+    }
 
     /// IPC 返回值**不做**字段名转换（tauri 只把入参转成 camelCase），前端按
     /// `picked.dataBase64` / `picked.fileName` 取值 —— 字段名一旦漂回下划线，
