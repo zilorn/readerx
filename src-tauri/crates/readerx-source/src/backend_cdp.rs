@@ -166,11 +166,12 @@ fn flatten_frames(tree: Option<&Value>, out: &mut Vec<Frame>, depth: usize) {
 fn probe_expr(origin: &str, login_url: &str) -> String {
     let script = storage::probe_script(&[origin.to_string()]);
     let json = serde_json::to_string(&script).unwrap_or_else(|_| "\"\"".to_string());
+    let pending = serde_json::to_string(storage::JS_PROBE_PENDING).unwrap();
     let fallback = serde_json::to_string(login_url).unwrap_or_else(|_| "\"\"".to_string());
     format!(
         "(async function () {{ \
              const r = await (0, eval)({json}); \
-             if (typeof r === \"string\" && r) return r; \
+             if (typeof r === \"string\" && r && r !== {pending}) return r; \
              for (let i = 0; i < 40; i++) {{ \
                  await new Promise(function (done) {{ setTimeout(done, 100); }}); \
                  if (window.__rxStorageProbeDone) {{ \
@@ -761,6 +762,98 @@ fn spawn_browser(binary: &str, options: &Options) -> Result<(Child, String), Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn run_storage_probe(indexed_db: &str, timer: &str) -> (StorageSnapshot, u32) {
+        let mut context = boa_engine::Context::default();
+        let globals = format!(
+            r#"var window = globalThis;
+var location = {{ origin: 'https://a.test', href: 'https://a.test/login' }};
+window.localStorage = {{ length: 1, key: function () {{ return 'token'; }},
+    getItem: function () {{ return 'test-token'; }} }};
+window.sessionStorage = {{ length: 0 }};
+var timerCalls = 0;
+{indexed_db}
+function setTimeout(done) {{ timerCalls++; {timer} done(); }}
+var probeResult;
+"#
+        );
+        context
+            .eval(boa_engine::Source::from_bytes(globals.as_bytes()))
+            .unwrap();
+        let script = format!(
+            "{}.then(function (text) {{ probeResult = text; }});",
+            probe_expr("https://a.test", "https://a.test/login")
+        );
+        context
+            .eval(boa_engine::Source::from_bytes(script.as_bytes()))
+            .unwrap();
+        context.run_jobs().unwrap();
+        let result = context
+            .eval(boa_engine::Source::from_bytes(b"probeResult"))
+            .unwrap();
+        let snapshot = storage::parse_probe_eval(&result.display().to_string()).unwrap();
+        let timer_calls = context
+            .eval(boa_engine::Source::from_bytes(b"timerCalls"))
+            .unwrap()
+            .as_number()
+            .unwrap() as u32;
+        let done = context
+            .eval(boa_engine::Source::from_bytes(
+                b"window.__rxStorageProbeDone",
+            ))
+            .unwrap();
+        assert_eq!(done.as_boolean(), Some(false));
+        let remaining = context
+            .eval(boa_engine::Source::from_bytes(
+                b"window.__rxStorageProbeResult",
+            ))
+            .unwrap();
+        assert_eq!(remaining.display().to_string(), "\"\"");
+        (snapshot, timer_calls)
+    }
+
+    #[test]
+    fn storage_probe_waits_for_indexed_db() {
+        // 在第一次轮询计时器触发时才完成数据库枚举，验证不会直接返回 pending。
+        let (snapshot, timer_calls) = run_storage_probe(
+            "var finishDatabases; window.indexedDB = { databases: function () { \
+             return new Promise(function (resolve) { finishDatabases = resolve; }); } };",
+            "finishDatabases([{ name: 'login-db', version: 3 }]);",
+        );
+        let page = snapshot.origin("https://a.test").unwrap();
+        assert_eq!(page.indexed_db.len(), 1);
+        assert_eq!(page.indexed_db[0].name, "login-db");
+        assert_eq!(page.indexed_db[0].version, 3);
+        assert_eq!(page.local_storage[0].value, "test-token");
+        assert_eq!(timer_calls, 1);
+    }
+
+    #[test]
+    fn storage_probe_reads_completed_or_failed_enumeration() {
+        for indexed_db in [
+            "window.indexedDB = undefined;",
+            "window.indexedDB = { databases: function () { return Promise.reject('unavailable'); } };",
+        ] {
+            let (snapshot, timer_calls) = run_storage_probe(indexed_db, "");
+            let page = snapshot.origin("https://a.test").unwrap();
+            assert!(page.indexed_db.is_empty());
+            assert_eq!(page.local_storage[0].value, "test-token");
+            assert_eq!(timer_calls, 1);
+        }
+    }
+
+    #[test]
+    fn storage_probe_timeout_returns_fallback_snapshot() {
+        let (snapshot, timer_calls) = run_storage_probe(
+            "window.indexedDB = { databases: function () { return new Promise(function () {}); } };",
+            "",
+        );
+        let page = snapshot.origin("https://a.test").unwrap();
+        assert_eq!(page.url, "https://a.test/login");
+        assert!(page.indexed_db.is_empty());
+        assert!(page.local_storage.is_empty());
+        assert_eq!(timer_calls, 40);
+    }
 
     #[test]
     fn domain_matching_is_host_scoped() {
