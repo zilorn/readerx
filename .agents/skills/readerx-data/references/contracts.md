@@ -6,7 +6,7 @@
 
 - book_store.rs 按 books/<id>/ 拆分 bookdetail.json、content.json、bookmarks.json；digest.json 是派生指纹缓存。元信息补丁不读写整本正文，逐章回写与书签各走对应文件。新增字段核对 models.rs、BookDetail 与前端 booksTypes.ts，保留 schemaVersion 信封及字段往返测试。
 - book_store 的读写入口在进程级书库事务锁内完成迁移、读取、修改、落盘及指纹更新；持锁时不调用同步引擎。单章补丁以 chapter.cid 定位，index 仅兼容旧载荷；先验证整批 cid 存在且唯一，再只改正文，保留当前目录标题/地址。
-- 普通状态读写/删除与 update_state 共用事务锁；读改写必须使用 update_state 闭包，闭包内不重入状态存储或同步引擎。阅读进度经 readerx_shelf_patch 按书提交增量，ensure 仅补缺失项，reset 在后端重置当前全部记录；不要恢复成前端整份旧书架快照覆盖。
+- 普通状态写入使用同目录临时文件，先 sync_all 再重命名替换，Unix（含 Android）随后同步父目录；提交前失败保留旧文件并清理临时文件，目录同步失败返回“已替换”错误（不可假定已回滚）。Windows 仅同步文件并替换，不承诺断电后的目录持久性。普通状态读写/删除与 update_state 共用事务锁；读改写必须使用 update_state 闭包，闭包内不重入状态存储或同步引擎。阅读进度经 readerx_shelf_patch 按书提交增量，ensure 仅补缺失项，reset 在后端重置当前全部记录；不要恢复成前端整份旧书架快照覆盖。
 - 旧 books/<id>.json 布局迁移成功后才删旧文件，失败仍可回退读取；全库旧书签完成迁移后留 .migrated 备份。不要通过删旧数据让新布局检查通过。
 - 书库与同步共用稳定 ID；已有规范 ID 沿用，不能在每次编辑后按新名字/地址重新计算。身份算法以 sync/identity.rs 为准：在线书首次按书源地址与详情页地址派生，导入书按归一文件名与字节数派生。分组与书源首次按名称/地址派生后编辑沿用 ID；规则仍按内容派生。前端 dataIds.ts 与 Rust 种子、大小写和归一化口径保持一致。
 - 迁移顺序与启动入口检查 src-tauri/src/lib.rs：书籍迁移在 UI/同步访问前完成，data_ids 再处理分组、书源、规则及引用。迁移待办先落盘，每步可重跑；目录或身份冲突保留原数据并返回失败，不能覆盖目标。

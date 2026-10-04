@@ -136,16 +136,30 @@ fn read_state_path(path: &Path) -> Result<Option<Value>, String> {
         .map_err(|e| format!("解析状态失败: {e}"))
 }
 
-fn write_state_path(path: &Path, value: &Value) -> Result<(), String> {
+/// 临时文件与目标在同一目录；提交前失败保留旧状态，Unix 提交后同步目录项。
+fn write_state_path(path: &Path, value: &impl serde::Serialize) -> Result<(), String> {
+    // 在替换前打开目录，避免打开失败时状态已经提交。
+    #[cfg(unix)]
+    let directory = fs::File::open(path.parent().ok_or("状态文件缺少父目录")?)
+        .map_err(|e| format!("打开状态目录失败: {e}"))?;
     let tmp = path.with_extension("json.tmp");
-    let file = fs::File::create(&tmp).map_err(|e| format!("写入状态失败: {e}"))?;
-    serde_json::to_writer_pretty(&file, value).map_err(|e| format!("序列化失败: {e}"))?;
-    file.sync_all().map_err(|e| format!("写入状态失败: {e}"))?;
-    drop(file);
-    fs::rename(&tmp, path).map_err(|e| {
+    let result = (|| {
+        let mut file = fs::File::create(&tmp).map_err(|e| format!("写入状态失败: {e}"))?;
+        serde_json::to_writer_pretty(&mut file, value).map_err(|e| format!("序列化失败: {e}"))?;
+        file.sync_all().map_err(|e| format!("写入状态失败: {e}"))?;
+        drop(file);
+        // 不先删除目标；替换失败时仍可读取旧状态。
+        fs::rename(&tmp, path).map_err(|e| format!("替换状态失败: {e}"))?;
+        #[cfg(unix)]
+        directory
+            .sync_all()
+            .map_err(|e| format!("状态已替换，但同步状态目录失败: {e}"))?;
+        Ok(())
+    })();
+    if result.is_err() {
         let _ = fs::remove_file(&tmp);
-        format!("写入状态失败: {e}")
-    })
+    }
+    result
 }
 
 pub(crate) fn read_state<R: tauri::Runtime>(
@@ -560,6 +574,64 @@ pub(crate) fn remove_source_login_cookie<R: tauri::Runtime>(
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    struct InterruptedState;
+
+    impl serde::Serialize for InterruptedState {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeMap;
+            let mut map = serializer.serialize_map(Some(2))?;
+            map.serialize_entry("chapter", &42)?;
+            Err(serde::ser::Error::custom("模拟写入中断"))
+        }
+    }
+
+    #[test]
+    fn interrupted_state_write_preserves_old_json_and_cleans_temp() {
+        let dir = std::env::temp_dir()
+            .join(format!("readerx-state-interrupted-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("shelf.json");
+        let old = serde_json::json!({"chapter": 7, "group": "reading", "theme": "dark"});
+        write_state_path(&path, &old).unwrap();
+        let original = fs::read(&path).unwrap();
+        assert!(write_state_path(&path, &InterruptedState).is_err());
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert_eq!(read_state_path(&path).unwrap(), Some(old));
+        assert!(!path.with_extension("json.tmp").exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn state_write_replaces_existing_json_and_ignores_crash_leftover() {
+        let dir = std::env::temp_dir()
+            .join(format!("readerx-state-replace-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("preferences.json");
+        let old = serde_json::json!({"theme": "dark", "extra": "old data"});
+        write_state_path(&path, &old).unwrap();
+        fs::write(path.with_extension("json.tmp"), b"{\"theme\":").unwrap();
+        assert_eq!(read_state_path(&path).unwrap(), Some(old));
+        let new = serde_json::json!({"theme": "light"});
+        write_state_path(&path, &new).unwrap();
+        assert_eq!(read_state_path(&path).unwrap(), Some(new));
+        assert!(!path.with_extension("json.tmp").exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn failed_state_replace_preserves_target_and_cleans_temp() {
+        let dir = std::env::temp_dir()
+            .join(format!("readerx-state-rename-failure-{}", std::process::id()));
+        let path = dir.join("groups.json");
+        // 目录充当不可替换的目标，稳定触发 rename 失败。
+        fs::create_dir_all(&path).unwrap();
+        fs::write(path.join("marker"), b"keep").unwrap();
+        assert!(write_state_path(&path, &serde_json::json!([])).is_err());
+        assert_eq!(fs::read(path.join("marker")).unwrap(), b"keep");
+        assert!(!path.with_extension("json.tmp").exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn concurrent_state_updates_preserve_every_entry() {
