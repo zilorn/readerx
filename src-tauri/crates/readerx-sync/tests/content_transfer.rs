@@ -266,3 +266,143 @@ fn duplicate_push_is_confirmed_but_missing_data_still_fails() {
         }
     }
 }
+
+/// Assert actual wire size even with loopback, so escaping and chunk envelopes are covered.
+struct BoundedTransport {
+    inner: LoopbackTransport,
+    chunks: usize,
+    legacy: bool,
+}
+impl readerx_sync::net::Transport for BoundedTransport {
+    fn peer(&self) -> readerx_sync::net::PeerInfo {
+        let mut peer = self.inner.peer();
+        peer.chapter_chunks = !self.legacy;
+        peer
+    }
+    fn request(&mut self, request: &readerx_sync::proto::Request) -> readerx_sync::Result<readerx_sync::proto::Response> {
+        use readerx_sync::proto::*;
+        assert!(serde_json::to_vec(request).unwrap().len() < MAX_FRAME_BYTES - 128);
+        if matches!(request, Request::PushChapterChunk { .. } | Request::PullChapterChunk { .. }) {
+            assert!(!self.legacy, "旧端不能收到新请求");
+            self.chunks += 1;
+        }
+        let response = self.inner.request(request)?;
+        assert!(serde_json::to_vec(&response).unwrap().len() < MAX_FRAME_BYTES - 128);
+        Ok(response)
+    }
+}
+
+#[test]
+fn oversized_chapters_push_and_pull_with_bounded_frames_and_converge() {
+    let ac = Arc::new(MemContent::default());
+    let bc = Arc::new(MemContent::default());
+    let a = engine("oversize-a", ac.clone());
+    let b = engine("oversize-b", bc.clone());
+    readerx_sync::net::lock_engine(&a).create_entity("book", Some("large-book".into()),
+        [("title", serde_json::json!("大章节"))]).unwrap();
+    // Bigger than both the old chapter budget and the wire frame limit.
+    let big = "中文🙂".repeat(900_000);
+    ac.put("large-book", "push-large", &big);
+    // Small raw body but JSON control-character escaping exceeds 8 MiB.
+    let escaped = format!("正文{}", "\u{0001}".repeat(1_500_000));
+    bc.put("large-book", "pull-escaped", &escaped);
+    ac.put("large-book", "small-a", "普通章节甲");
+    bc.put("large-book", "small-b", "普通章节乙");
+    let mut transport = BoundedTransport { inner: LoopbackTransport::new(b.clone()), chunks: 0, legacy: false };
+    let report = readerx_sync::sync_with(&mut readerx_sync::net::lock_engine(&a), &mut transport).unwrap();
+    assert_eq!((report.content_pushed, report.content_pulled), (2, 2));
+    assert!(!report.more_content);
+    assert!(transport.chunks > 4);
+    assert_eq!(effective(&a, "large-book"), effective(&b, "large-book"));
+    assert_eq!(effective(&b, "large-book")["push-large"], big);
+    assert_eq!(effective(&a, "large-book")["pull-escaped"], escaped);
+    let again = sync_once(&a, &b);
+    assert_eq!((again.content_pushed, again.content_pulled), (0, 0));
+}
+
+#[test]
+fn legacy_peer_keeps_large_chapters_pending_and_transfers_small_ones() {
+    let ac = Arc::new(MemContent::default());
+    let bc = Arc::new(MemContent::default());
+    let a = engine("legacy-large-a", ac.clone());
+    let b = engine("legacy-large-b", bc.clone());
+    readerx_sync::net::lock_engine(&a).create_entity("book", Some("legacy-book".into()),
+        [("title", serde_json::json!("大章节"))]).unwrap();
+    let big = "x".repeat(readerx_sync::proto::CONTENT_BATCH_BYTES + 1);
+    ac.put("legacy-book", "large-a", &big);
+    bc.put("legacy-book", "large-b", &big);
+    ac.put("legacy-book", "small-a", "普通章节甲");
+    bc.put("legacy-book", "small-b", "普通章节乙");
+    let mut transport = BoundedTransport { inner: LoopbackTransport::new(b.clone()), chunks: 0, legacy: true };
+    let error = readerx_sync::sync_with(&mut readerx_sync::net::lock_engine(&a), &mut transport).unwrap_err();
+    assert!(error.to_string().contains("升级"));
+    assert_eq!(effective(&a, "legacy-book")["small-b"], "普通章节乙");
+    assert_eq!(effective(&b, "legacy-book")["small-a"], "普通章节甲");
+    assert_eq!(transport.chunks, 0);
+    assert!(!effective(&a, "legacy-book").contains_key("large-b"));
+    assert!(!effective(&b, "legacy-book").contains_key("large-a"));
+    // Upgrading the peer resumes all outstanding content.
+    let report = sync_once(&a, &b);
+    assert_eq!((report.content_pushed, report.content_pulled), (1, 1));
+    assert!(!report.more_content);
+}
+
+struct InterruptedChapter(LoopbackTransport, usize);
+impl readerx_sync::net::Transport for InterruptedChapter {
+    fn peer(&self) -> readerx_sync::net::PeerInfo { self.0.peer() }
+    fn request(&mut self, request: &readerx_sync::proto::Request) -> readerx_sync::Result<readerx_sync::proto::Response> {
+        use readerx_sync::proto::Request;
+        if matches!(request, Request::PushChapterChunk { .. } | Request::PullChapterChunk { .. }) {
+            self.1 += 1;
+            if self.1 == 2 { return Err(readerx_sync::SyncError::Cancelled); }
+        }
+        self.0.request(request)
+    }
+}
+
+#[test]
+fn interrupted_chapter_is_not_staged_and_retries_in_both_directions() {
+    for pull in [false, true] {
+        let ac = Arc::new(MemContent::default());
+        let bc = Arc::new(MemContent::default());
+        let a = engine(&format!("chapter-stop-a-{pull}"), ac.clone());
+        let b = engine(&format!("chapter-stop-b-{pull}"), bc.clone());
+        readerx_sync::net::lock_engine(&a).create_entity("book", Some("stop-book".into()),
+            [("title", serde_json::json!("停止"))]).unwrap();
+        let text = "a".repeat(readerx_sync::proto::CONTENT_BATCH_BYTES + 1);
+        (if pull { bc } else { ac }).put("stop-book", "c1", &text);
+        let mut transport = InterruptedChapter(LoopbackTransport::new(b.clone()), 0);
+        let error = readerx_sync::sync_with(&mut readerx_sync::net::lock_engine(&a), &mut transport).unwrap_err();
+        assert_eq!(error, readerx_sync::SyncError::Cancelled);
+        let target = if pull { &a } else { &b };
+        assert!(readerx_sync::net::lock_engine(target).staged_bodies("stop-book").is_empty());
+        drop(transport);
+        let report = sync_once(&a, &b);
+        assert_eq!(report.content_pushed + report.content_pulled, 1);
+        assert_eq!(effective(target, "stop-book")["c1"], text);
+    }
+}
+
+#[test]
+fn oversized_chapter_crosses_authenticated_tcp_in_both_directions() {
+    use readerx_sync::net::{PeerServer, ServerOptions};
+    for pull in [false, true] {
+        let ac = Arc::new(MemContent::default());
+        let bc = Arc::new(MemContent::default());
+        let a = engine(&format!("chapter-tcp-a-{pull}"), ac.clone());
+        let b = engine(&format!("chapter-tcp-b-{pull}"), bc.clone());
+        let code = readerx_sync::net::lock_engine(&a).pairing_code();
+        readerx_sync::net::lock_engine(&b).join_group(&code).unwrap();
+        readerx_sync::net::lock_engine(&a).create_entity("book", Some("tcp-book".into()),
+            [("title", serde_json::json!("大章节"))]).unwrap();
+        let text = "中文🙂".repeat(850_000);
+        (if pull { bc } else { ac }).put("tcp-book", "c1", &text);
+        let options = ServerOptions::from_engine(&readerx_sync::net::lock_engine(&b)).unwrap()
+            .with_bind(([127, 0, 0, 1], 0).into());
+        let server = PeerServer::start(b.clone(), options).unwrap();
+        let report = readerx_sync::sync_with_addr(&mut readerx_sync::net::lock_engine(&a),
+            &server.local_addr().to_string(), std::time::Duration::from_secs(15)).unwrap();
+        assert_eq!(report.content_pushed + report.content_pulled, 1);
+        assert_eq!(effective(if pull { &a } else { &b }, "tcp-book")["c1"], text);
+    }
+}

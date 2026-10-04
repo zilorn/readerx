@@ -58,6 +58,7 @@
 pub mod cli;
 pub mod assets;
 mod asset_transfer;
+mod chapter_transfer;
 pub mod content;
 pub mod crypto;
 pub mod engine;

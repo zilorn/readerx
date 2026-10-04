@@ -307,7 +307,14 @@ fn run_session(
     // 操作已持久化；正文 / 资源失败也必须反馈给宿主，不能显示为全部完成。
     content_pass(engine, transport, report, progress)?;
     asset_pass(engine, transport, report, progress)?;
-    if report.more_content || report.more_assets {
+    if report.more_content {
+        return Err(SyncError::Protocol(if !transport.peer().chapter_chunks {
+            "部分正文未能完整传输，请升级两端应用以支持章节分片"
+        } else {
+            "部分正文未能完整传输"
+        }.into()));
+    }
+    if report.more_assets {
         return Err(SyncError::Protocol("部分正文或资源未能完整传输".into()));
     }
 
@@ -362,6 +369,7 @@ fn content_pass(
 
     let i_win = engine.with(|e| e.device_id() .to_string()) > peer.device_id;
 
+    let mut receiver = crate::chapter_transfer::ChapterTransfer::new(engine.with(|e| e.asset_transfer_root()));
     let book_count = books.len();
     for (book_index, book) in books.into_iter().enumerate() {
 
@@ -441,7 +449,26 @@ fn content_pass(
                 let items = engine.with(|e| e.content_bodies(&book, batch));
                 let (items, size) = fit_batch(items);
                 if items.is_empty() {
-                    return Err(SyncError::Protocol("正文无法装入传输帧".into()));
+                    let cid = &wanted[0];
+                    let item = engine.with(|e| e.content_bodies(&book, &[cid.clone()])).into_iter()
+                        .find(|item| &item.cid == cid)
+                        .ok_or_else(|| SyncError::Protocol("正文无法读取".into()))?;
+                    if !peer.chapter_chunks {
+                        report.more_content = true;
+                        log::warn!("对端不支持章节分片，正文保留待同步 book={book} cid={cid}");
+                        wanted.remove(0);
+                        continue;
+                    }
+                    crate::chapter_transfer::push(transport, &book, &item, &mut |bytes| {
+                        report.bytes += bytes;
+                        notify_progress(engine, report, progress, "content", Some(&book), book_index + 1, book_count,
+                            report.content_pushed + report.content_pulled - before, Some(planned))
+                    })?;
+                    wanted.remove(0);
+                    report.content_pushed += 1;
+                    notify_progress(engine, report, progress, "content", Some(&book), book_index + 1, book_count,
+                        report.content_pushed + report.content_pulled - before, Some(planned))?;
+                    continue;
                 }
                 let sent: HashSet<String> = items.iter().map(|item| item.cid.clone()).collect();
                 wanted.retain(|cid| !sent.contains(cid));
@@ -512,12 +539,29 @@ fn content_pass(
                     )))
                 }
             };
-            if items.is_empty() || items.iter().any(|item| !requested.contains(&item.cid)) {
+            let chunked = items.is_empty();
+            let items = if chunked {
+                let cid = &wanted[0];
+                if !peer.chapter_chunks {
+                    report.more_content = true;
+                    log::warn!("对端不支持章节分片，正文保留待同步 book={book} cid={cid}");
+                    wanted.remove(0);
+                    continue;
+                }
+                let (item, final_bytes) = crate::chapter_transfer::pull(transport, &book, cid, &mut receiver, &mut |bytes| {
+                    report.bytes += bytes;
+                    notify_progress(engine, report, progress, "content", Some(&book), book_index + 1, book_count,
+                        report.content_pushed + report.content_pulled - before, Some(planned))
+                })?;
+                report.bytes += final_bytes;
+                vec![item]
+            } else { items };
+            if items.iter().any(|item| !requested.contains(&item.cid)) {
                 return Err(SyncError::Protocol("对端未返回请求的正文，或章节超过单帧大小".into()));
             }
             let received: HashSet<String> = items.iter().map(|item| item.cid.clone()).collect();
             wanted.retain(|cid| !received.contains(cid));
-            let size: u64 = items.iter().map(ChapterContent::body_bytes).sum();
+            let size: u64 = if chunked { 0 } else { items.iter().map(ChapterContent::body_bytes).sum() };
             let count = items.len();
             match engine.with(|e| e.stage_content(&book, &items)) {
                 Ok(_) => {
@@ -545,19 +589,21 @@ fn content_pass(
 }
 
 /// 按帧预算装箱：返回（装得下的章节, 它们的正文字节数）。
-fn fit_batch(items: Vec<ChapterContent>) -> (Vec<ChapterContent>, u64) {
+pub(crate) fn fit_batch(items: Vec<ChapterContent>) -> (Vec<ChapterContent>, u64) {
     let mut out = Vec::new();
     let mut bytes = 0u64;
+    let mut encoded = 2usize;
     for item in items {
-        let size = item.body_bytes();
-        if size > CONTENT_BATCH_BYTES as u64 {
+        let size = serde_json::to_vec(&item).map(|bytes| bytes.len() + 1).unwrap_or(usize::MAX);
+        if size > CONTENT_BATCH_BYTES - 2 {
             log::debug!("章节正文超过单帧预算 cid={}", item.cid);
             continue;
         }
-        if out.len() >= CONTENT_BATCH_CHAPTERS || bytes + size > CONTENT_BATCH_BYTES as u64 {
+        if out.len() >= CONTENT_BATCH_CHAPTERS || encoded.saturating_add(size) > CONTENT_BATCH_BYTES {
             break;
         }
-        bytes += size;
+        encoded += size;
+        bytes += item.body_bytes();
         out.push(item);
     }
     (out, bytes)

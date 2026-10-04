@@ -59,6 +59,8 @@ pub struct PeerInfo {
     pub content: bool,
     /// 支持超大资源分片（握手时协商）。
     pub asset_chunks: bool,
+    /// 支持超大章节分片（握手时协商）。
+    pub chapter_chunks: bool,
 }
 
 /// 一次同步所需的传输抽象。

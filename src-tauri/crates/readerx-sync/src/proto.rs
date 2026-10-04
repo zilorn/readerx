@@ -10,7 +10,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::assets::{Asset, AssetChunk, AssetDigest, BookAssets};
-use crate::content::{BookDigest, ChapterContent, ChapterDigest};
+use crate::content::{BookDigest, ChapterContent, ChapterDigest, ChapterChunk};
 use crate::id::{DeviceId, OpId};
 use crate::model::Operation;
 use crate::version::VersionVector;
@@ -70,6 +70,9 @@ pub enum Request {
         /// 是否支持超大资源分片；旧构建缺字段时不发送新请求。
         #[serde(default)]
         asset_chunks: bool,
+        /// 是否支持超大章节分片；旧构建缺字段时不发送新请求。
+        #[serde(default)]
+        chapter_chunks: bool,
     },
     /// 鉴权应答：`proof = HMAC(密钥, 握手文本)`
     Auth { proof: String },
@@ -85,6 +88,10 @@ pub enum Request {
     PushChapters { book: String, items: Vec<ChapterContent> },
     /// 拉正文：把这几章的正文给我
     PullChapters { book: String, cids: Vec<String> },
+    /// 完整章节 JSON 分片，后续拉取固定首片指纹。
+    PullChapterChunk { book: String, cid: String, offset: u64, hash: String },
+    /// 最后一片完成重组与暂存后才确认整章到达。
+    PushChapterChunk { book: String, chunk: ChapterChunk },
     /// 资源对账：**点名**这些书（不管本机有没有资源）+ 附带我算过的逐本总览。
     ///
     /// 两个字段分工不同，缺一不可：
@@ -134,6 +141,8 @@ impl Request {
             Request::AssetIndex { .. } => "asset_index",
             Request::AssetDigests { .. } => "asset_digests",
             Request::ExchangeAssets { .. } => "exchange_assets",
+            Request::PullChapterChunk { .. } => "pull_chapter_chunk",
+            Request::PushChapterChunk { .. } => "push_chapter_chunk",
             Request::PullAssetChunk { .. } => "pull_asset_chunk",
             Request::PushAssetChunk { .. } => "push_asset_chunk",
             Request::Stat => "stat",
@@ -165,6 +174,9 @@ pub enum Response {
         /// 是否支持超大资源分片；旧构建缺字段时不发送新请求。
         #[serde(default)]
         asset_chunks: bool,
+        /// 是否支持超大章节分片；旧构建缺字段时不发送新请求。
+        #[serde(default)]
+        chapter_chunks: bool,
     },
     /// 对 Auth 的回应（含服务端自己的 proof，做双向认证）
     Auth {
@@ -238,6 +250,8 @@ pub enum Response {
         stored: usize,
         items: Vec<Asset>,
     },
+    ChapterChunk { chunk: ChapterChunk },
+    ChapterChunkAck { offset: u64, complete: bool },
     AssetChunk { chunk: AssetChunk },
     AssetChunkAck { offset: u64, complete: bool },
     Pong {
@@ -265,6 +279,8 @@ impl Response {
             Response::AssetIndex { .. } => "asset_index",
             Response::AssetDigests { .. } => "asset_digests",
             Response::Assets { .. } => "assets",
+            Response::ChapterChunk { .. } => "chapter_chunk",
+            Response::ChapterChunkAck { .. } => "chapter_chunk_ack",
             Response::AssetChunk { .. } => "asset_chunk",
             Response::AssetChunkAck { .. } => "asset_chunk_ack",
             Response::Pong { .. } => "pong",
@@ -369,7 +385,7 @@ mod tests {
             "type": "hello", "ok": true, "protocol": crate::PROTOCOL_VERSION,
             "group": "group", "device": "peer", "name": "peer", "nonce": "nonce", "content": true
         })).unwrap();
-        assert!(matches!(response, Response::Hello { asset_chunks: false, .. }));
+        assert!(matches!(response, Response::Hello { asset_chunks: false, chapter_chunks: false, .. }));
     }
 
     #[test]

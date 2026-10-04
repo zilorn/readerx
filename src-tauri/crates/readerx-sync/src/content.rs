@@ -534,3 +534,14 @@ mod tests {
         assert_ne!(a, book_digest("b-1", &changed));
     }
 }
+
+/// 按完整章节 JSON 的字节分片；正文结构与 UTF-8 字符可跨片，重组后统一解码。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ChapterChunk {
+    pub cid: String,
+    pub hash: String,
+    pub offset: u64,
+    pub total: u64,
+    #[serde(with = "crate::assets::base64_bytes")]
+    pub bytes: Vec<u8>,
+}

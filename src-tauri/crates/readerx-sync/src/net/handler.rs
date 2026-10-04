@@ -6,8 +6,7 @@
 use crate::assets;
 use crate::engine::SyncEngine;
 use crate::proto::{
-    RejectedOp, Request, Response, ASSET_BATCH_BYTES, ASSET_BATCH_ITEMS, CONTENT_BATCH_BYTES,
-    CONTENT_BATCH_CHAPTERS,
+    RejectedOp, Request, Response, ASSET_BATCH_BYTES, ASSET_BATCH_ITEMS,
 };
 use crate::id::now_ms;
 use crate::PROTOCOL_VERSION;
@@ -21,6 +20,7 @@ pub(crate) fn handle_request(
     peer_device: Option<&str>,
     request: &Request,
     transfers: &mut crate::asset_transfer::AssetTransfer,
+    chapters: &mut crate::chapter_transfer::ChapterTransfer,
 ) -> Response {
     match request {
         Request::Pull { since, limit } => {
@@ -102,21 +102,7 @@ pub(crate) fn handle_request(
         Request::PullChapters { book, cids } => {
             // 按帧预算装箱：装不下的章节由对端在本连接后续请求中继续取回
             let bodies = engine.content_bodies(book, cids);
-            let mut items = Vec::new();
-            let mut bytes = 0usize;
-            for body in bodies {
-                let size = body.body_bytes() as usize;
-                if size > CONTENT_BATCH_BYTES {
-                    // 单章超过帧预算：这一章搬不过去（不静默丢，留下日志）
-                    log::debug!("章节正文超过单帧预算，跳过 book={book} bytes={size}");
-                    continue;
-                }
-                if items.len() >= CONTENT_BATCH_CHAPTERS || bytes + size > CONTENT_BATCH_BYTES {
-                    break;
-                }
-                bytes += size;
-                items.push(body);
-            }
+            let (items, _) = crate::session::fit_batch(bodies);
             if items.len() < cids.len() {
                 log::debug!("本次只回了 {} 章正文（其余继续请求）", items.len());
             }
@@ -129,6 +115,32 @@ pub(crate) fn handle_request(
                 Response::error("content_failed", error.to_string())
             }
         },
+        Request::PullChapterChunk { book, cid, offset, hash } => {
+            match chapters.pull(engine, book, cid, *offset, hash) {
+                Ok(chunk) => Response::ChapterChunk { chunk },
+                Err(error) => Response::error("chapter_chunk_failed", error.to_string()),
+            }
+        }
+        Request::PushChapterChunk { book, chunk } => {
+            if engine.is_read_only() || !engine.entity(book).is_some_and(|entity| !engine.is_effectively_deleted(entity)) {
+                return Response::error("chapter_chunk_failed", "章节分片对应书籍不存在或引擎只读");
+            }
+            match chapters.receive(book, chunk).and_then(|item| {
+                let complete = item.is_some();
+                if let Some(item) = item {
+                    let cid = item.cid.clone();
+                    let hash = item.fingerprint();
+                    engine.stage_content(book, &[item])?;
+                    if !engine.content_digests(book).iter().any(|digest| digest.cid == cid && digest.hash == hash) {
+                        return Err(crate::SyncError::Protocol("完整章节未能暂存".into()));
+                    }
+                }
+                Ok(complete)
+            }) {
+                Ok(complete) => Response::ChapterChunkAck { offset: chunk.offset + chunk.bytes.len() as u64, complete },
+                Err(error) => Response::error("chapter_chunk_failed", error.to_string()),
+            }
+        }
         // ---- 资源通道（封面 / 章节插图，见 crate::assets）----
         Request::AssetIndex { books, known } => {
             // 只回本机**有资源**、且与请求方算过的不一样的书：

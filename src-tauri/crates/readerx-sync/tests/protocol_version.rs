@@ -22,7 +22,7 @@ fn client_rejects_old_protocol_before_auth() {
             write_message(&mut stream, &Response::Hello {
                 ok, protocol: "readerx-sync/1".into(), group: "group".into(),
                 device: "old-server".into(), name: "old".into(), nonce: "nonce".into(),
-                message: None, code: None, content: true, asset_chunks: false,
+                message: None, code: None, content: true, asset_chunks: false, chapter_chunks: false,
             }, MAX_HANDSHAKE_BYTES).unwrap();
             assert!(read_message::<_, Request>(&mut reader, MAX_HANDSHAKE_BYTES).unwrap().is_none());
         });
@@ -52,7 +52,7 @@ fn server_rejects_old_protocol_before_registering_peer() {
     write_message(&mut stream, &Request::Hello {
         protocol: "readerx-sync/1".into(), group, device: "old-client".into(),
         name: "old".into(), knowledge: VersionVector::default(), nonce: "nonce".into(),
-        port: 0, content: true, asset_chunks: false,
+        port: 0, content: true, asset_chunks: false, chapter_chunks: false,
     }, MAX_HANDSHAKE_BYTES).unwrap();
     let mut reader = BufReader::new(stream);
     let response: Response = read_message(&mut reader, MAX_HANDSHAKE_BYTES).unwrap().unwrap();
