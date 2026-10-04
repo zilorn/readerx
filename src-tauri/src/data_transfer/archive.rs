@@ -311,7 +311,8 @@ pub(super) fn read_entry(
         Err(zip::result::ZipError::FileNotFound) => return Ok(None),
         Err(error) => return Err(format!("读取备份条目失败: {error}")),
     };
-    let mut bytes = Vec::with_capacity(entry.size() as usize);
+    // ZIP 的解压大小来自不可信元数据；仅按实际读到的内容增长，避免畸形声明触发巨量分配。
+    let mut bytes = Vec::new();
     entry
         .read_to_end(&mut bytes)
         .map_err(|e| format!("读取备份条目失败: {e}"))?;
@@ -349,6 +350,51 @@ fn valid_image(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn entry_allocation_ignores_declared_uncompressed_size() {
+        let dir = std::env::temp_dir().join(format!("readerx-archive-size-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("backup.zip");
+        for method in [CompressionMethod::Stored, CompressionMethod::Deflated] {
+            let mut writer = writer(File::create(&path).unwrap());
+            writer
+                .start_file(
+                    "state/readerx.shelf.json",
+                    SimpleFileOptions::default().compression_method(method),
+                )
+                .unwrap();
+            writer.write_all(b"{}").unwrap();
+            writer.finish().unwrap();
+
+            // 只篡改中央目录中的解压大小，实际压缩数据与 CRC 保持有效。
+            let mut raw = fs::read(&path).unwrap();
+            let central = raw
+                .windows(4)
+                .position(|bytes| bytes == b"PK\x01\x02")
+                .unwrap();
+            let declared_size = u32::MAX - 1;
+            raw[central + 24..central + 28].copy_from_slice(&declared_size.to_le_bytes());
+            fs::write(&path, raw).unwrap();
+
+            let mut zip = open_zip_from(File::open(&path).unwrap()).unwrap();
+            assert_eq!(
+                zip.by_name("state/readerx.shelf.json").unwrap().size(),
+                u64::from(declared_size)
+            );
+            let bytes = read_entry(&mut zip, "state/readerx.shelf.json")
+                .unwrap()
+                .unwrap();
+            assert_eq!(bytes, b"{}");
+            assert!(bytes.capacity() < 64 * 1024, "不应按声明大小预分配");
+            assert_eq!(read_entry(&mut zip, "missing.json").unwrap(), None);
+            assert_eq!(
+                read_entry_json(&mut zip, "state/readerx.shelf.json").unwrap(),
+                Some(serde_json::json!({}))
+            );
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     /// zip 的默认时间戳是 1980-01-01：解开备份看到一整套「1980 年的文件」会被当成文件坏了，
     /// 因此条目时间取源文件的修改时间，没有源文件的取当前时间。
