@@ -1712,20 +1712,33 @@ pub fn url_join(base: &str, rel: &str) -> String {
             None => rel.to_string(),
         };
     }
+    // base 的 query / fragment 不属于路径，不能参与目录与 authority 判断。
+    let base_url = base.split(['?', '#']).next().unwrap_or(base);
     // 取 scheme://authority
-    let Some(scheme_end) = base.find("://") else {
+    let Some(scheme_end) = base_url.find("://") else {
         return rel.to_string();
     };
     let authority_start = scheme_end + 3;
-    let path_start = base[authority_start..]
+    let path_start = base_url[authority_start..]
         .find('/')
         .map(|p| authority_start + p)
-        .unwrap_or(base.len());
-    let origin = &base[..path_start];
-    let base_path = &base[path_start..];
+        .unwrap_or(base_url.len());
+    let origin = &base_url[..path_start];
+    let base_path = &base_url[path_start..];
     // 相对地址里的 query / fragment 单独处理：拼进路径再取会重复追加（历史缺陷）
     let rel_path = rel.split(['?', '#']).next().unwrap_or("");
     let rel_suffix = &rel[rel_path.len()..];
+    if rel_path.is_empty() {
+        // 仅查询参数替换原查询；仅片段保留原查询，两者都沿用完整页面路径。
+        let path = if base_path.is_empty() { "/" } else { base_path };
+        let query = if rel.starts_with('#') {
+            let without_fragment = base.split('#').next().unwrap_or(base);
+            &without_fragment[base_url.len()..]
+        } else {
+            ""
+        };
+        return format!("{origin}{path}{query}{rel_suffix}");
+    }
     let out_path: String = if rel_path.starts_with('/') {
         rel_path.to_string()
     } else {
@@ -2494,6 +2507,26 @@ mod tests {
         assert_eq!(url_join("https://a.com/x/", "./y?q=1"), "https://a.com/x/y?q=1");
         assert_eq!(url_join("https://a.com", "//cdn.b.com/a.js"), "https://cdn.b.com/a.js");
         assert_eq!(url_join("https://a.com", "https://c.com/z"), "https://c.com/z");
+    }
+
+    #[test]
+    fn url_join_preserves_page_path_for_query_and_fragment() {
+        let cases = [
+            ("https://a.com/list", "?page=2", "https://a.com/list?page=2"),
+            ("https://a.com/root/list?page=1#old", "?page=2#new", "https://a.com/root/list?page=2#new"),
+            ("https://a.com/root/list/?page=1", "?page=2", "https://a.com/root/list/?page=2"),
+            ("https://a.com/list?page=1#old", "#new", "https://a.com/list?page=1#new"),
+            ("https://a.com/list", "#new", "https://a.com/list#new"),
+            ("https://a.com/list?page=1#old", "?", "https://a.com/list?"),
+            ("https://a.com/list?page=1#old", "#", "https://a.com/list?page=1#"),
+            ("https://a.com?page=1/2#old", "?page=2", "https://a.com/?page=2"),
+            ("https://a.com?page=1/2#old", "#new", "https://a.com/?page=1/2#new"),
+            ("https://a.com/root/list?next=/other/page#old", "chapter", "https://a.com/root/chapter"),
+            ("https://a.com/list?page=1#old", "", "https://a.com/list?page=1#old"),
+        ];
+        for (base, rel, expected) in cases {
+            assert_eq!(url_join(base, rel), expected, "base={base}, rel={rel}");
+        }
     }
 
     #[test]

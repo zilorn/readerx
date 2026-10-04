@@ -274,7 +274,7 @@ const list = items.map((li) => ({
 | --- | --- |
 | `util.stripHtml(html)` | 剥标签转文本并 trim |
 | `util.trim(s)` | 合并空白并 trim |
-| `util.urlJoin(base, rel)` | 相对/绝对 URL 合并并规范化 `./ ../` |
+| `util.urlJoin(base, rel)` | 相对/绝对 URL 合并并规范化 `./ ../`；仅 `?query` 保留页面路径并替换查询，仅 `#fragment` 保留路径与查询 |
 | `util.queryString(obj)` | 对象 → `a=b&c=d`（URL 编码） |
 | `util.queryParse(urlOrQuery)` | 解析 query → 对象（只保留首个同名） |
 | `util.decodeEntities(s)` | 常见 HTML 实体解码 |
