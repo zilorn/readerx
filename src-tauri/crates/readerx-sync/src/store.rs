@@ -363,33 +363,67 @@ impl SyncStore {
         write_json_atomic(&self.path("peers.json"), peers)
     }
 
-    /// 逐行读操作日志（返回操作与**行数**；建索引与重放都用它）。
+    /// 逐行读操作日志；忽略未换行的坏尾行，不修改文件。
     pub fn read_oplog(&self) -> Result<Vec<Operation>> {
+        self.read_oplog_inner(false)
+    }
+
+    /// 写者取得目录锁后调用：清除坏尾行，补齐合法尾行的换行，避免后续追加粘连。
+    pub(crate) fn recover_oplog(&self) -> Result<Vec<Operation>> {
+        self.read_oplog_inner(true)
+    }
+
+    fn read_oplog_inner(&self, repair: bool) -> Result<Vec<Operation>> {
         let path = self.path("oplog.jsonl");
         if !path.exists() {
             return Ok(Vec::new());
         }
-        let file = File::open(&path)?;
-        let reader = BufReader::new(file);
+        let mut reader = BufReader::new(File::open(&path)?);
         let mut ops = Vec::new();
-        for (line_no, line) in reader.lines().enumerate() {
-            let line = line?;
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
+        let mut line = Vec::new();
+        let mut offset = 0u64;
+        let mut line_no = 0usize;
+        loop {
+            line.clear();
+            let len = reader.read_until(b'\n', &mut line)?;
+            if len == 0 {
+                break;
             }
-            match serde_json::from_str::<Operation>(trimmed) {
-                Ok(op) => ops.push(op),
-                Err(e) => {
-                    // 半行 / 坏行：只可能出现在「写到一半掉电」的最后一行。
-                    // 丢掉它会丢一次修改，所以这里区分「是不是最后一行」：
-                    return Err(SyncError::Json(format!(
-                        "oplog.jsonl 第 {} 行解析失败（{}）：{e}",
-                        line_no + 1,
-                        trimmed.chars().take(80).collect::<String>()
-                    )));
+            line_no += 1;
+            let terminated = line.ends_with(b"\n");
+            if !line.iter().all(u8::is_ascii_whitespace) {
+                match serde_json::from_slice::<Operation>(&line) {
+                    Ok(op) => ops.push(op),
+                    Err(_) if !terminated => {
+                        // read_until 未读到换行即到 EOF：包括截断在 UTF-8 字符中间。
+                        if repair {
+                            let file = OpenOptions::new().write(true).open(&path)?;
+                            file.set_len(offset)?;
+                            file.sync_all()?;
+                        }
+                        log::warn!(
+                            "oplog.jsonl 忽略未完成尾行 line={} bytes={} repaired={repair}",
+                            line_no, len
+                        );
+                        break;
+                    }
+                    Err(e) => {
+                        // 已换行的坏记录（包括最后一行）不是未完成的追加，不得跳过。
+                        return Err(SyncError::Json(format!(
+                            "oplog.jsonl 第 {line_no} 行解析失败：{e}"
+                        )));
+                    }
                 }
             }
+            if !terminated {
+                if repair {
+                    let mut file = OpenOptions::new().append(true).open(&path)?;
+                    file.write_all(b"\n")?;
+                    file.sync_all()?;
+                }
+                break;
+            }
+            offset += len as u64;
         }
         Ok(ops)
     }
@@ -673,6 +707,70 @@ mod tests {
         assert_eq!(ops.len(), 3);
         assert_eq!(ops[2].seq, 3);
         assert_eq!(store.oplog_lines().unwrap(), 3);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn oplog_recovers_unterminated_tail_and_allows_append() {
+        // JSON 半行以及截断在多字节 UTF-8 字符中间都可以恢复。
+        for tail in [b"{\"op_id\":".as_slice(), b"{\"op_id\":\"\xe4\xb8".as_slice()] {
+            let dir = temp_dir("oplog-tail");
+            let store = SyncStore::open(&dir, "A").unwrap();
+            store.append_op(&sample_op(store.device_id(), 1)).unwrap();
+            let path = dir.join("oplog.jsonl");
+            let mut prefix = fs::read(&path).unwrap();
+            prefix.extend_from_slice(b"\r\n \t\n");
+            let mut damaged = prefix.clone();
+            damaged.extend_from_slice(tail);
+            fs::write(&path, &damaged).unwrap();
+
+            assert_eq!(store.read_oplog().unwrap().len(), 1);
+            assert_eq!(fs::read(&path).unwrap(), damaged, "只读不能修改文件");
+            assert_eq!(store.recover_oplog().unwrap().len(), 1);
+            assert_eq!(fs::read(&path).unwrap(), prefix);
+            store.append_op(&sample_op(store.device_id(), 2)).unwrap();
+            let ops = store.read_oplog().unwrap();
+            assert_eq!(ops.len(), 2);
+            assert_eq!(ops[1].seq, 2);
+            assert_eq!(store.oplog_lines().unwrap(), 2);
+            fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    #[test]
+    fn oplog_preserves_valid_tail_without_newline() {
+        let dir = temp_dir("oplog-no-newline");
+        let store = SyncStore::open(&dir, "A").unwrap();
+        let path = dir.join("oplog.jsonl");
+        let bytes = serde_json::to_vec(&sample_op(store.device_id(), 1)).unwrap();
+        fs::write(&path, &bytes).unwrap();
+        assert_eq!(store.read_oplog().unwrap().len(), 1);
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert_eq!(store.recover_oplog().unwrap().len(), 1);
+        store.append_op(&sample_op(store.device_id(), 2)).unwrap();
+        assert_eq!(store.read_oplog().unwrap().len(), 2);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn oplog_rejects_terminated_corruption_without_truncating() {
+        let dir = temp_dir("oplog-corrupt");
+        let store = SyncStore::open(&dir, "A").unwrap();
+        let path = dir.join("oplog.jsonl");
+        let valid = serde_json::to_string(&sample_op(store.device_id(), 1)).unwrap();
+        for bytes in [
+            format!("{valid}\n{{broken\n"),
+            format!("{{broken\n{valid}\n"),
+            format!("{valid}\n{{broken\n{{partial"),
+        ] {
+            fs::write(&path, &bytes).unwrap();
+            assert!(matches!(store.read_oplog(), Err(SyncError::Json(_))));
+            assert!(matches!(store.recover_oplog(), Err(SyncError::Json(_))));
+            assert_eq!(fs::read(&path).unwrap(), bytes.as_bytes());
+        }
+        fs::write(&path, b"{partial").unwrap();
+        assert!(store.recover_oplog().unwrap().is_empty());
+        assert!(fs::read(&path).unwrap().is_empty());
         fs::remove_dir_all(&dir).ok();
     }
 

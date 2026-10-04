@@ -230,9 +230,18 @@ impl SyncEngine {
         let store = SyncStore::open(root, &options.device_name)?;
         let device_id = store.device_id().to_string();
         let device_name = store.device().device_name.clone();
+        // 只读打开不抢锁：写者（同步服务）可以继续持有目录锁
+        let lock = if options.read_only {
+            None
+        } else if options.force_unlock {
+            log::warn!("按 --force-unlock 接管目录锁 dir={}", store.root().display());
+            Some(LockGuard::steal(store.root(), store.device_id())?)
+        } else {
+            Some(LockGuard::acquire(store.root(), store.device_id())?)
+        };
         let clock = store.load_clock()?.restore(&device_id);
 
-        let ops = store.read_oplog()?;
+        let ops = if options.read_only { store.read_oplog()? } else { store.recover_oplog()? };
         let snapshot = store.load_entities()?;
         let mut entities: BTreeMap<EntityId, Entity> = BTreeMap::new();
         let mut op_index: HashMap<OpId, usize> = HashMap::new();
@@ -258,15 +267,6 @@ impl SyncEngine {
         let deferred = store.load_deferred()?;
         let peers = store.load_peers()?;
 
-        // 只读打开不抢锁：写者（同步服务）可以继续持有目录锁
-        let lock = if options.read_only {
-            None
-        } else if options.force_unlock {
-            log::warn!("按 --force-unlock 接管目录锁 dir={}", store.root().display());
-            Some(LockGuard::steal(store.root(), store.device_id())?)
-        } else {
-            Some(LockGuard::acquire(store.root(), store.device_id())?)
-        };
         // 拿到独占目录锁后才能清理上次异常退出留下的未完成分片。
         // 完整资源仍走原有 assets/，这里没有需要迁移或恢复的书库数据。
         if !options.read_only {
@@ -1944,6 +1944,42 @@ mod tests {
             Some(serde_json::json!("三")),
             "快照之后的日志尾部必须被重放"
         );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn truncated_oplog_tail_recovers_across_restarts() {
+        let dir = temp_dir("truncated-tail");
+        let options = EngineOptions::new("A").with_schemas(schemas());
+        {
+            let mut engine = SyncEngine::open(&dir, options.clone()).unwrap();
+            engine
+                .create_entity("book", Some("book-1".into()), [("title", serde_json::json!("一"))])
+                .unwrap();
+            engine.flush().unwrap();
+            engine.set_field("book-1", "title", serde_json::json!("二")).unwrap();
+        }
+        let path = dir.join("oplog.jsonl");
+        let mut bytes = fs::read(&path).unwrap();
+        bytes.extend_from_slice(b"{\"op_id\":");
+        fs::write(&path, &bytes).unwrap();
+        {
+            let reader = SyncEngine::open(&dir, options.clone().read_only()).unwrap();
+            assert_eq!(reader.field("book-1", "title"), Some(serde_json::json!("二")));
+            assert_eq!(reader.op_count(), 2);
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
+        {
+            let mut writer = SyncEngine::open(&dir, options.clone()).unwrap();
+            assert_eq!(writer.field("book-1", "title"), Some(serde_json::json!("二")));
+            writer.set_field("book-1", "title", serde_json::json!("三")).unwrap();
+            assert_eq!(writer.ops()[2].seq, 3);
+            writer.flush().unwrap();
+        }
+        let reopened = SyncEngine::open(&dir, options).unwrap();
+        assert_eq!(reopened.op_count(), 3);
+        assert_eq!(reopened.field("book-1", "title"), Some(serde_json::json!("三")));
+        drop(reopened);
         fs::remove_dir_all(&dir).ok();
     }
 
