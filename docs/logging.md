@@ -129,7 +129,8 @@ log.warn("章节拉取失败", error);
 - 书籍正文、章节文本、剪贴板内容。
 
 凭据只记**数量**或长度；URL 用 `readerx_log::redact::url()`（去掉 `user:pass@`、
-把 `token` / `sign` / `password` 等查询参数的值换成 `***`），敏感值用 `redact::secret()`
+把 `token` / `sig` / `sign` / `api_key` / `access_key` / `key` / `password` 等查询参数的值换成 `***`，
+参数名与 HTTP(S) 协议匹配不区分大小写，`#fragment` 整体替换成 `#***`），敏感值用 `redact::secret()`
 （只留前 4 个字符与总长度）。书籍标题、章节名、搜索关键词、书源 id、地址属于排错必需，可以记。
 
 ## 排障流程

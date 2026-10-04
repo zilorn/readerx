@@ -29,6 +29,7 @@ const SENSITIVE_KEYS: &[&str] = &[
     "passwd",
     "pwd",
     "secret",
+    "sig",
     "sign",
     "signature",
     "auth",
@@ -36,23 +37,31 @@ const SENSITIVE_KEYS: &[&str] = &[
     "session",
     "cookie",
     "credential",
+    "api_key",
+    "access_key",
+    "key",
 ];
 
 /// URL 脱敏：
 /// - 去掉 `//user:password@` 里的凭据（只留主机）；
-/// - 查询串里敏感参数的值替换为 `***`（参数名保留，便于确认书源确实带了这个参数）。
+/// - 查询串里敏感参数的值替换为 `***`（参数名保留，便于确认书源确实带了这个参数）；
+/// - fragment 可能携带认证令牌，整体替换为 `***`。
 ///
-/// 非 http(s) 或解析不出结构的输入原样返回 —— 脱敏失败不应该让日志丢掉信息。
+/// 不依赖 URL 解析器，相对地址也按相同规则处理，保留路径和普通查询参数。
 pub fn url(raw: &str) -> String {
     let raw = raw.trim();
+    let (raw, fragment) = match raw.split_once('#') {
+        Some((raw, _)) => (raw, "#***"),
+        None => (raw, ""),
+    };
     let (head, query) = match raw.split_once('?') {
         Some((head, query)) => (head, Some(query)),
         None => (raw, None),
     };
     let head = strip_userinfo(head);
     match query {
-        Some(query) => format!("{head}?{}", mask_query(query)),
-        None => head,
+        Some(query) => format!("{head}?{}{fragment}", mask_query(query)),
+        None => format!("{head}{fragment}"),
     }
 }
 
@@ -66,11 +75,7 @@ fn strip_userinfo(head: &str) -> String {
     let authority_end = rest.find('/').unwrap_or(rest.len());
     let authority = &rest[..authority_end];
     match authority.rfind('@') {
-        Some(at) => format!(
-            "{}{}",
-            &head[..authority_start],
-            &rest[at + 1..]
-        ),
+        Some(at) => format!("{}{}", &head[..authority_start], &rest[at + 1..]),
         None => head.to_string(),
     }
 }
@@ -112,14 +117,22 @@ pub fn urls_in_text(text: &str) -> String {
     out
 }
 
-/// 文本里下一个 `http://` / `https://` 的起始下标
+/// 文本里下一个 `http://` / `https://` 的起始下标（协议不区分大小写）
 fn next_url_start(text: &str) -> Option<usize> {
-    match (text.find("http://"), text.find("https://")) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (Some(a), None) => Some(a),
-        (None, Some(b)) => Some(b),
-        (None, None) => None,
-    }
+    let bytes = text.as_bytes();
+    bytes.iter().enumerate().find_map(|(start, byte)| {
+        if !byte.eq_ignore_ascii_case(&b'h') {
+            return None;
+        }
+        let tail = &bytes[start..];
+        (tail
+            .get(..7)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"http://"))
+            || tail
+                .get(..8)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"https://")))
+        .then_some(start)
+    })
 }
 
 fn is_sensitive(key: &str) -> bool {
@@ -156,6 +169,64 @@ mod tests {
             "https://example.com/search?q=%E4%B9%A6&page=2"
         );
         assert_eq!(url("https://example.com/a/b"), "https://example.com/a/b");
+    }
+
+    #[test]
+    fn url_masks_signature_and_key_variants() {
+        for key in [
+            "sig",
+            "SIG",
+            "api_key",
+            "API_KEY",
+            "key",
+            "access_key",
+            "Access_Key",
+        ] {
+            assert_eq!(
+                url(&format!(
+                    "HTTPS://user:pass@example.com/api?{key}=sensitive&id=7"
+                )),
+                format!("HTTPS://example.com/api?{key}=***&id=7")
+            );
+        }
+    }
+
+    #[test]
+    fn url_masks_fragments_before_processing_query_and_authority() {
+        for (raw, expected) in [
+            (
+                "https://example.com/#access_token=secret",
+                "https://example.com/#***",
+            ),
+            (
+                "https://example.com/?id=7#token=secret",
+                "https://example.com/?id=7#***",
+            ),
+            (
+                "https://example.com/?sig=secret#token=other",
+                "https://example.com/?sig=***#***",
+            ),
+            (
+                "https://user:pass@example.com#token=secret?key=value@elsewhere",
+                "https://example.com#***",
+            ),
+            (
+                "https://example.com/#/login?token=secret",
+                "https://example.com/#***",
+            ),
+            ("/relative#secret", "/relative#***"),
+        ] {
+            assert_eq!(url(raw), expected);
+        }
+    }
+
+    #[test]
+    fn urls_in_text_handles_mixed_case_schemes_and_unicode() {
+        assert_eq!(
+            urls_in_text("原因(HTTP://user:pass@example.com?API_KEY=secret#token=other) 后续 <hTtPs://example.com/?sig=value>"),
+            "原因(HTTP://example.com?API_KEY=***#***) 后续 <hTtPs://example.com/?sig=***>"
+        );
+        assert_eq!(urls_in_text("短文本 htt HTTP"), "短文本 htt HTTP");
     }
 
     #[test]

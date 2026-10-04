@@ -892,8 +892,9 @@ pub fn http_request(source_id: &str, method: &str, raw_url: &str, opts: &str) ->
         Err(err) => {
             // 登录桥异常（极少见）：按取消处理，避免阻塞书源代码
             log::error!(
-                "自动网页认证后端异常 source={source_id} url={} reason={err}",
-                readerx_log::redact::url(&target)
+                "自动网页认证后端异常 source={source_id} url={} reason={}",
+                readerx_log::redact::url(&target),
+                redact_urls(&err)
             );
             mark_cf_challenge(&mut first, "cancelled", Some(&err));
             return serialize_value(&first);
@@ -915,9 +916,10 @@ pub fn http_request(source_id: &str, method: &str, raw_url: &str, opts: &str) ->
             outcome.message.clone()
         };
         log::info!(
-            "自动网页认证未完成 source={source_id} url={} cookie={} reason={msg}",
+            "自动网页认证未完成 source={source_id} url={} cookie={} reason={}",
             readerx_log::redact::url(&target),
-            outcome.count
+            outcome.count,
+            redact_urls(&msg)
         );
         mark_cf_challenge(&mut first, "cancelled", Some(&msg));
         return serialize_value(&first);
@@ -949,8 +951,9 @@ pub fn http_request(source_id: &str, method: &str, raw_url: &str, opts: &str) ->
         }
         Err(message) => {
             log::warn!(
-                "自动网页认证后重试仍失败 source={source_id} url={} reason={message}",
-                readerx_log::redact::url(raw_url)
+                "自动网页认证后重试仍失败 source={source_id} url={} reason={}",
+                readerx_log::redact::url(raw_url),
+                redact_urls(&message)
             );
             error_payload(message)
         }
