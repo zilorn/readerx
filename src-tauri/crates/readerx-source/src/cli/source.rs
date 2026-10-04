@@ -3,7 +3,7 @@
 //! 与 App 内 `readerx_source_call` 保持同一行为：建会话 → 套身份（UA / 请求头 / Cookie）
 //! → 播种已保存登录态 → 在 Boa 引擎里执行入口函数。
 
-use crate::cli::args::{Cli, ENTRY_FUNCTIONS};
+use crate::cli::args::{AuthKind, Cli, ENTRY_FUNCTIONS};
 use crate::cli::render as out;
 use crate::auth;
 use crate::engine;
@@ -22,7 +22,7 @@ pub fn load_source(cli: &Cli) -> Result<BookSource, String> {
         .as_deref()
         .ok_or_else(|| "缺少 --source <文件|id|名称>".to_string())?;
     let path = Path::new(selector);
-    let source = if path.is_file() {
+    let mut source = if path.is_file() {
         load_source_file(path)?
     } else {
         store::resolve_source(selector)?
@@ -35,6 +35,10 @@ pub fn load_source(cli: &Cli) -> Result<BookSource, String> {
             "书源 id `{}` 不能用作文件名（只允许字母数字与 . _ -）",
             source.id
         ));
+    }
+    // 仅覆盖本次 CLI 执行，不改写已保存的书源设置；run 的后续章节沿用该会话。
+    if cli.auth == AuthKind::None {
+        source.auto_auth = false;
     }
     Ok(source)
 }

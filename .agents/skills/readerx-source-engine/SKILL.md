@@ -17,7 +17,7 @@ description: 修改 ReaderX 书源引擎、Boa 宿主 API、浏览器认证后�
 
 ## 跨宿主契约
 
-- 真实浏览器能力通过 auth::AuthProvider 注册。App 使用 tauri-plugin-webview-login，CLI 使用可选 CDP/WebKit 后端；核心不加平台认证分支。
+- 真实浏览器能力通过 auth::AuthProvider 注册。App 使用 tauri-plugin-webview-login，CLI 使用可选 CDP/WebKit 后端；核心不加平台认证分支。CLI 在命令分发前统一注册后端，覆盖 call/run 的自动认证与 webview.login；`--auth none` 仅在本次装载书源时关闭 autoAuth，不写回书源。
 - CDP 认证在连接或启动浏览器前验证 URL 为带 host 的 HTTP(S) 地址；Cookie 域名或目标 host 缺失时拒绝匹配，不得退回全站 Cookie。
 - AuthRequest 携带脚本、会话 UA 与四段 ProbeScript。窗口 UA 与请求 UA 一致，后端原样执行探针；格式改动同时检查 Android、桌面、CDP、CLI WebKit 四个宿主。
 - 桌面登录看 src-tauri/plugins/tauri-plugin-webview-login；Linux 用 WebKitGTK CookieManager 读取含 httpOnly 的 Cookie；页面存储能力以 src/desktop.rs 的实测表为准，不用宿主 eval 读隔离的页面 localStorage。探针生成逻辑在引擎 storage.rs，后端不解析其内部结构。桌面正常收尾与 Android 一样不要求 Cookie 非空，仍采集并透传存储探针；等待标记按求值字符串解码后的完整值比较，不匹配快照子串。

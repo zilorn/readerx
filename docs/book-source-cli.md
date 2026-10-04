@@ -81,6 +81,10 @@ readerx-source --source ./my-source.json call searchBook '["剑来"]' --json | j
 
 ## 登录态与 Cloudflare
 
+`call` / `run` 同样按 `--auth` 注册浏览器后端，供 Cloudflare 自动认证和书源
+`webview.login()` 使用。`auto` 优先选择已编译且有显示环境的 WebKit，否则使用 CDP。
+`--auth none` 仅关闭本次执行的自动网页认证（`cf.auto = "disabled"`），不修改书源文件。
+
 `cf_clearance` 与 **IP + UA + TLS 指纹**绑定，纯 HTTP 客户端拿不到；CLI 提供三条路：
 
 ### 1) 导入浏览器 Cookie（最快，适合已有登录态）

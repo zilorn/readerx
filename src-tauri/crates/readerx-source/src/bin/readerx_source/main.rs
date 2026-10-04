@@ -86,13 +86,16 @@ fn dispatch(cli: Cli) -> Result<(), String> {
     // 用户输入表单（input.prompt）的终端后端：与认证后端无关，任何命令都可以弹问
     install_prompt_provider();
 
+    // 规则执行也需要同一认证后端（CF 自动认证 / webview.login）。
+    let auth_provider = install_auth_provider(&cli);
+
     match cli.command.as_str() {
         "sources" | "list" => commands::cmd_sources(&cli),
         "call" => commands::cmd_call(&cli),
         "run" => commands::cmd_run(&cli),
         "test" => commands::cmd_test(&cli),
-        "auth" => auth_cmd::cmd_auth(&cli, install_auth_provider(&cli)),
-        "login" => auth_cmd::cmd_auth(&cli, install_auth_provider(&cli)),
+        "auth" => auth_cmd::cmd_auth(&cli, auth_provider),
+        "login" => auth_cmd::cmd_auth(&cli, auth_provider),
         other => Err(format!("未知命令 `{other}`\n\n{USAGE}")),
     }
 }
