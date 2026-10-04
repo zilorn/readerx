@@ -44,12 +44,18 @@ pub fn write_frame<W: Write>(writer: &mut W, payload: &[u8], max: usize) -> Resu
 /// 读一帧；对端正常关闭（还没读到长度就 EOF）返回 `Ok(None)`。
 pub fn read_frame<R: Read>(reader: &mut R, max: usize) -> Result<Option<Vec<u8>>> {
     let mut header = [0u8; 4];
-    match reader.read_exact(&mut header) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-        Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => return Ok(None),
-        Err(e) => return Err(SyncError::Transport(e.to_string())),
+    // 先读一个字节，区分帧边界的正常 EOF 与长度前缀被截断。
+    loop {
+        match reader.read(&mut header[..1]) {
+            Ok(0) => return Ok(None),
+            Ok(_) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(SyncError::Transport(e.to_string())),
+        }
     }
+    reader
+        .read_exact(&mut header[1..])
+        .map_err(|e| SyncError::Transport(e.to_string()))?;
     let len = u32::from_be_bytes(header) as usize;
     if len > max {
         return Err(SyncError::Protocol(format!("对端声明的帧长 {len} 超过上限 {max}")));
@@ -145,6 +151,75 @@ mod tests {
         hostile.extend_from_slice(&(1_000_000u32).to_be_bytes());
         let mut cursor = Cursor::new(hostile);
         assert!(matches!(read_frame(&mut cursor, 1024), Err(SyncError::Protocol(_))));
+    }
+
+    #[test]
+    fn truncated_frames_are_transport_errors() {
+        let mut buffer = Vec::new();
+        write_frame(&mut buffer, b"hello", 1024).unwrap();
+        // 覆盖长度前缀的 1–3 字节截断，以及完整前缀后的正文截断。
+        for len in 1..buffer.len() {
+            let mut cursor = Cursor::new(&buffer[..len]);
+            assert!(
+                matches!(read_frame(&mut cursor, 1024), Err(SyncError::Transport(_))),
+                "截断于第 {len} 字节应报传输错误"
+            );
+        }
+    }
+
+    struct FragmentedReader {
+        bytes: Cursor<Vec<u8>>,
+        interrupt: bool,
+        reset: bool,
+    }
+
+    impl Read for FragmentedReader {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            if std::mem::take(&mut self.interrupt) {
+                return Err(std::io::ErrorKind::Interrupted.into());
+            }
+            if self.reset && self.bytes.position() == self.bytes.get_ref().len() as u64 {
+                return Err(std::io::ErrorKind::ConnectionReset.into());
+            }
+            let len = buffer.len().min(1);
+            self.bytes.read(&mut buffer[..len])
+        }
+    }
+
+    #[test]
+    fn connection_reset_is_always_a_transport_error() {
+        let mut buffer = Vec::new();
+        write_frame(&mut buffer, b"hello", 1024).unwrap();
+        for len in 0..buffer.len() {
+            let mut reader = FragmentedReader {
+                bytes: Cursor::new(buffer[..len].to_vec()),
+                interrupt: false,
+                reset: true,
+            };
+            assert!(
+                matches!(read_frame(&mut reader, 1024), Err(SyncError::Transport(_))),
+                "第 {len} 字节的 RST 应报传输错误"
+            );
+        }
+    }
+
+    #[test]
+    fn fragmented_reads_retry_interrupted_and_preserve_frame_boundaries() {
+        let mut buffer = Vec::new();
+        write_frame(&mut buffer, b"hello", 1024).unwrap();
+        write_frame(&mut buffer, b"", 1024).unwrap();
+        let mut reader = FragmentedReader {
+            bytes: Cursor::new(buffer),
+            interrupt: true,
+            reset: false,
+        };
+        assert_eq!(
+            read_frame(&mut reader, 1024).unwrap(),
+            Some(b"hello".to_vec())
+        );
+        assert_eq!(read_frame(&mut reader, 1024).unwrap(), Some(vec![]));
+        reader.interrupt = true;
+        assert_eq!(read_frame(&mut reader, 1024).unwrap(), None);
     }
 
     #[test]
