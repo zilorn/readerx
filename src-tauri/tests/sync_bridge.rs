@@ -662,6 +662,71 @@ fn concurrent_title_edit_is_reported_for_review_without_losing_either_side() {
 }
 
 #[test]
+fn conflict_resolution_reports_materialization_failures_and_can_retry() {
+    use tauri::Listener;
+    let _serial = SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    // 游标为 0 时失败在常规落地；游标在日志末尾时失败在指定实体落地。
+    for pending in [true, false] {
+        let (handle, app_data) = setup();
+        let local = local_engine(&handle, &app_data);
+        lock_engine(&local).create_entity("group", Some("resolve-group".into()), [
+            ("name", json!("原分组")),
+        ]).unwrap();
+        let peer = peer_engine("resolve-peer", Some(&lock_engine(&local).pairing_code()));
+        sync_once(&local, &peer);
+        lock_engine(&local).set_field("resolve-group", "name", json!("本机分组")).unwrap();
+        lock_engine(&peer).set_field("resolve-group", "name", json!("对端分组")).unwrap();
+        sync_once(&local, &peer);
+        let (id, count) = {
+            let mut guard = lock_engine(&local);
+            let id = guard.conflicts(Some(readerx_sync::ConflictStatus::Pending))[0].id.clone();
+            guard.flush().unwrap();
+            (id, guard.op_count())
+        };
+        if !pending {
+            // 常规落地写入另一个文件，随后裁决实体落地失败时仍须通知刷新。
+            lock_engine(&peer).create_entity("source_group", Some("resolved-source-group".into()), [
+                ("name", json!("已落地书源分组")),
+            ]).unwrap();
+            sync_once(&local, &peer);
+            lock_engine(&local).flush().unwrap();
+        }
+        drop(local);
+        write_json(&app_data.join("sync/settings.json"), &json!({
+            "activated": true, "hiddenGroupMigrated": true,
+            "materializedOps": if pending { 0 } else { count },
+        }));
+        // 用目录阻挡状态文件写入，真实触发持久化失败。
+        let path = app_data.join("state/readerx.groups.json");
+        std::fs::create_dir_all(&path).unwrap();
+        let applied = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let captured = applied.clone();
+        let listener = handle.listen("readerx-sync-applied", move |event| {
+            captured.lock().unwrap().push(serde_json::from_str(event.payload()).unwrap());
+        });
+        let service = SyncService::new(handle.clone());
+        let error = service.resolve_conflict(&id, "remote").expect_err("落地失败不能报成功");
+        let stage = if pending { "待同步数据" } else { "裁决结果" };
+        assert!(error.contains(&format!("裁决已保存，但{stage}落地失败")), "{error}");
+        assert!(service.conflicts(false).is_empty(), "裁决已写入引擎，不应声称回滚");
+        let cursor = read_json(&app_data.join("sync/settings.json"))["materializedOps"].clone();
+        if pending {
+            assert_eq!(cursor, 0, "常规落地失败不推进游标");
+            assert!(applied.lock().unwrap().is_empty(), "落地失败不能发送成功刷新事件");
+        } else {
+            assert!(applied.lock().unwrap().iter().any(|event| event["sourceGroups"] == true),
+                "指定实体落地失败不能吞掉此前已写回的书源分组刷新事件");
+        }
+        std::fs::remove_dir(&path).unwrap();
+        service.resolve_conflict(&id, "remote").expect("恢复写盘后同一裁决可以重试");
+        let groups = read_json(&path);
+        assert_eq!(groups[0]["name"], "对端分组");
+        service.shutdown();
+        handle.unlisten(listener);
+    }
+}
+
+#[test]
 fn local_edit_is_published_without_duplicating_operations() {
     let _serial = SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let (handle, app_data) = setup();

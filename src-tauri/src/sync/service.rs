@@ -1016,24 +1016,13 @@ impl<R: tauri::Runtime> SyncService<R> {
         };
         // 裁决结果也要落回本地文件：裁决写的是一次**本地**写入（比如采用了对端那一份），
         // 按操作来源过滤的常规落地会跳过它，这里点名落地这一个实体。
-        let mut changes = self.materialize_pending().unwrap_or_default();
-        let extra = match self.materialize_ids(&[entity_id]) {
-            Ok(applied) => applied,
-            Err(error) => {
-                log::warn!("裁决后的落地失败：{error}");
-                AppliedChanges::default()
-            }
-        };
-        changes.books |= extra.books;
-        changes.progress |= extra.progress;
-        changes.groups |= extra.groups;
-        changes.source_groups |= extra.source_groups;
-        changes.sources |= extra.sources;
-        changes.text_replaces |= extra.text_replaces;
-        changes.chapter_rules |= extra.chapter_rules;
-        changes.bookmarks.extend(extra.bookmarks);
-        changes.deleted_books.extend(extra.deleted_books);
+        let changes = self.materialize_pending()
+            .map_err(|error| format!("裁决已保存，但待同步数据落地失败：{error}"))?;
+        // 常规落地已成功，即使后面的指定实体落地失败，也要刷新已写回的数据。
         self.emit_applied(&changes);
+        let extra = self.materialize_ids(&[entity_id])
+            .map_err(|error| format!("裁决已保存，但裁决结果落地失败：{error}"))?;
+        self.emit_applied(&extra);
         self.emit_status();
         Ok(self.status())
     }
