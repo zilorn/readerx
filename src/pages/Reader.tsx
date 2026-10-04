@@ -206,10 +206,11 @@ const IMAGE_DECODE_CONCURRENCY = 3;
 function settlesWithin(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {
   return new Promise((resolve) => {
     const timer = window.setTimeout(() => resolve(false), timeoutMs);
-    void promise.then(() => {
+    const settled = () => {
       window.clearTimeout(timer);
       resolve(true);
-    });
+    };
+    void promise.then(settled, settled);
   });
 }
 
@@ -2185,7 +2186,9 @@ export default function ReaderPage() {
         const cid = chapterCid();
         const images = untrack(() =>
           loadReadingChapterImages(bookId(), chapterIdx(), () => chapterCid() !== cid),
-        );
+        ).catch((error: unknown) => {
+          log.warn("章节图片加载失败，使用可用图片排版", error);
+        });
         const ready = await settlesWithin(images, IMAGE_GATE_TIMEOUT_MS);
         if (!ready) {
           // 慢图不再干等（单张最长 60s）：先按占位排版把正文给用户，
