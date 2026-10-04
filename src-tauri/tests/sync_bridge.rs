@@ -1990,17 +1990,26 @@ fn sync_service_streams_large_books_and_saves_before_stop_or_disconnect() {
     service.sync_with_addr_now(&server.local_addr().to_string()).unwrap();
     assert_eq!(read_json(&app_data.join("books").join(&ids[0]).join("bookdetail.json"))["title"], "同步后的书名");
 
-    // 单章超过帧上限时不能假报全部完成，也不能无限空转。
+    // 超大章分片传输后完整落库，重复同步不能再次传输正文。
     let path = peer.data_root.join("books/peer-local/content.json");
     let mut content = read_json(&path);
     content["chapters"].as_array_mut().unwrap().push(json!({
         "cid": "oversized", "title": "超大章", "paragraphs": ["x".repeat(5 * 1024 * 1024)]
     }));
     write_json(&path, &content);
-    assert!(service.sync_with_addr_now(&server.local_addr().to_string()).is_err());
-    let failed = serde_json::to_value(service.status()).unwrap()["progress"].clone();
-    assert_eq!(failed["phase"], "failed");
+    let outcome = service.sync_with_addr_now(&server.local_addr().to_string()).unwrap();
+    assert_eq!(outcome.content_pulled, 1);
+    let stored = read_json(&local_path);
+    let chapters = stored["chapters"].as_array().unwrap();
+    assert_eq!(chapters.len(), 1501);
+    let oversized = chapters.iter().find(|chapter| chapter["cid"] == "oversized").unwrap();
+    assert_eq!(oversized["paragraphs"], json!(["x".repeat(5 * 1024 * 1024)]));
+    let completed = serde_json::to_value(service.status()).unwrap()["progress"].clone();
+    assert_eq!(completed["phase"], "done");
     assert!(!service.status().syncing);
+    let repeated = service.sync_with_addr_now(&server.local_addr().to_string()).unwrap();
+    assert_eq!(repeated.content_pulled, 0);
+    assert_eq!(repeated.content_pushed, 0);
     handle.unlisten(listener);
     drop(server);
     service.shutdown();
