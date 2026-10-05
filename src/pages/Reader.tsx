@@ -4066,6 +4066,7 @@ export default function ReaderPage() {
     window.getSelection()?.removeAllRanges();
     if (selSpan() !== null) setSelSpan(null);
     if (selMenu() !== null) setSelMenu(null);
+    styledSelection = null; // 选区收起：样式面板的兜底区间随之作废
   }
 
   /**
@@ -4123,9 +4124,9 @@ export default function ReaderPage() {
     showToast(t("reader.bookmarkAdded"));
   }
 
-  /** 原生选区「书签」入口 */
+  /** 原生选区「书签」入口（选区锚点因重渲染失效时按刚调整过样式的那段文字兜底） */
   function handleBookmarkRange(range: Range): void {
-    const span = spanOfRange(range);
+    const span = spanOfRange(range) ?? pinnedSpanForText(range.toString());
     if (!span) {
       showToast(t("reader.bookmarkNeedParagraph"), true);
       return;
@@ -4133,10 +4134,32 @@ export default function ReaderPage() {
     toggleBookmarkAtSpan(span[0], span[1]);
   }
 
+  /**
+   * 样式面板正在调整的选区。
+   *
+   * 应用样式会重渲染正文（文字节点被包进高亮 span）：原生选区的 DOM 锚点随之失效，
+   * 分页自绘选区不受影响（它按镜像偏移保存）。面板连续换样式时用这份区间继续调整，
+   * 收起选区（clearVisibleSelection）后作废；文字与章节都对得上才采纳，避免误用到别处。
+   */
+  let styledSelection: {
+    text: string;
+    bookId: string;
+    cid: string;
+    span: [number, number];
+  } | null = null;
+
+  /** 选区 Range 已因重渲染失效时的兜底区间（仅限刚调整过样式的那段文字） */
+  function pinnedSpanForText(text: string): [number, number] | null {
+    const pinned = styledSelection;
+    if (!pinned || !text) return null;
+    if (pinned.bookId !== bookId() || pinned.cid !== chapter()?.cid) return null;
+    return pinned.text === text ? pinned.span : null;
+  }
+
   /** 选区目标 → 本章镜像区间：自定义选区直接用它保存的 span，原生选区按 Range 换算 */
   function spanOfSelectionTarget(target: SelectionTarget): [number, number] | null {
     if (target.custom) return target.custom.span;
-    return spanOfRange(target.range);
+    return spanOfRange(target.range) ?? pinnedSpanForText(target.text);
   }
 
   /**
@@ -4168,36 +4191,41 @@ export default function ReaderPage() {
   /**
    * 应用书签样式（选区菜单的样式面板）：选区已有书签 → 就地改样式；没有 → 按该样式新建。
    * 与「书签」按钮分开：这里只增 / 改，不删除（再点当前样式也不会把书签去掉）。
-   * 应用后收起选区：正文重渲染会替换文字节点，原选区随即失效，样式在正文里立即可见。
+   * 不收起选区：面板可以接着换别的样式，重渲染后失效的锚点由 styledSelection 兜底。
+   * 返回是否落地（false = 被重叠 / 长度等规则拒绝），供菜单决定要不要保留。
    */
-  function applyBookmarkAppearance(target: SelectionTarget, mark: BookmarkAppearance): void {
+  function applyBookmarkAppearance(
+    target: SelectionTarget,
+    mark: BookmarkAppearance,
+  ): boolean {
     const b = book();
     const ch = chapter();
     const mir = mirror();
     const span = spanOfSelectionTarget(target);
     if (!b || !ch || !mir || mir.text.length === 0 || !span) {
       showToast(t("reader.bookmarkNoContent"), true);
-      return;
+      return false;
     }
     const charStart = Math.max(0, Math.min(span[0], mir.text.length));
     const charEnd = Math.max(charStart, Math.min(span[1], mir.text.length));
     if (charEnd <= charStart) {
       showToast(t("reader.bookmarkSelectText"), true);
-      return;
+      return false;
     }
+    const pinned = { text: target.text, bookId: b.id, cid: ch.cid, span: [charStart, charEnd] as [number, number] };
     const existed = bookmarkForSelectionSpan(b.id, ch.cid, charStart, charEnd);
     if (existed) {
-      clearVisibleSelection();
       updateBookmarkAppearance(existed.id, mark);
-      return;
+      styledSelection = pinned;
+      return true;
     }
     if (bookmarkOverlappingRange(b.id, ch.cid, charStart, charEnd)) {
       showToast(t("reader.bookmarkOverlap"), true);
-      return;
+      return false;
     }
     if (charEnd - charStart > BOOKMARK_MAX_LEN) {
       showToast(t("reader.bookmarkTooLong"), true);
-      return;
+      return false;
     }
     const startUnit = unitAtGlobalOffset(mir, charStart)?.unit ?? -1;
     const bookmark = makeBookmark(
@@ -4212,11 +4240,12 @@ export default function ReaderPage() {
     );
     if (!bookmark) {
       showToast(t("reader.bookmarkFailed"), true);
-      return;
+      return false;
     }
-    clearVisibleSelection();
     addBookmark(bookmark);
     showToast(t("reader.bookmarkAdded"));
+    styledSelection = pinned;
+    return true;
   }
 
   /** 从镜像偏移处开始朗读（null/越界 → 本章开头起读） */
@@ -4237,7 +4266,7 @@ export default function ReaderPage() {
 
   /** 原生选区「朗读」：从选区起点所在句子开始朗读 */
   function handleSpeakFromRange(range: Range): void {
-    const span = spanOfRange(range);
+    const span = spanOfRange(range) ?? pinnedSpanForText(range.toString());
     handleSpeakAtOffset(span ? span[0] : null);
   }
 
@@ -5343,6 +5372,7 @@ export default function ReaderPage() {
               onReplace={(text) => openReplaceFromSelection(text)}
               currentMark={(target) => currentMarkForSelection(target)}
               onApplyMark={(target, mark) => applyBookmarkAppearance(target, mark)}
+              contextKey={() => `${bookId()}|${chapterCid()}`}
               custom={() => (isPaged() ? selMenu() : null)}
             />
 

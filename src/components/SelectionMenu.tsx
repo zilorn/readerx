@@ -19,7 +19,16 @@
  * 2. 自定义选区（分页模式自绘拖选，可跨页连选）：页面把整段镜像文本、定位锚点
  *    （可见端的折叠 caret）与 [lo,hi) 偏移通过 props.custom 注入；回调直接给偏移。
  */
-import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import {
+  For,
+  Show,
+  createEffect,
+  createMemo,
+  createSignal,
+  on,
+  onCleanup,
+  onMount,
+} from "solid-js";
 import { t, type MessageKey } from "../lib/i18n";
 import {
   BOOKMARK_COLORS,
@@ -75,6 +84,8 @@ export interface SelectionMenuProps {
   custom?: () => SelectionCustom | null;
   /** 菜单条上/下沿距阅读区容器边的安全留白（px），防止贴到屏幕边缘/被刘海遮挡 */
   insets?: () => { top: number; bottom: number };
+  /** 阅读上下文标识（书 + 章节）：变化即收起保留态，换章后原选区无从对应 */
+  contextKey?: () => string;
   onCopy: (text: string) => void;
   /** 原生选区模式：书签（页面内部换算偏移） */
   onBookmark?: (range: Range) => void;
@@ -88,8 +99,11 @@ export interface SelectionMenuProps {
   onReplace?: (text: string) => void;
   /** 当前选区已有书签的样式（样式面板回显用）；没有书签返回 null */
   currentMark?: (target: SelectionTarget) => BookmarkAppearance | null;
-  /** 应用书签样式：给当前选区的书签改样式，选区没有书签时按该样式新建 */
-  onApplyMark?: (target: SelectionTarget, mark: BookmarkAppearance) => void;
+  /**
+   * 应用书签样式：给当前选区的书签改样式，选区没有书签时按该样式新建。
+   * 返回 false 表示这次调整没有落地（如与已有书签重叠被拒），菜单不进入保留态。
+   */
+  onApplyMark?: (target: SelectionTarget, mark: BookmarkAppearance) => boolean | void;
 }
 
 /** 线条样式名（选项本体与顺序在 lib/bookmarks.ts 的 BOOKMARK_STYLES） */
@@ -136,12 +150,22 @@ export function SelectionMenu(props: SelectionMenuProps) {
   let pressScrolled = false;
   /** 解冻计数器：按下期间跳过的定位重算，在解冻后补一次 */
   const [pressTick, setPressTick] = createSignal(0);
+  /**
+   * 样式面板刚应用过样式：正文重渲染会替换文字节点，选区随之失效（原生选区会被浏览器
+   * 收起，分页自绘选区的锚点 Range 也会脱离文档）。置位期间菜单留在原位，用户可以接着
+   * 换别的样式；点菜单外、滚动、重新选择或按其它动作项即解除。
+   */
+  const [pinned, setPinned] = createSignal(false);
+  /** 最近一次可用的锚点矩形（视口坐标）：选区锚点脱离文档后沿用，避免菜单跳到容器左上角 */
+  let lastAnchorRect: { left: number; right: number; top: number; bottom: number } | null = null;
 
   function hide(): void {
     if (pressing) return;
     if (menu()) {
       setMenu(null);
       setMarkPanel(false); // 收起菜单的同时复位样式面板，下次展开是收起态
+      setPinned(false);
+      lastAnchorRect = null;
     }
   }
 
@@ -163,7 +187,13 @@ export function SelectionMenu(props: SelectionMenuProps) {
   function applyMark(style: BookmarkStyle, color: BookmarkColor): void {
     const sel = target();
     if (!sel || !props.onApplyMark) return;
-    props.onApplyMark(sel, { style, color });
+    // 页面认下这次调整（不返回 false）就保留菜单：正文重渲染后选区锚点会失效
+    if (props.onApplyMark(sel, { style, color }) !== false) setPinned(true);
+  }
+
+  /** 按了会改动选区/书签的其它动作项：交回按真实选区对账，不再保留失效的选区 */
+  function releasePin(): void {
+    if (pinned()) setPinned(false);
   }
 
   /** 事件目标是否落在菜单条内部（目标可能不是 Node，如 window 上的滚动） */
@@ -190,7 +220,9 @@ export function SelectionMenu(props: SelectionMenuProps) {
   function show(range: Range, text: string): void {
     const cur = menu();
     if (cur && cur.text === text && sameRange(cur.range, range)) return;
-    setMenu({ range, text });
+    setMenu({ range, text }); // 换了选区：不再保留上一段文字的样式调整状态
+    setPinned(false);
+    lastAnchorRect = null;
   }
 
   /** 一次点按结束（click 已派发 / 指针离开菜单条 / 兜底超时）：解冻并按当前选区对账 */
@@ -222,20 +254,19 @@ export function SelectionMenu(props: SelectionMenuProps) {
     }
     const root = props.rootRef();
     const sel = window.getSelection();
-    if (
-      !root ||
-      !props.active() ||
-      !sel ||
-      sel.isCollapsed ||
-      sel.rangeCount === 0
-    ) {
+    if (!root || !props.active()) {
       hide();
+      return;
+    }
+    // 样式面板调整过、正文重渲染把选区清掉了：保留菜单（见 pinned 注释）
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
+      if (!pinned()) hide();
       return;
     }
     const range = sel.getRangeAt(0);
     const text = sel.toString();
     if (!text.trim()) {
-      hide();
+      if (!pinned()) hide();
       return;
     }
     const ancestor = range.commonAncestorContainer;
@@ -261,6 +292,17 @@ export function SelectionMenu(props: SelectionMenuProps) {
     queueMicrotask(sync);
   });
 
+  // 换书 / 换章后原选区无从对应：样式调整的保留态一并作废
+  createEffect(
+    on(
+      () => props.contextKey?.() ?? "",
+      () => {
+        if (pinned()) hide();
+      },
+      { defer: true },
+    ),
+  );
+
   onMount(() => {
     const onSelection = () => sync();
     const onPointerUp = (e: PointerEvent) => {
@@ -274,6 +316,15 @@ export function SelectionMenu(props: SelectionMenuProps) {
         }
         endPress();
         return;
+      }
+      if (pinned() && !insideBar(e.target)) {
+        // 样式调整后选区已经没了：点菜单外即收起。若这一下正好选出了新文字，
+        // 交给下面的 sync 按新选区重建（show 会解除保留态）
+        const sel = window.getSelection();
+        if (!sel || sel.isCollapsed || !sel.toString().trim()) {
+          hide();
+          return;
+        }
       }
       queueMicrotask(sync);
     };
@@ -320,21 +371,32 @@ export function SelectionMenu(props: SelectionMenuProps) {
     if (area.width <= 0 || area.height <= 0) return;
     // 实际高度随样式面板展开而变（下拉行固定 BAR_H，面板整块量取）
     const barH = bar.offsetHeight || BAR_H;
-    let r = current.range.getBoundingClientRect();
-    if (!r) return;
-    // 折叠 caret（自定义选区锚点）没有宽高：按其所在行的行高补出可用矩形
-    if (r.width <= 0 || r.height <= 0) {
-      const node = current.range.startContainer;
-      const el = (
-        node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement
-      ) as Element | null;
-      let lineH = 0;
-      if (el) lineH = parseFloat(getComputedStyle(el).lineHeight) || 0;
-      if (!lineH) lineH = 24;
-      const top = r.top;
-      const height = Math.max(r.height, lineH);
-      r = { left: r.left, right: r.left, top, bottom: top + height } as DOMRect;
+    const anchorNode = current.range.startContainer;
+    let r: { left: number; right: number; top: number; bottom: number } | null = null;
+    if (anchorNode.isConnected) {
+      const live = current.range.getBoundingClientRect();
+      if (live && (live.width > 0 || live.height > 0)) {
+        r = { left: live.left, right: live.right, top: live.top, bottom: live.bottom };
+      } else {
+        // 折叠 caret（自定义选区锚点）没有宽高：按其所在行的行高补出可用矩形
+        const el = (
+          anchorNode.nodeType === Node.ELEMENT_NODE ? anchorNode : anchorNode.parentElement
+        ) as Element | null;
+        let lineH = 0;
+        if (el) lineH = parseFloat(getComputedStyle(el).lineHeight) || 0;
+        if (!lineH) lineH = 24;
+        const top = live?.top ?? 0;
+        const height = Math.max(live?.height ?? 0, lineH);
+        r = { left: live?.left ?? 0, right: live?.left ?? 0, top, bottom: top + height };
+      }
     }
+    // 选区锚点已随正文重渲染脱离文档（样式面板调整过样式）：沿用最近一次可用位置
+    if (!r) r = lastAnchorRect;
+    if (!r) {
+      bar.style.visibility = "hidden";
+      return;
+    }
+    lastAnchorRect = r;
     const rect = {
       left: r.left,
       right: Math.max(r.right, r.left + 2),
@@ -473,6 +535,7 @@ export function SelectionMenu(props: SelectionMenuProps) {
               <button
                 class="flex h-9 flex-none cursor-pointer items-center gap-1.5 rounded-xl px-3 text-[13px] text-text-2 transition-colors active:bg-surface-2"
                 onClick={() => {
+                  releasePin();
                   const c = props.custom?.() ?? null;
                   if (c) props.onBookmarkSpan?.(c.span[0], c.span[1]);
                   else props.onBookmark?.(current().range);
@@ -499,6 +562,7 @@ export function SelectionMenu(props: SelectionMenuProps) {
               <button
                 class="flex h-9 flex-none cursor-pointer items-center gap-1.5 rounded-xl px-3 text-[13px] text-text-2 transition-colors active:bg-surface-2"
                 onClick={() => {
+                  releasePin();
                   const c = props.custom?.() ?? null;
                   if (c) props.onSpeakOffset?.(c.span[0]);
                   else props.onSpeak?.(current().range);
