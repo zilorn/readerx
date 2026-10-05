@@ -19,6 +19,7 @@
 - 分页 / 滚动切换需在正文 DOM 更新前捕获字符位置并设置 resumeTarget，滚动转分页采样旧视口以补上未执行的滚动帧；恢复落定前不提交新视图的位置。切换时序回归运行 `node scripts/reader-position-transition-test.mjs`（Solid 浏览器运行时，覆盖单双页、未提交滚动、章首与连续切换）。
 - 书签、选区、搜索与朗读共用正文字符坐标。src/lib/bookmarks.ts 的 buildTextMirror 拼接 p/h 文本，图片占零字符；段内图的 at 是 UTF-16 偏移。渲染保留 data-u/data-c，嵌套高亮 span 不新增或删减锚定文本。
 - 书签重定位使用 resolveBookmarkTarget 的结构信息与前后文回退，并保留 uncertain 结果；目录覆盖或重载正文沿用风险预览与确认组件，不能只按文本首次出现位置静默跳转。
+- 书签的线条与颜色是记录上的可选字段 `style` / `color`（缺省 = 直线 + 主题强调色，旧记录与外部导入经 normalizeBookmark* 回默认）。选区菜单「书签」右侧的伸缩面板作用于当前选区的书签：已有则改样式，没有则按所选样式新建，只增改不删除；渲染走 index.css 的 `readerx-bookmark-*` 类，颜色经 CSS 变量 `--bm-color` 注入。
 - 简繁转换与文本替换沿用 src/lib/hanDisplay.ts、textReplacements.ts 的显示派生路径，不改写存盘正文和章节 cid。显示文本变化时检查进度恢复、搜索、书签和朗读是否仍使用一致的镜像。
 
 ## 在线正文与图片

@@ -3,6 +3,7 @@
  * 避免为图标额外引入依赖，保证首屏与懒加载体积。
  */
 import type { JSX } from "solid-js";
+import type { BookmarkStyle } from "../lib/bookmarks";
 
 export type SvgIconProps = { size?: number; class?: string };
 
@@ -80,6 +81,15 @@ export function ChevronRightIcon(p: SvgIconProps) {
   return (
     <Icon {...p}>
       <polyline points="9 18 15 12 9 6" />
+    </Icon>
+  );
+}
+
+/** 向下展开（书签样式面板等） */
+export function ChevronDownIcon(p: SvgIconProps) {
+  return (
+    <Icon {...p}>
+      <polyline points="6 9 12 15 18 9" />
     </Icon>
   );
 }
@@ -448,6 +458,35 @@ export function BookmarkIcon(p: SvgIconProps & { filled?: boolean }) {
   return (
     <Icon {...p}>
       <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />
+    </Icon>
+  );
+}
+
+/** 线条样式样例线：虚线 / 点线 / 波浪线 / 默认直线（用于书签样式选项图标） */
+function styleSampleLine(style: BookmarkStyle) {
+  switch (style) {
+    case "dashed":
+      return <line x1="3" y1="16.5" x2="21" y2="16.5" stroke-width="2.4" stroke-dasharray="4.5 3.2" />;
+    case "dotted":
+      return <line x1="3" y1="16.5" x2="21" y2="16.5" stroke-width="2.4" stroke-dasharray="0.1 3.6" />;
+    case "wavy":
+      return <path d="M3 16.5q2.25-3.2 4.5 0t4.5 0t4.5 0t4.5 0" stroke-width="1.8" />;
+    default:
+      return <line x1="3" y1="16.5" x2="21" y2="16.5" stroke-width="2.4" />;
+  }
+}
+
+/** 书签样式选项图标：上方两条文字示意线，下方按所选样式画线（荧光笔为一块底色） */
+export function BookmarkStyleIcon(p: SvgIconProps & { style: BookmarkStyle }) {
+  return (
+    <Icon {...p}>
+      <line x1="4" y1="6.5" x2="20" y2="6.5" opacity="0.4" />
+      <line x1="4" y1="11" x2="15" y2="11" opacity="0.4" />
+      {p.style === "marker" ? (
+        <rect x="3" y="13.8" width="18" height="5.4" rx="2" fill="currentColor" opacity="0.38" stroke="none" />
+      ) : (
+        styleSampleLine(p.style)
+      )}
     </Icon>
   );
 }

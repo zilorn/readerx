@@ -317,14 +317,17 @@ impl SchemaRegistry {
         );
 
         // 书签：一条书签一旦存在就是「用户标记」，正文位置不可变；
-        // 备注可以改（并发改备注走 LWW，败方进冲突队列）
+        // 备注可以改（并发改备注走 LWW，败方进冲突队列）；
+        // 线条样式与颜色是展示偏好，并发改动取最后写入者即可，不必进冲突队列。
         registry.register(
             Schema::new("bookmark")
                 .field("book_id", MergeKind::Frozen)
                 .field("chapter_index", MergeKind::Frozen)
                 .field("offset", MergeKind::Frozen)
                 .field("text", MergeKind::Frozen)
-                .field("note", MergeKind::Lww),
+                .field("note", MergeKind::Lww)
+                .field("style", MergeKind::LwwSilent)
+                .field("color", MergeKind::LwwSilent),
         );
 
         // 分组：名字 LWW，组内顺序用列表

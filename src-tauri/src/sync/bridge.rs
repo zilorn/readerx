@@ -2175,6 +2175,9 @@ fn bookmark_values(value: &Value, book_uid: &str) -> BTreeMap<String, Value> {
         ("text", "text"),
         ("before", "before"),
         ("after", "after"),
+        // 展示样式（线条 / 颜色）：旧记录没有这两个字段，缺省按默认样式渲染
+        ("style", "style"),
+        ("color", "color"),
     ] {
         if let Some(text) = value.get(key).and_then(Value::as_str) {
             fields.insert(field.to_string(), json!(text));
@@ -2200,7 +2203,7 @@ fn bookmark_values(value: &Value, book_uid: &str) -> BTreeMap<String, Value> {
 /// 引擎里的书签实体 → 前端书签记录（字段名回到前端口径）。
 fn bookmark_value(id: &str, local_book_id: &str, entity: &Entity) -> Value {
     let text = |field: &str| entity.field(field).unwrap_or(Value::Null);
-    json!({
+    let mut value = json!({
         "id": id,
         "bookId": local_book_id,
         "chapterCid": text("chapter_cid"),
@@ -2212,8 +2215,19 @@ fn bookmark_value(id: &str, local_book_id: &str, entity: &Entity) -> Value {
         "text": text("text"),
         "before": text("before"),
         "after": text("after"),
+        "style": text("style"),
+        "color": text("color"),
         "createdAt": text("created_at"),
-    })
+    });
+    // 旧记录没有样式字段：缺省（null）不落盘，保持书签记录原有字段形状
+    if let Some(object) = value.as_object_mut() {
+        for field in ["style", "color"] {
+            if object.get(field).map(Value::is_null).unwrap_or(false) {
+                object.remove(field);
+            }
+        }
+    }
+    value
 }
 
 /// 文本替换规则的引擎字段。`book_id` 存书实体 id（uid），全局规则为空串。
@@ -2436,6 +2450,8 @@ mod tests {
             "text": "选中",
             "before": "前",
             "after": "后",
+            "style": "wavy",
+            "color": "red",
             "createdAt": 99,
         });
         let values = bookmark_values(&mark, "b-abc");
@@ -2443,8 +2459,16 @@ mod tests {
         assert_eq!(values["chapter_cid"], json!("c0002"));
         assert_eq!(values["char_start"], json!(10));
         assert_eq!(values["char_end"], json!(20));
+        assert_eq!(values["style"], json!("wavy"));
+        assert_eq!(values["color"], json!("red"));
         assert_eq!(values["created_at"], json!(99));
         assert!(!values.contains_key("id"), "实体 id 就是书签 id，不进字段");
+
+        // 旧记录没有样式字段：不写空值，引擎里也不该出现这两个键
+        let legacy = json!({ "id": "bm-2", "bookId": "b1", "charStart": 1, "charEnd": 2 });
+        let legacy_values = bookmark_values(&legacy, "b-abc");
+        assert!(!legacy_values.contains_key("style"));
+        assert!(!legacy_values.contains_key("color"));
     }
 
     #[test]
@@ -2455,6 +2479,8 @@ mod tests {
         fields.insert("char_start".to_string(), json!(10));
         fields.insert("char_end".to_string(), json!(20));
         fields.insert("text".to_string(), json!("选中"));
+        fields.insert("style".to_string(), json!("marker"));
+        fields.insert("color".to_string(), json!("blue"));
         let mut entity = Entity::new("bm-1", "bookmark", readerx_sync::Hlc::default(), 1);
         for (name, value) in fields {
             entity.fields.insert(
@@ -2470,7 +2496,26 @@ mod tests {
         assert_eq!(value["id"], json!("bm-1"));
         assert_eq!(value["bookId"], json!("local-1"));
         assert_eq!(value["charEnd"], json!(20));
+        assert_eq!(value["style"], json!("marker"));
+        assert_eq!(value["color"], json!("blue"));
         assert_eq!(value["chapterIndex"], Value::Null);
+    }
+
+    #[test]
+    fn bookmark_value_omits_missing_appearance_fields() {
+        // 旧书签（引擎里没有 style/color）落地成前端记录时不写 null，保持字段形状
+        let mut entity = Entity::new("bm-1", "bookmark", readerx_sync::Hlc::default(), 1);
+        entity.fields.insert(
+            "char_start".to_string(),
+            readerx_sync::FieldState::Value {
+                value: json!(10),
+                hlc: readerx_sync::Hlc::default(),
+                origin: readerx_sync::model::Stamp::new("A", 1),
+            },
+        );
+        let value = bookmark_value("bm-1", "local-1", &entity);
+        assert!(!value.as_object().unwrap().contains_key("style"));
+        assert!(!value.as_object().unwrap().contains_key("color"));
     }
 
     #[test]

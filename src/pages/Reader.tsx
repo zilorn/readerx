@@ -71,7 +71,11 @@ import { ChapterRangeSheet } from "../components/ChapterRangeSheet";
 import { MenuPageSlider } from "../components/MenuPageSlider";
 import { OnlineTocOverwriteDialog } from "../components/OnlineTocOverwriteDialog";
 import { ReloadChapterRiskDialog } from "../components/ReloadChapterRiskDialog";
-import { SelectionMenu, type SelectionCustom } from "../components/SelectionMenu";
+import {
+  SelectionMenu,
+  type SelectionCustom,
+  type SelectionTarget,
+} from "../components/SelectionMenu";
 import { TtsBubble } from "../components/TtsBubble";
 import { TtsDecodeGuideDialog } from "../components/TtsDecodeGuideDialog";
 import { TtsSheet } from "../components/TtsSheet";
@@ -104,7 +108,9 @@ import { t, type MessageKey } from "../lib/i18n";
 import {
   BOOKMARK_MAX_LEN,
   addBookmark,
+  bookmarkAppearance,
   bookmarkAtExactRange,
+  bookmarkColorValue,
   bookmarkOverlappingRange,
   buildTextMirror,
   ensureBookmarksLoaded,
@@ -113,8 +119,12 @@ import {
   resolveBookmarkTarget,
   sortedBookmarks,
   unitAtGlobalOffset,
+  updateBookmarkAppearance,
   type Bookmark,
+  type BookmarkAppearance,
+  type BookmarkColor,
   type BookmarkInheritPreview,
+  type BookmarkStyle,
   type TextMirror,
 } from "../lib/bookmarks";
 import {
@@ -354,7 +364,7 @@ function chapterRangeLabel(from: number, to: number): string {
 // 书签下划线：按单元内字符区间把文本切段渲染
 // ---------------------------------------------------------------------------
 
-/** 标记的视觉语义：书签=下划线，朗读中=浅橙底，搜索模式命中=强调底，选取中=拖选底色 */
+/** 标记的视觉语义：书签=下划线（可带样式/颜色），朗读中=浅橙底，搜索模式命中=强调底，选取中=拖选底色 */
 export type MarkKind = "bookmark" | "speak" | "search" | "searchCurrent" | "select";
 
 /** 单元内被标记覆盖的字符区间（局部于该单元文本） */
@@ -364,6 +374,10 @@ export interface UnitMark {
   e: number;
   /** 缺省视为书签下划线 */
   kind?: MarkKind;
+  /** 书签线条样式（kind 为 bookmark 时有效；缺省直线） */
+  style?: BookmarkStyle;
+  /** 书签颜色（kind 为 bookmark 时有效；缺省跟随主题） */
+  color?: BookmarkColor;
 }
 
 /** 待定位高亮的字符区间（镜像文本全局坐标） */
@@ -381,6 +395,9 @@ interface TextSegment {
   search: boolean;
   searchCurrent: boolean;
   select: boolean;
+  /** 书签样式/颜色（bookmark 为真时有效） */
+  style?: BookmarkStyle;
+  color?: BookmarkColor;
 }
 
 /** 把文本按覆盖区间切段（窗口 [winStart, winStart+text.length) 之外的标记忽略） */
@@ -390,14 +407,26 @@ function splitMarkedText(
   unit: number,
   marks: UnitMark[],
 ): TextSegment[] {
-  const spans: { s: number; e: number; kind: MarkKind }[] = [];
+  const spans: {
+    s: number;
+    e: number;
+    kind: MarkKind;
+    style?: BookmarkStyle;
+    color?: BookmarkColor;
+  }[] = [];
   for (const mark of marks) {
     if (mark.unit !== unit) continue;
     const winEnd = winStart + text.length;
     const s = Math.max(mark.s, winStart);
     const e = Math.min(mark.e, winEnd);
     if (e <= s) continue;
-    spans.push({ s: s - winStart, e: e - winStart, kind: mark.kind ?? "bookmark" });
+    spans.push({
+      s: s - winStart,
+      e: e - winStart,
+      kind: mark.kind ?? "bookmark",
+      style: mark.style,
+      color: mark.color,
+    });
   }
   if (spans.length === 0) {
     return [
@@ -423,13 +452,19 @@ function splitMarkedText(
     let search = false;
     let searchCurrent = false;
     let select = false;
+    let style: BookmarkStyle | undefined;
+    let color: BookmarkColor | undefined;
     for (const sp of spans) {
       if (sp.e > a && sp.s < b) {
         if (sp.kind === "speak") speak = true;
         else if (sp.kind === "search") search = true;
         else if (sp.kind === "searchCurrent") searchCurrent = true;
         else if (sp.kind === "select") select = true;
-        else bookmark = true;
+        else {
+          bookmark = true;
+          style = sp.style;
+          color = sp.color;
+        }
       }
     }
     segments.push({
@@ -439,6 +474,8 @@ function splitMarkedText(
       search,
       searchCurrent,
       select,
+      style,
+      color,
     });
   }
   return segments;
@@ -455,6 +492,13 @@ function combineMarks(...lists: UnitMark[][]): UnitMark[] {
   }
   out.sort((a, b) => a.unit - b.unit || a.s - b.s || a.e - b.e);
   return out;
+}
+
+/** 书签片段的内联样式：颜色写进 CSS 变量 --bm-color（默认色不写，由 CSS 跟随主题强调色） */
+function bookmarkSegmentColor(seg: TextSegment): JSX.CSSProperties | undefined {
+  if (!seg.bookmark) return undefined;
+  const value = bookmarkColorValue(seg.color ?? "default");
+  return value ? { "--bm-color": value } : undefined;
 }
 
 /** 渲染切段：命中书签/朗读/搜索标记的片段包对应样式 span */
@@ -491,11 +535,17 @@ function renderMarkedText(
           <span
             classList={{
               "readerx-bookmark": seg.bookmark,
+              "readerx-bookmark-dashed": seg.bookmark && seg.style === "dashed",
+              "readerx-bookmark-dotted": seg.bookmark && seg.style === "dotted",
+              "readerx-bookmark-wavy": seg.bookmark && seg.style === "wavy",
+              "readerx-bookmark-marker": seg.bookmark && seg.style === "marker",
               "readerx-speak": seg.speak,
               "readerx-search": seg.search,
               "readerx-search-current": seg.searchCurrent,
               "readerx-select": seg.select,
             }}
+            // 书签颜色经 CSS 变量注入（缺省时 CSS 回落到主题强调色）
+            style={bookmarkSegmentColor(seg)}
           >
             {seg.text}
           </span>
@@ -1732,7 +1782,8 @@ export default function ReaderPage() {
   const bookBookmarks = createMemo(() => sortedBookmarks(bookId()));
 
   // 当前章节内、书签覆盖的单元内字符区间（供下划线渲染）。
-  // 书签区间是镜像文本全局 [charStart, charEnd)，可与多个单元（跨段落）求交。
+  // 书签区间是镜像文本全局 [charStart, charEnd)，可与多个单元（跨段落）求交；
+  // 每条书签自带的线条样式与颜色一并带下去（旧记录缺省 = 直线 + 主题色）。
   const unitMarks = createMemo<UnitMark[]>(() => {
     const bms = bookBookmarks();
     const cid = chapterCid();
@@ -1741,6 +1792,7 @@ export default function ReaderPage() {
     const out: UnitMark[] = [];
     for (const bm of bms) {
       if (bm.chapterCid !== cid) continue;
+      const appearance = bookmarkAppearance(bm);
       for (let u = 0; u < mir.unitLength.length; u++) {
         const len = mir.unitLength[u];
         if (len <= 0) continue;
@@ -1748,7 +1800,13 @@ export default function ReaderPage() {
         const lo = Math.max(bm.charStart, base);
         const hi = Math.min(bm.charEnd, base + len);
         if (hi <= lo) continue;
-        out.push({ unit: u, s: lo - base, e: hi - base });
+        out.push({
+          unit: u,
+          s: lo - base,
+          e: hi - base,
+          style: appearance.style,
+          color: appearance.color,
+        });
       }
     }
     out.sort((a, b) => a.unit - b.unit || a.s - b.s || a.e - b.e);
@@ -4075,6 +4133,92 @@ export default function ReaderPage() {
     toggleBookmarkAtSpan(span[0], span[1]);
   }
 
+  /** 选区目标 → 本章镜像区间：自定义选区直接用它保存的 span，原生选区按 Range 换算 */
+  function spanOfSelectionTarget(target: SelectionTarget): [number, number] | null {
+    if (target.custom) return target.custom.span;
+    return spanOfRange(target.range);
+  }
+
+  /**
+   * 选区对应的目标书签：完全同区间，或选区整段落在其中（便于对已有书签改样式）。
+   * 与已有书签只有部分相交（伸出书签之外）时返回 undefined —— 那种情况按“重叠”拒绝。
+   */
+  function bookmarkForSelectionSpan(
+    bookId: string,
+    chapterCid: string,
+    lo: number,
+    hi: number,
+  ): Bookmark | undefined {
+    const exact = bookmarkAtExactRange(bookId, chapterCid, lo, hi);
+    if (exact) return exact;
+    const overlap = bookmarkOverlappingRange(bookId, chapterCid, lo, hi);
+    return overlap && overlap.charStart <= lo && hi <= overlap.charEnd ? overlap : undefined;
+  }
+
+  /** 样式面板回显：当前选区已有书签时给出它的线条样式与颜色 */
+  function currentMarkForSelection(target: SelectionTarget): BookmarkAppearance | null {
+    const b = book();
+    const ch = chapter();
+    const span = spanOfSelectionTarget(target);
+    if (!b || !ch || !span) return null;
+    const existed = bookmarkForSelectionSpan(b.id, ch.cid, span[0], span[1]);
+    return existed ? bookmarkAppearance(existed) : null;
+  }
+
+  /**
+   * 应用书签样式（选区菜单的样式面板）：选区已有书签 → 就地改样式；没有 → 按该样式新建。
+   * 与「书签」按钮分开：这里只增 / 改，不删除（再点当前样式也不会把书签去掉）。
+   * 应用后收起选区：正文重渲染会替换文字节点，原选区随即失效，样式在正文里立即可见。
+   */
+  function applyBookmarkAppearance(target: SelectionTarget, mark: BookmarkAppearance): void {
+    const b = book();
+    const ch = chapter();
+    const mir = mirror();
+    const span = spanOfSelectionTarget(target);
+    if (!b || !ch || !mir || mir.text.length === 0 || !span) {
+      showToast(t("reader.bookmarkNoContent"), true);
+      return;
+    }
+    const charStart = Math.max(0, Math.min(span[0], mir.text.length));
+    const charEnd = Math.max(charStart, Math.min(span[1], mir.text.length));
+    if (charEnd <= charStart) {
+      showToast(t("reader.bookmarkSelectText"), true);
+      return;
+    }
+    const existed = bookmarkForSelectionSpan(b.id, ch.cid, charStart, charEnd);
+    if (existed) {
+      clearVisibleSelection();
+      updateBookmarkAppearance(existed.id, mark);
+      return;
+    }
+    if (bookmarkOverlappingRange(b.id, ch.cid, charStart, charEnd)) {
+      showToast(t("reader.bookmarkOverlap"), true);
+      return;
+    }
+    if (charEnd - charStart > BOOKMARK_MAX_LEN) {
+      showToast(t("reader.bookmarkTooLong"), true);
+      return;
+    }
+    const startUnit = unitAtGlobalOffset(mir, charStart)?.unit ?? -1;
+    const bookmark = makeBookmark(
+      b.id,
+      ch,
+      chapterIdx(),
+      startUnit,
+      charStart,
+      charEnd,
+      mir,
+      mark,
+    );
+    if (!bookmark) {
+      showToast(t("reader.bookmarkFailed"), true);
+      return;
+    }
+    clearVisibleSelection();
+    addBookmark(bookmark);
+    showToast(t("reader.bookmarkAdded"));
+  }
+
   /** 从镜像偏移处开始朗读（null/越界 → 本章开头起读） */
   function handleSpeakAtOffset(start: number | null): void {
     const ch = chapter();
@@ -5197,6 +5341,8 @@ export default function ReaderPage() {
               onBookmarkSpan={(lo, hi) => toggleBookmarkAtSpan(lo, hi)}
               onSpeakOffset={(start) => handleSpeakAtOffset(start)}
               onReplace={(text) => openReplaceFromSelection(text)}
+              currentMark={(target) => currentMarkForSelection(target)}
+              onApplyMark={(target, mark) => applyBookmarkAppearance(target, mark)}
               custom={() => (isPaged() ? selMenu() : null)}
             />
 

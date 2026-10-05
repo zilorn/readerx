@@ -28,6 +28,84 @@ export const BOOKMARK_CONTEXT = 32;
 /** 单条书签最大跨度（字符），超出则拒绝添加 */
 export const BOOKMARK_MAX_LEN = 800;
 
+/**
+ * 书签线条样式：直线（默认，与旧数据一致）、虚线、点线、波浪线、荧光笔底色。
+ * 老书签记录没有 style 字段，一律按直线渲染。
+ */
+export type BookmarkStyle = "line" | "dashed" | "dotted" | "wavy" | "marker";
+
+/** 书签颜色：default 跟随主题强调色，其余为固定色板（不随主题变化） */
+export type BookmarkColor =
+  | "default"
+  | "red"
+  | "orange"
+  | "yellow"
+  | "green"
+  | "blue"
+  | "purple";
+
+/** 一条书签的视觉样式（线条 + 颜色） */
+export interface BookmarkAppearance {
+  style: BookmarkStyle;
+  color: BookmarkColor;
+}
+
+/** 缺省样式：直线 + 主题强调色（= 旧数据的观感） */
+export const DEFAULT_BOOKMARK_APPEARANCE: BookmarkAppearance = {
+  style: "line",
+  color: "default",
+};
+
+/** 全部线条样式（顺序即样式面板里的展示顺序） */
+export const BOOKMARK_STYLES: readonly BookmarkStyle[] = [
+  "line",
+  "dashed",
+  "dotted",
+  "wavy",
+  "marker",
+];
+
+/** 颜色选项：value 为 null 表示跟随主题强调色（--accent） */
+export const BOOKMARK_COLORS: readonly {
+  color: BookmarkColor;
+  value: string | null;
+}[] = [
+  { color: "default", value: null },
+  { color: "red", value: "#e5484d" },
+  { color: "orange", value: "#f76b15" },
+  { color: "yellow", value: "#d9a400" },
+  { color: "green", value: "#30a46c" },
+  { color: "blue", value: "#0091ff" },
+  { color: "purple", value: "#8e4ec6" },
+];
+
+/** 颜色选项对应的 CSS 色值；null = 跟随主题强调色 */
+export function bookmarkColorValue(color: BookmarkColor): string | null {
+  return BOOKMARK_COLORS.find((option) => option.color === color)?.value ?? null;
+}
+
+/** 线条样式归一化：旧数据 / 外部导入里不认识的值回退到默认直线 */
+export function normalizeBookmarkStyle(value: unknown): BookmarkStyle {
+  return BOOKMARK_STYLES.includes(value as BookmarkStyle) ? (value as BookmarkStyle) : "line";
+}
+
+/** 颜色归一化：不认识的值回退到跟随主题 */
+export function normalizeBookmarkColor(value: unknown): BookmarkColor {
+  return BOOKMARK_COLORS.some((option) => option.color === value)
+    ? (value as BookmarkColor)
+    : "default";
+}
+
+/** 取一条书签的展示样式（未设置过 = 默认直线 + 主题色） */
+export function bookmarkAppearance(
+  bookmark: Pick<Bookmark, "style" | "color">,
+): BookmarkAppearance {
+  return {
+    style: normalizeBookmarkStyle(bookmark.style),
+    color: normalizeBookmarkColor(bookmark.color),
+  };
+}
+
 export interface Bookmark {
   id: string;
   bookId: string;
@@ -46,6 +124,10 @@ export interface Bookmark {
   before: string;
   /** 终点后的原文（镜像文本，长度 ≤ BOOKMARK_CONTEXT） */
   after: string;
+  /** 线条样式（缺省为直线；旧记录没有该字段） */
+  style?: BookmarkStyle;
+  /** 颜色（缺省跟随主题强调色；旧记录没有该字段） */
+  color?: BookmarkColor;
   createdAt: number;
 }
 
@@ -247,6 +329,28 @@ export function addBookmark(bookmark: Bookmark): void {
   persist(bookmark.bookId);
 }
 
+/**
+ * 改一条书签的展示样式（线条 / 颜色）。只动这两个字段：位置、文字与锚定上下文不变，
+ * 因此不影响定位与「重新导入」时的继承判定。找不到该 id 时什么都不做。
+ */
+export function updateBookmarkAppearance(id: string, appearance: BookmarkAppearance): void {
+  const map = { ...bookmarkMap() };
+  const style = normalizeBookmarkStyle(appearance.style);
+  const color = normalizeBookmarkColor(appearance.color);
+  for (const [bookId, list] of Object.entries(bookmarkMap())) {
+    const index = list.findIndex((bm) => bm.id === id);
+    if (index < 0) continue;
+    const current = list[index];
+    if (current.style === style && current.color === color) return; // 样式没变：不写盘
+    const next = list.slice();
+    next[index] = { ...current, style, color };
+    map[bookId] = next;
+    setBookmarkMap(map);
+    persist(bookId);
+    return;
+  }
+}
+
 export function removeBookmark(id: string): void {
   const map: BookmarkMap = {};
   const touched: string[] = [];
@@ -293,6 +397,7 @@ export function newBookmarkId(): string {
  * 的全局区间，可横跨任意多个单元（图片不占字符）。unitIndex 只记录“起点所在
  * 单元”，作为定位时的结构化锚点之一。
  * mirror 需来自该书签所在章节的 buildTextMirror(章节单元)。
+ * appearance 缺省时不写 style/color 字段（保留旧记录形状，渲染按默认直线处理）。
  */
 export function makeBookmark(
   bookId: string,
@@ -302,6 +407,7 @@ export function makeBookmark(
   charStart: number,
   charEnd: number,
   mirror: TextMirror,
+  appearance?: BookmarkAppearance,
 ): Bookmark | null {
   if (!chapter || !Number.isFinite(charStart) || !Number.isFinite(charEnd)) return null;
   if (charEnd <= charStart) return null;
@@ -326,6 +432,8 @@ export function makeBookmark(
     text,
     before: mirror.text.slice(Math.max(0, charStart - BOOKMARK_CONTEXT), charStart),
     after: mirror.text.slice(charEnd, charEnd + BOOKMARK_CONTEXT),
+    style: appearance ? normalizeBookmarkStyle(appearance.style) : undefined,
+    color: appearance ? normalizeBookmarkColor(appearance.color) : undefined,
     createdAt: Date.now(),
   };
 }

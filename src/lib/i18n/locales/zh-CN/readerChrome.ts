@@ -60,6 +60,20 @@ export const readerChrome = {
   "readerChrome.selection.bookmark": "书签",
   "readerChrome.selection.speak": "朗读",
   "readerChrome.selection.replace": "替换",
+  // 书签样式面板（书签按钮右侧的伸缩入口）
+  "readerChrome.selection.markStyle": "书签样式",
+  "readerChrome.selection.style.line": "直线",
+  "readerChrome.selection.style.dashed": "虚线",
+  "readerChrome.selection.style.dotted": "点线",
+  "readerChrome.selection.style.wavy": "波浪线",
+  "readerChrome.selection.style.marker": "荧光笔",
+  "readerChrome.selection.color.default": "默认色",
+  "readerChrome.selection.color.red": "红色",
+  "readerChrome.selection.color.orange": "橙色",
+  "readerChrome.selection.color.yellow": "黄色",
+  "readerChrome.selection.color.green": "绿色",
+  "readerChrome.selection.color.blue": "蓝色",
+  "readerChrome.selection.color.purple": "紫色",
 
   // 书签面板
   "readerChrome.bookmark.title": "书签",

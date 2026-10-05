@@ -311,12 +311,35 @@
   box-decoration-break: clone;
 }
 
-/* 书签下划线（与朗读背景可叠加在同一段文字上） */
+/* 书签下划线（与朗读背景可叠加在同一段文字上）。
+   默认样式 = 直线 + 主题强调色；颜色由内联的 --bm-color 指定（缺省回落到 --accent）。
+   dashed / dotted / wavy 只改线条形态，marker（荧光笔）改用半透明底色。 */
 .readerx-bookmark {
   text-decoration-line: underline;
-  text-decoration-color: var(--accent);
+  text-decoration-color: var(--bm-color, var(--accent));
   text-decoration-thickness: 2px;
   text-underline-offset: 0.2em;
+}
+
+.readerx-bookmark-dashed {
+  text-decoration-style: dashed;
+}
+
+.readerx-bookmark-dotted {
+  text-decoration-style: dotted;
+}
+
+.readerx-bookmark-wavy {
+  text-decoration-style: wavy;
+}
+
+.readerx-bookmark-marker {
+  text-decoration-line: none;
+  border-radius: 3px;
+  background-color: var(--accent-weak);
+  background-color: color-mix(in srgb, var(--bm-color, var(--accent)) 38%, transparent);
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
 }
 
 /* 分页模式自绘选区：正在拖选的文字底色（每段文字独立圆角，跨行不断开） */

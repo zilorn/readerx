@@ -60,6 +60,20 @@ export const readerChrome = {
   "readerChrome.selection.bookmark": "Bookmark",
   "readerChrome.selection.speak": "Read aloud",
   "readerChrome.selection.replace": "Replace",
+  // Bookmark style panel (expanded from the chevron next to Bookmark)
+  "readerChrome.selection.markStyle": "Bookmark style",
+  "readerChrome.selection.style.line": "Underline",
+  "readerChrome.selection.style.dashed": "Dashed",
+  "readerChrome.selection.style.dotted": "Dotted",
+  "readerChrome.selection.style.wavy": "Wavy",
+  "readerChrome.selection.style.marker": "Highlighter",
+  "readerChrome.selection.color.default": "Default color",
+  "readerChrome.selection.color.red": "Red",
+  "readerChrome.selection.color.orange": "Orange",
+  "readerChrome.selection.color.yellow": "Yellow",
+  "readerChrome.selection.color.green": "Green",
+  "readerChrome.selection.color.blue": "Blue",
+  "readerChrome.selection.color.purple": "Purple",
 
   // Bookmark panel
   "readerChrome.bookmark.title": "Bookmarks",
