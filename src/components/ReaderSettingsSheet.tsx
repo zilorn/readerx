@@ -1,9 +1,9 @@
 /**
  * 阅读设置底部抽屉（入口：阅读菜单顶栏的齿轮按钮）：
- * - 顶部为与「设置」页共用的阅读设置（正文字号 / 段落间距 / 翻页方式），
+ * - 顶部为与「设置」页共用的阅读设置（正文字号 / 段落间距），
  *   由 ReadingSettingsRows 提供，改动一处两处同步；
+ * - 自动翻页开关与其间隔同行同卡片，未开启自动翻页时不显示间隔；
  * - 下方调整阅读页底部状态栏的显示（开/关）与进度百分比口径（整本书 / 当前章节）。
- * - 自动翻页开关控制当前阅读会话，间隔作为全局偏好保存。
  * 状态栏和自动翻页逻辑由 Reader.tsx 接线。
  */
 import { ReaderAutoPageControls } from "./ReaderAutoPageControls";
@@ -128,8 +128,13 @@ export function ReaderSettingsSheet(props: ReaderSettingsSheetProps) {
         <ScrollArea class="min-h-0 flex-1" contentClass="px-4 pb-[calc(20px+env(safe-area-inset-bottom))] pt-3">
           <Card>
             <ReadingSettingsRows group="adjustments" />
-            <ReaderAutoPageControls group="adjustments" enabled={props.autoPageEnabled} onChange={props.onAutoPageChange} />
           </Card>
+
+          <div class="mt-3">
+            <Card>
+              <ReaderAutoPageControls enabled={props.autoPageEnabled} onChange={props.onAutoPageChange} />
+            </Card>
+          </div>
 
           <div class="mt-3">
             <Card>
@@ -175,7 +180,6 @@ export function ReaderSettingsSheet(props: ReaderSettingsSheetProps) {
           <div class="mt-3">
             <Card>
               <ReadingSettingsRows group="switches" />
-              <ReaderAutoPageControls group="switches" enabled={props.autoPageEnabled} onChange={props.onAutoPageChange} />
               <div class="flex w-full items-center gap-3 px-4 py-[13px] text-left">
                 <span class="flex min-w-0 flex-1 flex-col gap-0.5">
                   <span class="text-[14.5px] font-medium">
