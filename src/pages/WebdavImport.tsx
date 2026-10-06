@@ -6,7 +6,7 @@ import {
   createSignal,
 } from "solid-js";
 import { Portal } from "solid-js/web";
-import { useNavigate } from "@solidjs/router";
+import { useLocation, useNavigate } from "@solidjs/router";
 import { DavServerDrawer } from "../components/DavServerDrawer";
 import { LoadingScreen } from "../components/LoadingScreen";
 import { PageHeader } from "../components/PageHeader";
@@ -47,12 +47,16 @@ import {
   type DavEntry,
 } from "../lib/webdav";
 import { BookmarkRiskDialog } from "../components/BookmarkRiskDialog";
+import { createAndroidBackHandler } from "../lib/androidBack";
 import { showToast } from "../lib/toast";
 import { closeOnRouteChange } from "../lib/keptPage";
 import { createLogger } from "../lib/logger";
 import { t } from "../lib/i18n";
 
 const log = createLogger("webdav");
+
+/** 本页路由（常驻页面，见 App.tsx 的 KEPT_PAGES） */
+const PAGE_PATH = "/webdav-import";
 
 let reloadSeq = 0;
 
@@ -192,6 +196,7 @@ function ImportedBookRow(props: {
 /** 目录条目按类型分开渲染：文件夹可进入，书籍文件可勾选导入；已导入的书可直接阅读/长按重新导入 */
 export default function WebdavImportPage() {
   const navigate = useNavigate();
+  const location = useLocation();
   const [path, setPath] = createSignal("");
   const [dirList, setDirList] = createSignal<DavEntry[] | null>(null);
   const [error, setError] = createSignal<string | null>(null);
@@ -342,6 +347,25 @@ export default function WebdavImportPage() {
     setKeyword("");
     setPath(idx < 0 ? "" : dir.slice(0, idx));
   }
+
+  // 安卓实体返回键：浏览子目录时逐级返回；已在服务器根目录（没有再上一级）或本页弹层
+  // 打开时交还系统默认返回，即按原样退回书架页面。
+  createAndroidBackHandler(
+    () =>
+      location.pathname === PAGE_PATH &&
+      path() !== "" &&
+      !configOpen() &&
+      !reimportEntry() &&
+      !bookmarkRisk(),
+    () => {
+      if (path()) {
+        goUp();
+        return;
+      }
+      // 回到根目录后的注销还没生效时仍会收到返回键：按默认返回离开本页，别让按键落空
+      goBack();
+    },
+  );
 
   function toggleFile(pathToToggle: string) {
     setSelected((prev) => {

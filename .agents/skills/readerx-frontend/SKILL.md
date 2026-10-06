@@ -13,7 +13,7 @@ description: 开发或修改 ReaderX 的 SolidJS 页面、路由、共享状态�
 - 外壳和导航：修改 src/shell/，手机与桌面共用页面。AppShell 承接外壳选择、Toast、书源输入弹窗、跨页面分组抽屉与同步导航接线；页面栈、滚动、导航及 Suspense 留在外壳。跳转用 useNavigate 或 Solid 的 A 组件。
 - 状态：共享状态沿用 src/lib/ 下对应业务模块的模块级 signal（偏好在 store.ts，书库在 books.ts，分组在 groups.ts），不要全部堆进 store.ts；读取 getter，修改走导出的 setter/action，跨页面偏好不重复保存，不引入 Redux/MobX；组件 signal 仅存局部 UI 状态，不用 createEffect 驱动渲染树。持久化交给 Rust，考虑旧数据迁移。
 - 样式：沿用 Tailwind v4、主题 token 和 src/index.css 变量，颜色不写死，浅色/深色/sepia 由 html[data-theme] 切换；手机列宽由 --app-column 控制，桌面由外壳分栏，页面沿用相邻页面的滚动结构。body 浮层用 `max-w-[var(--app-column)]`；阅读字号修改保留既有行高、字距和缩进。SVG 图标放 src/components/icons.tsx，不引图标库，不用表情或文本符号代替按钮图标。复杂样式优先用 @utility 等 Tailwind 机制，注意低版本 Android WebView 兼容性，必要时提供 fallback。
-- 平台：窗口宽度决定外壳，不复制桌面页面；桌面文件导入用 readerx_pick_book_file。新增 Rust command 同步 invoke_handler 与所需 capability。
+- 平台：窗口宽度决定外壳，不复制桌面页面；桌面文件导入用 readerx_pick_book_file。新增 Rust command 同步 invoke_handler 与所需 capability。安卓实体返回键默认走 WebView 历史返回；需要页面接管时用 src/lib/androidBack.ts 的 createAndroidBackHandler（注册 Tauri 的 back-button 监听即接管，注销即恢复默认），只在页面确实能消费返回时才为真，否则会出现按了没反应的返回。
 
 ## 按需参考
 
