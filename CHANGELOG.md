@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-10-06
+
+### Added
+
+- WebDAV 导入页的安卓实体返回键在子目录中逐级返回上级目录，位于服务器根目录时按原样返回书架。
+
+### Changed
+
+- 阅读设置中自动翻页开关与翻页间隔合并到同一卡片，未开启自动翻页时不显示间隔。
+
+### Fixed
+
+- 阅读时长排行把已移出书库的书籍汇总为一条，不再因同名条目重复占用排行。
+
 ## [0.4.3] - 2026-10-05
 
 ### Added
