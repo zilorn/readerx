@@ -19,7 +19,7 @@ export const settings = {
   "settings.readingTime.emptyPeriod": "这段时间暂无阅读记录",
   "settings.readingTime.bookRanking": "书籍累计时长排行",
   "settings.readingTime.emptyBooks": "暂无书籍阅读记录",
-  "settings.readingTime.removedBook": "已移出书库的书籍",
+  "settings.readingTime.removedBooks": "已移出书库的书籍",
   "settings.readingTime.hiddenBooks": "隐藏的书籍",
   "settings.readingTime.showAll": "查看全部 {count} 本",
   "settings.readingTime.showLess": "收起排行",
