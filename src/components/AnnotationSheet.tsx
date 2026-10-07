@@ -7,6 +7,7 @@ import {
   saveAnnotationNote, type ParagraphAnchor,
 } from "../lib/annotations";
 import { t } from "../lib/i18n";
+import { isDesktopShell } from "../lib/platform";
 import { showToast } from "../lib/toast";
 import { createAndroidBackHandler } from "../lib/androidBack";
 
@@ -83,7 +84,7 @@ export function AnnotationSheet(props: AnnotationSheetProps) {
       label={t("readerChrome.annotation.title")}
       position="absolute"
       layer={52}
-      sizeClass="max-h-[76%]"
+      sizeClass={isDesktopShell() ? "h-full" : "h-[72%]"}
       readerUi
     >
       <div class="flex flex-none items-center gap-2 border-b border-border px-4 py-3">
