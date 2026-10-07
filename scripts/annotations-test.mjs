@@ -13,6 +13,7 @@ let pauseRead;
 let reads = 0;
 let writes = 0;
 let failures = 0;
+let afterWrite;
 const bridge = {
   async readRemoteAnnotations(id) {
     reads++;
@@ -21,9 +22,10 @@ const bridge = {
   },
   async saveRemoteAnnotations(id, list) {
     writes++;
-    if (writeFails) return false;
+    if (writeFails) return null;
     disk.set(id, structuredClone(list));
-    return true;
+    if (afterWrite) afterWrite(id);
+    return structuredClone(disk.get(id));
   },
 };
 const code = ts.transpileModule(await readFile(new URL("../src/lib/annotations.ts", import.meta.url), "utf8"), {
@@ -92,4 +94,22 @@ assert.equal(await stale, false, "删除/恢复后，旧的在飞读取不能重
 pauseRead = null;
 await ensureAnnotationsLoaded("b1");
 assert.equal(annotationsFor("b1")[0].notes.length, 2);
+afterWrite = (id) => {
+  const list = disk.get(id);
+  list[0].notes.push({ id: "remote-note", text: "远端新增", createdAt: 1, updatedAt: 1 });
+};
+assert.ok(await saveAnnotationNote("merged-result", anchor, null, null, "本机新增"));
+assert.equal(annotationsFor("merged-result")[0].notes.length, 2, "发布 Rust 实际保存结果，保留同步合并的记录");
+afterWrite = (id) => invalidateAnnotationCache(id);
+assert.ok(await saveAnnotationNote("sync-during-save", anchor, null, null, "保存期间同步"), "保存成功后收到失效事件仍返回成功");
+assert.equal(annotationsFor("sync-during-save")[0].notes[0].text, "保存期间同步");
+afterWrite = null;
+// 同步聚合可改变段落 id；用稳定 note id 继续编辑已打开抽屉的草稿。
+const prior = annotationsFor("merged-result")[0];
+const editedId = prior.notes[0].id;
+disk.get("merged-result")[0].id = "folded-paragraph";
+invalidateAnnotationCache("merged-result");
+assert.ok(await saveAnnotationNote("merged-result", anchor, prior.id, editedId, "聚合后继续编辑"));
+assert.equal(annotationsFor("merged-result")[0].notes.length, 2);
+assert.equal(annotationsFor("merged-result")[0].notes.find((n) => n.id === editedId).text, "聚合后继续编辑");
 console.log("annotations: 聚合、编辑、书籍隔离、锚点重定位、并发与失败保护通过");

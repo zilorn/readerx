@@ -897,6 +897,24 @@ pub(crate) fn put_annotations<R: tauri::Runtime>(
     write_annotations_file(&dir.join(ANNOTATIONS_FILE), annotations)
 }
 
+/// 前端快照只用于算差集，读改写在同一书库事务内保留刚落地的远端记录。
+pub(crate) fn patch_annotations<R: tauri::Runtime>(
+    app: &AppHandle<R>, id: &str, previous: &[Value], next: &[Value],
+) -> Result<Vec<Value>, String> {
+    let changed = crate::annotations::changed(previous, next)?;
+    let _transaction = library_transaction();
+    migrate_legacy_layout(app);
+    let dir = book_dir(app, id)?;
+    if !dir.is_dir() { return Err("书籍不存在".into()); }
+    let path = dir.join(ANNOTATIONS_FILE);
+    let mut current = read_annotations_file(&path)?;
+    let existing = crate::annotations::flatten(&current)?;
+    for note in existing.values() { crate::annotations::upsert(&mut current, note); }
+    for note in changed.values() { crate::annotations::upsert(&mut current, note); }
+    write_annotations_file(&path, &current)?;
+    Ok(current)
+}
+
 /// 删除一本书：整个书籍目录（含书签）连同听书缓存、章节插图一起清掉。
 pub(crate) fn delete_book<R: tauri::Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), String> {
     let _transaction = library_transaction();

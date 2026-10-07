@@ -149,11 +149,11 @@ export function saveAnnotationNote(
     if (epoch !== epochFor(bookId) || !await ensureAnnotationsLoaded(bookId)) return;
     if (epoch !== epochFor(bookId)) return;
     const list = annotationsFor(bookId);
-    const existing = paragraphId
-      ? list.find((item) => item.id === paragraphId)
-      : list.find((item) => item.chapterCid === anchor.chapterCid &&
+    const existing = (noteId ? list.find((item) => item.notes.some((note) => note.id === noteId)) : null)
+      ?? (paragraphId ? list.find((item) => item.id === paragraphId) : null)
+      ?? list.find((item) => item.chapterCid === anchor.chapterCid &&
         item.unitIndex === anchor.unitIndex && item.fingerprint === anchor.fingerprint);
-    if (paragraphId && !existing) return;
+    if (noteId && !existing) return;
     const previous = noteId ? existing?.notes.find((note) => note.id === noteId) : null;
     if (noteId && !previous) return;
     const now = Date.now();
@@ -171,8 +171,14 @@ export function saveAnnotationNote(
     const next = existing
       ? list.map((item) => item.id === existing.id ? paragraph : item)
       : [...list, paragraph];
-    if (!await saveRemoteAnnotations(bookId, next) || epoch !== epochFor(bookId)) return;
-    setRecords((prev) => ({ ...prev, [bookId]: next }));
+    const saved = await saveRemoteAnnotations(bookId, next, list);
+    if (saved === null) return;
+    // 同步事件可能在保存期间失效缓存；写入已成功时保留成功结果并重新读取。
+    if (epoch !== epochFor(bookId)) {
+      await ensureAnnotationsLoaded(bookId);
+    } else {
+      setRecords((prev) => ({ ...prev, [bookId]: saved }));
+    }
     log.info(previous ? "注释更新完成" : "注释添加完成", { bookId, paragraphs: next.length });
     result = true;
   });

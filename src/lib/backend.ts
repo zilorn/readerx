@@ -213,17 +213,16 @@ export async function readRemoteAnnotations<T>(bookId: string): Promise<T[] | nu
     return null;
   }
 }
-export async function saveRemoteAnnotations(bookId: string, annotations: readonly unknown[]): Promise<boolean> {
+export async function saveRemoteAnnotations<T>(bookId: string, annotations: readonly T[], previous: readonly T[]): Promise<T[] | null> {
   if (!tauri) {
     memoryAnnotations.set(bookId, [...annotations]);
-    return true;
+    return [...annotations];
   }
   try {
-    await invoke("readerx_annotations_put", { bookId, annotations });
-    return true;
+    return await invoke<T[]>("readerx_annotations_put", { bookId, annotations, previous });
   } catch (err) {
     reportFailure(t("readerChrome.annotation.writeFailed"), err);
-    return false;
+    return null;
   }
 }
 

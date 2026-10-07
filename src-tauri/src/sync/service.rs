@@ -336,13 +336,17 @@ impl<R: tauri::Runtime> SyncService<R> {
     /// 首次启用时这一步要写几百条操作（每条都要 fsync），因此**放在后台线程**：
     /// 用户点开关必须立刻有反应，而不是等整个书库灌完。
     pub fn reconcile_local(&self) -> Result<(), String> {
+        self.reconcile_local_mode(false)
+    }
+
+    fn reconcile_local_mode(&self, imported: bool) -> Result<(), String> {
         let _materializing = self.materializing.lock().unwrap_or_else(|p| p.into_inner());
         let engine = self.engine().ok_or("同步未启用")?;
         let mut index = {
             let mut inner = self.lock();
             std::mem::take(&mut inner.index)
         };
-        let result = bridge::reconcile(&self.app, &engine, &mut index);
+        let result = bridge::reconcile_annotations_mode(&self.app, &engine, &mut index, imported);
         {
             let mut inner = self.lock();
             inner.index = index;
@@ -362,7 +366,7 @@ impl<R: tauri::Runtime> SyncService<R> {
         if self.engine().is_none() {
             return;
         }
-        if let Err(error) = self.reconcile_local() {
+        if let Err(error) = self.reconcile_local_mode(true) {
             log::warn!("导入后同步对账失败（下次启动会继续）：{error}");
         }
         // 恢复旧备份后补回引擎中较新的累计值，再允许继续计时。
@@ -1114,6 +1118,47 @@ impl<R: tauri::Runtime> SyncService<R> {
         }
     }
 
+    /// 注释保存与同步落库串行；只发布用户本次修改过的 note。
+    pub fn save_annotations(&self, book_id: &str, previous: &[Value], next: &[Value]) -> Result<Vec<Value>, String> {
+        let _materializing = self.materializing.lock().unwrap_or_else(|p| p.into_inner());
+        let changed = crate::annotations::changed(previous, next)?;
+        let engine = self.engine();
+        if let Some(engine) = &engine {
+            let uid = bridge::local_uid(&self.app, book_id);
+            let guard = lock_engine(engine);
+            for (note_id, note) in &changed {
+                if let Some(entity) = guard.entity(&format!("annotation:{uid}:{note_id}")) {
+                    if (entity.conflicted.contains("note") && entity.field("note").as_ref() != Some(&note.value["text"])) ||
+                        (entity.conflicted.contains("anchor") && entity.field("anchor").as_ref() != Some(&note.anchor)) {
+                        return Err("该注释存在同步冲突，请先裁决".into());
+                    }
+                }
+            }
+        }
+        let saved = book_store::patch_annotations(&self.app, book_id, previous, next)?;
+        if let Some(engine) = engine {
+            let mut records = Vec::new();
+            for note in changed.values() { crate::annotations::upsert(&mut records, note); }
+            let mut index = {
+                let mut inner = self.lock();
+                std::mem::take(&mut inner.index)
+            };
+            let result = bridge::publish_annotations(&self.app, &engine, &mut index, book_id, &records, false);
+            // 发送期间可能已收到远端操作：按引擎当前值补落地，再返回实际存储值。
+            let result = result.and_then(|()| {
+                let uid = index.uid_for(&self.app, book_id);
+                bridge::apply_annotations(&self.app, &engine, book_id, &uid)
+                    .map_err(readerx_sync::SyncError::Io)
+            });
+            self.lock().index = index;
+            if result.map_err(|error| error.to_string())? {
+                self.emit_applied(&AppliedChanges { annotations: vec![book_id.to_owned()], ..Default::default() });
+            }
+            return book_store::get_annotations(&self.app, book_id);
+        }
+        Ok(saved)
+    }
+
     /// 阅读进度整表被写入（`readerx.shelf`）：只发布真正变了的条目。
     pub fn on_shelf_changed(&self, shelf: &Value) {
         let Some(engine) = self.engine() else {
@@ -1565,13 +1610,14 @@ impl<R: tauri::Runtime> SyncService<R> {
             return;
         }
         log::info!(
-            "同步落地: 书籍={} 进度={} 分组={} 书源分组={} 书源={} 书签={} 替换规则={} 分章规则={} 删除={}",
+            "同步落地: 书籍={} 进度={} 分组={} 书源分组={} 书源={} 书签={} 注释={} 替换规则={} 分章规则={} 删除={}",
             changes.books,
             changes.progress,
             changes.groups,
             changes.source_groups,
             changes.sources,
             changes.bookmarks.len(),
+            changes.annotations.len(),
             changes.text_replaces,
             changes.chapter_rules,
             changes.deleted_books.len()
@@ -1628,7 +1674,7 @@ fn entity_title(engine: &SyncEngine, entity_id: &str, kind: &str) -> String {
     match kind {
         "group" | "source_group" | "book_source" => named("name"),
         "book" => named("title"),
-        "reading_progress" | "bookmark" => {
+        "reading_progress" | "bookmark" | "annotation" => {
             let book = engine
                 .field(entity_id, "book_id")
                 .and_then(|v| v.as_str().map(str::to_string))

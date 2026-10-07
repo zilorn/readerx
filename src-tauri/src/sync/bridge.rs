@@ -78,6 +78,8 @@ pub struct AppliedChanges {
     pub sources: bool,
     /// 书签有变化的本机书 id → 只重载这几本
     pub bookmarks: Vec<String>,
+    /// 注释有变化的书 id → 失效并重载阅读页注释
+    pub annotations: Vec<String>,
     /// 文本替换规则有变化 → 重新读回规则清单
     pub text_replaces: bool,
     /// 分章规则有变化 → 重新读回规则清单
@@ -99,6 +101,7 @@ impl AppliedChanges {
         self.text_replaces |= next.text_replaces;
         self.chapter_rules |= next.chapter_rules;
         self.bookmarks.extend(next.bookmarks);
+        self.annotations.extend(next.annotations);
         self.chapters.extend(next.chapters);
         self.deleted_books.extend(next.deleted_books);
     }
@@ -113,6 +116,7 @@ impl AppliedChanges {
             && !self.text_replaces
             && !self.chapter_rules
             && self.bookmarks.is_empty()
+            && self.annotations.is_empty()
             && self.chapters.is_empty()
             && self.deleted_books.is_empty()
     }
@@ -492,6 +496,36 @@ pub fn publish_bookmarks<R: tauri::Runtime>(
     Ok(())
 }
 
+/// 每条 note 独立发布；快照缺少的远端 note 不解释成删除。
+/// 启动对账只补引擎缺少的注释，已有实体以引擎为准，避免旧磁盘重发覆盖。
+pub fn publish_annotations<R: tauri::Runtime>(
+    app: &AppHandle<R>, engine: &SharedEngine, index: &mut BookIndex,
+    book_id: &str, annotations: &[Value], only_missing: bool,
+) -> Result<(), SyncError> {
+    let notes = crate::annotations::flatten(annotations).map_err(SyncError::Io)?;
+    let uid = index.uid_for(app, book_id);
+    let mut guard = lock_engine(engine);
+    for (note_id, note) in notes {
+        // 按书限定实体身份，导入旧备份或碰巧同名不会串到别的书。
+        let id = format!("annotation:{uid}:{note_id}");
+        let values = BTreeMap::from([
+            ("book_id".into(), json!(uid)),
+            ("note_id".into(), json!(note_id)),
+            ("anchor".into(), note.anchor),
+            ("note".into(), note.value["text"].clone()),
+            ("created_at".into(), note.value["createdAt"].clone()),
+            ("updated_at".into(), note.value["updatedAt"].clone()),
+        ]);
+        if guard.entity(&id).is_none() {
+            guard.create_entity("annotation", Some(id), values)?;
+        } else if !only_missing {
+            if guard.entity(&id).is_some_and(Entity::is_deleted) { guard.restore_entity(&id)?; }
+            publish_fields(&mut guard, &id, &values)?;
+        }
+    }
+    Ok(())
+}
+
 /// 发布分组清单（`readerx.groups` 的整个数组）。
 pub fn publish_groups<R: tauri::Runtime>(
     _app: &AppHandle<R>,
@@ -823,6 +857,13 @@ pub fn reconcile<R: tauri::Runtime>(
     engine: &SharedEngine,
     index: &mut BookIndex,
 ) -> Result<(), SyncError> {
+    reconcile_annotations_mode(app, engine, index, false)
+}
+
+/// 备份导入属于显式本地改动；注释缺失也要发布删除，启动则只补缺失实体。
+pub(crate) fn reconcile_annotations_mode<R: tauri::Runtime>(
+    app: &AppHandle<R>, engine: &SharedEngine, index: &mut BookIndex, imported: bool,
+) -> Result<(), SyncError> {
     *index = BookIndex::rebuild(app).map_err(SyncError::Io)?;
     let books = book_store::list_sync_meta(app).map_err(SyncError::Io)?;
     let mut facts = LocalFacts::load(app);
@@ -847,6 +888,23 @@ pub fn reconcile<R: tauri::Runtime>(
         if !bookmarks.is_empty() {
             publish_bookmarks(app, engine, index, &meta.id, &bookmarks)?;
         }
+    }
+
+    for meta in &books {
+        // 读失败须中止对账，不能先推进落库游标再以空注释覆盖。
+        let annotations = book_store::get_annotations(app, &meta.id).map_err(SyncError::Io)?;
+        publish_annotations(app, engine, index, &meta.id, &annotations, !imported)?;
+        let uid = index.uid_for(app, &meta.id);
+        if imported {
+            let present = crate::annotations::flatten(&annotations).map_err(SyncError::Io)?;
+            let mut guard = lock_engine(engine);
+            let removed = guard.entities_of_kind("annotation", false).into_iter()
+                .filter(|entity| book_ref_of(entity) == uid &&
+                    entity.field("note_id").and_then(|v| v.as_str().map(str::to_owned)).is_some_and(|id| !present.contains_key(&id)))
+                .map(|entity| entity.id.clone()).collect::<Vec<_>>();
+            for id in removed { guard.delete_entity(&id, Some("备份恢复移除注释".into()))?; }
+        }
+        apply_annotations(app, engine, &meta.id, &uid).map_err(SyncError::Io)?;
     }
 
     // 分组与书源（书源分组要排在书源前面：书源的归属按分组实体 id 发布）
@@ -955,7 +1013,7 @@ fn apply_online_books<R: tauri::Runtime>(
         // 新书创建前跳过的进度、书签及书籍规则按引擎当前值补落地。
         let related: Vec<String> = {
             let guard = lock_engine(engine);
-            ["reading_progress", "bookmark", "text_replace"].into_iter()
+            ["reading_progress", "bookmark", "annotation", "text_replace"].into_iter()
                 .flat_map(|kind| guard.entities_of_kind(kind, true))
                 .filter(|entity| book_ref_of(entity) == uid)
                 .map(|entity| entity.id.clone())
@@ -1025,7 +1083,7 @@ fn apply_staged_content<R: tauri::Runtime>(
         // 元信息比正文先到时，进度与书签曾因无本机书而跳过；建书后重新落地其当前状态。
         let related: Vec<String> = {
             let guard = lock_engine(engine);
-            ["reading_progress", "bookmark"].into_iter()
+            ["reading_progress", "bookmark", "annotation"].into_iter()
                 .flat_map(|kind| guard.entities_of_kind(kind, true))
                 .filter(|entity| book_ref_of(entity) == book_uid)
                 .map(|entity| entity.id.clone()).collect()
@@ -1421,6 +1479,20 @@ fn apply_snapshots<R: tauri::Runtime>(
             }
         }
     }
+    let mut annotation_books = Vec::new();
+    for snapshot in &snapshots {
+        if let Snapshot::Annotation { book_uid } = snapshot {
+            if let Some(local_id) = index.resolve(app, book_uid).map_err(SyncError::Io)? {
+                if !annotation_books.contains(&local_id) { annotation_books.push(local_id); }
+            }
+        }
+    }
+    for local_id in annotation_books {
+        let uid = index.uid_for(app, &local_id);
+        if apply_annotations(app, engine, &local_id, &uid).map_err(SyncError::Io)? {
+            changes.annotations.push(local_id);
+        }
+    }
     let sources = if snapshots.iter().any(|s| matches!(s, Snapshot::Source { .. })) {
         readerx_source::store::list_sources().unwrap_or_default()
     } else {
@@ -1523,6 +1595,7 @@ fn collect_snapshots(
             "bookmark" => snapshots.push(Snapshot::Bookmark {
                 book_uid: book_ref_of(entity),
             }),
+            "annotation" => snapshots.push(Snapshot::Annotation { book_uid: book_ref_of(entity) }),
             "group" => snapshots.push(Snapshot::Group {
                 uid: id,
                 deleted,
@@ -1583,6 +1656,7 @@ enum Snapshot {
         /// 书实体 id（uid）
         book_uid: String,
     },
+    Annotation { book_uid: String },
     Group {
         uid: String,
         deleted: bool,
@@ -1786,6 +1860,53 @@ fn apply_bookmarks<R: tauri::Runtime>(
         return Ok(false);
     }
     book_store::put_bookmarks(app, local_id, &values)?;
+    Ok(true)
+}
+
+/// 将每条实体按锚点聚合，同段两台设备首次新增时即使段落 id 不同也只有一条记录。
+pub(crate) fn apply_annotations<R: tauri::Runtime>(
+    app: &AppHandle<R>, engine: &SharedEngine, local_id: &str, book_uid: &str,
+) -> Result<bool, String> {
+    let entities: Vec<Entity> = lock_engine(engine).entities_of_kind("annotation", true)
+        .into_iter().filter(|entity| book_ref_of(entity) == book_uid).cloned().collect();
+    let current = book_store::get_annotations(app, local_id)?;
+    let existing = crate::annotations::flatten(&current)?;
+    let mut values = current.clone();
+    for entity in entities {
+        let Some(note_id) = entity.field("note_id").and_then(|v| v.as_str().map(str::to_owned)) else {
+            return Err("同步注释身份无效".into());
+        };
+        if entity.is_deleted() {
+            for record in &mut values {
+                record["notes"].as_array_mut().unwrap().retain(|note| note["id"].as_str() != Some(&note_id));
+            }
+            continue;
+        }
+        let anchor = entity.field("anchor").ok_or("同步注释锚点缺失")?;
+        if !anchor.is_object() { return Err("同步注释锚点无效".into()); }
+        let mut value = existing.get(&note_id).map(|note| note.value.clone()).unwrap_or_else(|| json!({}));
+        value.as_object_mut().ok_or("本机注释内容无效")?.extend(json!({"id": note_id, "text": entity.field("note"), "createdAt": entity.field("created_at"), "updatedAt": entity.field("updated_at")}).as_object().unwrap().clone());
+        let note = crate::annotations::Note {
+            paragraph_id: format!("paragraph:{}:{}:{}", anchor["chapterCid"].as_str().unwrap_or_default(), anchor["unitIndex"], anchor["fingerprint"].as_str().unwrap_or_default()),
+            anchor,
+            value,
+        };
+        // 先校验远端完整记录；无效数据不得写入后让前端整本读失败。
+        let mut record = note.anchor.clone();
+        record["id"] = json!(note.paragraph_id);
+        record["notes"] = json!([note.value]);
+        crate::annotations::flatten(&[record])?;
+        crate::annotations::upsert(&mut values, &note);
+    }
+    values.retain(|record| !record["notes"].as_array().unwrap().is_empty());
+    // notes 按创建时间与 id 排序，重复落库必须幂等，不随引擎遍历顺序来回变。
+    for record in &mut values {
+        record["notes"].as_array_mut().unwrap().sort_by(|a,b| {
+            a["createdAt"].as_u64().cmp(&b["createdAt"].as_u64()).then_with(|| a["id"].as_str().cmp(&b["id"].as_str()))
+        });
+    }
+    if current == values { return Ok(false); }
+    book_store::put_annotations(app, local_id, &values)?;
     Ok(true)
 }
 

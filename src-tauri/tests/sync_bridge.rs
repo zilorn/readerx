@@ -1888,6 +1888,11 @@ fn sync_service_streams_large_books_and_saves_before_stop_or_disconnect() {
             ("book_id", json!(uid)), ("chapter_cid", json!("c0010")), ("text", json!("正文")),
             ("created_at", json!(1_700_000_000_000u64))
         ]).unwrap();
+        guard.create_entity("annotation", Some(format!("annotation:{uid}:stream-note")), [
+            ("book_id", json!(uid)), ("note_id", json!("stream-note")),
+            ("anchor", json!({"chapterCid": "c0010", "unitIndex": 0, "fingerprint": "a".repeat(64), "before": "", "after": ""})),
+            ("note", json!("先到达的注释")), ("created_at", json!(10)), ("updated_at", json!(10)),
+        ]).unwrap();
     }
     let connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let counted = connections.clone();
@@ -1914,6 +1919,7 @@ fn sync_service_streams_large_books_and_saves_before_stop_or_disconnect() {
     assert_eq!(read_json(&app_data.join("books").join(&ids[0]).join("content.json"))["chapters"].as_array().unwrap().len(), 450);
     assert_eq!(read_json(&app_data.join("state/readerx.shelf.json"))[&ids[0]]["chapterCid"], "c0010");
     assert_eq!(read_json(&app_data.join("books").join(&ids[0]).join("bookmarks.json"))["bookmarks"].as_array().unwrap().len(), 1);
+    assert_eq!(read_json(&app_data.join("books").join(&ids[0]).join("annotations.json"))["annotations"][0]["notes"][0]["text"], "先到达的注释");
     let events = events.lock().unwrap();
     assert!(!events.iter().any(|event| event["phase"] == "continuing"));
     assert!(events.iter().any(|event| event["phase"] == "content" && event["completed"].as_u64().unwrap() > 0));
@@ -2140,4 +2146,166 @@ fn upgrade_migrates_book_ids_without_recreating_sync_entities() {
     let books = guard.entities_of_kind("book", true);
     assert_eq!(books.len(), 1);
     assert_eq!(serde_json::to_value(books[0]).unwrap(), serde_json::to_value(before).unwrap());
+}
+
+fn annotation_record(paragraph_id: &str, note_id: &str, text: &str) -> Value {
+    json!({"id": paragraph_id, "chapterCid": "c0001", "unitIndex": 0,
+        "fingerprint": "a".repeat(64), "before": "", "after": "",
+        "notes": [{"id": note_id, "text": text, "createdAt": 10, "updatedAt": 10}]})
+}
+
+#[test]
+fn annotations_sync_merge_conflict_resolution_restart_and_book_deletion() {
+    use readerx_sync::Resolution;
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let (app, root) = setup();
+    let uid = identity::book_uid(&identity::BookKey { file_name: "三体.epub", size: 1024, ..Default::default() });
+    seed_local_book(&root, &uid, "三体");
+    write_json(&root.join("books").join(&uid).join("annotations.json"), &json!({"schemaVersion": 1,
+        "annotations": [annotation_record("paragraph-a", "note-a", "设备甲注释")]}));
+    let a = local_engine(&app, &root);
+    let mut index_a = BookIndex::default();
+    bridge::reconcile(&app, &a, &mut index_a).unwrap();
+    let code = lock_engine(&a).pairing_code();
+    let b = RealPeer::start("annotations-b", Some(&code));
+    seed_local_book(&b.data_root, &uid, "三体");
+    write_json(&b.data_root.join("books").join(&uid).join("annotations.json"), &json!({"schemaVersion": 1,
+        "annotations": [annotation_record("paragraph-b", "note-b", "设备乙注释")]}));
+    let mut index_b = BookIndex::default();
+    {
+        let _pin = readerx_lib::pin_data_root(Some(b.data_root.clone()));
+        bridge::reconcile(&app, &b.engine, &mut index_b).unwrap();
+    }
+    // 经第三台中继也不丢失；两端各自新增的段落 id 不同仍聚合成同一段。
+    let c = peer_engine("annotations-c", Some(&code));
+    sync_once(&c, &b.engine);
+    sync_once(&a, &c);
+    sync_once(&b.engine, &a);
+    let changes = bridge::materialize(&app, &a, 0, &mut index_a).unwrap();
+    assert_eq!(changes.annotations, vec![uid.clone()]);
+    let path_a = root.join("books").join(&uid).join("annotations.json");
+    let path_b = b.data_root.join("books").join(&uid).join("annotations.json");
+    {
+        let _pin = readerx_lib::pin_data_root(Some(b.data_root.clone()));
+        assert_eq!(bridge::materialize(&app, &b.engine, 0, &mut index_b).unwrap().annotations, vec![uid.clone()]);
+    }
+    let merged = read_json(&path_a);
+    assert_eq!(merged["annotations"].as_array().unwrap().len(), 1);
+    assert_eq!(merged["annotations"][0]["notes"].as_array().unwrap().len(), 2);
+    assert_eq!(merged["annotations"][0]["notes"], read_json(&path_b)["annotations"][0]["notes"]);
+    assert!(lock_engine(&a).conflicts(None).is_empty());
+    assert!(bridge::materialize(&app, &a, 0, &mut index_a).unwrap().annotations.is_empty());
+    // 同一条注释并发改正文：失败方留在冲突队列，裁决结果回写且跨设备收敛。
+    bridge::publish_annotations(&app, &a, &mut index_a, &uid,
+        &[annotation_record("paragraph-a", "note-a", "甲改写")], false).unwrap();
+    {
+        let _pin = readerx_lib::pin_data_root(Some(b.data_root.clone()));
+        bridge::publish_annotations(&app, &b.engine, &mut index_b, &uid,
+            &[annotation_record("paragraph-b", "note-a", "乙改写")], false).unwrap();
+    }
+    sync_once(&a, &b.engine);
+    let (conflict_id, entity_id) = {
+        let guard = lock_engine(&a);
+        let conflict = guard.conflicts(None).into_iter().find(|c| c.kind == "annotation" && c.field == "note").unwrap();
+        assert_ne!(conflict.local.value, conflict.remote.value);
+        (conflict.id.clone(), conflict.entity_id.clone())
+    };
+    lock_engine(&a).resolve_conflict(&conflict_id, Resolution::KeepRemote).unwrap();
+    assert_eq!(bridge::materialize_entities(&app, &a, &mut index_a, &[entity_id]).unwrap().annotations, vec![uid.clone()]);
+    sync_once(&b.engine, &a);
+    {
+        let _pin = readerx_lib::pin_data_root(Some(b.data_root.clone()));
+        bridge::materialize(&app, &b.engine, 0, &mut index_b).unwrap();
+    }
+    assert_eq!(read_json(&path_a)["annotations"][0]["notes"], read_json(&path_b)["annotations"][0]["notes"]);
+    // 恢复旧磁盘 / 重启对账不得把已经裁决过的新值重新发回去。
+    let count = lock_engine(&a).op_count();
+    write_json(&path_a, &merged);
+    bridge::reconcile(&app, &a, &mut index_a).unwrap();
+    assert_eq!(lock_engine(&a).op_count(), count);
+    assert_eq!(read_json(&path_a)["annotations"][0]["notes"], read_json(&path_b)["annotations"][0]["notes"]);
+    lock_engine(&a).flush().unwrap();
+    drop(a);
+    let a = local_engine(&app, &root);
+    bridge::reconcile(&app, &a, &mut index_a).unwrap();
+    assert_eq!(lock_engine(&a).entities_of_kind("annotation", false).len(), 2);
+    bridge::publish_book_delete(&app, &a, &uid).unwrap();
+    assert!(lock_engine(&a).entities_of_kind("annotation", false).is_empty());
+    sync_once(&b.engine, &a);
+    {
+        let _pin = readerx_lib::pin_data_root(Some(b.data_root.clone()));
+        assert_eq!(bridge::materialize(&app, &b.engine, 0, &mut index_b).unwrap().deleted_books, vec![uid.clone()]);
+    }
+    assert!(!path_b.exists());
+}
+
+#[test]
+fn annotation_save_with_stale_snapshot_preserves_remote_add_and_edit() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let (app, root) = setup();
+    seed_local_book(&root, "local-save", "三体");
+    let service = SyncService::new(app.clone());
+    let previous = vec![annotation_record("p", "n1", "本机旧值"), annotation_record("p2", "n2", "另一条旧值")];
+    let incoming = vec![annotation_record("remote", "n1", "本机旧值"), annotation_record("remote", "n2", "远端改写"), annotation_record("remote", "n3", "远端新增")];
+    let path = root.join("books/local-save/annotations.json");
+    write_json(&path, &json!({"schemaVersion": 1, "annotations": incoming}));
+    let mut next = previous.clone();
+    next[0]["notes"][0]["text"] = json!("本机修改第一条");
+    let saved = service.save_annotations("local-save", &previous, &next).unwrap();
+    let notes = saved.iter().flat_map(|p| p["notes"].as_array().unwrap()).collect::<Vec<_>>();
+    assert_eq!(notes.len(), 3);
+    assert_eq!(notes.iter().find(|n| n["id"] == "n2").unwrap()["text"], "远端改写");
+    assert_eq!(notes.iter().find(|n| n["id"] == "n3").unwrap()["text"], "远端新增");
+    assert_eq!(notes.iter().find(|n| n["id"] == "n1").unwrap()["text"], "本机修改第一条");
+    // 损坏文件必须保留原样、向上返回失败。
+    std::fs::write(&path, "broken").unwrap();
+    assert!(service.save_annotations("local-save", &previous, &next).is_err());
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "broken");
+}
+
+#[test]
+fn annotation_service_publishes_save_and_backup_restore_deletions() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let (app, root) = setup();
+    let uid = identity::book_uid(&identity::BookKey { file_name: "三体.epub", size: 1024, ..Default::default() });
+    seed_local_book(&root, &uid, "三体");
+    write_json(&root.join("sync/settings.json"), &json!({"activated": true, "enabled": false, "autoSync": false}));
+    let service = SyncService::new(app.clone());
+    service.bootstrap();
+    let next = vec![annotation_record("p1", "n1", "保存第一条"), annotation_record("p2", "n2", "保存第二条")];
+    let saved = service.save_annotations(&uid, &[], &next).unwrap();
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0]["notes"].as_array().unwrap().len(), 2);
+    service.shutdown();
+    drop(service);
+    let engine = local_engine(&app, &root);
+    assert_eq!(lock_engine(&engine).entities_of_kind("annotation", false).len(), 2);
+    lock_engine(&engine).flush().unwrap();
+    drop(engine);
+    // 覆盖恢复缺少注释的旧备份：空文件是显式删除，不能从引擎把旧注释补回来。
+    let path = root.join("books").join(&uid).join("annotations.json");
+    write_json(&path, &json!({"schemaVersion": 1, "annotations": []}));
+    let service = SyncService::new(app.clone());
+    // 先加载服务，再模拟导入结束；启动对账本身以引擎为准。
+    service.bootstrap();
+    write_json(&path, &json!({"schemaVersion": 1, "annotations": []}));
+    service.on_data_imported();
+    assert!(read_json(&path)["annotations"].as_array().unwrap().is_empty());
+    service.shutdown();
+    drop(service);
+    let engine = local_engine(&app, &root);
+    assert!(lock_engine(&engine).entities_of_kind("annotation", false).is_empty());
+    assert_eq!(lock_engine(&engine).entities_of_kind("annotation", true).len(), 2);
+    lock_engine(&engine).flush().unwrap();
+    drop(engine);
+    // 再显式恢复有注释的备份，可以恢复墓碑，保留原 note 身份。
+    let service = SyncService::new(app);
+    service.bootstrap();
+    write_json(&path, &json!({"schemaVersion": 1, "annotations": next}));
+    service.on_data_imported();
+    assert_eq!(read_json(&path)["annotations"][0]["notes"].as_array().unwrap().len(), 2);
+    service.shutdown();
+    drop(service);
+    let engine = local_engine(&shared_app().0, &root);
+    assert_eq!(lock_engine(&engine).entities_of_kind("annotation", false).len(), 2);
 }

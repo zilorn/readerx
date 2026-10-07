@@ -30,13 +30,13 @@ export function AnnotationSheet(props: AnnotationSheetProps) {
   const [editing, setEditing] = createSignal(props.target.add);
   const [noteId, setNoteId] = createSignal<string | null>(null);
   const [draft, setDraft] = createSignal("");
-  const paragraph = () => annotationsFor(props.bookId).find((item) =>
-    props.target.paragraphId
-      ? item.id === props.target.paragraphId
-      : item.chapterCid === props.target.anchor.chapterCid &&
+  const paragraph = () => {
+    const list = annotationsFor(props.bookId);
+    return list.find((item) => item.id === props.target.paragraphId)
+      ?? list.find((item) => item.chapterCid === props.target.anchor.chapterCid &&
         item.unitIndex === props.target.anchor.unitIndex &&
-        item.fingerprint === props.target.anchor.fingerprint,
-  );
+        item.fingerprint === props.target.anchor.fingerprint);
+  };
   const close = () => { if (!busy()) props.onClose(); };
   createAndroidBackHandler(() => true, close);
 

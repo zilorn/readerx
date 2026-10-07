@@ -1,6 +1,7 @@
 mod app_updates;
 mod book_images;
 mod book_store;
+mod annotations;
 mod mobi;
 mod mobi_huff;
 mod chapter_runs;

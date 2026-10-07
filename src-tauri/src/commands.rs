@@ -190,9 +190,10 @@ pub async fn readerx_annotations_put(
     app: AppHandle,
     book_id: String,
     annotations: Vec<Value>,
-) -> Result<(), String> {
+    previous: Vec<Value>,
+) -> Result<Vec<Value>, String> {
     blocking("注释写入", move || {
-        book_store::put_annotations(&app, &book_id, &annotations)
+        sync::service_hook(&app).save_annotations(&book_id, &previous, &annotations)
     })
     .await
 }
