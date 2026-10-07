@@ -85,7 +85,7 @@ export interface TtsPlayerCtx {
   bookId: () => string;
   /** 视图所在章节（阅读页当前章节） */
   chapterIndex: () => number;
-  /** 取某章数据 */
+  /** 取阅读显示副本（已应用文本替换与简繁转换），正文变化时须返回新章节对象 */
   chapterAt: (index: number) => LocalBookChapter | undefined;
   chapterCount: () => number;
   /**
@@ -192,6 +192,7 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
   // ---- 内部可变状态（不走响应式） ----
   let seq = 0;
   let items: ChapterSpeechItem[] = [];
+  let itemsChapter: LocalBookChapter | undefined;
   let itemsLayoutKey: string | null = null;
   let chapterIdxEngine = ctx.chapterIndex();
   let pendingAutoNav = -1;
@@ -283,9 +284,9 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
   // HTTP 源（WebAudio）辅助
   // ------------------------------------------------------------------
 
-  /** 缓存键：含接口配置（声明了 {$RATE} 时含倍速），源/配置变化后自然失效 */
+  /** 缓存键包含实际显示句子，等长替换后不能复用同坐标的旧音频。键不写入日志。 */
   function httpCacheKey(item: ChapterSpeechItem): string {
-    return `${item.unit}#${item.ls}#${item.le}#${httpRequestFingerprint()}`;
+    return JSON.stringify([httpRequestFingerprint(), item.text]);
   }
 
   /** 停掉当前 WebAudio 节点（停止/换句前调用） */
@@ -317,7 +318,6 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
         `unit=${item.unit}`,
         `ls=${item.ls}`,
         `le=${item.le}`,
-        `cacheKey=${key}`,
         `ms=${Math.round(performance.now() - started)}`,
         lastSynthError,
       ];
@@ -341,6 +341,7 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
   function loadItems(chapterIndex: number): void {
     chapterIdxEngine = chapterIndex;
     const ch = ctx.chapterAt(chapterIndex);
+    itemsChapter = ch;
     items = ch ? buildChapterSpeechItems(ch) : [];
     itemsLayoutKey = null;
     audioBytesCache.clear();
@@ -459,19 +460,23 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
     // 每次切句重新取页面边界，字号、窗口和开关变化无需重启播放器。
     const anchor = items[idxItem];
     const chapterIndex = chapterIdxEngine;
-    if (ctx.pageOffsets) {
-      const splitAtPages = currentTtsPageSplit();
-      if (splitAtPages && !stayPaused) setStatus("loading");
-      const cuts = splitAtPages ? await ctx.pageOffsets(chapterIndex) : [];
-      if (my !== seq || disposed) return;
-      const layoutKey = `${chapterIndex}:${cuts.join(",")}`;
-      if (itemsLayoutKey !== layoutKey) {
-        const chapter = ctx.chapterAt(chapterIndex);
-        items = chapter ? splitSpeechItemsAtPages(buildChapterSpeechItems(chapter), cuts) : [];
-        itemsLayoutKey = layoutKey;
-        const offset = splitAtPages ? position ?? anchor.start : anchor.start;
-        idxItem = anchor.isTitle ? 0 : Math.max(0, items.findIndex((item) => !item.isTitle && item.end > offset));
-      }
+    const splitAtPages = currentTtsPageSplit() && !!ctx.pageOffsets;
+    if (splitAtPages && !stayPaused) setStatus("loading");
+    const cuts = splitAtPages ? await ctx.pageOffsets!(chapterIndex) : [];
+    if (my !== seq || disposed) return;
+    const chapter = ctx.chapterAt(chapterIndex);
+    const layoutKey = `${chapterIndex}:${cuts.join(",")}`;
+    // 替换规则变化不一定改变分页边界；分句必须同时按显示副本身份失效。
+    if (itemsChapter !== chapter || itemsLayoutKey !== layoutKey) {
+      items = chapter ? splitSpeechItemsAtPages(buildChapterSpeechItems(chapter), cuts) : [];
+      itemsChapter = chapter;
+      itemsLayoutKey = layoutKey;
+      const offset = splitAtPages ? position ?? anchor.start : anchor.start;
+      idxItem = anchor.isTitle ? 0 : Math.max(0, items.findIndex((item) => !item.isTitle && item.end > offset));
+    }
+    if (items.length === 0) {
+      advanceFromCurrent();
+      return;
     }
     activate(idxItem);
     setError(null);
@@ -761,6 +766,7 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
     void stopNativeSpeech();
     audioBytesCache.clear();
     items = [];
+    itemsChapter = undefined;
     chapterIdxEngine = ctx.chapterIndex();
     pendingAutoNav = -1;
     // 定时不随停止清掉：分钟模式冻结剩余时间、本章模式留给下一次朗读，
@@ -1075,6 +1081,7 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
     void resumeAudioContext().catch(() => {});
     void stopNativeSpeech();
     audioBytesCache.clear();
+    itemsChapter = undefined;
     unlistenEvents?.();
     unlistenEvents = undefined;
   }
