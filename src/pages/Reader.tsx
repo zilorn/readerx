@@ -1,3 +1,9 @@
+import { AnnotationSheet, type AnnotationTarget } from "../components/AnnotationSheet";
+import { AnnotationIcon } from "../components/icons";
+import {
+  annotationCacheVersion, annotationsFor, ensureAnnotationsLoaded,
+  paragraphAnchor, resolveAnnotationUnit,
+} from "../lib/annotations";
 import { createReaderAutoPage } from "../lib/readerAutoPage";
 import { createReaderPageTurn } from "../lib/readerPageTurn";
 import { trackReadingTime } from "../lib/readingTime";
@@ -774,6 +780,27 @@ function InlineImageBlock(props: {
 /** 段落里的段内插图：分页片段带排版算好的展示尺寸，滚动模式按自然比例（无尺寸） */
 type ParagraphImage = ReaderInlineImage & { w?: number; h?: number };
 
+/** 段末图标不占正文字符/排版宽度，沿用页面右留白，避免影响分页与镜像偏移。 */
+function AnnotationMarker(props: { onOpen: () => void }) {
+  return (
+    <span
+      data-reader-ui
+      class="relative inline-block w-0 select-none"
+      style={{ "text-indent": "0", "letter-spacing": "0" }}
+    >
+      <button
+        type="button"
+        class="absolute left-[2px] bottom-[-5px] grid h-6 w-6 cursor-pointer place-items-center rounded-md text-accent"
+        aria-label={t("readerChrome.annotation.open")}
+        onPointerDown={(e) => { e.preventDefault(); e.stopPropagation(); }}
+        onClick={(e) => { e.stopPropagation(); props.onOpen(); }}
+      >
+        <AnnotationIcon size={16} />
+      </button>
+    </span>
+  );
+}
+
 /**
  * 段落内容：文字与段内插图按锚点交错渲染。
  * `cstart` 为片段文本在单元原文中的起始偏移（书签/朗读标记用单元内绝对偏移）。
@@ -791,6 +818,7 @@ function ParagraphContent(props: {
   unit: number;
   marks: UnitMark[];
   natural?: boolean;
+  onAnnotation?: () => void;
   onImageRetry?: (url: string) => void;
 }) {
   const pieces = createMemo(() => splitParagraphPieces(props.text, props.imgs));
@@ -798,7 +826,11 @@ function ParagraphContent(props: {
     <For each={pieces()}>
       {(piece) =>
         piece.kind === "text" ? (
-          <>{renderMarkedText(piece.text, props.cstart + piece.at, props.unit, props.marks)}</>
+          <>{renderMarkedText(piece.text, props.cstart + piece.at, props.unit, props.marks)}
+            <Show when={props.onAnnotation && piece.at + piece.text.length === props.text.length}>
+              <AnnotationMarker onOpen={() => props.onAnnotation?.()} />
+            </Show>
+          </>
         ) : (
           <InlineImageBlock
             src={piece.img.src}
@@ -818,6 +850,8 @@ function ParagraphContent(props: {
 /** 分页视图里的单个片段 */
 function PagedFragment(props: {
   fragment: PageFragment;
+  annotated: boolean;
+  onAnnotation: (unit: number) => void;
   layout: PaginateLayout;
   marks: UnitMark[];
   onImageRetry?: (url: string) => void;
@@ -839,6 +873,7 @@ function PagedFragment(props: {
           imgs={fragment.imgs}
           cstart={fragment.cstart}
           unit={fragment.unit}
+          onAnnotation={fragment.end && props.annotated ? () => props.onAnnotation(fragment.unit) : undefined}
           marks={props.marks}
           onImageRetry={props.onImageRetry}
         />
@@ -869,6 +904,8 @@ function PagedFragment(props: {
 function ScrollBlock(props: {
   layout: PaginateLayout;
   block: ReaderBlock;
+  annotated: boolean;
+  onAnnotation: (unit: number) => void;
   unit: number;
   marks: UnitMark[];
   onImageRetry?: (url: string) => void;
@@ -883,6 +920,7 @@ function ScrollBlock(props: {
           imgs={block.imgs}
           cstart={0}
           unit={props.unit}
+          onAnnotation={props.annotated ? () => props.onAnnotation(props.unit) : undefined}
           marks={props.marks}
           natural
           onImageRetry={props.onImageRetry}
@@ -1011,6 +1049,7 @@ export default function ReaderPage() {
   const [tocByHover, setTocByHover] = createSignal(false);
   const [bmPanelOpen, setBmPanelOpen] = createSignal(false);
   const [readerSettingsOpen, setReaderSettingsOpen] = createSignal(false);
+  const [annotationTarget, setAnnotationTarget] = createSignal<AnnotationTarget | null>(null);
   // 文本替换抽屉：replaceSeed 非空表示从选区菜单进入（查找框预填所选文字）
   const [replaceSheetOpen, setReplaceSheetOpen] = createSignal(false);
   const [replaceSeed, setReplaceSeed] = createSignal<string | null>(null);
@@ -1064,9 +1103,11 @@ export default function ReaderPage() {
 
   const isPaged = () => currentPageMode() === "paged";
 
-  // 书签数据：每本书一个文件，换书时载入那一本（已载入过的直接命中缓存）
+  // 书签与注释按书分文件；换书或注释缓存失效时读取对应文件。
   createEffect(() => {
     void ensureBookmarksLoaded(bookId());
+    annotationCacheVersion();
+    void ensureAnnotationsLoaded(bookId());
   });
 
   // 书载入后：补建档案、按存档的精确文本位置（cid+偏移）恢复章节。
@@ -1652,6 +1693,47 @@ export default function ReaderPage() {
     unitsCache = built;
     return built;
   });
+
+  const rawAnnotationChapter = createMemo(() =>
+    windowBook()?.chapters.find((item) => item.cid === chapterCid()),
+  );
+  const rawAnnotationUnits = createMemo(() => {
+    const ch = rawAnnotationChapter();
+    return ch ? chapterUnits(ch) : [];
+  });
+  const annotationUnits = createMemo(() => {
+    const map = new Map<number, string>();
+    const raw = rawAnnotationUnits();
+    for (const item of annotationsFor(bookId())) {
+      if (item.chapterCid !== chapterCid() || !item.notes.length) continue;
+      const unit = resolveAnnotationUnit(item, raw);
+      if (unit !== null) map.set(unit, item.id);
+    }
+    return map;
+  });
+  function openAnnotation(unit: number, add: boolean): void {
+    const anchor = paragraphAnchor(chapterCid() ?? "", rawAnnotationUnits(), unit);
+    const displayed = units()[unit];
+    if (!anchor || displayed?.kind !== "p") return;
+    clearVisibleSelection();
+    setMenuOpen(false);
+    setTocOpen(false);
+    setAnnotationTarget({
+      anchor, paragraphId: annotationUnits().get(unit) ?? null,
+      text: displayed.text, add,
+    });
+  }
+  function annotateSelection(target: SelectionTarget): void {
+    const span = spanOfSelectionTarget(target);
+    const start = span ? unitAtGlobalOffset(mirror(), span[0]) : null;
+    const end = span ? unitAtGlobalOffset(mirror(), span[1] - 1) : null;
+    if (!start || !end || start.unit !== end.unit || units()[start.unit]?.kind !== "p") {
+      showToast(t("readerChrome.annotation.singleParagraph"), true);
+      return;
+    }
+    openAnnotation(start.unit, true);
+  }
+  createEffect(on(() => `${bookId()}|${chapterCid()}`, () => setAnnotationTarget(null)));
 
   // 滚动模式：正文单元分片挂载数量（0 起逐片增长）。超大章节整章一次建 DOM 会
   // 长时间卡住首屏，这里先挂一片（≥首屏），之后每帧追加一片，直到整章挂完。
@@ -2481,6 +2563,7 @@ export default function ReaderPage() {
       bmPanelOpen() ||
       readerSettingsOpen() ||
       replaceSheetOpen() ||
+      annotationTarget() !== null ||
       bookSearchOpen() ||
       searchSession() !== null ||
       downloadOpen()
@@ -2538,7 +2621,7 @@ export default function ReaderPage() {
       !tocOpen() &&
       !bmPanelOpen() &&
       !readerSettingsOpen() &&
-      !replaceSheetOpen() &&
+      !replaceSheetOpen() && !annotationTarget() &&
       !bookSearchOpen() &&
       !jumpBackHint(),
   );
@@ -3183,6 +3266,7 @@ export default function ReaderPage() {
       bmPanelOpen() ||
       readerSettingsOpen() ||
       replaceSheetOpen() ||
+      annotationTarget() !== null ||
       bookSearchOpen()
     ) {
       return false;
@@ -3859,7 +3943,7 @@ export default function ReaderPage() {
     !!chapter() && !volumeScrollEndCid() && !resumeTarget() &&
     !contentPendingGate() && !remoteReloading() &&
     !menuOpen() && !tocOpen() && !bmPanelOpen() && !bookSearchOpen() &&
-    !readerSettingsOpen() && !replaceSheetOpen() && !downloadOpen() &&
+    !readerSettingsOpen() && !replaceSheetOpen() && !annotationTarget() && !downloadOpen() &&
     !ttsSettingsOpen() && !ttsDecodeGuideOpen() && !reloadRisk() && !updateConflict() &&
     !selSpan() && !selMenu(),
   );
@@ -3985,6 +4069,7 @@ export default function ReaderPage() {
         bookSearchOpen() ||
         readerSettingsOpen() ||
         replaceSheetOpen() ||
+        annotationTarget() !== null ||
         downloadOpen() ||
         !isPaged()
       )
@@ -3998,7 +4083,7 @@ export default function ReaderPage() {
   // 桌面端贴边呼出（鼠标操作，手机端不参与）：上 / 下边缘 → 顶栏 + 底栏一起弹出，
   // 右边缘 → 目录侧栏滑出；鼠标离开边缘与浮层后只收起「悬浮呼出」的这一份
   createEdgeHoverReveal({
-    enabled: () => isDesktopShell() && !autoPageEnabled(),
+    enabled: () => isDesktopShell() && !autoPageEnabled() && !annotationTarget(),
     frameEl: () => frameRef,
     onMenuEdge: () => {
       if (menuOpen()) return; // 已经开着（点按呼出的也算）：不动它，也不接管收起
@@ -4404,22 +4489,26 @@ export default function ReaderPage() {
           <div style={{ height: `${readerTopPad()}px`, "flex": "none" }} />
           <div
             ref={(el) => { if (live) colRef = el; }}
-            class="relative flex w-full flex-none overflow-hidden"
+            class="relative flex w-full flex-none"
             style={{
               height: `${layout()!.pageHeight}px`,
               gap: `${geometry()!.gap}px`,
+              // 仅让段末图标绘入横向留白，正文仍按单页高度裁切。
+              "clip-path": "inset(0 -28px 0 0)",
             }}
           >
             <For each={visiblePages()}>
               {(pageFragments) => (
                 <div
-                  class="relative flex-none overflow-hidden"
+                  class="relative flex-none"
                   style={{ width: `${layout()!.textWidth}px` }}
                 >
                   <For each={pageFragments}>
                     {(fragment) => (
                       <PagedFragment
                         fragment={fragment}
+                        annotated={fragment.kind === "p" && annotationUnits().has(fragment.unit)}
+                        onAnnotation={(unit) => openAnnotation(unit, false)}
                         layout={layout()!}
                         marks={renderMarks()}
                         onImageRetry={retryReaderImage}
@@ -4510,6 +4599,8 @@ export default function ReaderPage() {
           <div
             ref={areaRef}
             class="relative min-h-0 flex-1 overflow-hidden [-webkit-touch-callout:none]"
+            // 注释表单聚焦时只滚动抽屉内容，避免浏览器挪动被裁切的阅读区。
+            style={{ overflow: annotationTarget() ? "clip" : undefined }}
             onPointerDown={onSurfacePointerDown}
             onPointerUp={onSurfacePointerUp}
             onPointerMove={onSurfacePointerMove}
@@ -4571,6 +4662,8 @@ export default function ReaderPage() {
                         <ScrollBlock
                           layout={layout()!}
                           block={block}
+                          annotated={annotationUnits().has(idx())}
+                          onAnnotation={(unit) => openAnnotation(unit, false)}
                           unit={idx()}
                           marks={renderMarks()}
                           onImageRetry={retryReaderImage}
@@ -5362,6 +5455,9 @@ export default function ReaderPage() {
                 !tocOpen() &&
                 !bmPanelOpen() &&
                 !bookSearchOpen() &&
+                !annotationTarget() &&
+                !replaceSheetOpen() &&
+                !readerSettingsOpen() &&
                 !searchSession()
               }
               onCopy={(text) => void handleCopyText(text)}
@@ -5369,12 +5465,17 @@ export default function ReaderPage() {
               onSpeak={(range) => handleSpeakFromRange(range)}
               onBookmarkSpan={(lo, hi) => toggleBookmarkAtSpan(lo, hi)}
               onSpeakOffset={(start) => handleSpeakAtOffset(start)}
+              onAnnotation={annotateSelection}
               onReplace={(text) => openReplaceFromSelection(text)}
               currentMark={(target) => currentMarkForSelection(target)}
               onApplyMark={(target, mark) => applyBookmarkAppearance(target, mark)}
               contextKey={() => `${bookId()}|${chapterCid()}`}
               custom={() => (isPaged() ? selMenu() : null)}
             />
+
+            <Show when={annotationTarget()}>
+              {(target) => <AnnotationSheet bookId={bookId()} target={target()} onClose={() => setAnnotationTarget(null)} />}
+            </Show>
 
             {/* 听书设置（引擎 / 音色 / 自定义源 / 倍速 / 定时） */}
             <TtsSheet

@@ -5,6 +5,7 @@
 //!   bookdetail.json   元信息（书名、作者、封面、分组、标签…，不含正文）
 //!   content.json      章节正文
 //!   bookmarks.json    该书书签
+//!   annotations.json  按段落聚合的注释
 //!   digest.json       章节正文指纹缓存（同步对账用；派生数据，删了会自动重建）
 //! ```
 //!
@@ -43,9 +44,11 @@ use tauri::AppHandle;
 const BOOKDETAIL_FILE: &str = "bookdetail.json";
 /// 正文文件
 const CONTENT_FILE: &str = "content.json";
+/// 段落注释文件
+const ANNOTATIONS_FILE: &str = "annotations.json";
 /// 书签文件
 const BOOKMARKS_FILE: &str = "bookmarks.json";
-/// 当前文件格式版本（三个文件信封里的 `schemaVersion`）
+/// 当前文件格式版本（文件信封里的 `schemaVersion`）
 const SCHEMA_VERSION: u32 = 1;
 
 fn schema_version() -> u32 {
@@ -192,6 +195,37 @@ struct BookmarkFile {
     schema_version: u32,
     #[serde(default)]
     bookmarks: Vec<Value>,
+}
+
+/// 注释按段落聚合，记录与 notes 的结构由前端维护。
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AnnotationFile {
+    schema_version: u32,
+    annotations: Vec<Value>,
+}
+
+fn read_annotations_file(path: &Path) -> Result<Vec<Value>, String> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let text = fs::read_to_string(path).map_err(|e| format!("读取注释失败: {e}"))?;
+    let file: AnnotationFile =
+        serde_json::from_str(&text).map_err(|e| format!("解析注释失败: {e}"))?;
+    if file.schema_version != SCHEMA_VERSION {
+        return Err("注释格式版本不受支持".into());
+    }
+    Ok(file.annotations)
+}
+fn write_annotations_file(path: &Path, annotations: &[Value]) -> Result<(), String> {
+    write_json_atomic(
+        path,
+        &AnnotationFile {
+            schema_version: SCHEMA_VERSION,
+            annotations: annotations.to_vec(),
+        },
+        "注释",
+    )
 }
 
 /// 章节正文（blocks / paragraphs）的「只算字数」视图。
@@ -839,6 +873,28 @@ pub(crate) fn put_bookmarks<R: tauri::Runtime>(
         return Ok(());
     }
     write_bookmarks_file(&dir.join(BOOKMARKS_FILE), bookmarks)
+}
+
+pub(crate) fn get_annotations<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+) -> Result<Vec<Value>, String> {
+    let _transaction = library_transaction();
+    migrate_legacy_layout(app);
+    read_annotations_file(&book_dir(app, id)?.join(ANNOTATIONS_FILE))
+}
+pub(crate) fn put_annotations<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+    annotations: &[Value],
+) -> Result<(), String> {
+    let _transaction = library_transaction();
+    migrate_legacy_layout(app);
+    let dir = book_dir(app, id)?;
+    if !dir.is_dir() {
+        return Err("书籍不存在".into());
+    }
+    write_annotations_file(&dir.join(ANNOTATIONS_FILE), annotations)
 }
 
 /// 删除一本书：整个书籍目录（含书签）连同听书缓存、章节插图一起清掉。
@@ -2357,6 +2413,25 @@ mod tests {
         assert!(!target.exists());
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn annotations_round_trip_and_corruption() {
+        let dir = temp_dir("annotations");
+        let path = dir.join(ANNOTATIONS_FILE);
+        assert!(read_annotations_file(&path).unwrap().is_empty());
+        let records = vec![
+            serde_json::json!({"id": "p1", "chapterCid": "c1", "unitIndex": 2, "notes": [{"id": "n1", "text": "想法"}, {"id": "n2", "text": "说明"}]}),
+        ];
+        write_annotations_file(&path, &records).unwrap();
+        assert_eq!(read_annotations_file(&path).unwrap(), records);
+        write_annotations_file(&path, &[]).unwrap();
+        assert!(read_annotations_file(&path).unwrap().is_empty());
+        fs::write(&path, "{坏文件").unwrap();
+        assert!(read_annotations_file(&path).is_err());
+        fs::write(&path, r#"{"schemaVersion":99,"annotations":[]}"#).unwrap();
+        assert!(read_annotations_file(&path).is_err());
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

@@ -9,6 +9,7 @@
  * 与「局域网同步」的分工见 `docs/backup.md`：同步是两台设备自动合并元信息，
  * 备份是把整台设备（含正文）搬到一个文件里，由用户显式导出与导入。
  */
+import { flushAnnotationWrites, invalidateAnnotationCache } from "./annotations";
 import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
 import { invalidateBookmarkCache } from "./bookmarks";
 import { reloadLocalBooks } from "./books";
@@ -112,6 +113,7 @@ export async function exportBackup(
   onProgress: ProgressHandler,
 ): Promise<BackupExportResult | null> {
   if (!isTauri()) throw new Error(t("backup.appOnly"));
+  await flushAnnotationWrites();
   return await invoke<BackupExportResult | null>("readerx_data_export", {
     includeCredentials,
     onProgress: openChannel(onProgress),
@@ -131,6 +133,7 @@ export async function importBackup(
   onProgress: ProgressHandler,
 ): Promise<BackupImportResult> {
   if (!isTauri()) throw new Error(t("backup.appOnly"));
+  await flushAnnotationWrites();
   const result = await invoke<BackupImportResult>("readerx_data_import", {
     path,
     mode,
@@ -148,6 +151,7 @@ export async function importBackup(
  */
 async function reloadAfterImport(): Promise<void> {
   invalidateBookmarkCache();
+  invalidateAnnotationCache();
   await reloadGroups();
   await reloadSourceGroups();
   await reloadLocalBooks();

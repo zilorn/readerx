@@ -535,3 +535,45 @@ fn archive_read_json(path: &Path, entry: &str) -> Value {
         .unwrap_or_else(|| panic!("归档里没有 {entry}"))
         .clone()
 }
+
+#[test]
+fn annotations_survive_archive_merge_replace_and_old_backup() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let (app, root) = setup();
+    let id = "b-5e20dcb39c59dc92";
+    seed_book(&root, id, "三体", "三体.epub", 1_000, None);
+    let path = root.join(format!("books/{id}/annotations.json"));
+    let paragraph = json!({ "id":"p1", "chapterCid":"c0001", "unitIndex":0, "fingerprint":"f", "before":"", "after":"", "notes":[{"id":"n1","text":"原注释"}] });
+    write_json(
+        &path,
+        &json!({"schemaVersion":1,"annotations":[paragraph.clone()]}),
+    );
+    let backup = export(&app, &root, "annotations", false);
+    fs::remove_dir_all(root.join("books")).unwrap();
+    import(&app, &backup, ImportMode::Merge);
+    assert_eq!(read_json(&path)["annotations"][0], paragraph);
+    let mut local = paragraph.clone();
+    local["notes"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"id":"n2","text":"本机新增"}));
+    write_json(&path, &json!({"schemaVersion":1,"annotations":[local]}));
+    import(&app, &backup, ImportMode::Merge);
+    assert_eq!(
+        read_json(&path)["annotations"][0]["notes"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    import(&app, &backup, ImportMode::Replace);
+    assert_eq!(read_json(&path)["annotations"][0], paragraph);
+    fs::remove_file(&path).unwrap();
+    let old_backup = export(&app, &root, "without-annotations", false);
+    write_json(&path, &json!({"schemaVersion":1,"annotations":[paragraph]}));
+    import(&app, &old_backup, ImportMode::Replace);
+    assert!(read_json(&path)["annotations"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+}

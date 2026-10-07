@@ -172,6 +172,8 @@ pub fn run() {
             commands::readerx_book_get,
             commands::readerx_book_patch_meta,
             commands::readerx_book_delete,
+            commands::readerx_annotations_get,
+            commands::readerx_annotations_put,
             commands::readerx_bookmarks_get,
             commands::readerx_bookmarks_put,
             commands::readerx_tts_cache_put,

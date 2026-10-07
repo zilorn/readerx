@@ -670,3 +670,13 @@ export function WindowMaximizeIcon(p: SvgIconProps) {
 export function WindowRestoreIcon(p: SvgIconProps) {
   return <Icon {...p}><path d="M9 5h10v10" /><rect x="5" y="9" width="10" height="10" rx="1" /></Icon>;
 }
+
+/** 段落注释 */
+export function AnnotationIcon(p: SvgIconProps) {
+  return (
+    <Icon {...p}>
+      <path d="M21 11.5a8.4 8.4 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.4 8.4 0 0 1-3.8-.9L3 21l1.9-5.7a8.4 8.4 0 0 1-.9-3.8A8.5 8.5 0 0 1 8.7 3.9a8.4 8.4 0 0 1 3.8-.9h.5a8.5 8.5 0 0 1 8 8v.5z" />
+      <path d="M8 10h8M8 14h5" />
+    </Icon>
+  );
+}

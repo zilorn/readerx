@@ -34,6 +34,7 @@ const log = createLogger("backend");
 
 const memoryState = new Map<string, unknown>();
 const memoryBooks = new Map<string, LocalBook>();
+const memoryAnnotations = new Map<string, unknown[]>();
 const memoryBookmarks = new Map<string, unknown[]>();
 const memorySources = new Map<string, BookSource>();
 
@@ -160,6 +161,7 @@ export async function deleteRemoteBook(id: string): Promise<void> {
   if (!tauri) {
     memoryBooks.delete(id);
     memoryBookmarks.delete(id);
+    memoryAnnotations.delete(id);
     return;
   }
   await invoke("readerx_book_delete", { id });
@@ -198,6 +200,30 @@ export async function saveRemoteBookmarks(
     await invoke("readerx_bookmarks_put", { bookId, bookmarks });
   } catch (err) {
     reportFailure(t("library.bookmarks.writeFailed"), err);
+  }
+}
+
+/** 注释按书单独存储；读取失败不能当作空数据覆盖。 */
+export async function readRemoteAnnotations<T>(bookId: string): Promise<T[] | null> {
+  if (!tauri) return (memoryAnnotations.get(bookId) as T[] | undefined) ?? [];
+  try {
+    return await invoke<T[]>("readerx_annotations_get", { bookId });
+  } catch (err) {
+    reportFailure(t("readerChrome.annotation.readFailed"), err);
+    return null;
+  }
+}
+export async function saveRemoteAnnotations(bookId: string, annotations: readonly unknown[]): Promise<boolean> {
+  if (!tauri) {
+    memoryAnnotations.set(bookId, [...annotations]);
+    return true;
+  }
+  try {
+    await invoke("readerx_annotations_put", { bookId, annotations });
+    return true;
+  } catch (err) {
+    reportFailure(t("readerChrome.annotation.writeFailed"), err);
+    return false;
   }
 }
 
@@ -248,6 +274,7 @@ export async function patchRemoteBookMeta(
 export async function clearRemoteBooks(): Promise<void> {
   if (!tauri) {
     memoryBooks.clear();
+    memoryAnnotations.clear();
     memoryBookmarks.clear();
     return;
   }

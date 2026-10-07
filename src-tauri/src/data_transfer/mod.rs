@@ -17,6 +17,7 @@
 //! books/<id>/bookdetail.json   书籍元信息
 //! books/<id>/content.json      章节正文
 //! books/<id>/bookmarks.json    书签
+//! books/<id>/annotations.json  段落注释
 //! images/<name>                章节插图 / PDF 页面图（文件名前缀就是它所属的书籍 id）
 //! book_sources/<id>.json       书源定义
 //! source_sessions/<id>.json    书源登录态（**仅当导出时勾选「包含登录信息」**）
