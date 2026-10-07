@@ -68,7 +68,7 @@ import { createLogger } from "./logger";
 const log = createLogger("tts");
 
 export type TtsStatus = "stopped" | "loading" | "playing" | "paused" | "error";
-export type TtsTimerMode = "off" | "minutes" | "chapter";
+export type TtsTimerMode = "off" | "minutes" | "minutesChapter" | "chapter";
 
 /** 当前正在朗读的位置信息（供高亮/悬浮球展示） */
 export interface TtsFocus {
@@ -202,6 +202,8 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
   let timerDeadline = 0;
   /** 停止朗读时冻结的剩余毫秒（minutes 模式：停止期间不计时，重新起播接着走） */
   let timerFrozenMs = 0;
+  /** 分钟到点后进入“读完当前章再停”的收尾阶段；此时定时模式已复位为 off。 */
+  let finishChapterAfterTimer = false;
   let disposed = false;
   let starting = false;
   // ---- 原生引擎（native）状态 ----
@@ -426,10 +428,12 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
       return;
     }
     // 当前章播完
-    if (timerMode() === "chapter") {
+    if (timerMode() === "chapter" || finishChapterAfterTimer) {
+      const timedFinish = finishChapterAfterTimer;
+      finishChapterAfterTimer = false;
       setTimerMode("off");
       setTimerRemainSec(null);
-      ctx.notify?.(t("tts.notify.chapterTimerEnd"));
+      ctx.notify?.(t(timedFinish ? "tts.notify.timerChapterEnd" : "tts.notify.chapterTimerEnd"));
       stop();
       return;
     }
@@ -896,7 +900,7 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
     }
   }
 
-  /** 跑分钟倒计时：每秒刷新剩余时间，到点停朗读并收起定时 */
+  /** 跑分钟倒计时：每秒刷新剩余时间；普通分钟到点立即停，收尾模式到点后读完当前章再停。 */
   function armMinuteTimer(remainMs: number): void {
     timerFrozenMs = remainMs;
     timerDeadline = Date.now() + remainMs;
@@ -906,9 +910,15 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
       setTimerRemainSec(Math.round(left / 1000));
       if (left <= 0) {
         clearTimerHandle();
+        const finishChapter = timerMode() === "minutesChapter";
         setTimerMode("off");
         setTimerMinutes(0);
         setTimerRemainSec(null);
+        if (finishChapter && status() !== "stopped") {
+          finishChapterAfterTimer = true;
+          ctx.notify?.(t("tts.notify.timerFinishChapter"));
+          return;
+        }
         ctx.notify?.(t("tts.notify.timerEnd"));
         stop();
       }
@@ -936,7 +946,7 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
 
   /** 重新起播：接着走上次停止时冻结的剩余时间 */
   function resumeMinuteTimer(): void {
-    if (timerMode() !== "minutes" || timerHandle !== undefined) return;
+    if ((timerMode() !== "minutes" && timerMode() !== "minutesChapter") || timerHandle !== undefined) return;
     if (timerFrozenMs <= 0) return;
     armMinuteTimer(timerFrozenMs);
   }
@@ -944,9 +954,10 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
   function setTimer(mode: TtsTimerMode, minutes = 0): void {
     clearTimerHandle();
     timerFrozenMs = 0;
+    finishChapterAfterTimer = false;
     setTimerMode(mode);
     setTimerMinutes(minutes);
-    if (mode === "minutes" && minutes > 0) {
+    if ((mode === "minutes" || mode === "minutesChapter") && minutes > 0) {
       armMinuteTimer(minutes * 60_000);
     } else {
       setTimerRemainSec(null);
