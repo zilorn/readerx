@@ -50,7 +50,9 @@ export const tts = {
   "tts.timer.off": "关闭",
   "tts.timer.minutes": "{count} 分钟",
   "tts.timer.chapterEnd": "本章结束",
+  "tts.timer.finishChapter": "分钟到点后读完本章",
   "tts.timer.remaining": "剩余 {time} 后自动停止",
+  "tts.timer.remainingFinishChapter": "剩余 {time}，到点后读完本章再停止",
   "tts.timer.chapterHint": "朗读到本章结尾自动停止",
 
   // 操作
@@ -70,6 +72,8 @@ export const tts = {
   "tts.notify.chapterNoText": "本章没有可朗读的文字",
   "tts.notify.chapterTimerEnd": "定时：本章朗读结束",
   "tts.notify.timerEnd": "定时结束，已停止朗读",
+  "tts.notify.timerFinishChapter": "定时已到，读完本章后停止",
+  "tts.notify.timerChapterEnd": "定时：已读完本章并停止朗读",
 
   // 播放错误（ttsPlayer / ttsEngine / httpTts）
   "tts.error.nativeUnavailable": "原生语音需在 Tauri 应用内运行（Android 真机），当前环境不可用",
