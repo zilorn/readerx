@@ -132,7 +132,11 @@ fn write_books<R: tauri::Runtime>(
         }
         if item.action != BookAction::Skip {
             let dir = root.join(&item.local_id);
-            for name in &item.entries {
+            // 元信息先落盘，复用 write_bytes 的父目录创建；注释合并不能依赖归档字母顺序。
+            let entries = item.entries.iter()
+                .filter(|name| name.ends_with("/bookdetail.json"))
+                .chain(item.entries.iter().filter(|name| !name.ends_with("/bookdetail.json")));
+            for name in entries {
                 let Some(file) = name.rsplit('/').next() else {
                     continue;
                 };
@@ -143,6 +147,9 @@ fn write_books<R: tauri::Runtime>(
                     "bookdetail.json" => {
                         let value = remap_detail(&bytes, remap, mode)?;
                         write_bytes(&dir.join(file), &value)?;
+                    }
+                    "annotations.json" => {
+                        merge_annotation_file(app, &item.local_id, &bytes, mode)?;
                     }
                     "bookmarks.json" => {
                         merge_bookmark_file(app, &item.local_id, &bytes, mode)?;
@@ -157,6 +164,20 @@ fn write_books<R: tauri::Runtime>(
             if let Some(bytes) = archive::read_entry(zip, &name)? {
                 merge_bookmark_file(app, &item.local_id, &bytes, mode)?;
             }
+        }
+        if item.action == BookAction::Skip {
+            let name = format!("{BOOKS_DIR}/{}/annotations.json", item.archive_id);
+            if let Some(bytes) = archive::read_entry(zip, &name)? {
+                merge_annotation_file(app, &item.local_id, &bytes, mode)?;
+            }
+        } else if mode == ImportMode::Replace
+            && !item
+                .entries
+                .iter()
+                .any(|name| name.ends_with("/annotations.json"))
+        {
+            // 恢复旧备份：归档缺少注释时清空当前书的注释。
+            book_store::put_annotations(app, &item.local_id, &[])?;
         }
         report("books", index as u64 + 1, plan.len() as u64);
     }
@@ -178,6 +199,65 @@ fn remap_detail(bytes: &[u8], remap: &Remap, mode: ImportMode) -> Result<Vec<u8>
         }
     }
     serde_json::to_vec_pretty(&value).map_err(|e| format!("书籍元信息序列化失败: {e}"))
+}
+
+/// 同段记录合并其 notes，重复 note id 保留本机内容；覆盖恢复直接采用归档。
+fn merge_annotation_file<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    local_id: &str,
+    bytes: &[u8],
+    mode: ImportMode,
+) -> Result<(), String> {
+    let incoming: Value =
+        serde_json::from_slice(bytes).map_err(|e| format!("注释无法解析: {e}"))?;
+    if incoming.get("schemaVersion").and_then(Value::as_u64) != Some(1) {
+        return Err("注释格式版本不受支持".into());
+    }
+    let arriving = incoming
+        .get("annotations")
+        .and_then(Value::as_array)
+        .ok_or("注释记录无效")?;
+    let existing = book_store::get_annotations(app, local_id)?;
+    let merged = merge_annotations(&existing, arriving, mode == ImportMode::Replace)?;
+    book_store::put_annotations(app, local_id, &merged)
+}
+fn merge_annotations(
+    local: &[Value],
+    incoming: &[Value],
+    replace: bool,
+) -> Result<Vec<Value>, String> {
+    let mut out = if replace { Vec::new() } else { local.to_vec() };
+    for paragraph in incoming {
+        let notes = paragraph
+            .get("notes")
+            .and_then(Value::as_array)
+            .ok_or("注释列表无效")?;
+        let Some(existing) = out.iter_mut().find(|item| {
+            item["chapterCid"] == paragraph["chapterCid"]
+                && item["unitIndex"] == paragraph["unitIndex"]
+                && item["fingerprint"] == paragraph["fingerprint"]
+        }) else {
+            out.push(paragraph.clone());
+            continue;
+        };
+        let target = existing
+            .get_mut("notes")
+            .and_then(Value::as_array_mut)
+            .ok_or("本机注释列表无效")?;
+        for note in notes {
+            let id = note
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or("注释身份无效")?;
+            if !target
+                .iter()
+                .any(|item| item.get("id").and_then(Value::as_str) == Some(id))
+            {
+                target.push(note.clone());
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// 书签取并集（按书签 id，与同步同一口径）；覆盖模式下归档那份直接取代本机那份。
@@ -432,6 +512,25 @@ fn write_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn annotations_merge_notes_per_paragraph_and_replace() {
+        let local = vec![
+            serde_json::json!({"id":"local", "chapterCid":"c1", "unitIndex":2, "fingerprint":"same", "notes":[{"id":"n1","text":"local"}]}),
+        ];
+        let incoming = vec![
+            serde_json::json!({"id":"incoming", "chapterCid":"c1", "unitIndex":2, "fingerprint":"same", "notes":[{"id":"n1","text":"remote"},{"id":"n2","text":"added"}]}),
+        ];
+        let merged = merge_annotations(&local, &incoming, false).unwrap();
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0]["notes"].as_array().unwrap().len(), 2);
+        assert_eq!(merged[0]["notes"][0]["text"], "local");
+        assert_eq!(
+            merge_annotations(&local, &incoming, true).unwrap(),
+            incoming
+        );
+        assert!(merge_annotations(&local, &[serde_json::json!({"id":"bad"})], false).is_err());
+    }
 
     #[test]
     fn bookmarks_merge_by_id_and_follow_the_local_book_id() {

@@ -178,6 +178,8 @@ export const sync = {
   "sync.kind.source": "书源",
   "sync.kind.group": "分组",
   "sync.kind.sourceGroup": "书源分组",
+  "sync.kind.annotation": "段落注释",
+  "sync.field.annotationAnchor": "段落位置",
   "sync.kind.bookmark": "书签",
   "sync.kind.progress": "阅读进度",
 };

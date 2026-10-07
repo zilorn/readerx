@@ -20,6 +20,7 @@
 - 书签、选区、搜索与朗读共用正文字符坐标。src/lib/bookmarks.ts 的 buildTextMirror 拼接 p/h 文本，图片占零字符；段内图的 at 是 UTF-16 偏移。渲染保留 data-u/data-c，嵌套高亮 span 不新增或删减锚定文本。
 - 书签重定位使用 resolveBookmarkTarget 的结构信息与前后文回退，并保留 uncertain 结果；目录覆盖或重载正文沿用风险预览与确认组件，不能只按文本首次出现位置静默跳转。
 - 书签的线条与颜色是记录上的可选字段 `style` / `color`（缺省 = 直线 + 主题强调色，旧记录与外部导入经 normalizeBookmark* 回默认）。选区菜单「书签」右侧的伸缩面板作用于当前选区的书签：已有则改样式，没有则按所选样式新建，只增改不删除；调整后菜单保持展开以便连续换样式（点菜单外收起），页面为此保留选区区间兜底——正文重渲染会替换文字节点，原生选区锚点与分页锚点 Range 都可能脱离文档。渲染走 index.css 的 `readerx-bookmark-*` 类，颜色经 CSS 变量 `--bm-color` 注入。
+- 段落注释入口为 src/components/AnnotationSheet.tsx 与 src/lib/annotations.ts，由 Reader.tsx 接通 SelectionMenu。锚点取原书 chapterCid + unitIndex + SHA-256 原段与邻段指纹，显示替换/简繁转换不改变段落身份；只允许同一正文 p 单元内的选区（沿用 spanOfSelectionTarget 以兼容书签样式保留选区）。分页只在末片段显示一个无正文文本、零排版宽度的图标；保持列间与右侧留白可绘制。注释打开时暂停翻页/音量键/边缘菜单，表单聚焦不能滚动阅读区；Android 返回和 Escape 收起抽屉。保存快照带 previous，后端只应用 note 差集并返回实际合并结果；同步事件按书失效并重载，抽屉草稿保留，聚合后按稳定 note id 继续编辑。运行 `node scripts/annotations-test.mjs`；存储、备份与同步见 [阅读注释](../../../../docs/annotations.md)。
 - 简繁转换与文本替换沿用 src/lib/hanDisplay.ts、textReplacements.ts 的显示派生路径，不改写存盘正文和章节 cid。显示文本变化时检查进度恢复、搜索、书签和朗读是否仍使用一致的镜像。
 
 ## 在线正文与图片

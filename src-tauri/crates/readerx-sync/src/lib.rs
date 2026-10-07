@@ -97,7 +97,8 @@ pub use version::{Relation, VersionVector};
 // v2 将正文与资源同步作为同一套协议；v1 即使自报 content 也可能不支持资源请求。
 // 不兼容的请求或语义变更必须递增此版本，不能只依赖可选能力字段。
 // v3 修复计数器赋值、列表种子与唯一键冲突的收敛语义。
-pub const PROTOCOL_VERSION: &str = "readerx-sync/3";
+// v4 加入逐条注释与书籍删除级联，旧端缺少相应 schema 与落库语义。
+pub const PROTOCOL_VERSION: &str = "readerx-sync/4";
 
 /// 本 crate 支持的 schema 版本上限；op 里带了更高版本说明对端更新，先缓冲不合并。
 pub const SCHEMA_VERSION: u32 = 1;

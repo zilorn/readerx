@@ -2,7 +2,7 @@
  * 阅读页长按/拖选文本后的自定义菜单（替换原生菜单/右键菜单观感）。
  *
  * - 阻止原生弹出：容器已统一 contextmenu preventDefault，iOS 加 touch-callout none；
- * - 仅「复制 / 书签 / 朗读 / 替换」等动作项，带 SVG 图标；
+ * - 仅「复制 / 书签 / 朗读 / 注释 / 替换」等动作项，带 SVG 图标；
  * - 「书签」右侧的伸缩按钮展开样式面板：线条（直线 / 虚线 / 点线 / 波浪线 / 荧光笔）
  *   与颜色（默认跟随主题 + 若干固定色）；面板里的选择直接作用于当前选区的书签
  *   （没有书签则按该样式新建），由页面回调落地；
@@ -39,6 +39,7 @@ import {
   type BookmarkStyle,
 } from "../lib/bookmarks";
 import {
+  AnnotationIcon,
   BookmarkIcon,
   BookmarkStyleIcon,
   ChevronDownIcon,
@@ -87,6 +88,8 @@ export interface SelectionMenuProps {
   /** 阅读上下文标识（书 + 章节）：变化即收起保留态，换章后原选区无从对应 */
   contextKey?: () => string;
   onCopy: (text: string) => void;
+  /** 注释：统一传入原生/自定义选区，按段落聚合。 */
+  onAnnotation?: (target: SelectionTarget) => void;
   /** 原生选区模式：书签（页面内部换算偏移） */
   onBookmark?: (range: Range) => void;
   /** 原生选区模式：从选区起点所在句子开始朗读 */
@@ -571,6 +574,19 @@ export function SelectionMenu(props: SelectionMenuProps) {
                 <SpeakerIcon size={17} />
                 <span>{t("readerChrome.selection.speak")}</span>
               </button>
+              <Show when={props.onAnnotation}>
+                <div class="mx-1 h-5 w-px flex-none bg-border" />
+                <button
+                  class="flex h-9 flex-none cursor-pointer items-center gap-1.5 rounded-xl px-3 text-[13px] text-text-2 active:bg-surface-2"
+                  onClick={() => {
+                    const selected = target();
+                    if (selected) props.onAnnotation?.(selected);
+                  }}
+                >
+                  <AnnotationIcon size={17} />
+                  <span>{t("readerChrome.selection.annotation")}</span>
+                </button>
+              </Show>
               <Show when={props.onReplace}>
                 <div class="mx-1 h-5 w-px flex-none bg-border" />
                 <button

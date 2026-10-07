@@ -279,6 +279,7 @@ impl SchemaRegistry {
                 .field("file_name", MergeKind::Frozen)
                 .cascade(CascadeRule::cascade("reading_progress", "book_id"))
                 .cascade(CascadeRule::cascade("bookmark", "book_id"))
+                .cascade(CascadeRule::cascade("annotation", "book_id"))
                 // 目录与书同生共死：书没了，它的章节目录也没有意义
                 .cascade(CascadeRule::cascade("book_structure", "book_id"))
                 // 只对某本书生效的文本替换规则跟随书一起删（全局规则没有 book_id，不受影响）
@@ -328,6 +329,17 @@ impl SchemaRegistry {
                 .field("note", MergeKind::Lww)
                 .field("style", MergeKind::LwwSilent)
                 .field("color", MergeKind::LwwSilent),
+        );
+
+        // 每条注释独立实体；同段新增互不覆盖，同条并发改正文必须保留冲突。
+        registry.register(
+            Schema::new("annotation")
+                .field("book_id", MergeKind::Frozen)
+                .field("note_id", MergeKind::Frozen)
+                .field("anchor", MergeKind::Lww)
+                .field("note", MergeKind::Lww)
+                .field("created_at", MergeKind::Frozen)
+                .field("updated_at", MergeKind::LwwSilent),
         );
 
         // 分组：名字 LWW，组内顺序用列表
@@ -431,6 +443,7 @@ mod tests {
             "reading_progress",
             "reading_time",
             "bookmark",
+            "annotation",
             "group",
             "source_group",
             "shelf",

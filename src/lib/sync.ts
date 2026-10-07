@@ -22,6 +22,7 @@ import { describeError, reportFailure } from "./errorReport";
 import { reloadGroups } from "./groups";
 import { reloadReadingProgress, setSyncProgress, type SyncProgress } from "./store";
 import { reloadSourceGroups } from "./sourceGroups";
+import { invalidateAnnotationCache, ensureAnnotationsLoaded } from "./annotations";
 import { reloadTextReplacements } from "./textReplacements";
 import { t, type MessageKey } from "./i18n";
 import { createLogger } from "./logger";
@@ -113,6 +114,7 @@ export interface AppliedChanges {
   /** 章节目录 / 正文有变化的本机书 id → 重载这几本的正文缓存 */
   chapters: string[];
   bookmarks: string[];
+  annotations: string[];
   deletedBooks: string[];
 }
 
@@ -304,6 +306,7 @@ async function applyChanges(changes: AppliedChanges): Promise<void> {
     `chapterRules=${changes.chapterRules}`,
     `chapters=${changes.chapters.length}`,
     `bookmarks=${changes.bookmarks.length}`,
+    `annotations=${changes.annotations.length}`,
     `deleted=${changes.deletedBooks.length}`,
   );
   try {
@@ -317,6 +320,10 @@ async function applyChanges(changes: AppliedChanges): Promise<void> {
     if (changes.readingTime) await loadReadingTime();
     if (changes.bookmarks.length > 0) {
       for (const bookId of changes.bookmarks) await reloadBookBookmarks(bookId);
+    }
+    for (const bookId of [...changes.annotations, ...changes.deletedBooks]) {
+      invalidateAnnotationCache(bookId);
+      if (!changes.deletedBooks.includes(bookId)) await ensureAnnotationsLoaded(bookId);
     }
     if (changes.sources) await refreshBookSources();
     if (changes.textReplaces) await reloadTextReplacements();
@@ -585,6 +592,8 @@ export function conflictFieldLabel(field: string): string {
       return t("sync.field.name");
     case "json":
       return t("sync.field.sourceJson");
+    case "anchor":
+      return t("sync.field.annotationAnchor");
     case "note":
       return t("sync.field.note");
     case "":
@@ -605,6 +614,8 @@ export function conflictKindLabel(kind: string): string {
       return t("sync.kind.group");
     case "source_group":
       return t("sync.kind.sourceGroup");
+    case "annotation":
+      return t("sync.kind.annotation");
     case "bookmark":
       return t("sync.kind.bookmark");
     case "reading_progress":

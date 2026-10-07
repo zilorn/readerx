@@ -175,6 +175,29 @@ pub async fn readerx_book_delete(app: AppHandle, id: String) -> Result<(), Strin
     .await
 }
 
+#[tauri::command]
+pub async fn readerx_annotations_get(
+    app: AppHandle,
+    book_id: String,
+) -> Result<Vec<Value>, String> {
+    blocking("注释读取", move || {
+        book_store::get_annotations(&app, &book_id)
+    })
+    .await
+}
+#[tauri::command]
+pub async fn readerx_annotations_put(
+    app: AppHandle,
+    book_id: String,
+    annotations: Vec<Value>,
+    previous: Vec<Value>,
+) -> Result<Vec<Value>, String> {
+    blocking("注释写入", move || {
+        sync::service_hook(&app).save_annotations(&book_id, &previous, &annotations)
+    })
+    .await
+}
+
 /// 读取某本书的书签（books/<id>/bookmarks.json）；没有书签返回空列表。
 /// 书签按书分文件，读写都不必碰正文，也不必碰其它书的书签。
 #[tauri::command]

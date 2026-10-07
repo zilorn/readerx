@@ -6,6 +6,18 @@
  * 阅读页正文（src/pages/Reader.tsx）用 `reader.` 前缀，两边不要互相引用。
  */
 export const readerChrome = {
+  "readerChrome.annotation.invalid": "注释记录格式无效",
+  "readerChrome.selection.annotation": "注释",
+  "readerChrome.annotation.title": "段落注释",
+  "readerChrome.annotation.add": "添加注释",
+  "readerChrome.annotation.edit": "编辑注释",
+  "readerChrome.annotation.placeholder": "写下你的想法…",
+  "readerChrome.annotation.saved": "注释已保存",
+  "readerChrome.annotation.open": "查看段落注释",
+  "readerChrome.annotation.singleParagraph": "请选择同一段落内的文字",
+  "readerChrome.annotation.readFailed": "读取注释失败",
+  "readerChrome.annotation.writeFailed": "保存注释失败",
+  "readerChrome.annotation.retry": "重新读取注释",
   "readerChrome.settings.autoPage": "自动翻页",
   "readerChrome.autoPage.started": "已开启自动翻页，每 {seconds} 秒翻一屏",
   "readerChrome.autoPage.stopped": "已停止自动翻页",

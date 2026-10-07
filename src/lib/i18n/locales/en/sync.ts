@@ -220,6 +220,8 @@ export const sync = {
   "sync.kind.source": "Source",
   "sync.kind.group": "Group",
   "sync.kind.sourceGroup": "Source group",
+  "sync.kind.annotation": "Paragraph annotation",
+  "sync.field.annotationAnchor": "Paragraph position",
   "sync.kind.bookmark": "Bookmark",
   "sync.kind.progress": "Reading position",
 };

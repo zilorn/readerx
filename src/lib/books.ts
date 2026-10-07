@@ -8,6 +8,7 @@
  * - 分组 / 元信息编辑走 Rust 侧就地打补丁（readerx_book_patch_meta），
  *   正文不整本经 IPC 传回 WebView。
  */
+import { flushAnnotationWrites, invalidateAnnotationCache } from "./annotations";
 import { createSignal } from "solid-js";
 import {
   clearRemoteBooks,
@@ -1040,8 +1041,10 @@ export async function importLocalBookFile(file: File): Promise<LocalBook> {
 export async function removeLocalBook(id: string): Promise<void> {
   const started = performance.now();
   const meta = bookMetaById(id);
+  await flushAnnotationWrites();
   await deleteRemoteBook(id);
   removeBookmarksForBook(id);
+  invalidateAnnotationCache(id);
   removeFromBoth(id);
   log.info(
     "删除书籍完成",
@@ -1070,8 +1073,10 @@ export async function clearLocalGroup(groupId: string): Promise<void> {
 export async function clearLocalBooks(): Promise<void> {
   const started = performance.now();
   const count = bookMetaList().length;
+  await flushAnnotationWrites();
   await clearRemoteBooks();
   clearAllBookmarks();
+  invalidateAnnotationCache();
   setMetasState([]);
   setFullsState([]);
   log.info(

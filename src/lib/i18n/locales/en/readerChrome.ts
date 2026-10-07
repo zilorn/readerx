@@ -6,6 +6,18 @@
  * The reading page itself (src/pages/Reader.tsx) owns the `reader.` prefix.
  */
 export const readerChrome = {
+  "readerChrome.annotation.invalid": "Invalid note records",
+  "readerChrome.selection.annotation": "Annotate",
+  "readerChrome.annotation.title": "Paragraph notes",
+  "readerChrome.annotation.add": "Add note",
+  "readerChrome.annotation.edit": "Edit note",
+  "readerChrome.annotation.placeholder": "Write your thoughts…",
+  "readerChrome.annotation.saved": "Note saved",
+  "readerChrome.annotation.open": "View paragraph notes",
+  "readerChrome.annotation.singleParagraph": "Select text within one paragraph",
+  "readerChrome.annotation.readFailed": "Failed to read notes",
+  "readerChrome.annotation.writeFailed": "Failed to save notes",
+  "readerChrome.annotation.retry": "Retry loading notes",
   "readerChrome.settings.autoPage": "Auto page turn",
   "readerChrome.autoPage.started": "Auto page turn started: every {seconds} seconds",
   "readerChrome.autoPage.stopped": "Auto page turn stopped",
