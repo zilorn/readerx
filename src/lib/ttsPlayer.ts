@@ -427,7 +427,13 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
       void playFrom(f.index + 1);
       return;
     }
-    // 当前章播完
+    // 当前章播完。分钟到点后的收尾若恰好位于全书最后一章，沿用“本书已朗读完毕”路径。
+    if (finishChapterAfterTimer && chapterIdxEngine + 1 >= ctx.chapterCount()) {
+      finishChapterAfterTimer = false;
+      ctx.notify?.(t("tts.notify.bookFinished"));
+      stop();
+      return;
+    }
     if (timerMode() === "chapter" || finishChapterAfterTimer) {
       const timedFinish = finishChapterAfterTimer;
       finishChapterAfterTimer = false;
@@ -773,6 +779,8 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
     itemsChapter = undefined;
     chapterIdxEngine = ctx.chapterIndex();
     pendingAutoNav = -1;
+    // 到点后的“读完本章再停”只属于当前会话；手动停止后不得带到下一次起播。
+    finishChapterAfterTimer = false;
     // 定时不随停止清掉：分钟模式冻结剩余时间、本章模式留给下一次朗读，
     // 选中文字菜单「朗读」这种“停旧会话再起播”的路径因此不会丢定时
     freezeMinuteTimer();
