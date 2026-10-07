@@ -53,6 +53,10 @@ export interface TtsSheetProps {
 
 const MINUTE_OPTIONS = [10, 20, 30, 60] as const;
 
+function isMinuteMode(mode: TtsTimerMode): boolean {
+  return mode === "minutes" || mode === "minutesChapter";
+}
+
 const ENGINES: Array<{ id: TtsEngine; labelKey: MessageKey; descKey: MessageKey }> = [
   { id: "native", labelKey: "tts.engine.native", descKey: "tts.engine.nativeDesc" },
   { id: "http", labelKey: "tts.engine.http", descKey: "tts.engine.httpDesc" },
@@ -383,6 +387,21 @@ export function TtsSheet(props: TtsSheetProps) {
               class="cursor-pointer rounded-lg border px-2.5 py-[7px] text-[12.5px] transition-colors"
               classList={{
                 "border-accent bg-accent-weak font-semibold text-accent":
+                  props.timerMode() === "minutesChapter",
+                "border-border text-text-2": props.timerMode() !== "minutesChapter",
+              }}
+              aria-pressed={props.timerMode() === "minutesChapter"}
+              onClick={() => {
+                const minutes = props.timerMinutes() > 0 ? props.timerMinutes() : 30;
+                props.onTimer("minutesChapter", minutes);
+              }}
+            >
+              {t("tts.timer.finishChapter")}
+            </button>
+            <button
+              class="cursor-pointer rounded-lg border px-2.5 py-[7px] text-[12.5px] transition-colors"
+              classList={{
+                "border-accent bg-accent-weak font-semibold text-accent":
                   props.timerMode() === "chapter",
                 "border-border text-text-2": props.timerMode() !== "chapter",
               }}
@@ -394,10 +413,10 @@ export function TtsSheet(props: TtsSheetProps) {
           </div>
 
           <div class="flex items-center gap-1.5 px-3 text-[12px] text-text-3">
-            <Show when={props.timerMode() === "minutes" && props.timerRemainSec() !== null}>
+            <Show when={isMinuteMode(props.timerMode()) && props.timerRemainSec() !== null}>
               <TimerIcon size={14} />
               <span>
-                {t("tts.timer.remaining", { time: formatRemain(props.timerRemainSec() ?? 0) })}
+                {t(props.timerMode() === "minutesChapter" ? "tts.timer.remainingFinishChapter" : "tts.timer.remaining", { time: formatRemain(props.timerRemainSec() ?? 0) })}
               </span>
             </Show>
             <Show when={props.timerMode() === "chapter"}>
