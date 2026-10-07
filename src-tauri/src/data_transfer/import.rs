@@ -132,8 +132,11 @@ fn write_books<R: tauri::Runtime>(
         }
         if item.action != BookAction::Skip {
             let dir = root.join(&item.local_id);
-            fs::create_dir_all(&dir).map_err(|e| format!("创建书籍目录失败: {e}"))?;
-            for name in &item.entries {
+            // 元信息先落盘，复用 write_bytes 的父目录创建；注释合并不能依赖归档字母顺序。
+            let entries = item.entries.iter()
+                .filter(|name| name.ends_with("/bookdetail.json"))
+                .chain(item.entries.iter().filter(|name| !name.ends_with("/bookdetail.json")));
+            for name in entries {
                 let Some(file) = name.rsplit('/').next() else {
                     continue;
                 };

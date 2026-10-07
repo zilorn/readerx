@@ -16,7 +16,7 @@
 
 ## 备份与恢复
 
-- 归档入口按 data_transfer/archive.rs 分类与校验条目名，拒绝越界路径；不绕过 is_safe_entry 直接解压。plan.rs 只读规划，import.rs 写盘；流式处理正文/图片，避免为整库复制字节到内存。
+- 归档入口按 data_transfer/archive.rs 分类与校验条目名，拒绝越界路径；不绕过 is_safe_entry 直接解压。plan.rs 只读规划，import.rs 写盘；书籍导入先落 bookdetail.json，复用 write_bytes 创建父目录，再处理书签/注释，不单独重复建目录或依赖条目字母顺序；流式处理正文/图片，避免为整库复制字节到内存。
 - 合并与覆盖语义不同：合并保留本机额外数据并按身份映射引用，偏好已有值保留；覆盖先写后删并清空归档缺失的内容类状态。新增 state 键时明确分类、合并规则、缺失语义与 ID 换算，不能直接全量 JSON 覆盖。
 - 书源会话与 WebDAV 密码默认过滤，显式包含才导出；sync/、tts-audio/、logs/ 和本机 reading-time-origin 不作为换机数据搬走。阅读时长 contributions 应保留，恢复后本机新增时间使用独立来源。
 - 覆盖删除书或书源前先调用同步删除钩子（定位身份仍需要旧数据），批量导入后调用 on_data_imported 全量对账。前端 import 完成后按 backup.ts 依赖顺序失效书签并重载分组、书库、进度、统计、规则、书源。
