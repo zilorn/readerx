@@ -1940,11 +1940,11 @@ export default function ReaderPage() {
    * 挂起的「切页落点」判定：用户手动翻页 / 跳页 / 取消选中后置位。
    * 跨章翻页或整章重排时分页结果还没就绪，判定要等视图就绪（见下方 effect）再补做。
    */
-  let followPageCheckPending = false;
+  const [followPageCheckPending, setFollowPageCheckPending] = createSignal(false);
 
   /** 用户刚把视图切到某一处：稍后判定这一屏是不是朗读句所在屏（跟读页） */
   function armFollowPageCheck(): void {
-    followPageCheckPending = true;
+    setFollowPageCheckPending(true);
   }
 
   /**
@@ -1952,19 +1952,20 @@ export default function ReaderPage() {
    * 视图未就绪（跨章正文 / 分页结果还没到）时保持挂起，由补判 effect 在就绪后重来。
    */
   function checkFollowPage(): void {
-    if (!followPageCheckPending) return;
+    if (!followPageCheckPending()) return;
     if (followEnabled() || !ttsActive()) {
-      followPageCheckPending = false;
+      setFollowPageCheckPending(false);
       return;
     }
     const f = ttsPlayer.focus();
     // 滚动模式不判定「跟读页」；朗读句不在本视图章节时当前屏也不可能是跟读页
     if (!isPaged() || !f || f.item.start < 0 || f.cid !== chapter()?.cid) {
-      followPageCheckPending = false;
+      setFollowPageCheckPending(false);
       return;
     }
+    if (selSpan() !== null) return; // 选取期间保持暂停跟随，取消选中后再判定
     if (speakPageIndex(f) < 0) return; // 分页未就绪：保持挂起
-    followPageCheckPending = false;
+    setFollowPageCheckPending(false);
     if (speakOnCurrentScreen()) setFollowEnabled(true);
   }
 
@@ -2374,9 +2375,10 @@ export default function ReaderPage() {
 
   // 用户手动翻页 / 跳页 / 切章后落回朗读句所在屏（跟读页）→ 恢复跟读跟随。
   // 判定要等视图就绪：跨章翻页时新章正文与分页结果都还没到，先挂着由本 effect 补判。
+  // 挂起状态自身也触发检查：翻页入口在页码更新后置位，不能只等待下一次视图变化。
   createEffect(
     on(
-      [() => chapter()?.cid ?? null, paged, pageIdx, pageColumns],
+      [followPageCheckPending, () => chapter()?.cid ?? null, isPaged, paged, pageIdx, pageColumns, selSpan],
       () => checkFollowPage(),
       { defer: true },
     ),
