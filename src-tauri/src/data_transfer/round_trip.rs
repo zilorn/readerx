@@ -619,6 +619,17 @@ fn convert_to_v1(root: &Path, path: &Path, omitted: Option<&str>) {
             .unwrap();
         std::io::copy(&mut entry, &mut rewritten).unwrap();
     }
+    // Materialize SQLite collections/progress as the real old JSON archive layout.
+    for key in books.state_keys().unwrap() {
+        if let Some(value) = books.read_state(&key).unwrap() {
+            rewritten
+                .start_file(format!("state/{key}.json"), archive::text_options(None))
+                .unwrap();
+            rewritten
+                .write_all(&serde_json::to_vec(&value).unwrap())
+                .unwrap();
+        }
+    }
     for id in &scan.books {
         for file in [
             "bookdetail.json",
@@ -654,6 +665,12 @@ fn sqlite_export_keeps_sources_json_and_v1_import_restores_books() {
     let manifest = archive::read_manifest(&mut zip).unwrap();
     assert_eq!(manifest.format, "readerx-backup/2");
     assert!(zip.by_name("books.sqlite3").is_ok());
+    for key in crate::book_store::state::KEYS {
+        assert!(
+            zip.by_name(&format!("state/{key}.json")).is_err(),
+            "{key} must be inside SQLite"
+        );
+    }
     assert!(!zip.file_names().any(|name| name.starts_with("books/")
         || name.ends_with("-wal")
         || name.ends_with("-shm")));
@@ -674,6 +691,10 @@ fn sqlite_export_keeps_sources_json_and_v1_import_restores_books() {
     let db = rusqlite::Connection::open(root.join("books.sqlite3")).unwrap();
     let receipts: i64 = db
         .query_row("SELECT count(*) FROM migrated_books", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(receipts, 0);
+    let receipts: i64 = db
+        .query_row("SELECT count(*) FROM migrated_states", [], |r| r.get(0))
         .unwrap();
     assert_eq!(receipts, 0);
     drop(db);
@@ -743,6 +764,9 @@ fn invalid_sqlite_archive_fails_before_local_writes_and_cleans_temporary_files()
         None,
         Some("PRAGMA user_version=999;"),
         Some("UPDATE chapters SET chapter='broken';"),
+        Some("UPDATE groups SET record='broken';"),
+        Some("UPDATE rules SET record='[]';"),
+        Some("UPDATE books SET detail=json_set(detail,'$.progress',1);"),
         Some("UPDATE books SET id='../outside-' || id;"),
         Some("INSERT OR REPLACE INTO annotations SELECT id,'{}' FROM books;"),
         Some("PRAGMA foreign_keys=OFF; INSERT INTO bookmarks VALUES('missing','[]');"),
@@ -805,4 +829,20 @@ fn annotations_survive_archive_merge_replace_and_old_backup() {
         .as_array()
         .unwrap()
         .is_empty());
+}
+
+#[test]
+fn metadata_patch_keeps_progress_in_the_same_book_row() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let (app, root) = setup();
+    seed_device_a(&root);
+    crate::storage::read_state(&app, "readerx.shelf").unwrap();
+    let patch = serde_json::from_value(json!({"title":"新标题","groupId":"new-group"})).unwrap();
+    crate::book_store::patch_book_meta(&app, "local-a", &patch).unwrap();
+    let detail = read_json(&root.join("books/local-a/bookdetail.json"));
+    assert_eq!(detail["title"], "新标题");
+    assert_eq!(detail["groupId"], "new-group");
+    assert_eq!(detail["progress"]["chapter"], 1);
+    assert_eq!(detail["progress"]["charOffset"], 10);
+    assert!(!root.join("state/readerx.shelf.json").exists());
 }

@@ -1,10 +1,10 @@
 //! 合并规则（导入的「合并」语义）：输入两份 JSON，输出要落盘的那一份。
 //!
-//! 为什么状态文件不能整份覆盖：`readerx.shelf` 一个文件里装着全库的阅读进度，
+//! 状态 API 同时适配 SQLite 与旧 JSON：`readerx.shelf` 是全库阅读进度的逻辑视图，
 //! `readerx.groups` / `readerx.textReplacements` 装着全部分组与替换规则 —— 整份覆盖
 //! 会把本机那份数据抹掉。因此按**身份**取并集：
 //!
-//! | 状态文件 | 身份 | 并发 / 重复时 |
+//! | 状态 key | 身份 | 并发 / 重复时 |
 //! | --- | --- | --- |
 //! | `readerx.shelf` | 书籍 id | `updatedAt` 较新的一方胜出（与同步的进度口径一致） |
 //! | `readerx.groups` / `readerx.sourceGroups` | 分组名 | 本机已有同名分组则不动（书 / 书源的归属按名字对上） |

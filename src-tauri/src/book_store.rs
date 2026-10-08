@@ -46,7 +46,7 @@ fn schema_version() -> u32 {
 
 /// `bookdetail.json`：书籍元信息（不含正文）。
 ///
-/// 与 [`LocalBook`] 字段同构（只少 `chapters`），两边必须保持一致 ——
+/// 对外书籍字段与 [`LocalBook`] 同构（少 `chapters`），另存内部 `progress` ——
 /// 单元测试 `detail_round_trip_keeps_every_field` 会在加了字段却忘记同步时失败。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

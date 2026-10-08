@@ -11,6 +11,7 @@
 //! 也能在单元测试里直接用真实文件跑。
 
 use super::{is_safe_entry, Manifest, MANIFEST_NAME};
+use serde_json::Value;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::Path;

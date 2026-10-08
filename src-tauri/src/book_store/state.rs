@@ -340,7 +340,7 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
-    fn identity_migration_keeps_progress_and_rule_book_references() {
+    fn identity_migration_keeps_progress() {
         let root = setup();
         set(&root, "readerx.shelf", json!({"b1":{"chapter":7}}));
         set(
@@ -360,6 +360,10 @@ mod tests {
         let root = setup();
         let db = sqlite::open(&root).unwrap();
         db.execute_batch("DROP TABLE groups; DROP TABLE rules; DROP TABLE collections; DROP TABLE migrated_states; PRAGMA user_version=1;").unwrap();
+        let old_snapshot = sqlite::snapshot(&db, &root).unwrap();
+        assert_eq!(old_snapshot.ids().unwrap(), vec!["b1", "b2"]);
+        assert!(old_snapshot.state_keys().unwrap().is_empty());
+        drop(old_snapshot);
         drop(db);
         set(&root, "readerx.groups", json!([{"id":"g1"}]));
         set(
