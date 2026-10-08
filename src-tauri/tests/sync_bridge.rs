@@ -697,6 +697,7 @@ fn conflict_resolution_reports_materialization_failures_and_can_retry() {
         }));
         // 只阻断分组的 SQLite 写入，保留前一阶段的书源分组刷新。
         let path = app_data.join("state/readerx.groups.json");
+        readerx_lib::sync::book_ids::migrate(&handle).unwrap();
         let db = rusqlite::Connection::open(app_data.join("books.sqlite3")).unwrap();
         db.execute_batch("CREATE TRIGGER fail_groups BEFORE INSERT ON groups WHEN NEW.key='readerx.groups' BEGIN SELECT RAISE(ABORT,'injected'); END").unwrap();
         let applied = Arc::new(Mutex::new(Vec::<Value>::new()));
@@ -1812,7 +1813,7 @@ fn hidden_group_membership_survives_sync_and_can_be_cleared() {
     assert_eq!(ids.len(), 1);
     let path = app_data.join("books").join(&ids[0]).join("bookdetail.json");
     assert_eq!(read_json(&path)["groupId"], "__hidden__");
-    assert!(!app_data.join("state/readerx.groups.json").exists(), "不能额外创建普通分组");
+    assert_eq!(read_json(&app_data.join("state/readerx.groups.json")), json!([]), "不能额外创建普通分组");
     lock_engine(&peer.engine).set_field(&uid, "group", json!(null)).unwrap();
     sync_once(&fresh, &peer.engine);
     bridge::materialize(&handle, &fresh, 0, &mut index).unwrap();

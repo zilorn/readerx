@@ -1,6 +1,6 @@
 //! SQLite-backed collections and the legacy shelf API's view of books.detail.progress.
 //! All entry points share the library lock; callbacks never re-enter storage or sync.
-use super::{library_transaction, sqlite, BookDetail};
+use super::{library_transaction, sqlite};
 use rusqlite::{params, Connection};
 use serde_json::{Map, Value};
 use std::{fs, path::Path};
@@ -29,15 +29,17 @@ pub(super) fn read(db: &Connection, key: &str) -> Result<Option<Value>, String> 
     if key == "readerx.shelf" {
         let mut out = Map::new();
         let mut query = db
-            .prepare("SELECT id,detail FROM books ORDER BY id")
+            .prepare("SELECT id,json_extract(detail,'$.progress') FROM books ORDER BY id")
             .map_err(sql)?;
         let rows = query
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+            })
             .map_err(sql)?;
         for row in rows {
             let (id, raw) = row.map_err(sql)?;
-            let detail: BookDetail = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
-            if let Some(progress) = detail.progress {
+            if let Some(raw) = raw {
+                let progress: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
                 validate_progress(&progress)?;
                 out.insert(id, progress);
             }
@@ -92,25 +94,36 @@ fn write(db: &Connection, root: &Path, key: &str, value: Option<&Value>) -> Resu
         for (id, progress) in entries {
             sqlite::valid_id(id)?;
             validate_progress(progress)?;
-            if sqlite::detail(db, id)?.is_none() {
+            let exists: bool = db
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM books WHERE id=?1)",
+                    [id],
+                    |r| r.get(0),
+                )
+                .map_err(sql)?;
+            if !exists {
                 sqlite::reject_pending_migration(root, id)?;
             }
         }
-        let ids = {
-            let mut q = db.prepare("SELECT id FROM books").map_err(sql)?;
-            let rows = q.query_map([], |r| r.get::<_, String>(0)).map_err(sql)?;
-            rows.collect::<Result<Vec<_>, _>>().map_err(sql)?
-        };
-        for id in ids {
-            let mut detail = sqlite::detail(db, &id)?.ok_or("书籍元信息缺失")?;
-            let progress = entries.get(&id).map(|entry| {
-                let mut entry = entry.clone();
-                entry["bookId"] = Value::String(id.clone());
-                entry
-            });
-            if detail.progress != progress {
-                detail.progress = progress;
-                sqlite::save_detail(db, &detail)?;
+        // Keep covers and unrelated metadata out of the Rust read/serialize path.
+        let current = read(db, key)?.ok_or("书架状态缺失")?;
+        let current = current.as_object().ok_or("书架状态格式错误")?;
+        for id in current.keys().filter(|id| !entries.contains_key(*id)) {
+            db.execute(
+                "UPDATE books SET detail=json_remove(detail,'$.progress') WHERE id=?1",
+                [id],
+            )
+            .map_err(sql)?;
+        }
+        for (id, entry) in entries {
+            let mut progress = entry.clone();
+            progress["bookId"] = Value::String(id.clone());
+            if current.get(id) != Some(&progress) {
+                db.execute(
+                    "UPDATE books SET detail=json_set(detail,'$.progress',json(?1)) WHERE id=?2",
+                    params![progress.to_string(), id],
+                )
+                .map_err(sql)?;
             }
         }
         return Ok(());
@@ -316,6 +329,18 @@ mod tests {
         assert_eq!(shelf["b1"]["chapter"], 5);
         assert_eq!(shelf["b2"]["chapter"], 2);
         let db = sqlite::open(&root).unwrap();
+        db.execute_batch("UPDATE books SET detail=json_set(detail,'$.extra',42) WHERE id='b1'; CREATE TRIGGER keep_b2 BEFORE UPDATE ON books WHEN OLD.id='b2' BEGIN SELECT RAISE(ABORT,'unchanged row was written'); END;").unwrap();
+        let mut next = shelf.clone();
+        next["b1"]["charOffset"] = json!(9);
+        set(&root, "readerx.shelf", next);
+        let extra: i64 = db
+            .query_row(
+                "SELECT json_extract(detail,'$.extra') FROM books WHERE id='b1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(extra, 42);
         let book = sqlite::get(&db, "b1").unwrap().unwrap();
         sqlite::put(&db, &book).unwrap();
         assert_eq!(

@@ -644,8 +644,13 @@ fn convert_to_v1(root: &Path, path: &Path, omitted: Option<&str>) {
             rewritten
                 .start_file(name, archive::text_options(None))
                 .unwrap();
+            let mut value: Value =
+                serde_json::from_slice(&books.read(id, file).unwrap().unwrap()).unwrap();
+            if file == "bookdetail.json" {
+                value.as_object_mut().unwrap().remove("progress");
+            }
             rewritten
-                .write_all(&books.read(id, file).unwrap().unwrap())
+                .write_all(&serde_json::to_vec(&value).unwrap())
                 .unwrap();
         }
     }
