@@ -17,6 +17,7 @@
 - 阅读进度使用稳定 chapterCid 与章节镜像字符偏移，查看 src/lib/progress.ts；字号、窗口宽度或排版变化不能把页码当持久化位置。
 - 进度累计字符缓存仅按书籍对象 WeakMap 保存，不强引用整书；正文更新与显示副本沿用新对象独立统计。缓存改动运行 `node --expose-gc scripts/progress-cache-test.mjs`，验证同 ID 内容隔离与对象回收。
 - 分页 / 滚动切换需在正文 DOM 更新前捕获字符位置并设置 resumeTarget，滚动转分页采样旧视口以补上未执行的滚动帧；恢复落定前不提交新视图的位置。切换时序回归运行 `node scripts/reader-position-transition-test.mjs`（Solid 浏览器运行时，覆盖单双页、未提交滚动、章首与连续切换）。
+- 选区菜单竖直定位在 src/lib/selectionMenuPosition.ts：首个可见选中行距正文页顶不足四个正文行高时贴可见选区与末手柄下方，否则贴可见选区与起始手柄上方，间距 10px；空间不足只夹取安全区，不翻面或放到选区中间。Reader.tsx 的 pageSelLayout 提供正文页顶、行高和按阅读顺序的首个可见行（双页不能取两页纵坐标最小值），手柄仍只传屏内真实端点；原生选区使用屏内客户矩形与计算行高。回归运行 `node scripts/selection-menu-position-test.mjs`。
 - 书签、选区、搜索与朗读共用正文字符坐标。src/lib/bookmarks.ts 的 buildTextMirror 拼接 p/h 文本，图片占零字符；段内图的 at 是 UTF-16 偏移。渲染保留 data-u/data-c，嵌套高亮 span 不新增或删减锚定文本。
 - 书签重定位使用 resolveBookmarkTarget 的结构信息与前后文回退，并保留 uncertain 结果；目录覆盖或重载正文沿用风险预览与确认组件，不能只按文本首次出现位置静默跳转。
 - 书签的线条与颜色是记录上的可选字段 `style` / `color`（缺省 = 直线 + 主题强调色，旧记录与外部导入经 normalizeBookmark* 回默认）。选区菜单「书签」右侧的伸缩面板作用于当前选区的书签：已有则改样式，没有则按所选样式新建，只增改不删除；调整后菜单保持展开以便连续换样式（点菜单外收起），页面为此保留选区区间兜底——正文重渲染会替换文字节点，原生选区锚点与分页锚点 Range 都可能脱离文档。渲染走 index.css 的 `readerx-bookmark-*` 类，颜色经 CSS 变量 `--bm-color` 注入。

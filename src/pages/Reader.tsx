@@ -3299,6 +3299,9 @@ export default function ReaderPage() {
     hi: { x: number; y: number; top: number } | null;
     top: number;
     bottom: number;
+    firstLineTop: number;
+    pageTop: number;
+    lineHeight: number;
   } | null {
     const span = selSpan();
     const area = areaRef;
@@ -3373,6 +3376,12 @@ export default function ReaderPage() {
     if (!zLoP && !zHiP) return null;
     const zTop = zLoP && zHiP ? Math.min(zLoP.top, zHiP.top) : (zLoP ?? zHiP)!.top;
     const zBottom = zLoP && zHiP ? Math.max(zLoP.bottom, zHiP.bottom) : (zLoP ?? zHiP)!.bottom;
+    // 四行阈值按阅读顺序首个可见行计算；双页不能用右页更靠上的末行代替首行。
+    const menuGeometry = {
+      firstLineTop: (zLoP ?? zHiP)!.top,
+      pageTop: col.getBoundingClientRect().top - areaRect.top,
+      lineHeight: READING_LINE_HEIGHT * (layout()?.fontSize ?? 24),
+    };
     // 手柄只画「真实端点就在本屏内」的那端：跨屏连选自动翻到下一屏时，起点/终点若落在
     // 其它屏，本屏不显示那端的手柄——起点在上一屏时，本屏只保留仍在屏内的拖动端手柄。
     // lo 端点含 offset 处字符（起点语义：段首选中时手柄须锚在段首，而非上一段末尾）；
@@ -3382,13 +3391,14 @@ export default function ReaderPage() {
     if (!loP && !hiP) {
       // 整屏都被选入、两端真实端点都在其它屏（跨屏连选正停留在被整屏选中的中间屏）：
       // 本屏没有可拖的手柄，仅保留整片可见选区的纵向避让范围
-      return { lo: null, hi: null, top: zTop, bottom: zBottom };
+      return { lo: null, hi: null, top: zTop, bottom: zBottom, ...menuGeometry };
     }
     return {
       lo: loP ? { x: loP.x, y: loP.y, top: loP.top } : null,
       hi: hiP ? { x: hiP.x, y: hiP.y, top: hiP.top } : null,
       top: zTop,
       bottom: zBottom,
+      ...menuGeometry,
     };
   }
 
@@ -3663,7 +3673,10 @@ export default function ReaderPage() {
       const handles: Array<{ x: number; y: number; r: number }> = [];
       if (geo.lo) handles.push({ x: geo.lo.x, y: geo.lo.y, r: SEL_HANDLE_R });
       if (geo.hi) handles.push({ x: geo.hi.x, y: geo.hi.y, r: SEL_HANDLE_R });
-      avoid = { top: geo.top, bottom: geo.bottom, handles };
+      avoid = {
+        top: geo.top, bottom: geo.bottom, handles,
+        firstLineTop: geo.firstLineTop, pageTop: geo.pageTop, lineHeight: geo.lineHeight,
+      };
     }
     setSelMenu({ text, anchor, span: [span[0], span[1]], ...(avoid ? { avoid } : {}) });
   }

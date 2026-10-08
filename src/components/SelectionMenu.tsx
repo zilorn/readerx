@@ -7,8 +7,8 @@
  *   与颜色（默认跟随主题 + 若干固定色）；面板里的选择直接作用于当前选区的书签
  *   （没有书签则按该样式新建），由页面回调落地；
  * - 固定高度条，宽度自适应内容；内容超出可用宽度时内部横向滚动，杜绝纵向溢出/出屏；
- * - 跟随选区定位，但只在能完整放进安全区（上/下留白）的区间摆放，绝不压到选区两端手柄
- *   （自定义选区模式下页面会传手柄位置来避让）；滚动手势或选区消失即隐藏。
+ * - 可见选区首行在正文页顶四行以内时贴末手柄下方，否则贴起始手柄上方；
+ *   空间不足时夹取到安全区（自定义选区模式下页面传行盒与手柄几何）；滚动即隐藏。
  * - 点按自身期间（pointerdown → click）位置被冻结：条一旦在按下与抬起之间移位，click 的
  *   目标会退化成按下点/抬起点的公共祖先（按钮收不到 click），表现为「按了没反应、条还跳到
  *   别处，再按一次才生效」；同一个选区也不再重复重建状态，避免无谓的重算定位。
@@ -30,6 +30,7 @@ import {
   onMount,
 } from "solid-js";
 import { t, type MessageKey } from "../lib/i18n";
+import { selectionMenuTop, type SelectionMenuGeometry } from "../lib/selectionMenuPosition";
 import {
   BOOKMARK_COLORS,
   BOOKMARK_STYLES,
@@ -57,15 +58,9 @@ export interface SelectionCustom {
   span: [number, number];
   /**
    * 选区在本页可见内容的纵向范围与两端手柄圆心（相对阅读区容器坐标）。
-   * 提供后，菜单条会在竖直方向上避开手柄，且只在能完整放下的区间定位。
+   * 同时提供首个可见选中行、正文页顶与正文行高，供四行阈值判定。
    */
-  avoid?: {
-    /** 选区首/末可见行的行盒上/下缘（相对阅读区容器顶部） */
-    top: number;
-    bottom: number;
-    /** 选区两端手柄的圆心与半径（相对阅读区容器） */
-    handles: Array<{ x: number; y: number; r: number }>;
-  };
+  avoid?: SelectionMenuGeometry;
 }
 
 /** 菜单当前对应的选区（原生 Range / 自定义选区数据 + 选区文本） */
@@ -130,7 +125,6 @@ const COLOR_LABEL_KEYS: Record<BookmarkColor, MessageKey> = {
 };
 
 const BAR_H = 46;
-const GAP = 10;
 const SIDE = 8;
 /** 抬起后等待 click 派发的兜底时长（ms）：超时仍未派发（手势被系统接管等）就自行解冻对账 */
 const PRESS_FALLBACK_MS = 400;
@@ -161,6 +155,7 @@ export function SelectionMenu(props: SelectionMenuProps) {
   const [pinned, setPinned] = createSignal(false);
   /** 最近一次可用的锚点矩形（视口坐标）：选区锚点脱离文档后沿用，避免菜单跳到容器左上角 */
   let lastAnchorRect: { left: number; right: number; top: number; bottom: number } | null = null;
+  let lastNativeGeometry: SelectionMenuGeometry | null = null;
 
   function hide(): void {
     if (pressing) return;
@@ -169,6 +164,7 @@ export function SelectionMenu(props: SelectionMenuProps) {
       setMarkPanel(false); // 收起菜单的同时复位样式面板，下次展开是收起态
       setPinned(false);
       lastAnchorRect = null;
+      lastNativeGeometry = null;
     }
   }
 
@@ -226,6 +222,7 @@ export function SelectionMenu(props: SelectionMenuProps) {
     setMenu({ range, text }); // 换了选区：不再保留上一段文字的样式调整状态
     setPinned(false);
     lastAnchorRect = null;
+    lastNativeGeometry = null;
   }
 
   /** 一次点按结束（click 已派发 / 指针离开菜单条 / 兜底超时）：解冻并按当前选区对账 */
@@ -354,9 +351,8 @@ export function SelectionMenu(props: SelectionMenuProps) {
     });
   });
 
-  // 定位：按实际尺寸计算，保证条不越界（上下翻面、左右避让）
-  // 竖直方向按候选区间逐个挑选：只在能完整放下、且不压到选区手柄的位置摆放；
-  // 全程受上/下安全留白约束，杜绝菜单条被顶到阅读区上缘（贴屏幕顶部）。
+  // 定位：水平方向沿用锚点居中；竖直方向按首个可见行的四行阈值固定贴放。
+  // 面板展开沿用同一方向，极端空间不足时夹取到上/下安全区。
   createEffect(() => {
     const current = menu();
     const root = props.rootRef();
@@ -424,77 +420,35 @@ export function SelectionMenu(props: SelectionMenuProps) {
       Math.max(SIDE, area.width - width - SIDE),
     );
 
-    // ---- 竖直定位：候选区间逐个验证（放得下 + 不压手柄） ----
+    // ---- 竖直定位：顶部四行贴下方，其余贴上方 ----
     const ins = props.insets?.() ?? { top: SIDE, bottom: SIDE };
-    const topMin = Math.max(SIDE, ins.top); // 条上缘至少离容器顶这么远
+    const topMin = Math.max(SIDE, ins.top);
     const topMax = Math.max(topMin, area.height - Math.max(SIDE, ins.bottom) - barH);
     const custom = props.custom?.() ?? null;
-    const avoid = custom?.avoid ?? null;
-    const handles = avoid?.handles ?? [];
-    const anchorTop = rect.top - area.top;
-    const anchorBottom = rect.bottom - area.top;
-    const zoneTop = avoid ? avoid.top : anchorTop;
-    const zoneBottom = avoid ? avoid.bottom : anchorBottom;
-
-    /** 某候选 top 处的条是否压到任一手柄（按手柄外接方框保守判断） */
-    const barOverlaps = (top: number): boolean => {
-      const bT = top;
-      const bB = top + barH;
-      const bL = left;
-      const bR = left + width;
-      for (const h of handles) {
-        if (bR < h.x - h.r || bL > h.x + h.r) continue;
-        if (bB < h.y - h.r || bT > h.y + h.r) continue;
-        return true;
-      }
-      return false;
-    };
-
-    // 候选按偏好排序：先锚点行上方（贴近选区结尾），空间不够再整段上方/下方，
-    // 长选区还能落到两端手柄之间的空隙里；每项都要能完整放下。
-    const cands: Array<{ top: number; pref: number }> = [];
-    const push = (top: number, pref: number): void => {
-      if (top >= topMin && top <= topMax) cands.push({ top, pref });
-    };
-    push(anchorTop - barH - GAP, 0); // 选区结尾上方（默认摆放）
-    push(zoneTop - barH - GAP, 1); // 整段选区上方
-    push(zoneBottom + GAP, 2); // 整段选区下方（上方放不下 / 压手柄时）
-    if (handles.length >= 2) {
-      let minY = Infinity;
-      let maxY = -Infinity;
-      for (const h of handles) {
-        if (h.y < minY) minY = h.y;
-        if (h.y > maxY) maxY = h.y;
-      }
-      // 两端手柄之间的空隙足以整条放下时才用中间带
-      if (maxY - minY >= barH + 2 * (GAP + 12)) {
-        push((minY + maxY) / 2 - barH / 2, 3);
-      }
+    let geometry = custom?.avoid ?? null;
+    if (!geometry && anchorNode.isConnected) {
+      // 原生选区用可见客户矩形，避免跨屏选区的并集把屏外文字算进定位。
+      const visible = Array.from(current.range.getClientRects()).filter(
+        (line) => line.height > 0 && line.bottom > area.top && line.top < area.bottom &&
+          line.right > area.left && line.left < area.right,
+      );
+      const el = (
+        anchorNode.nodeType === Node.ELEMENT_NODE ? anchorNode : anchorNode.parentElement
+      ) as Element | null;
+      const lineHeight = el ? parseFloat(getComputedStyle(el).lineHeight) || 24 : 24;
+      geometry = {
+        top: Math.max(0, (visible.length ? Math.min(...visible.map((line) => line.top)) : rect.top) - area.top),
+        bottom: Math.min(area.height, (visible.length ? Math.max(...visible.map((line) => line.bottom)) : rect.bottom) - area.top),
+        firstLineTop: Math.max(0, (visible[0]?.top ?? rect.top) - area.top),
+        pageTop: 0,
+        lineHeight,
+        handles: [],
+      };
+      lastNativeGeometry = geometry;
     }
-    cands.sort((a, b) => a.pref - b.pref);
-
-    let top: number | null = null;
-    for (const c of cands) {
-      if (!barOverlaps(c.top)) {
-        top = c.top;
-        break;
-      }
-    }
-    if (top === null) {
-      // 兜底（极小容器等极端情况）：仍贴安全区上下限，选离锚点最近的位置
-      const anchorMid = (anchorTop + anchorBottom) / 2;
-      let best: number | null = null;
-      let bestDist = Infinity;
-      for (const c of cands) {
-        const t = Math.max(topMin, Math.min(c.top, topMax));
-        const dist = Math.abs(t + barH / 2 - anchorMid);
-        if (dist < bestDist) {
-          bestDist = dist;
-          best = t;
-        }
-      }
-      top = best ?? Math.max(topMin, Math.min(anchorTop - barH - GAP, topMax));
-    }
+    geometry ??= lastNativeGeometry;
+    if (!geometry) return;
+    const top = selectionMenuTop(geometry, barH, topMin, topMax);
 
     bar.style.visibility = "visible";
     bar.style.top = `${top}px`;
