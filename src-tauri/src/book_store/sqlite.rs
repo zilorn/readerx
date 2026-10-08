@@ -506,12 +506,17 @@ pub(super) fn require_book(db: &Connection, root: &Path, id: &str) -> Result<(),
     if detail(db, id)?.is_some() {
         return Ok(());
     }
+    reject_pending_migration(root, id)?;
+    Err("书籍不存在".into())
+}
+/// A failed migration is not a deleted book: writes must fail so sync can retry.
+pub(super) fn reject_pending_migration(root: &Path, id: &str) -> Result<(), String> {
     if root.join("books").join(id).join(BOOKDETAIL_FILE).is_file()
         || root.join("books").join(format!("{id}.json")).is_file()
     {
         Err("书籍数据迁移失败，请查看应用日志".into())
     } else {
-        Err("书籍不存在".into())
+        Ok(())
     }
 }
 pub(super) fn commit(db: rusqlite::Transaction<'_>) -> Result<(), String> {
@@ -697,6 +702,8 @@ mod tests {
         assert!(root.join("books/good/bookdetail.json.migrated").is_file());
         assert!(root.join("books/bad/bookdetail.json").is_file());
         assert!(require_book(&db, &root, "bad").is_err());
+        assert!(reject_pending_migration(&root, "bad").is_err());
+        assert!(reject_pending_migration(&root, "missing").is_ok());
         fs::write(&bad, r#"{"schemaVersion":1,"annotations":[]}"#).unwrap();
         drop(db);
         let db = open(&root).unwrap();

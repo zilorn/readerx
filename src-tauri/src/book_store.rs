@@ -851,6 +851,7 @@ pub(crate) fn normalize_book_images<R: tauri::Runtime>(
     let root = crate::storage::data_root_at(app, root)?;
     let mut db = sqlite::open(&root)?;
     let Some(mut book) = sqlite::get(&db, id)? else {
+        sqlite::reject_pending_migration(&root, id)?;
         return Ok(false);
     };
     if !crate::book_images::normalize_image_refs(&root.join("images"), &mut book.chapters) {
@@ -1214,6 +1215,7 @@ pub(crate) fn apply_sync_meta<R: tauri::Runtime>(
     let mut db = sqlite::open(&root)?;
     let tx = sqlite::transaction(&mut db)?;
     let Some(mut detail) = sqlite::detail(&tx, id)? else {
+        sqlite::reject_pending_migration(&root, id)?;
         return Ok(false);
     };
     if BookSyncMeta::from_detail(&detail) == *want {
@@ -1410,6 +1412,7 @@ pub(crate) fn apply_sync_structure<R: tauri::Runtime>(
     let mut db = sqlite::open(&root)?;
     let tx = sqlite::transaction(&mut db)?;
     if sqlite::detail(&tx, id)?.is_none() {
+        sqlite::reject_pending_migration(&root, id)?;
         return Ok(false);
     }
     if sqlite::refs(&tx, id)? == want {
@@ -1718,6 +1721,7 @@ pub(crate) fn set_cover_at<R: tauri::Runtime>(
     let mut db = sqlite::open(&root)?;
     let tx = sqlite::transaction(&mut db)?;
     let Some(mut detail) = sqlite::detail(&tx, id)? else {
+        sqlite::reject_pending_migration(&root, id)?;
         return Ok(false);
     };
     let want = cover.filter(|v| !v.is_empty()).map(str::to_string);
