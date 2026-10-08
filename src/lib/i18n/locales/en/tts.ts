@@ -58,7 +58,9 @@ export const tts = {
   "tts.timer.minutes_one": "{count} minute",
   "tts.timer.minutes_other": "{count} minutes",
   "tts.timer.chapterEnd": "End of chapter",
+  "tts.timer.finishChapter": "Finish chapter after timer",
   "tts.timer.remaining": "Stops automatically in {time}",
+  "tts.timer.remainingFinishChapter": "{time} left; then finishes this chapter before stopping",
   "tts.timer.chapterHint": "Stops automatically at the end of this chapter",
 
   // Actions
@@ -78,6 +80,8 @@ export const tts = {
   "tts.notify.chapterNoText": "No readable text in this chapter",
   "tts.notify.chapterTimerEnd": "Timer: chapter finished",
   "tts.notify.timerEnd": "Timer finished; reading stopped",
+  "tts.notify.timerFinishChapter": "Timer finished; reading will stop at the end of this chapter",
+  "tts.notify.timerChapterEnd": "Timer: chapter finished; reading stopped",
 
   // Playback errors (ttsPlayer / ttsEngine / httpTts)
   "tts.error.nativeUnavailable":
