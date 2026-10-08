@@ -29,7 +29,9 @@ pub(super) fn read(db: &Connection, key: &str) -> Result<Option<Value>, String> 
     if key == "readerx.shelf" {
         let mut out = Map::new();
         let mut query = db
-            .prepare("SELECT id,json_extract(detail,'$.progress') FROM books ORDER BY id")
+            .prepare(
+                "SELECT id,json_quote(json_extract(detail,'$.progress')) FROM books ORDER BY id",
+            )
             .map_err(sql)?;
         let rows = query
             .query_map([], |r| {
@@ -40,6 +42,9 @@ pub(super) fn read(db: &Connection, key: &str) -> Result<Option<Value>, String> 
             let (id, raw) = row.map_err(sql)?;
             if let Some(raw) = raw {
                 let progress: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+                if progress.is_null() {
+                    continue;
+                }
                 validate_progress(&progress)?;
                 out.insert(id, progress);
             }
@@ -294,6 +299,14 @@ mod tests {
         fs::remove_file(path).unwrap();
         set(&root, "readerx.groups", json!([{"id":"old"}]));
         let db = sqlite::open(&root).unwrap();
+        db.execute(
+            "UPDATE books SET detail=json_set(detail,'$.progress',?1) WHERE id='b1'",
+            ["{\"chapter\":8}"],
+        )
+        .unwrap();
+        assert!(read_at(&root, "readerx.shelf").is_err());
+        db.execute_batch("UPDATE books SET detail=json_remove(detail,'$.progress') WHERE id='b1'")
+            .unwrap();
         db.execute_batch("CREATE TRIGGER fail_group BEFORE INSERT ON groups WHEN NEW.position=1 BEGIN SELECT RAISE(ABORT,'injected'); END").unwrap();
         assert!(update_at(&root, "readerx.groups", |v| {
             *v = Some(json!([{"id":"new"},{"id":"bad"}]));
