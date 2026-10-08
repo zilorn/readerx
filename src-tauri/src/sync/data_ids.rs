@@ -7,7 +7,11 @@ use std::{collections::BTreeMap, path::Path};
 pub fn migrate(root: &Path) -> Result<(), String> {
     const JOURNAL: &str = "migrations/readerx.dataIdMigration.json";
     FilePlan::resume(root, JOURNAL)?;
-    id_migration::migrate(root, &BTreeMap::new())?;
+    if unreadable_book_details(root)? {
+        // Keep the original groups/sources until their references can be remapped on retry.
+        return Ok(());
+    }
+    migrate_sources(root, &BTreeMap::new())?;
     let mut plan = FilePlan::default();
     let mut groups = BTreeMap::new();
     let mut source_groups = BTreeMap::new();
@@ -101,12 +105,94 @@ pub fn migrate(root: &Path) -> Result<(), String> {
     plan.writes
         .retain(|path, value| id_migration::read(&root.join(path)).ok().as_ref() != Some(value));
     let changed = plan.writes.len();
+    // Apply DB references before the file plan: failed file writes leave the old groups
+    // available for deriving the same mapping on retry.
+    crate::book_store::remap_metadata_at(root, "groupId", &groups)?;
     plan.commit(root, JOURNAL)?;
     if changed > 0 {
         log::info!("同步数据 ID 迁移完成 files={changed}");
     }
     Ok(())
 }
+/// Journal aliases before source files can be renamed by the source crate.
+/// A crash between source migration and DB updates must not lose the old ID mapping.
+pub(crate) fn migrate_sources(
+    root: &Path,
+    aliases: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    let journal = root.join("migrations/readerx.sqliteSourceRefs.json");
+    let mut remap: BTreeMap<String, String> = if journal.is_file() {
+        serde_json::from_value(id_migration::read(&journal)?).map_err(|e| e.to_string())?
+    } else {
+        BTreeMap::new()
+    };
+    remap.extend(aliases.clone());
+    for path in id_migration::json_files(&root.join("book_sources"))? {
+        let value = id_migration::read(&path)?;
+        let old = text(&value, "id");
+        remap.entry(old.clone()).or_insert_with(|| {
+            identity::entity_id(
+                &old,
+                "s-",
+                identity::source_uid(&text(&value, "bookSourceUrl")),
+            )
+        });
+    }
+    if !remap.is_empty() {
+        id_migration::write(
+            &journal,
+            &serde_json::to_value(&remap).map_err(|e| e.to_string())?,
+        )?;
+    }
+    if unreadable_book_details(root)? {
+        return Ok(());
+    }
+    id_migration::migrate(root, &remap)?;
+    crate::book_store::remap_metadata_at(root, "bookSourceId", &remap)?;
+    if journal.is_file() {
+        std::fs::remove_file(journal).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn unreadable_book_details(root: &Path) -> Result<bool, String> {
+    let mut pending = false;
+    for path in id_migration::details(root)? {
+        if id_migration::read(&path).is_err() {
+            log::warn!("旧书籍元信息无法读取，保留身份迁移待办，稍后重试");
+            pending = true;
+        }
+    }
+    Ok(pending)
+}
+
+/// The shared source crate still owns file writes; the App maintains SQLite references.
+pub(crate) fn save_source(
+    root: &Path,
+    source: &readerx_source::models::BookSource,
+    old: &str,
+) -> Result<(), String> {
+    if !readerx_source::store::valid_component(old)
+        || !readerx_source::store::valid_component(&source.id)
+    {
+        return Err("书源 ID 非法".into());
+    }
+    let journal = root.join("migrations/readerx.sqliteSourceRefs.json");
+    let mut remap: BTreeMap<String, String> = if journal.is_file() {
+        serde_json::from_value(id_migration::read(&journal)?).map_err(|e| e.to_string())?
+    } else {
+        BTreeMap::new()
+    };
+    remap.insert(old.to_string(), source.id.clone());
+    id_migration::write(
+        &journal,
+        &serde_json::to_value(&remap).map_err(|e| e.to_string())?,
+    )?;
+    id_migration::save_source(root, source, old)?;
+    crate::book_store::remap_metadata_at(root, "bookSourceId", &remap)?;
+    std::fs::remove_file(journal).map_err(|e| e.to_string())
+}
+
 fn text(value: &Value, key: &str) -> String {
     value
         .get(key)

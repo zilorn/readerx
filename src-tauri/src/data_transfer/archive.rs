@@ -125,7 +125,7 @@ pub(super) fn writer(file: File) -> ZipWriter<File> {
 }
 
 /// 文本类条目（JSON）的压缩参数
-pub(super) fn text_options(source: Option<&Path>) -> SimpleFileOptions {
+pub(crate) fn text_options(source: Option<&Path>) -> SimpleFileOptions {
     file_options(source, CompressionMethod::Deflated)
 }
 

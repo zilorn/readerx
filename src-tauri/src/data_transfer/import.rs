@@ -80,15 +80,35 @@ pub(super) fn apply<R: tauri::Runtime>(
         )?;
     }
 
-    let aliases = archive_sources.iter().map(|source| {
-        let local = if mode == ImportMode::Merge {
-            local_sources.iter().find(|local| same_source(&local.book_source_url, &source.url))
-        } else { None };
-        let target = local.map(|local| crate::sync::identity::entity_id(&local.id, "s-", crate::sync::identity::source_uid(&local.book_source_url)))
-            .unwrap_or_else(|| crate::sync::identity::entity_id(&source.id, "s-", crate::sync::identity::source_uid(&source.url)));
-        (source.id.clone(), target)
-    }).collect();
-    readerx_source::id_migration::migrate(&storage::data_root(app)?, &aliases)?;
+    let aliases = archive_sources
+        .iter()
+        .map(|source| {
+            let local = if mode == ImportMode::Merge {
+                local_sources
+                    .iter()
+                    .find(|local| same_source(&local.book_source_url, &source.url))
+            } else {
+                None
+            };
+            let target = local
+                .map(|local| {
+                    crate::sync::identity::entity_id(
+                        &local.id,
+                        "s-",
+                        crate::sync::identity::source_uid(&local.book_source_url),
+                    )
+                })
+                .unwrap_or_else(|| {
+                    crate::sync::identity::entity_id(
+                        &source.id,
+                        "s-",
+                        crate::sync::identity::source_uid(&source.url),
+                    )
+                });
+            (source.id.clone(), target)
+        })
+        .collect();
+    crate::sync::data_ids::migrate_sources(&storage::data_root(app)?, &aliases)?;
     crate::sync::book_ids::migrate(app)?;
     crate::sync::data_ids::migrate(&storage::data_root(app)?)?;
 
@@ -122,7 +142,6 @@ fn write_books<R: tauri::Runtime>(
     summary: &mut ImportSummary,
     report: &mut dyn FnMut(&str, u64, u64),
 ) -> Result<(), String> {
-    let root = storage::data_root(app)?.join(BOOKS_DIR);
     report("books", 0, plan.len() as u64);
     for (index, item) in plan.iter().enumerate() {
         match item.action {
@@ -131,31 +150,30 @@ fn write_books<R: tauri::Runtime>(
             BookAction::Skip => summary.books_skipped += 1,
         }
         if item.action != BookAction::Skip {
-            let dir = root.join(&item.local_id);
-            // 元信息先落盘，复用 write_bytes 的父目录创建；注释合并不能依赖归档字母顺序。
-            let entries = item.entries.iter()
-                .filter(|name| name.ends_with("/bookdetail.json"))
-                .chain(item.entries.iter().filter(|name| !name.ends_with("/bookdetail.json")));
-            for name in entries {
-                let Some(file) = name.rsplit('/').next() else {
+            let prefix = format!("{BOOKS_DIR}/{}/", item.archive_id);
+            let detail = archive::read_entry(zip, &format!("{prefix}bookdetail.json"))?
+                .ok_or("备份缺少书籍元信息")?;
+            let content = archive::read_entry(zip, &format!("{prefix}content.json"))?;
+            let detail = remap_detail(&detail, remap, mode)?;
+            book_store::import_book_json(app, &item.local_id, &detail, content.as_deref())?;
+            for name in &item.entries {
+                let file = name.rsplit('/').next().unwrap_or_default();
+                if !matches!(file, "annotations.json" | "bookmarks.json") {
                     continue;
-                };
+                }
                 let Some(bytes) = archive::read_entry(zip, name)? else {
                     continue;
                 };
-                match file {
-                    "bookdetail.json" => {
-                        let value = remap_detail(&bytes, remap, mode)?;
-                        write_bytes(&dir.join(file), &value)?;
-                    }
-                    "annotations.json" => {
-                        merge_annotation_file(app, &item.local_id, &bytes, mode)?;
-                    }
-                    "bookmarks.json" => {
-                        merge_bookmark_file(app, &item.local_id, &bytes, mode)?;
-                    }
-                    _ => write_bytes(&dir.join(file), &bytes)?,
+                if file == "annotations.json" {
+                    merge_annotation_file(app, &item.local_id, &bytes, mode)?;
+                } else {
+                    merge_bookmark_file(app, &item.local_id, &bytes, mode)?;
                 }
+            }
+            if mode == ImportMode::Replace
+                && !item.entries.iter().any(|n| n.ends_with("/bookmarks.json"))
+            {
+                book_store::put_bookmarks(app, &item.local_id, &[])?;
             }
         }
         // 本机已有同一本书（另一个 id）：归档里的书签仍要并进本机那本，不能丢
@@ -474,7 +492,7 @@ fn remove_extras<R: tauri::Runtime>(
         if keep_books.contains(book.id.as_str()) {
             continue;
         }
-        // 同步删除要读 bookdetail.json 定位身份，必须在删文件之前
+        // 同步删除要读书籍元信息定位身份，必须在删书之前
         hook.on_book_deleted(&book.id);
         book_store::delete_book(app, &book.id)?;
         summary.books_removed += 1;

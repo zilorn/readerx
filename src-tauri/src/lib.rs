@@ -138,7 +138,7 @@ pub fn run() {
                 log::warn!("启动清理存储临时文件失败：{error}");
             }
             // 本地书的旧布局（整本 books/<id>.json、全库一份的 state/readerx.bookmarks.json）
-            // 先转为目录布局，再统一书籍 ID；必须早于界面与同步线程访问书库。
+            // 逐本迁入 SQLite，再统一书籍 ID；必须早于界面与同步线程访问书库。
             sync::book_ids::migrate(app.handle()).map_err(std::io::Error::other)?;
             sync::data_ids::migrate(&storage::data_root(app.handle())?).map_err(std::io::Error::other)?;
             // 网页登录后端：把「插件（Android 原生浮层 / 桌面独立登录窗口）」注册为引擎的认证实现

@@ -150,7 +150,7 @@ pub async fn readerx_book_get(app: AppHandle, id: String) -> Result<Option<Local
     blocking("书籍读取", move || book_store::get_book(&app, &id)).await
 }
 
-/// 单本元信息补丁（分组 / 书名 / 封面 / 标签…）：只动 bookdetail.json，正文不读也不传。
+/// 单本元信息补丁（分组 / 书名 / 封面 / 标签…）：只动数据库元信息，正文不读也不传。
 #[tauri::command]
 pub async fn readerx_book_patch_meta(
     app: AppHandle,
@@ -198,7 +198,7 @@ pub async fn readerx_annotations_put(
     .await
 }
 
-/// 读取某本书的书签（books/<id>/bookmarks.json）；没有书签返回空列表。
+/// 读取某本书的数据库书签；没有书签返回空列表。
 /// 书签按书分文件，读写都不必碰正文，也不必碰其它书的书签。
 #[tauri::command]
 pub async fn readerx_bookmarks_get(app: AppHandle, book_id: String) -> Result<Vec<Value>, String> {
@@ -437,7 +437,7 @@ pub async fn readerx_source_put(app: AppHandle, mut source: BookSource) -> Resul
         validate_source(&source)?;
         let old = source.id.clone();
         source.id = sync::identity::entity_id(&old, "s-", sync::identity::source_uid(&source.book_source_url));
-        readerx_source::id_migration::save_source(&storage::data_root(&app)?, &source, &old)?;
+        sync::data_ids::save_source(&storage::data_root(&app)?, &source, &old)?;
         sync::service_hook(&app).on_source_changed(&source);
         Ok(source)
     })

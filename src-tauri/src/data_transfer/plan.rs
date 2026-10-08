@@ -60,7 +60,7 @@ pub(super) struct BookPlan {
     pub(super) entries: Vec<String>,
 }
 
-/// 本机书籍 id 与身份（读 `bookdetail.json`，不碰正文）
+/// 本机书籍 id 与身份（读数据库元信息，不碰正文）
 pub(super) fn local_books<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<LocalBook>, String> {
     let metas = book_store::list_sync_meta(app)?;
     // 书源地址只读一次：书籍身份要用它，逐本去列书源会变成 O(书 × 源)

@@ -56,18 +56,18 @@ fn setup() -> (tauri::AppHandle<tauri::test::MockRuntime>, PathBuf) {
     ] {
         let _ = fs::remove_dir_all(data_root.join(sub));
     }
+    fs::create_dir_all(&data_root).unwrap();
+    let _ = std::fs::remove_file(data_root.join("books.sqlite3"));
     (handle, data_root)
 }
 
+#[path = "../../tests/support/book_json.rs"]
+mod book_json;
 fn write_json(path: &Path, value: &Value) {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).unwrap();
-    }
-    fs::write(path, serde_json::to_string_pretty(value).unwrap()).unwrap();
+    book_json::write(path, value);
 }
-
 fn read_json(path: &Path) -> Value {
-    serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+    book_json::read(path)
 }
 
 /// 造一本本地书（与 `book_store.rs` 的目录布局一致）
@@ -258,6 +258,7 @@ fn export_and_merge_import_restores_everything() {
     ] {
         let _ = fs::remove_dir_all(root.join(sub));
     }
+    let _ = fs::remove_file(root.join("books.sqlite3"));
     let summary = import(&app, &backup, ImportMode::Merge);
     assert_eq!(summary.books_added, 2);
     assert_eq!(summary.sources_added, 1);
@@ -293,11 +294,17 @@ fn export_and_merge_import_restores_everything() {
         "卷首"
     );
     assert_eq!(
-        read_json(&root.join(format!("book_sources/{}.json", crate::sync::identity::source_uid("https://a.example.com"))))["bookSourceUrl"],
+        read_json(&root.join(format!(
+            "book_sources/{}.json",
+            crate::sync::identity::source_uid("https://a.example.com")
+        )))["bookSourceUrl"],
         "https://a.example.com"
     );
     assert_eq!(
-        read_json(&root.join(format!("source_sessions/{}.json", crate::sync::identity::source_uid("https://a.example.com"))))["cookie"],
+        read_json(&root.join(format!(
+            "source_sessions/{}.json",
+            crate::sync::identity::source_uid("https://a.example.com")
+        )))["cookie"],
         "sid=secret"
     );
     // 偏好类状态原样回来（换机时是「本机没有」→ 取归档那份）
@@ -338,9 +345,17 @@ fn export_without_credentials_leaves_login_state_and_passwords_out() {
     // 导入后本机的登录态不被删（归档没带它，不等于「用户不要了」）
     let summary = import(&app, &backup, ImportMode::Merge);
     assert_eq!(summary.books_updated, 2);
-    assert!(root.join(format!("source_sessions/{}.json", crate::sync::identity::source_uid("https://a.example.com"))).is_file());
+    assert!(root
+        .join(format!(
+            "source_sessions/{}.json",
+            crate::sync::identity::source_uid("https://a.example.com")
+        ))
+        .is_file());
     assert_eq!(
-        read_json(&root.join(format!("source_sessions/{}.json", crate::sync::identity::source_uid("https://a.example.com"))))["cookie"],
+        read_json(&root.join(format!(
+            "source_sessions/{}.json",
+            crate::sync::identity::source_uid("https://a.example.com")
+        )))["cookie"],
         "sid=secret"
     );
 }
@@ -377,7 +392,10 @@ fn merge_keeps_local_extras_and_newer_progress() {
     assert_eq!(summary.books_removed, 0);
 
     // 本机多出来的书一本都不动
-    assert!(root.join("books/b-3e75c5b1cc830167/bookdetail.json").is_file());
+    assert_eq!(
+        read_json(&root.join("books/b-3e75c5b1cc830167/bookdetail.json"))["title"],
+        "超新星纪元"
+    );
     // 进度按 updatedAt 取新的：本机那份更靠后 → 保留本机
     let shelf = read_json(&root.join("state/readerx.shelf.json"));
     assert_eq!(shelf["b-5e20dcb39c59dc92"]["chapter"], 9);
@@ -467,6 +485,7 @@ fn merge_matches_the_same_book_from_another_device_by_identity() {
     ] {
         let _ = fs::remove_dir_all(root.join(sub));
     }
+    fs::remove_file(root.join("books.sqlite3")).unwrap();
     seed_book(&root, "local-other", "三体", "三体.epub", 1024, None);
     seed_state(
         &root,
@@ -536,6 +555,25 @@ fn archive_read_json(path: &Path, entry: &str) -> Value {
         .clone()
 }
 
+fn omit_archive_entry(path: &Path, omitted: &str) {
+    let mut original = zip::ZipArchive::new(fs::File::open(path).unwrap()).unwrap();
+    let temporary = path.with_extension("test.zip");
+    let mut rewritten = zip::ZipWriter::new(fs::File::create(&temporary).unwrap());
+    for index in 0..original.len() {
+        let mut entry = original.by_index(index).unwrap();
+        if entry.name() == omitted {
+            continue;
+        }
+        rewritten
+            .start_file(entry.name(), archive::text_options(None))
+            .unwrap();
+        std::io::copy(&mut entry, &mut rewritten).unwrap();
+    }
+    drop(rewritten.finish().unwrap());
+    drop(original);
+    fs::rename(temporary, path).unwrap();
+}
+
 #[test]
 fn annotations_survive_archive_merge_replace_and_old_backup() {
     let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
@@ -550,6 +588,7 @@ fn annotations_survive_archive_merge_replace_and_old_backup() {
     );
     let backup = export(&app, &root, "annotations", false);
     fs::remove_dir_all(root.join("books")).unwrap();
+    fs::remove_file(root.join("books.sqlite3")).unwrap();
     import(&app, &backup, ImportMode::Merge);
     assert_eq!(read_json(&path)["annotations"][0], paragraph);
     let mut local = paragraph.clone();
@@ -568,8 +607,9 @@ fn annotations_survive_archive_merge_replace_and_old_backup() {
     );
     import(&app, &backup, ImportMode::Replace);
     assert_eq!(read_json(&path)["annotations"][0], paragraph);
-    fs::remove_file(&path).unwrap();
     let old_backup = export(&app, &root, "without-annotations", false);
+    // Reproduce a backup written before annotations existed, rather than merely storing an empty list.
+    omit_archive_entry(&old_backup, &format!("books/{id}/annotations.json"));
     write_json(&path, &json!({"schemaVersion":1,"annotations":[paragraph]}));
     import(&app, &old_backup, ImportMode::Replace);
     assert!(read_json(&path)["annotations"]

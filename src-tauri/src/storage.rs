@@ -1,7 +1,7 @@
 //! 持久化层（App 侧）：偏好 / 书架 / 分章规则等状态、听书缓存、以及应用数据根目录。
 //!
 //! - 状态按 key 存为 JSON 文件（`state/<key>.json`）；
-//! - **本地书籍**按 `books/<id>/` 目录存（元信息 / 正文 / 书签分文件，见 `book_store.rs`）；
+//! - **本地书籍**存入 `books.sqlite3`（见 `book_store.rs` 和 `book_store/sqlite.rs`）；
 //! - **书源与书源登录态**由 `readerx-source` crate 实现（见文件末尾的转发段）。
 //!
 //! 全部为同步磁盘 I/O，仅对 `commands` 暴露；WebView 侧只通过 command 访问。

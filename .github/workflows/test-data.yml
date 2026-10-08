@@ -1,0 +1,36 @@
+name: Test book storage and data compatibility
+
+on:
+  pull_request:
+    paths:
+      - 'src-tauri/**'
+      - '.github/workflows/test-data.yml'
+      - '.github/actions/setup-build/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-data-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  data-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup-build
+      - name: Prepare frontend assets
+        run: pnpm build
+      - name: Book storage, migrations, backups and sync integration
+        working-directory: src-tauri
+        run: |
+          cargo test --locked -p readerx --lib book_store
+          cargo test --locked -p readerx --lib sync::book_ids
+          cargo test --locked -p readerx --lib sync::data_ids
+          cargo test --locked -p readerx --lib data_transfer
+          cargo test --locked -p readerx --test sync_bridge
+          cargo test --locked -p readerx-sync
+          cargo test --locked -p readerx-source

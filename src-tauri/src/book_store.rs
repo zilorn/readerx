@@ -1,29 +1,7 @@
-//! 本地书存储：`books/<id>/` 目录布局（元信息 / 正文 / 书签分文件）。
-//!
-//! ```text
-//! <应用数据目录>/books/<id>/
-//!   bookdetail.json   元信息（书名、作者、封面、分组、标签…，不含正文）
-//!   content.json      章节正文
-//!   bookmarks.json    该书书签
-//!   annotations.json  按段落聚合的注释
-//!   digest.json       章节正文指纹缓存（同步对账用；派生数据，删了会自动重建）
-//! ```
-//!
-//! **为什么拆开**：原先整本只有一个 `books/<id>.json`，改一个分组名也要把几百 MB 的
-//! 正文读回来再整本写一遍；书签更是全库挤在一个 `state/readerx.bookmarks.json` 里，
-//! 删一本书的书签得把所有书的书签重写一遍。拆开后每类数据各写各的文件，互不牵连：
-//! 元信息补丁只动 `bookdetail.json`，逐章回写只动 `content.json`，书签只动 `bookmarks.json`。
-//!
-//! 三个文件都带 `schemaVersion` 信封，便于以后再改格式时识别版本；
-//! 书签记录的结构由前端定义，这里只做信封与存取，不解析记录内容（免得以后加字段被后端丢弃）。
-//!
-//! **旧布局迁移**（[`migrate_legacy_layout`]，进程内只跑一次、幂等）：
-//! - `books/<id>.json`（整本）→ `books/<id>/{bookdetail,content}.json`，成功后才删旧文件；
-//! - `state/readerx.bookmarks.json`（全库书签一处）→ 各书 `bookmarks.json`，
-//!   全部迁完后旧文件改名为 `.migrated` 留底。
-//!
-//! 迁移没成功的书仍可按旧布局读取（[`get_book`] / [`list_book_meta`] 留有回退），
-//! 不会因为一次写盘失败就从书架上凭空消失。
+//! 本地书籍数据存储在应用数据根的 `books.sqlite3`。
+//! 元信息、逐章正文与派生指纹、书签和注释经 SQLite 事务读写。
+//! 旧目录 / 整书 JSON 逐本迁移，成功后改名 `.migrated` 留底，失败保留读回退。
+//! TTS、书源、状态 JSON 与图片字节保持文件存储；备份仍采用原 JSON 归档格式。
 
 use crate::models::{
     BookChapterPatch, BookMeta, BookMetaPatch, ChapterBlock, ChapterHead, LocalBook,
@@ -35,14 +13,19 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{BufReader, BufWriter};
+use std::io::BufReader;
+#[cfg(test)]
+use std::io::BufWriter;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 use tauri::AppHandle;
 
-/// 元信息文件
+#[path = "book_store/sqlite.rs"]
+mod sqlite;
+
+/// 旧布局 / 便携备份的元信息文件名
 const BOOKDETAIL_FILE: &str = "bookdetail.json";
-/// 正文文件
+/// 旧布局 / 便携备份的正文文件名
 const CONTENT_FILE: &str = "content.json";
 /// 段落注释文件
 const ANNOTATIONS_FILE: &str = "annotations.json";
@@ -217,6 +200,7 @@ fn read_annotations_file(path: &Path) -> Result<Vec<Value>, String> {
     }
     Ok(file.annotations)
 }
+#[cfg(test)]
 fn write_annotations_file(path: &Path, annotations: &[Value]) -> Result<(), String> {
     write_json_atomic(
         path,
@@ -338,54 +322,8 @@ fn scan_chapter_head(chapter: ChapterScan) -> ChapterHead {
 // 路径与落盘
 // ---------------------------------------------------------------------------
 
-/// `books/` 根目录（不存在则创建）
-fn books_root<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
-    let dir = crate::storage::data_root(app)?.join("books");
-    crate::storage::ensure_dir(&dir)?;
-    Ok(dir)
-}
-
-/// 单本书的目录路径。**不创建目录**：读路径不该给不存在的书留下空目录。
-fn book_dir<R: tauri::Runtime>(app: &AppHandle<R>, id: &str) -> Result<PathBuf, String> {
-    book_dir_at(app, None, id)
-}
-
-/// 同 [`book_dir`]，但允许指定数据根（见 `storage::data_root_at`）。
-fn book_dir_at<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    root: Option<&Path>,
-    id: &str,
-) -> Result<PathBuf, String> {
-    if !crate::storage::valid_component(id) {
-        return Err("非法的书籍 id".to_string());
-    }
-    Ok(crate::storage::data_root_at(app, root)?.join("books").join(id))
-}
-
-/// 旧布局的整书文件路径：`books/<id>.json`
-fn legacy_book_file<R: tauri::Runtime>(app: &AppHandle<R>, id: &str) -> Result<PathBuf, String> {
-    if !crate::storage::valid_component(id) {
-        return Err("非法的书籍 id".to_string());
-    }
-    Ok(crate::storage::data_root(app)?.join("books").join(format!("{id}.json")))
-}
-
-/// 写路径用的书籍目录：不存在则建；调用方已持事务锁并完成旧布局迁移。
-fn ensure_book_dir<R: tauri::Runtime>(app: &AppHandle<R>, id: &str) -> Result<PathBuf, String> {
-    let dir = book_dir(app, id)?;
-    if dir.is_dir() {
-        return Ok(dir);
-    }
-    if legacy_book_file(app, id)?.is_file() {
-        // 旧文件还在说明这本没迁移成功（畸形文件 / 写盘失败）：不能当它不存在，
-        // 否则会凭空造出一个没有正文的空书目录，把旧数据挡在外面
-        return Err("书籍数据迁移失败，请查看应用日志".to_string());
-    }
-    crate::storage::ensure_dir(&dir)?;
-    Ok(dir)
-}
-
 /// 原子写 JSON：先写临时文件再替换（中途失败 / 进程被杀不会留下半截文件）
+#[cfg(test)]
 fn write_json_atomic<T: Serialize>(path: &Path, value: &T, what: &str) -> Result<(), String> {
     let tmp = path.with_extension("json.tmp");
     let _temporary = crate::temporary_file::TemporaryFile(tmp.clone());
@@ -394,7 +332,10 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T, what: &str) -> Result
         let mut writer = BufWriter::new(file);
         serde_json::to_writer(&mut writer, value).map_err(|e| format!("序列化{what}失败: {e}"))?;
         std::io::Write::flush(&mut writer).map_err(|e| format!("写入{what}失败: {e}"))?;
-        writer.get_ref().sync_all().map_err(|e| format!("写入{what}失败: {e}"))?;
+        writer
+            .get_ref()
+            .sync_all()
+            .map_err(|e| format!("写入{what}失败: {e}"))?;
     }
     fs::rename(&tmp, path).map_err(|e| format!("写入{what}失败: {e}"))
 }
@@ -424,32 +365,6 @@ fn scan_json_file<T: DeserializeOwned>(path: &Path) -> Result<T, String> {
     }
 }
 
-/// 书籍文件较大时先做一次「流式图片迁移」：把旧数据里以 data URL 形式塞进章节的图片
-/// 抽成本地文件（内存占用只与单张图片同级）。这样后续「读回整本再解析」不会为了
-/// 几百 MB 的 base64 把内存打满 —— 旧版本正是因此在大图片书籍上直接闪退。
-/// 迁移失败（畸形文件等）只记日志、不影响原路径读取。
-fn stream_migrate_if_large<R: tauri::Runtime>(app: &AppHandle<R>, id: &str, path: &Path) {
-    let Ok(metadata) = fs::metadata(path) else {
-        return;
-    };
-    if metadata.len() < crate::book_images::STREAM_MIGRATE_MIN_BYTES {
-        return;
-    }
-    // 没有内嵌图片（纯文本巨书）就不必整本重写一遍
-    if !crate::book_images::file_has_data_image(path) {
-        return;
-    }
-    let Ok(root) = crate::book_images::images_root(app) else {
-        log::warn!("书籍图片迁移无法定位图片目录（{id}），本次跳过");
-        return;
-    };
-    match crate::book_images::migrate_book_file(&root, id, path) {
-        Ok(true) => log::info!("书籍图片迁移完成 id={id}（data URL 已抽成本地文件）"),
-        Ok(false) => {}
-        Err(error) => log::warn!("书籍图片迁移跳过（{id}）: {error}"),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // 目录布局的读写（纯路径，便于单测）
 // ---------------------------------------------------------------------------
@@ -459,6 +374,7 @@ fn stream_migrate_if_large<R: tauri::Runtime>(app: &AppHandle<R>, id: &str, path
 /// **先写正文再写元信息**：书名等信息是「书已在书架上」的标志（列表按 bookdetail.json
 /// 判定），正文先落盘可以保证「列表里能看到的书一定有正文」；反过来写就会出现
 /// 一本点开是空白的书。
+#[cfg(test)]
 fn write_book_files(dir: &Path, book: LocalBook) -> Result<(), String> {
     let detail = BookDetail::from_book(&book);
     let content = BookContent {
@@ -471,12 +387,14 @@ fn write_book_files(dir: &Path, book: LocalBook) -> Result<(), String> {
 }
 
 /// 只回写正文（逐章回写用）
+#[cfg(test)]
 fn write_book_content(dir: &Path, chapters: &[LocalBookChapter]) -> Result<(), String> {
     write_book_content_with_digests(dir, chapters, None)
 }
 
 /// 写正文 + 章节指纹缓存：`digests` 为 `Some` 时直接用调用方算好的（逐章回写路径
 /// 只重算改动的那几章），`None` 时整本重算。
+#[cfg(test)]
 fn write_book_content_with_digests(
     dir: &Path,
     chapters: &[LocalBookChapter],
@@ -493,7 +411,9 @@ fn write_book_content_with_digests(
             let mut assets = read_digest_assets(dir, chapters.len());
             for (index, chapter) in chapters.iter().enumerate() {
                 if let Some(slot) = assets.get_mut(index) {
-                    *slot = ChapterAssets { locals: chapter_asset_locals(chapter) };
+                    *slot = ChapterAssets {
+                        locals: chapter_asset_locals(chapter),
+                    };
                 }
             }
             write_digest_file_with(dir, digests, assets)
@@ -529,11 +449,13 @@ fn read_meta_from_dir(dir: &Path) -> Result<Option<BookMeta>, String> {
     let detail: BookDetail = read_json_file(&detail_path, "书籍元信息")?;
     let content_path = dir.join(CONTENT_FILE);
     let chapters = if content_path.is_file() {
-        scan_json_file::<ContentScan>(&content_path)?
-            .chapters
-            .into_iter()
-            .map(scan_chapter_head)
-            .collect()
+        match scan_json_file::<ContentScan>(&content_path) {
+            Ok(scan) => scan.chapters.into_iter().map(scan_chapter_head).collect(),
+            Err(error) => {
+                log::warn!("旧书籍正文损坏，保留书架元信息：{error}");
+                Vec::new()
+            }
+        }
     } else {
         Vec::new()
     };
@@ -542,7 +464,12 @@ fn read_meta_from_dir(dir: &Path) -> Result<Option<BookMeta>, String> {
 
 /// 旧布局整书文件 → 目录布局（幂等）：先写齐两个新文件，成功后才删旧文件。
 /// 任何一步失败都保留旧文件，调用方下次仍能按旧布局读出来。
-fn convert_legacy_book(dir: &Path, legacy: &Path, images_root: Option<&Path>) -> Result<(), String> {
+#[cfg(test)]
+fn convert_legacy_book(
+    dir: &Path,
+    legacy: &Path,
+    images_root: Option<&Path>,
+) -> Result<(), String> {
     let mut book: LocalBook = read_json_file(legacy, "书籍")?;
     // 旧数据里的 data URL 图片：迁移机会只有这一次，顺手抽成文件
     if let Some(root) = images_root {
@@ -567,6 +494,7 @@ fn read_bookmarks_file(path: &Path) -> Result<Vec<Value>, String> {
     Ok(file.bookmarks)
 }
 
+#[cfg(test)]
 fn write_bookmarks_file(path: &Path, bookmarks: &[Value]) -> Result<(), String> {
     let file = BookmarkFile {
         schema_version: SCHEMA_VERSION,
@@ -579,19 +507,6 @@ fn write_bookmarks_file(path: &Path, bookmarks: &[Value]) -> Result<(), String> 
 // 旧布局迁移
 // ---------------------------------------------------------------------------
 
-/// 进程内迁移账本：串行化迁移，并记住这次已经试过的书
-/// （迁移失败的书仍按旧布局读，但不反复重读同一个坏文件）。
-#[derive(Default)]
-struct LegacyMigration {
-    done: bool,
-    attempted: HashSet<String>,
-}
-
-fn legacy_migration() -> &'static Mutex<LegacyMigration> {
-    static STATE: OnceLock<Mutex<LegacyMigration>> = OnceLock::new();
-    STATE.get_or_init(|| Mutex::new(LegacyMigration::default()))
-}
-
 /// 所有书库入口共用事务锁；不持锁调用同步引擎，避免引擎与磁盘锁顺序反转。
 /// 读操作也参与，保证元信息、正文和派生缓存来自同一次完整写入。
 fn library_transaction() -> std::sync::MutexGuard<'static, ()> {
@@ -599,78 +514,10 @@ fn library_transaction() -> std::sync::MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|error| error.into_inner())
 }
 
-/// 旧布局迁移（幂等）。每次运行最多走一遍：单本书失败只记日志并把旧文件留着
-/// （该书的列表与阅读都留有旧布局回退），不在这次运行里反复重试 ——
-/// 失败的书已记进账本，下次启动（新的账本）才会再试。
-/// 各书籍 / 书签读写入口都会先调用它兜底，因此不必在别处手动触发。
-fn migrate_legacy_layout<R: tauri::Runtime>(app: &AppHandle<R>) {
-    let Ok(mut state) = legacy_migration().lock() else {
-        // 锁中毒：别的线程在迁移中 panic 了，本次跳过（下次启动再来）
-        return;
-    };
-    if state.done {
-        return;
-    }
-    state.done = true;
-    if let Err(error) = migrate_books(app, &mut state) {
-        log::warn!("旧书籍布局迁移未完成（下次启动继续）: {error}");
-    } else if let Err(error) = migrate_legacy_bookmarks(app) {
-        log::warn!("旧书签迁移未完成（下次启动继续）: {error}");
-    }
-}
-
-/// `books/<id>.json` → `books/<id>/{bookdetail,content}.json`
-fn migrate_books<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    state: &mut LegacyMigration,
-) -> Result<(), String> {
-    let dir = books_root(app)?;
-    let images = crate::book_images::images_root(app).ok();
-    for entry in fs::read_dir(&dir).map_err(|e| format!("读取书库失败: {e}"))?.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("json") {
-            continue;
-        }
-        let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        if state.attempted.contains(id) {
-            continue;
-        }
-        state.attempted.insert(id.to_string());
-        // 大文件先流式抽图，避免整本 base64 进内存
-        stream_migrate_if_large(app, id, &path);
-        if let Err(error) = convert_legacy_book(&dir.join(id), &path, images.as_deref()) {
-            log::warn!("书籍旧布局迁移失败（{id}），保留原文件: {error}");
-            continue;
-        }
-        log::info!("书籍已迁移到目录布局 id={id}");
-    }
-    Ok(())
-}
-
-/// `state/readerx.bookmarks.json`（全库书签一处）→ 各书 `books/<id>/bookmarks.json`。
-/// 全部能迁的都迁完之后，旧文件改名为 `.migrated` 留底（不再参与读取）。
-fn migrate_legacy_bookmarks<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<u64, String> {
-    let legacy = crate::storage::state_dir(app)?.join("readerx.bookmarks.json");
-    if !legacy.is_file() {
-        return Ok(0);
-    }
-    let books = crate::storage::data_root(app)?.join("books");
-    let (migrated, pending) = split_legacy_bookmarks(&legacy, &books)?;
-    if pending > 0 {
-        // 有书还没迁过来（迁移失败）：整份旧文件留着，下次继续
-        return Err(format!("还有 {pending} 本书未完成迁移"));
-    }
-    let backup = legacy.with_extension("json.migrated");
-    fs::rename(&legacy, &backup).map_err(|e| format!("归档旧书签文件失败: {e}"))?;
-    log::info!("书签已迁移为每本书独立文件 books={migrated}");
-    Ok(migrated)
-}
-
 /// 把「全库一份」的旧书签按书拆开写进各自的 `books/<id>/bookmarks.json`（幂等）。
 /// 返回（已写入的书数，因书籍目录还不存在而暂时跳过的书数）——调用方据此决定
 /// 能否归档旧文件：只要还有书没迁过来，旧文件就不能动。
+#[cfg(test)]
 fn split_legacy_bookmarks(legacy: &Path, books_dir: &Path) -> Result<(u64, u64), String> {
     let text = fs::read_to_string(legacy).map_err(|e| format!("读取旧书签失败: {e}"))?;
     let map: HashMap<String, Vec<Value>> =
@@ -708,85 +555,73 @@ fn split_legacy_bookmarks(legacy: &Path, books_dir: &Path) -> Result<(u64, u64),
 // 对外读写
 // ---------------------------------------------------------------------------
 
-/// 读整本书。目录布局优先；迁移没成功的旧文件仍可读（内容不丢）。
+/// 读整本书。数据库优先；迁移失败时保留旧 JSON 读回退。
 pub(crate) fn get_book<R: tauri::Runtime>(
-    app: &AppHandle<R>, id: &str,
+    app: &AppHandle<R>,
+    id: &str,
 ) -> Result<Option<LocalBook>, String> {
     let _transaction = library_transaction();
-    migrate_legacy_layout(app);
-    let dir = book_dir(app, id)?;
-    if let Some(mut book) = read_book_from_dir(&dir)? {
-        // 图片自愈：本地副本不在了就清引用、旧数据里的 data URL 抽成文件（有改动才回写）
-        if let Ok(root) = crate::book_images::images_root(app) {
-            if crate::book_images::migrate_chapters(&root, id, &mut book.chapters) {
-                log::info!("书籍图片旧数据迁移完成 id={id}");
-                write_book_content(&dir, &book.chapters)?;
+    sqlite::valid_id(id)?;
+    let root = crate::storage::data_root(app)?;
+    match sqlite::open(&root) {
+        Ok(mut db) => {
+            if let Some(mut book) = sqlite::get(&db, id)? {
+                if crate::book_images::migrate_chapters(
+                    &root.join("images"),
+                    id,
+                    &mut book.chapters,
+                ) {
+                    let tx = sqlite::transaction(&mut db)?;
+                    sqlite::put(&tx, &book)?;
+                    sqlite::commit(tx)?;
+                }
+                return Ok(Some(book));
             }
         }
-        return Ok(Some(book));
+        Err(error) => {
+            if !root.join("books").join(id).join(BOOKDETAIL_FILE).is_file()
+                && !root.join("books").join(format!("{id}.json")).is_file()
+            {
+                return Err(error);
+            }
+            log::warn!("数据库读取失败，使用未迁移书籍 id={id}");
+        }
     }
-    let legacy = legacy_book_file(app, id)?;
-    if !legacy.is_file() {
-        return Ok(None);
-    }
-    stream_migrate_if_large(app, id, &legacy);
-    let book = read_json_file(&legacy, "书籍")?;
-    log::debug!("按旧布局读取书籍 id={id}");
-    Ok(Some(book))
+    legacy_book_at(&root, id)
 }
 
 /// 整本写入（导入 / 在线书整本替换）。
 pub(crate) fn put_book<R: tauri::Runtime>(
-    app: &AppHandle<R>, mut book: LocalBook,
+    app: &AppHandle<R>,
+    mut book: LocalBook,
 ) -> Result<(), String> {
     let _transaction = library_transaction();
-    migrate_legacy_layout(app);
-    let dir = ensure_book_dir(app, &book.id)?;
-    if let Ok(root) = crate::book_images::images_root(app) {
-        crate::book_images::migrate_book(&root, &mut book);
+    let root = crate::storage::data_root(app)?;
+    let mut db = sqlite::open(&root)?;
+    sqlite::valid_id(&book.id)?;
+    if sqlite::detail(&db, &book.id)?.is_none() && legacy_book_at(&root, &book.id)?.is_some() {
+        return Err("书籍数据迁移失败，请查看应用日志".into());
     }
-    write_book_files(&dir, book)
+    crate::book_images::migrate_book(&root.join("images"), &mut book);
+    let tx = sqlite::transaction(&mut db)?;
+    sqlite::put(&tx, &book)?;
+    sqlite::commit(tx)
 }
 
-/// 只回写一本书的若干章节（在线书逐批下载正文用）：
-/// 只读改 `content.json`，元信息一个字节都不碰（原先要把整本读回来再整本写）。
+/// 按 cid 增量回写章节正文；批次及字数 / 指纹 / 图片引用在同一事务内提交。
 pub(crate) fn put_book_chapters<R: tauri::Runtime>(
     app: &AppHandle<R>,
     id: &str,
     updates: &[BookChapterPatch],
 ) -> Result<(), String> {
     let _transaction = library_transaction();
-    migrate_legacy_layout(app);
-    let dir = book_dir(app, id)?;
-    let path = dir.join(CONTENT_FILE);
-    if !path.is_file() {
-        return Err(missing_book_error(app, id)?);
-    }
-    stream_migrate_if_large(app, id, &path);
-    let mut content: BookContent = read_json_file(&path, "书籍正文")?;
-    // 章节指纹缓存：这里只更新被回写的这几章（整本重算 = 把几百 MB 正文重新哈希一遍，
-    // 在线书逐批下载会一批调用一次）；缓存对不上号时退回整本重算。
-    let mut digests = read_digest_file(&dir).ok().filter(|digests| {
-        digests.len() == content.chapters.len()
-            && digests
-                .iter()
-                .zip(content.chapters.iter())
-                .all(|(digest, chapter)| digest.cid == chapter.cid)
-    });
-    let indices = patch_chapters(&mut content.chapters, updates)?;
-    // 迁移结果只在内存里，写盘时自然落定；写盘失败也不影响本次章节回写的数据
-    if let Ok(root) = crate::book_images::images_root(app) {
-        crate::book_images::migrate_chapters(&root, id, &mut content.chapters);
-    }
-    if let Some(digests) = digests.as_mut() {
-        for index in indices {
-            digests[index] = chapter_digest(&content.chapters[index]);
-        }
-    }
-    write_book_content_with_digests(&dir, &content.chapters, digests)
+    let root = crate::storage::data_root(app)?;
+    let mut db = sqlite::open(&root)?;
+    sqlite::patch(&mut db, &root, id, updates)
 }
 
 /// 下标仅是旧客户端的提示；身份必须以 cid 为准，目录变更不能改变正文归属。
+#[cfg(test)]
 fn patch_chapters(
     chapters: &mut [LocalBookChapter],
     updates: &[BookChapterPatch],
@@ -817,7 +652,7 @@ fn patch_chapters(
     Ok(indices)
 }
 
-/// 只改元信息（分组 / 书名 / 封面 / 标签…）：只读写 `bookdetail.json`，
+/// 只改元信息（分组 / 书名 / 封面 / 标签…）：只读写 books 行，
 /// 几百 MB 的正文不必读回来，也不经过 IPC。
 pub(crate) fn patch_book_meta<R: tauri::Runtime>(
     app: &AppHandle<R>,
@@ -825,37 +660,51 @@ pub(crate) fn patch_book_meta<R: tauri::Runtime>(
     patch: &BookMetaPatch,
 ) -> Result<(), String> {
     let _transaction = library_transaction();
-    migrate_legacy_layout(app);
-    let path = book_dir(app, id)?.join(BOOKDETAIL_FILE);
-    if !path.is_file() {
-        return Err(missing_book_error(app, id)?);
+    let root = crate::storage::data_root(app)?;
+    let mut db = sqlite::open(&root)?;
+    sqlite::require_book(&db, &root, id)?;
+    let tx = sqlite::transaction(&mut db)?;
+    let mut book = sqlite::detail(&tx, id)?
+        .ok_or("书籍不存在")?
+        .into_book(Vec::new());
+    if patch.apply_to(&mut book) {
+        sqlite::save_detail(&tx, &BookDetail::from_book(&book))?;
     }
-    let detail: BookDetail = read_json_file(&path, "书籍元信息")?;
-    // 借用 LocalBook 的补丁语义，保证与旧实现逐字段一致（正文不参与）
-    let mut book = detail.into_book(Vec::new());
-    if !patch.apply_to(&mut book) {
-        return Ok(());
-    }
-    write_json_atomic(&path, &BookDetail::from_book(&book), "书籍元信息")
-}
-
-/// 「书籍不存在」的具体原因：旧文件还在说明是迁移没成功（畸形文件 / 写盘失败），
-/// 直接说「不存在」会让用户以为是书被删了。
-fn missing_book_error<R: tauri::Runtime>(app: &AppHandle<R>, id: &str) -> Result<String, String> {
-    if legacy_book_file(app, id)?.is_file() {
-        return Ok("书籍数据迁移失败，请查看应用日志".to_string());
-    }
-    Ok("书籍不存在".to_string())
+    sqlite::commit(tx)
 }
 
 /// 读取某本书的书签（书不存在 / 没有书签都返回空列表）
 pub(crate) fn get_bookmarks<R: tauri::Runtime>(
-    app: &AppHandle<R>, id: &str,
+    app: &AppHandle<R>,
+    id: &str,
 ) -> Result<Vec<Value>, String> {
     let _transaction = library_transaction();
-    migrate_legacy_layout(app);
-    let path = book_dir(app, id)?.join(BOOKMARKS_FILE);
-    read_bookmarks_file(&path)
+    sqlite::valid_id(id)?;
+    let root = crate::storage::data_root(app)?;
+    match sqlite::open(&root) {
+        Ok(db) if sqlite::detail(&db, id)?.is_some() => sqlite::records(&db, "bookmarks", id),
+        Ok(_) => legacy_bookmarks_at(&root, id),
+        Err(error) => {
+            let path = root.join("books").join(id).join(BOOKMARKS_FILE);
+            if !path.is_file() && !root.join("state/readerx.bookmarks.json").is_file() {
+                return Err(error);
+            }
+            legacy_bookmarks_at(&root, id)
+        }
+    }
+}
+
+fn legacy_bookmarks_at(root: &Path, id: &str) -> Result<Vec<Value>, String> {
+    let path = root.join("books").join(id).join(BOOKMARKS_FILE);
+    if path.is_file() {
+        return read_bookmarks_file(&path);
+    }
+    let global = root.join("state/readerx.bookmarks.json");
+    if global.is_file() {
+        let mut records: HashMap<String, Vec<Value>> = read_json_file(&global, "旧书签")?;
+        return Ok(records.remove(id).unwrap_or_default());
+    }
+    Ok(Vec::new())
 }
 
 /// 覆盖式写入某本书的书签
@@ -865,14 +714,17 @@ pub(crate) fn put_bookmarks<R: tauri::Runtime>(
     bookmarks: &[Value],
 ) -> Result<(), String> {
     let _transaction = library_transaction();
-    migrate_legacy_layout(app);
-    let dir = book_dir(app, id)?;
-    if !dir.is_dir() {
-        // 书已经不在了（删书与写书签撞上）：不落盘，也不留下一个只有书签的孤儿目录
-        log::debug!("书籍不存在，书签未写入 id={id}");
+    let root = crate::storage::data_root(app)?;
+    let db = sqlite::open(&root)?;
+    if sqlite::detail(&db, id)?.is_none() {
+        if root.join("books").join(id).join(BOOKDETAIL_FILE).is_file()
+            || root.join("books").join(format!("{id}.json")).is_file()
+        {
+            sqlite::require_book(&db, &root, id)?;
+        }
         return Ok(());
     }
-    write_bookmarks_file(&dir.join(BOOKMARKS_FILE), bookmarks)
+    sqlite::put_records(&db, "bookmarks", id, bookmarks)
 }
 
 pub(crate) fn get_annotations<R: tauri::Runtime>(
@@ -880,8 +732,19 @@ pub(crate) fn get_annotations<R: tauri::Runtime>(
     id: &str,
 ) -> Result<Vec<Value>, String> {
     let _transaction = library_transaction();
-    migrate_legacy_layout(app);
-    read_annotations_file(&book_dir(app, id)?.join(ANNOTATIONS_FILE))
+    sqlite::valid_id(id)?;
+    let root = crate::storage::data_root(app)?;
+    match sqlite::open(&root) {
+        Ok(db) if sqlite::detail(&db, id)?.is_some() => sqlite::records(&db, "annotations", id),
+        Ok(_) => read_annotations_file(&root.join("books").join(id).join(ANNOTATIONS_FILE)),
+        Err(error) => {
+            let path = root.join("books").join(id).join(ANNOTATIONS_FILE);
+            if !path.is_file() {
+                return Err(error);
+            }
+            read_annotations_file(&path)
+        }
+    }
 }
 pub(crate) fn put_annotations<R: tauri::Runtime>(
     app: &AppHandle<R>,
@@ -889,44 +752,87 @@ pub(crate) fn put_annotations<R: tauri::Runtime>(
     annotations: &[Value],
 ) -> Result<(), String> {
     let _transaction = library_transaction();
-    migrate_legacy_layout(app);
-    let dir = book_dir(app, id)?;
-    if !dir.is_dir() {
-        return Err("书籍不存在".into());
-    }
-    write_annotations_file(&dir.join(ANNOTATIONS_FILE), annotations)
+    let root = crate::storage::data_root(app)?;
+    let db = sqlite::open(&root)?;
+    sqlite::require_book(&db, &root, id)?;
+    sqlite::put_records(&db, "annotations", id, annotations)
 }
 
 /// 前端快照只用于算差集，读改写在同一书库事务内保留刚落地的远端记录。
 pub(crate) fn patch_annotations<R: tauri::Runtime>(
-    app: &AppHandle<R>, id: &str, previous: &[Value], next: &[Value],
+    app: &AppHandle<R>,
+    id: &str,
+    previous: &[Value],
+    next: &[Value],
 ) -> Result<Vec<Value>, String> {
     let changed = crate::annotations::changed(previous, next)?;
     let _transaction = library_transaction();
-    migrate_legacy_layout(app);
-    let dir = book_dir(app, id)?;
-    if !dir.is_dir() { return Err("书籍不存在".into()); }
-    let path = dir.join(ANNOTATIONS_FILE);
-    let mut current = read_annotations_file(&path)?;
+    let root = crate::storage::data_root(app)?;
+    let mut db = sqlite::open(&root)?;
+    sqlite::require_book(&db, &root, id)?;
+    let tx = sqlite::transaction(&mut db)?;
+    let mut current = sqlite::records(&tx, "annotations", id)?;
     let existing = crate::annotations::flatten(&current)?;
-    for note in existing.values() { crate::annotations::upsert(&mut current, note); }
-    for note in changed.values() { crate::annotations::upsert(&mut current, note); }
-    write_annotations_file(&path, &current)?;
+    for note in existing.values() {
+        crate::annotations::upsert(&mut current, note);
+    }
+    for note in changed.values() {
+        crate::annotations::upsert(&mut current, note);
+    }
+    sqlite::put_records(&tx, "annotations", id, &current)?;
+    sqlite::commit(tx)?;
     Ok(current)
 }
 
-/// 删除一本书：整个书籍目录（含书签）连同听书缓存、章节插图一起清掉。
+/// 删除一本书：数据库级联清理，文件缓存和独占图片仍在文件层清理。
 pub(crate) fn delete_book<R: tauri::Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), String> {
     let _transaction = library_transaction();
-    migrate_legacy_layout(app);
-    if !crate::storage::valid_component(id) {
-        return Err("非法的书籍 id".to_string());
+    let root = crate::storage::data_root(app)?;
+    let db = sqlite::open(&root)?;
+    sqlite::valid_id(id)?;
+    let mut locals: Vec<_> = sqlite::assets(&db, id)?
+        .into_iter()
+        .map(|(_, local)| local)
+        .collect();
+    // Remove failed legacy inputs before the row, so a failed cleanup cannot resurrect the book.
+    let books = root.join("books");
+    for path in [
+        books.join(id).join(CONTENT_FILE),
+        books.join(format!("{id}.json")),
+    ] {
+        if let Ok(names) = image_locals_from_file(&path) {
+            locals.extend(names);
+        }
     }
-    let books = books_root(app)?;
-    let images = crate::book_images::images_root(app).ok();
-    delete_book_files(&books, images.as_deref(), id)?;
+    for path in [books.join(id), books.join(format!("{id}.json"))] {
+        if path.is_dir() {
+            fs::remove_dir_all(path).map_err(|e| e.to_string())?;
+        } else if path.is_file() {
+            fs::remove_file(path).map_err(|e| e.to_string())?;
+        }
+    }
+    sqlite::delete(&db, id)?;
+    let references = (|| {
+        let mut references = remaining_image_locals(&books)?;
+        for detail in sqlite::details(&db)? {
+            references.extend(
+                sqlite::assets(&db, &detail.id)?
+                    .into_iter()
+                    .map(|(_, local)| local),
+            );
+        }
+        Ok::<_, String>(references)
+    })();
+    match references {
+        Ok(references) => {
+            crate::book_images::remove_book_images(&root.join("images"), &locals, |name| {
+                !references.contains(name)
+            });
+        }
+        Err(error) => log::warn!("删书后插图引用检查失败，保留图片：{error}"),
+    }
     crate::storage::remove_book_tts_cache(app, id)?;
-    log::info!("书籍已删除 id={id}（含书签、听书缓存与章节插图）");
+    log::info!("书籍已删除 id={id}（含书签、注释与听书缓存）");
     Ok(())
 }
 
@@ -942,24 +848,22 @@ pub(crate) fn normalize_book_images<R: tauri::Runtime>(
     id: &str,
 ) -> Result<bool, String> {
     let _transaction = library_transaction();
-    let dir = book_dir_at(app, root, id)?;
-    if !dir.join(BOOKDETAIL_FILE).is_file() {
+    let root = crate::storage::data_root_at(app, root)?;
+    let mut db = sqlite::open(&root)?;
+    let Some(mut book) = sqlite::get(&db, id)? else {
+        return Ok(false);
+    };
+    if !crate::book_images::normalize_image_refs(&root.join("images"), &mut book.chapters) {
         return Ok(false);
     }
-    let content_path = dir.join(CONTENT_FILE);
-    if !content_path.is_file() {
-        return Ok(false);
-    }
-    let mut content: BookContent = read_json_file(&content_path, "书籍正文")?;
-    let images_root = crate::book_images::images_root_at(app, root)?;
-    if !crate::book_images::normalize_image_refs(&images_root, &mut content.chapters) {
-        return Ok(false);
-    }
-    write_book_content(&dir, &content.chapters)?;
+    let tx = sqlite::transaction(&mut db)?;
+    sqlite::put(&tx, &book)?;
+    sqlite::commit(tx)?;
     Ok(true)
 }
 
 /// 先保存待删书的插图引用，再删书籍文件；只清理其余书籍不再引用的文件。
+#[cfg(test)]
 fn delete_book_files(books: &Path, images: Option<&Path>, id: &str) -> Result<(), String> {
     let dir = books.join(id);
     let legacy = books.join(format!("{id}.json"));
@@ -1049,6 +953,9 @@ fn image_locals_from_file(path: &Path) -> Result<HashSet<String>, String> {
 
 /// 删除待删书之后扫描剩余引用，两种布局都认；旧文件仍存在时也保留它的引用。
 fn remaining_image_locals(books: &Path) -> Result<HashSet<String>, String> {
+    if !books.exists() {
+        return Ok(HashSet::new());
+    }
     let entries = fs::read_dir(books).map_err(|e| format!("读取书库失败: {e}"))?;
     let mut referenced = HashSet::new();
     for entry in entries {
@@ -1071,13 +978,31 @@ fn remaining_image_locals(books: &Path) -> Result<HashSet<String>, String> {
 
 /// 书库元数据列表（不含任何章节正文）：应用启动 / 书架只拉这一份，
 /// 避免把每本书的全文经 IPC 搬到 WebView（含在线书内嵌的 data URL 大图）。
-/// 这里流式扫描正文、跳过图片载荷，内存占用与书库总字节数无关。
+/// 数据库查询预计算的章节头；仅未迁移的旧书走 JSON 扫描。
 pub(crate) fn list_book_meta<R: tauri::Runtime>(
     app: &AppHandle<R>,
 ) -> Result<Vec<BookMeta>, String> {
     let _transaction = library_transaction();
-    migrate_legacy_layout(app);
-    scan_books_dir(&books_root(app)?)
+    let root = crate::storage::data_root(app)?;
+    let mut metas = match sqlite::open(&root) {
+        Ok(db) => sqlite::metas(&db)?,
+        Err(error) => {
+            if !root.join("books").is_dir() {
+                return Err(error);
+            }
+            log::warn!("数据库读取失败，列出未迁移书籍");
+            Vec::new()
+        }
+    };
+    if root.join("books").is_dir() {
+        for meta in scan_books_dir(&root.join("books"))? {
+            if !metas.iter().any(|existing| existing.id == meta.id) {
+                metas.push(meta);
+            }
+        }
+    }
+    metas.sort_by_key(|book| std::cmp::Reverse(book.imported_at));
+    Ok(metas)
 }
 
 /// 扫描书库目录，**两种布局都认**：
@@ -1150,11 +1075,10 @@ fn scan_books_dir(dir: &Path) -> Result<Vec<BookMeta>, String> {
 // 同步桥接视图：只读元信息（正文一个字节都不碰）
 // ---------------------------------------------------------------------------
 
-/// 可同步的书籍元信息（`bookdetail.json` 里参与同步的那些字段）。
+/// 可同步的书籍元信息（数据库 detail 中参与同步的那些字段）。
 ///
 /// **为什么不直接用 [`LocalBook`]**：同步对账在每次启动、每次改书标签时都要跑，
-/// 而读整本要把 `content.json`（可能是几百 MB 的正文）解析一遍。同步只关心元信息，
-/// 因此单独开一个只读 `bookdetail.json` 的视图。
+/// 而读整本会解析所有章节正文。同步只关心元信息，因此单独读取数据库 detail。
 ///
 /// 刻意不在这里的字段（不同步）：`cover`（data URL，会把操作日志撑爆）、
 /// `imported_at` / `hue`（导入时间与封面色相）。书源 ID 与同步身份一致。
@@ -1216,24 +1140,24 @@ impl BookSyncMeta {
     }
 }
 
-/// 读取一本书的可同步元信息（只读 `bookdetail.json`；旧布局回退同样支持）。
+/// 读取一本书的可同步元信息（只读数据库 detail；旧布局回退同样支持）。
 pub(crate) fn get_sync_meta<R: tauri::Runtime>(
-    app: &AppHandle<R>, id: &str,
+    app: &AppHandle<R>,
+    id: &str,
 ) -> Result<Option<BookSyncMeta>, String> {
     let _transaction = library_transaction();
-    migrate_legacy_layout(app);
-    if let Some(meta) = sync_meta_from_dir(&book_dir(app, id)?)? {
-        return Ok(Some(meta));
+    let root = crate::storage::data_root(app)?;
+    let db = sqlite::open(&root)?;
+    if let Some(detail) = sqlite::detail(&db, id)? {
+        return Ok(Some(BookSyncMeta::from_detail(&detail)));
     }
-    let legacy = legacy_book_file(app, id)?;
-    if !legacy.is_file() {
-        return Ok(None);
-    }
-    let scan: BookScan = scan_json_file(&legacy)?;
-    Ok(Some(BookSyncMeta::from_scan(&scan)))
+    Ok(legacy_book_at(&root, id)?
+        .as_ref()
+        .map(|book| BookSyncMeta::from_detail(&BookDetail::from_book(book))))
 }
 
 /// 目录布局的可同步元信息（纯路径，便于单测）。
+#[cfg(test)]
 fn sync_meta_from_dir(dir: &Path) -> Result<Option<BookSyncMeta>, String> {
     let path = dir.join(BOOKDETAIL_FILE);
     if !path.is_file() {
@@ -1245,8 +1169,7 @@ fn sync_meta_from_dir(dir: &Path) -> Result<Option<BookSyncMeta>, String> {
 
 /// 列出全部本地书的可同步元信息（两种布局都认，口径与书架列表一致）。
 ///
-/// 与 [`scan_books_dir`] 的区别只有一个：**不读 `content.json`**，因此不会为了
-/// 「这本书有几章」把整库正文解析一遍。
+/// 只读数据库 detail；迁移失败的旧书籍仍使用元信息回退。
 pub(crate) fn list_sync_meta<R: tauri::Runtime>(
     app: &AppHandle<R>,
 ) -> Result<Vec<BookSyncMeta>, String> {
@@ -1259,44 +1182,27 @@ pub(crate) fn list_sync_meta_at<R: tauri::Runtime>(
     root: Option<&Path>,
 ) -> Result<Vec<BookSyncMeta>, String> {
     let _transaction = library_transaction();
-    migrate_legacy_layout(app);
-    let dir = match root {
-        Some(root) => root.join("books"),
-        None => books_root(app)?,
-    };
-    let mut books = Vec::new();
-    for entry in fs::read_dir(&dir).map_err(|e| format!("读取书库失败: {e}"))?.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            let detail_path = path.join(BOOKDETAIL_FILE);
-            if !detail_path.is_file() {
-                continue;
+    let root = crate::storage::data_root_at(app, root)?;
+    let db = sqlite::open(&root)?;
+    let mut out: Vec<_> = sqlite::details(&db)?
+        .iter()
+        .map(BookSyncMeta::from_detail)
+        .collect();
+    if root.join("books").is_dir() {
+        for meta in scan_books_dir(&root.join("books"))? {
+            if !out.iter().any(|existing| existing.id == meta.id) {
+                // Failed migrations remain visible without reading all chapter bodies.
+                let id = &meta.id;
+                if let Some(detail) = legacy_detail_at(&root, id)? {
+                    out.push(BookSyncMeta::from_detail(&detail));
+                }
             }
-            match read_json_file::<BookDetail>(&detail_path, "书籍元信息") {
-                Ok(detail) => books.push(BookSyncMeta::from_detail(&detail)),
-                Err(error) => log::warn!("同步对账跳过无法解析的书籍 {}：{error}", path.display()),
-            }
-            continue;
-        }
-        if path.extension().and_then(|s| s.to_str()) != Some("json") {
-            continue;
-        }
-        let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        // 目录布局已经存在时不再看旧文件（与书架列表同一口径：同一本书不出现两次）
-        if dir.join(id).join(BOOKDETAIL_FILE).is_file() {
-            continue;
-        }
-        match scan_json_file::<BookScan>(&path) {
-            Ok(scan) => books.push(BookSyncMeta::from_scan(&scan)),
-            Err(error) => log::warn!("同步对账跳过无法解析的书籍文件 {}：{error}", path.display()),
         }
     }
-    Ok(books)
+    Ok(out)
 }
 
-/// 把同步合并后的元信息写回 `bookdetail.json`（只动 `want` 里的字段，
+/// 把同步合并后的元信息写回数据库 detail（只动 `want` 里的字段，
 /// 封面 / 导入时间 / 色相 / 书源 id 原样保留）。返回是否真的改动了磁盘。
 pub(crate) fn apply_sync_meta<R: tauri::Runtime>(
     app: &AppHandle<R>,
@@ -1304,11 +1210,43 @@ pub(crate) fn apply_sync_meta<R: tauri::Runtime>(
     want: &BookSyncMeta,
 ) -> Result<bool, String> {
     let _transaction = library_transaction();
-    migrate_legacy_layout(app);
-    apply_sync_meta_in_dir(&book_dir(app, id)?, want)
+    let root = crate::storage::data_root(app)?;
+    let mut db = sqlite::open(&root)?;
+    let tx = sqlite::transaction(&mut db)?;
+    let Some(mut detail) = sqlite::detail(&tx, id)? else {
+        return Ok(false);
+    };
+    if BookSyncMeta::from_detail(&detail) == *want {
+        return Ok(false);
+    }
+    detail.title = want.title.clone();
+    detail.author = want.author.clone();
+    detail.intro = want.intro.clone();
+    detail.format = want.format.clone();
+    detail.file_name = want.file_name.clone();
+    detail.size = want.size;
+    detail.split_desc = want.split_desc.clone();
+    detail.source = want.source.clone();
+    detail.book_url = want.book_url.clone();
+    detail.book_source_id = want.book_source_id.clone();
+    detail.group_id = want.group_id.clone();
+    detail.tags = if want.tags.is_empty() {
+        None
+    } else {
+        Some(want.tags.clone())
+    };
+    detail.source_tags = if want.source_tags.is_empty() {
+        None
+    } else {
+        Some(want.source_tags.clone())
+    };
+    sqlite::save_detail(&tx, &detail)?;
+    sqlite::commit(tx)?;
+    Ok(true)
 }
 
 /// [`apply_sync_meta`] 的纯路径版本（便于单测）。
+#[cfg(test)]
 fn apply_sync_meta_in_dir(dir: &Path, want: &BookSyncMeta) -> Result<bool, String> {
     let path = dir.join(BOOKDETAIL_FILE);
     if !path.is_file() {
@@ -1330,7 +1268,11 @@ fn apply_sync_meta_in_dir(dir: &Path, want: &BookSyncMeta) -> Result<bool, Strin
     detail.book_url = want.book_url.clone();
     detail.book_source_id = want.book_source_id.clone();
     detail.group_id = want.group_id.clone();
-    detail.tags = if want.tags.is_empty() { None } else { Some(want.tags.clone()) };
+    detail.tags = if want.tags.is_empty() {
+        None
+    } else {
+        Some(want.tags.clone())
+    };
     detail.source_tags = if want.source_tags.is_empty() {
         None
     } else {
@@ -1375,6 +1317,7 @@ pub(crate) fn chapter_refs(chapters: &[LocalBookChapter]) -> Vec<ChapterRef> {
 /// `content.json` 的目录扫描视图：**只取章节头**，段落与结构化块一律不解析
 /// （serde 对未声明字段走忽略语义：字符串只扫描、不分配），因此扫一本几百 MB 的书
 /// 也不会把正文读进内存 —— 对账要为每本书算一份目录，不能按「读整本」的代价来。
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ChapterRefScan {
@@ -1386,6 +1329,7 @@ struct ChapterRefScan {
     url: Option<String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ContentRefScan {
@@ -1393,6 +1337,7 @@ struct ContentRefScan {
     chapters: Vec<ChapterRefScan>,
 }
 
+#[cfg(test)]
 fn scan_chapter_refs(path: &Path) -> Result<Vec<ChapterRef>, String> {
     if !path.is_file() {
         return Ok(Vec::new());
@@ -1411,85 +1356,94 @@ fn scan_chapter_refs(path: &Path) -> Result<Vec<ChapterRef>, String> {
 
 /// 列出全部本地书的目录（同步对账用；两种布局都认）。
 ///
-/// 只读 `content.json` 的章节头，**不解析正文**，也不统计字数：这是「启动时把书库
+/// 只读数据库章节头，**不解析正文**，也不统计字数：这是「启动时把书库
 /// 目录灌进引擎」的那一步，不能按读整本的代价来。
 pub(crate) fn list_sync_structures<R: tauri::Runtime>(
     app: &AppHandle<R>,
 ) -> Result<Vec<(String, Vec<ChapterRef>)>, String> {
     let _transaction = library_transaction();
-    migrate_legacy_layout(app);
-    let dir = books_root(app)?;
-    let mut books = Vec::new();
-    for entry in fs::read_dir(&dir).map_err(|e| format!("读取书库失败: {e}"))?.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            if !path.join(BOOKDETAIL_FILE).is_file() {
-                continue;
-            }
-            let Some(id) = path.file_name().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            match scan_chapter_refs(&path.join(CONTENT_FILE)) {
-                Ok(chapters) if !chapters.is_empty() => books.push((id.to_string(), chapters)),
-                Ok(_) => {}
-                Err(error) => log::warn!("同步对账跳过无法解析的目录 {}：{error}", path.display()),
-            }
-            continue;
-        }
-        // 旧布局（迁移没成功）：整书文件里直接带 chapters
-        if path.extension().and_then(|s| s.to_str()) != Some("json") {
-            continue;
-        }
-        let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        if dir.join(id).join(BOOKDETAIL_FILE).is_file() {
-            continue;
-        }
-        let scan: Result<BookScan, String> = scan_json_file(&path);
-        match scan {
-            Ok(scan) => {
-                let chapters: Vec<ChapterRef> = scan
-                    .chapters
-                    .into_iter()
-                    .map(|chapter| ChapterRef {
-                        cid: chapter.cid,
-                        title: chapter.title,
-                        url: chapter.url,
-                    })
-                    .collect();
-                if !chapters.is_empty() {
-                    books.push((scan.id, chapters));
-                }
-            }
-            Err(error) => log::warn!("同步对账跳过无法解析的目录 {}：{error}", path.display()),
+    let root = crate::storage::data_root(app)?;
+    let db = sqlite::open(&root)?;
+    let mut out = Vec::new();
+    for detail in sqlite::details(&db)? {
+        let refs = sqlite::refs(&db, &detail.id)?;
+        if !refs.is_empty() {
+            out.push((detail.id, refs));
         }
     }
-    Ok(books)
+    if root.join("books").is_dir() {
+        for meta in scan_books_dir(&root.join("books"))? {
+            if sqlite::detail(&db, &meta.id)?.is_some() {
+                continue;
+            }
+            if !meta.chapters.is_empty() {
+                out.push((
+                    meta.id,
+                    meta.chapters
+                        .into_iter()
+                        .map(|h| ChapterRef {
+                            cid: h.cid,
+                            title: h.title,
+                            url: h.url,
+                        })
+                        .collect(),
+                ));
+            }
+        }
+    }
+    Ok(out)
 }
 
-/// 把同步来的目录落到本地 `content.json`：**按 cid 复用原有正文**，只更新标题 / 地址、
+/// 把同步来的目录落到数据库：**按 cid 复用原有正文**，只更新标题 / 地址、
 /// 增删章节并重排顺序。正文本身由内容通道单独搬运（见 docs/sync.md），这里一个字节
 /// 都不改，因此「目录变了」不会顺带把谁读了一半的正文弄丢。
 ///
 /// 返回是否真的改动了磁盘；目录（cid / 标题 / 地址）本来就一致时直接返回 false，
-/// 连整本 `content.json` 都不解析。
+/// 不读取章节正文。
 pub(crate) fn apply_sync_structure<R: tauri::Runtime>(
     app: &AppHandle<R>,
     id: &str,
     want: &[ChapterRef],
 ) -> Result<bool, String> {
     let _transaction = library_transaction();
-    migrate_legacy_layout(app);
-    let dir = book_dir(app, id)?;
-    if !dir.join(BOOKDETAIL_FILE).is_file() {
-        // 书已经不在本机了：目录跟着书的删除一起没了，不是错误
+    let root = crate::storage::data_root(app)?;
+    let mut db = sqlite::open(&root)?;
+    let tx = sqlite::transaction(&mut db)?;
+    if sqlite::detail(&tx, id)?.is_none() {
         return Ok(false);
     }
-    apply_sync_structure_in_dir(&dir, want)
+    if sqlite::refs(&tx, id)? == want {
+        return Ok(false);
+    }
+    let mut by_cid: HashMap<_, _> = sqlite::chapters(&tx, id)?
+        .into_iter()
+        .map(|c| (c.cid.clone(), c))
+        .collect();
+    let mut book = sqlite::detail(&tx, id)?
+        .ok_or("书籍不存在")?
+        .into_book(Vec::new());
+    book.chapters = want
+        .iter()
+        .map(|entry| {
+            let mut chapter = by_cid.remove(&entry.cid).unwrap_or(LocalBookChapter {
+                cid: entry.cid.clone(),
+                title: String::new(),
+                url: None,
+                paragraphs: Vec::new(),
+                blocks: None,
+            });
+            chapter.title = entry.title.clone();
+            chapter.url = entry.url.clone();
+            chapter
+        })
+        .collect();
+    sqlite::put(&tx, &book)?;
+    sqlite::commit(tx)?;
+    Ok(true)
 }
 
 /// [`apply_sync_structure`] 的纯路径版本（便于单测）。
+#[cfg(test)]
 fn apply_sync_structure_in_dir(dir: &Path, want: &[ChapterRef]) -> Result<bool, String> {
     let content_path = dir.join(CONTENT_FILE);
     let current = scan_chapter_refs(&content_path)?;
@@ -1499,7 +1453,10 @@ fn apply_sync_structure_in_dir(dir: &Path, want: &[ChapterRef]) -> Result<bool, 
     let content: BookContent = if content_path.is_file() {
         read_json_file(&content_path, "书籍正文")?
     } else {
-        BookContent { schema_version: SCHEMA_VERSION, chapters: Vec::new() }
+        BookContent {
+            schema_version: SCHEMA_VERSION,
+            chapters: Vec::new(),
+        }
     };
     let mut by_cid: HashMap<String, LocalBookChapter> = content
         .chapters
@@ -1532,15 +1489,11 @@ fn apply_sync_structure_in_dir(dir: &Path, want: &[ChapterRef]) -> Result<bool, 
 // 同步桥接视图：正文（指纹缓存 / 按需取章 / 落地）
 // ---------------------------------------------------------------------------
 
-/// 章节正文指纹缓存文件（`books/<id>/digest.json`）。
-///
-/// **派生缓存**：内容完全由 `content.json` 决定，删掉会自动重建（也能被旧版本忽略）。
-/// 为什么要有它：正文同步每次会话都要问「这本书本机有哪些章、指纹是什么」，
-/// 每次都把整本 `content.json` 解析一遍（几百 MB）不可接受 —— 写正文时顺手把指纹
-/// 落在这个小文件里，读的时候只读它。
+/// 旧章节指纹缓存文件名；升级时归档。生产指纹与正文同事务存储在章节行内。
 const DIGEST_FILE: &str = "digest.json";
 
 /// 指纹文件格式：章节顺序与 `content.json` 一一对应（`hash` 为空串 = 该章没有正文）。
+#[cfg(test)]
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BookDigestFile {
@@ -1563,6 +1516,7 @@ struct BookDigestFile {
 }
 
 /// 一章正文里引用到的插图（见 [`BookDigestFile::assets`]）。
+#[cfg(test)]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ChapterAssets {
@@ -1588,6 +1542,7 @@ fn chapter_asset_locals(chapter: &LocalBookChapter) -> Vec<String> {
     locals
 }
 
+#[cfg(test)]
 fn content_stamp(path: &Path) -> (u64, u64) {
     let Ok(metadata) = fs::metadata(path) else {
         return (0, 0);
@@ -1607,7 +1562,10 @@ fn chapter_digest(chapter: &LocalBookChapter) -> ChapterDigest {
         .blocks
         .as_ref()
         .and_then(|blocks| serde_json::to_value(blocks).ok());
-    let hash = if chapter.paragraphs.iter().any(|text| !text.trim().is_empty())
+    let hash = if chapter
+        .paragraphs
+        .iter()
+        .any(|text| !text.trim().is_empty())
         || blocks.is_some()
     {
         readerx_sync::content::body_fingerprint(&chapter.paragraphs, blocks.as_ref())
@@ -1615,10 +1573,14 @@ fn chapter_digest(chapter: &LocalBookChapter) -> ChapterDigest {
         // 没有正文的章节：占位（保持与 content.json 的下标一致），同步时不参与搬运
         String::new()
     };
-    ChapterDigest { cid: chapter.cid.clone(), hash }
+    ChapterDigest {
+        cid: chapter.cid.clone(),
+        hash,
+    }
 }
 
 /// 写指纹缓存（正文写完之后调用；写失败只记日志，不影响正文本身）。
+#[cfg(test)]
 fn write_digest_file(dir: &Path, chapters: &[LocalBookChapter]) -> Result<(), String> {
     write_digest_file_with(dir, chapter_digests(chapters), chapter_assets(chapters))
 }
@@ -1629,14 +1591,18 @@ fn chapter_digests(chapters: &[LocalBookChapter]) -> Vec<ChapterDigest> {
 }
 
 /// 见 [`chapter_digests`]。
+#[cfg(test)]
 fn chapter_assets(chapters: &[LocalBookChapter]) -> Vec<ChapterAssets> {
     chapters
         .iter()
-        .map(|chapter| ChapterAssets { locals: chapter_asset_locals(chapter) })
+        .map(|chapter| ChapterAssets {
+            locals: chapter_asset_locals(chapter),
+        })
         .collect()
 }
 
 /// 写指纹缓存（调用方已经算好两份清单，见 [`write_book_content_with_digests`] 的逐章路径）。
+#[cfg(test)]
 fn write_digest_file_with(
     dir: &Path,
     chapters: Vec<ChapterDigest>,
@@ -1657,6 +1623,7 @@ fn write_digest_file_with(
 ///
 /// 缓存缺失 / 过期 / 长度对不上时返回等长的空清单：那几章的引用会在下一次整本重算时补上，
 /// 资源通道据此把它们当成「还没落地」—— 宁可不搬，也不要把错的引用发出去。
+#[cfg(test)]
 fn read_digest_assets(dir: &Path, chapters: usize) -> Vec<ChapterAssets> {
     let cached = read_json_file::<BookDigestFile>(&dir.join(DIGEST_FILE), "章节指纹")
         .ok()
@@ -1669,6 +1636,7 @@ fn read_digest_assets(dir: &Path, chapters: usize) -> Vec<ChapterAssets> {
 }
 
 /// 读指纹缓存；缓存缺失 / 过期时**从正文重建**（一次整本解析，之后都走缓存）。
+#[cfg(test)]
 fn read_digest_file(dir: &Path) -> Result<Vec<ChapterDigest>, String> {
     let content_path = dir.join(CONTENT_FILE);
     let (mtime, size) = content_stamp(&content_path);
@@ -1701,18 +1669,22 @@ pub(crate) fn read_sync_digests_at<R: tauri::Runtime>(
     id: &str,
 ) -> Result<Vec<ChapterDigest>, String> {
     let _transaction = library_transaction();
-    migrate_legacy_layout(app);
-    let dir = book_dir_at(app, root, id)?;
-    if !dir.join(BOOKDETAIL_FILE).is_file() {
-        return Ok(Vec::new());
+    let root = crate::storage::data_root_at(app, root)?;
+    let db = sqlite::open(&root)?;
+    if sqlite::detail(&db, id)?.is_none() {
+        return Ok(legacy_book_at(&root, id)?
+            .map(|b| {
+                chapter_digests(&b.chapters)
+                    .into_iter()
+                    .filter(|d| !d.hash.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default());
     }
-    Ok(read_digest_file(&dir)?
-        .into_iter()
-        .filter(|digest| !digest.hash.is_empty())
-        .collect())
+    sqlite::digests(&db, id)
 }
 
-/// 一本书的封面（`bookdetail.json` 里的 data URL）。只读元信息，不碰正文。
+/// 一本书的封面（数据库元信息里的 data URL）。不碰正文。
 ///
 /// 封面同步走资源通道（见 `docs/sync.md` 第 7.10 节）：引擎要的是「这段 data URL 的
 /// 字节与指纹」，因此这里只提供只读入口，**不改存储形态** —— 封面仍然是元信息里的
@@ -1723,19 +1695,12 @@ pub(crate) fn get_cover_at<R: tauri::Runtime>(
     id: &str,
 ) -> Result<Option<String>, String> {
     let _transaction = library_transaction();
-    migrate_legacy_layout(app);
-    let path = book_dir_at(app, root, id)?.join(BOOKDETAIL_FILE);
-    if path.is_file() {
-        let detail: BookDetail = read_json_file(&path, "书籍元信息")?;
+    let root = crate::storage::data_root_at(app, root)?;
+    let db = sqlite::open(&root)?;
+    if let Some(detail) = sqlite::detail(&db, id)? {
         return Ok(detail.cover);
     }
-    // 旧布局回退：与 `get_sync_meta` 同一口径（迁移没成功的书仍可读）
-    let legacy = legacy_book_file(app, id)?;
-    if !legacy.is_file() {
-        return Ok(None);
-    }
-    let scan: BookScan = scan_json_file(&legacy)?;
-    Ok(scan.cover)
+    Ok(legacy_detail_at(&root, id)?.and_then(|d| d.cover))
 }
 
 /// 写一本书的封面（`Some` 写值，`None` / 空串清除）；返回是否真的改动了磁盘。
@@ -1749,19 +1714,19 @@ pub(crate) fn set_cover_at<R: tauri::Runtime>(
     cover: Option<&str>,
 ) -> Result<bool, String> {
     let _transaction = library_transaction();
-    migrate_legacy_layout(app);
-    let path = book_dir_at(app, root, id)?.join(BOOKDETAIL_FILE);
-    if !path.is_file() {
-        // 书已经不在了（对端刚同步来、本地却没这个文件）：不是错误，跳过即可
+    let root = crate::storage::data_root_at(app, root)?;
+    let mut db = sqlite::open(&root)?;
+    let tx = sqlite::transaction(&mut db)?;
+    let Some(mut detail) = sqlite::detail(&tx, id)? else {
         return Ok(false);
-    }
-    let mut detail: BookDetail = read_json_file(&path, "书籍元信息")?;
-    let want = cover.filter(|value| !value.is_empty()).map(str::to_string);
+    };
+    let want = cover.filter(|v| !v.is_empty()).map(str::to_string);
     if detail.cover == want {
         return Ok(false);
     }
     detail.cover = want;
-    write_json_atomic(&path, &detail, "书籍元信息")?;
+    sqlite::save_detail(&tx, &detail)?;
+    sqlite::commit(tx)?;
     Ok(true)
 }
 
@@ -1776,32 +1741,12 @@ pub(crate) fn read_sync_asset_refs_at<R: tauri::Runtime>(
     id: &str,
 ) -> Result<Vec<(String, String)>, String> {
     let _transaction = library_transaction();
-    migrate_legacy_layout(app);
-    let dir = book_dir_at(app, root, id)?;
-    if !dir.join(BOOKDETAIL_FILE).is_file() {
-        return Ok(Vec::new());
-    }
-    // 先让缓存/正文对齐一次（`read_digest_file` 负责过期重建），再取引用清单
-    read_digest_file(&dir)?;
-    let file: BookDigestFile = read_json_file(&dir.join(DIGEST_FILE), "章节指纹")?;
-    let mut refs: Vec<(String, String)> = Vec::new();
-    for chapter in file.assets {
-        for local in chapter.locals {
-            if let Some(name) = crate::book_images::asset_name(&local) {
-                refs.push((name, local));
-            }
-        }
-    }
-    refs.sort();
-    refs.dedup();
-    Ok(refs)
+    let root = crate::storage::data_root_at(app, root)?;
+    let db = sqlite::open(&root)?;
+    sqlite::assets(&db, id)
 }
 
-/// 按 cid 取章节正文（对端要哪几章就取哪几章）。
-///
-/// 实现是**顺序扫一遍** `content.json`，只留下命中的章节：内存占用与单章同级，
-/// 不会因为对端只要一章就把整本正文读进内存。代价是要扫完整份文件（图片载荷字段
-/// 会被完整解析，但只保留命中的那一章）。
+/// 按 cid 索引查询指定章节；正文内存占用与请求的章节同级。
 pub(crate) fn read_chapters_by_cid_at<R: tauri::Runtime>(
     app: &AppHandle<R>,
     root: Option<&Path>,
@@ -1809,175 +1754,84 @@ pub(crate) fn read_chapters_by_cid_at<R: tauri::Runtime>(
     cids: &[String],
 ) -> Result<Vec<LocalBookChapter>, String> {
     let _transaction = library_transaction();
-    migrate_legacy_layout(app);
-    let path = book_dir_at(app, root, id)?.join(CONTENT_FILE);
-    if !path.is_file() || cids.is_empty() {
-        return Ok(Vec::new());
+    let root = crate::storage::data_root_at(app, root)?;
+    let db = sqlite::open(&root)?;
+    if sqlite::detail(&db, id)?.is_none() {
+        let wanted: HashSet<_> = cids.iter().collect();
+        return Ok(legacy_book_at(&root, id)?
+            .map(|b| {
+                b.chapters
+                    .into_iter()
+                    .filter(|c| wanted.contains(&c.cid))
+                    .collect()
+            })
+            .unwrap_or_default());
     }
-    let wanted: HashSet<String> = cids.iter().cloned().collect();
-    let file = fs::File::open(&path).map_err(|e| format!("读取书籍正文失败: {e}"))?;
-    let mut deserializer = serde_json::Deserializer::from_reader(BufReader::new(file));
-    let picked = serde::de::DeserializeSeed::deserialize(
-        PickChapters { wanted: &wanted },
-        &mut deserializer,
-    )
-    .map_err(|e| format!("解析书籍正文失败: {e}"))?;
-    Ok(picked)
+    Ok(sqlite::picked(&db, id, cids)?
+        .into_iter()
+        .map(|(_, c)| c)
+        .collect())
 }
 
-/// 只挑出指定 cid 的章节（`chapters` 数组逐项反序列化，未命中的读完即丢）。
-struct PickChapters<'a> {
-    wanted: &'a HashSet<String>,
-}
-
-impl<'de, 'a> serde::de::DeserializeSeed<'de> for PickChapters<'a> {
-    type Value = Vec<LocalBookChapter>;
-
-    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        deserializer.deserialize_map(PickTop { wanted: self.wanted })
-    }
-}
-
-/// `content.json` 的顶层对象：只关心 `chapters`，其余字段跳过。
-struct PickTop<'a> {
-    wanted: &'a HashSet<String>,
-}
-
-impl<'de, 'a> serde::de::Visitor<'de> for PickTop<'a> {
-    type Value = Vec<LocalBookChapter>;
-
-    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("书籍正文对象")
-    }
-
-    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-    where
-        A: serde::de::MapAccess<'de>,
-    {
-        let mut picked = Vec::new();
-        while let Some(key) = map.next_key::<String>()? {
-            if key == "chapters" {
-                picked = map.next_value_seed(PickList { wanted: self.wanted })?;
-            } else {
-                map.next_value::<serde::de::IgnoredAny>()?;
-            }
-        }
-        Ok(picked)
-    }
-}
-
-/// `chapters` 数组：逐项反序列化成章节，未命中 cid 的直接丢掉。
-struct PickList<'a> {
-    wanted: &'a HashSet<String>,
-}
-
-impl<'de, 'a> serde::de::DeserializeSeed<'de> for PickList<'a> {
-    type Value = Vec<LocalBookChapter>;
-
-    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        deserializer.deserialize_seq(PickListVisitor { wanted: self.wanted })
-    }
-}
-
-struct PickListVisitor<'a> {
-    wanted: &'a HashSet<String>,
-}
-
-impl<'de, 'a> serde::de::Visitor<'de> for PickListVisitor<'a> {
-    type Value = Vec<LocalBookChapter>;
-
-    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("章节数组")
-    }
-
-    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-    where
-        A: serde::de::SeqAccess<'de>,
-    {
-        let mut out = Vec::new();
-        while let Some(chapter) = seq.next_element::<LocalBookChapter>()? {
-            if self.wanted.contains(&chapter.cid) {
-                out.push(chapter);
-            }
-        }
-        Ok(out)
-    }
-}
-
-/// 把同步来的正文写进某本书（按 cid 合并：更新已有章的正文，缺的补在后面）。
-///
-/// 标题 / 地址只在本地缺失时采用对端那份：目录（结构）实体才是它们的权威来源，
-/// 这里不该用一份可能过时的正文载荷把刚同步好的目录改回去。
 pub(crate) fn apply_sync_chapters<R: tauri::Runtime>(
     app: &AppHandle<R>,
     id: &str,
     bodies: &[ChapterContent],
 ) -> Result<usize, String> {
     let _transaction = library_transaction();
-    migrate_legacy_layout(app);
-    let dir = book_dir(app, id)?;
-    if !dir.join(BOOKDETAIL_FILE).is_file() {
-        return Err("书籍不在本机".to_string());
-    }
-    let content_path = dir.join(CONTENT_FILE);
-    let mut chapters = if content_path.is_file() {
-        read_json_file::<BookContent>(&content_path, "书籍正文")?.chapters
-    } else {
-        Vec::new()
-    };
-    let mut applied = 0usize;
+    let root = crate::storage::data_root(app)?;
+    let mut db = sqlite::open(&root)?;
+    sqlite::require_book(&db, &root, id)?;
+    let tx = sqlite::transaction(&mut db)?;
+    let mut next = sqlite::refs(&tx, id)?.len();
+    let mut applied = 0;
     for body in bodies {
         if !has_body(body) {
             continue;
         }
-        let paragraphs = body.paragraphs.clone();
+        let mut matches = sqlite::picked(&tx, id, &[body.cid.clone()])?;
+        if matches.len() > 1 {
+            return Err("章节 cid 重复，无法同步正文".into());
+        }
+        let (position, mut chapter) = matches.pop().unwrap_or_else(|| {
+            let p = next;
+            next += 1;
+            (
+                p,
+                LocalBookChapter {
+                    cid: body.cid.clone(),
+                    title: body.title.clone(),
+                    url: body.url.clone(),
+                    paragraphs: Vec::new(),
+                    blocks: None,
+                },
+            )
+        });
         let blocks = body
             .blocks
             .as_ref()
-            .and_then(|value| serde_json::from_value::<Vec<ChapterBlock>>(value.clone()).ok());
-        match chapters.iter_mut().find(|chapter| chapter.cid == body.cid) {
-            Some(chapter) => {
-                // 正文完全一样就不动它（同步会话可能重复推到同一章）
-                let same_blocks = match (&chapter.blocks, &body.blocks) {
-                    (None, None) => true,
-                    (Some(existing), Some(incoming)) => {
-                        serde_json::to_value(existing).ok().as_ref() == Some(incoming)
-                    }
-                    _ => false,
-                };
-                if chapter.paragraphs == paragraphs && same_blocks {
-                    continue;
-                }
-                chapter.paragraphs = paragraphs;
-                chapter.blocks = blocks;
-                if chapter.title.is_empty() {
-                    chapter.title = body.title.clone();
-                }
-                if chapter.url.is_none() {
-                    chapter.url = body.url.clone();
-                }
-            }
-            None => chapters.push(LocalBookChapter {
-                cid: body.cid.clone(),
-                title: body.title.clone(),
-                paragraphs,
-                blocks,
-                url: body.url.clone(),
-            }),
+            .map(|v| {
+                serde_json::from_value::<Vec<ChapterBlock>>(v.clone())
+                    .map_err(|e| format!("同步章节块无效: {e}"))
+            })
+            .transpose()?;
+        if chapter.paragraphs == body.paragraphs
+            && serde_json::to_value(&chapter.blocks).ok() == serde_json::to_value(&blocks).ok()
+        {
+            continue;
         }
+        chapter.paragraphs = body.paragraphs.clone();
+        chapter.blocks = blocks;
+        if chapter.title.is_empty() {
+            chapter.title = body.title.clone();
+        }
+        if chapter.url.is_none() {
+            chapter.url = body.url.clone();
+        }
+        sqlite::save_chapter(&tx, id, position, &chapter)?;
         applied += 1;
     }
-    if applied == 0 {
-        return Ok(0);
-    }
-    write_book_content(&dir, &chapters)?;
-    log::debug!("同步正文已写入 id={id} 章节={applied}");
+    sqlite::commit(tx)?;
     Ok(applied)
 }
 
@@ -1989,6 +1843,154 @@ fn has_body(body: &ChapterContent) -> bool {
             .as_ref()
             .and_then(|value| value.as_array())
             .is_some_and(|items| !items.is_empty())
+}
+
+fn legacy_book_at(root: &Path, id: &str) -> Result<Option<LocalBook>, String> {
+    sqlite::valid_id(id)?;
+    if let Some(book) = read_book_from_dir(&root.join("books").join(id))? {
+        return Ok(Some(book));
+    }
+    let flat = root.join("books").join(format!("{id}.json"));
+    if flat.is_file() {
+        return read_json_file(&flat, "旧书籍").map(Some);
+    }
+    Ok(None)
+}
+fn legacy_detail_at(root: &Path, id: &str) -> Result<Option<BookDetail>, String> {
+    sqlite::valid_id(id)?;
+    let path = root.join("books").join(id).join(BOOKDETAIL_FILE);
+    if path.is_file() {
+        return read_json_file(&path, "旧书籍元信息").map(Some);
+    }
+    Ok(legacy_book_at(root, id)?
+        .as_ref()
+        .map(BookDetail::from_book))
+}
+
+pub(crate) fn contains_at<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    root: Option<&Path>,
+    id: &str,
+) -> Result<bool, String> {
+    let _transaction = library_transaction();
+    let root = crate::storage::data_root_at(app, root)?;
+    Ok(sqlite::detail(&sqlite::open(&root)?, id)?.is_some())
+}
+pub(crate) fn export_books<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    zip: &mut zip::ZipWriter<fs::File>,
+    report: &mut dyn FnMut(&str, u64, u64),
+) -> Result<u64, String> {
+    let _transaction = library_transaction();
+    let root = crate::storage::data_root(app)?;
+    let db = sqlite::open(&root)?;
+    // Refuse a partial backup when any readable legacy book could not be imported.
+    if root.join("books").is_dir() && !scan_books_dir(&root.join("books"))?.is_empty() {
+        return Err("书籍迁移尚未完成，暂不能导出完整备份".into());
+    }
+    sqlite::export(&db, zip, report)
+}
+/// Backup JSON is a portable representation, not the on-disk database schema.
+pub(crate) fn import_book_json<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+    detail: &[u8],
+    content: Option<&[u8]>,
+) -> Result<(), String> {
+    let mut detail: BookDetail =
+        serde_json::from_slice(detail).map_err(|e| format!("书籍元信息无法解析: {e}"))?;
+    detail.id = id.to_string();
+    if detail.schema_version != SCHEMA_VERSION {
+        return Err("书籍格式版本不受支持".into());
+    }
+    let chapters = match content {
+        Some(bytes) => {
+            let content: BookContent =
+                serde_json::from_slice(bytes).map_err(|e| format!("书籍正文无法解析: {e}"))?;
+            if content.schema_version != SCHEMA_VERSION {
+                return Err("书籍正文格式版本不受支持".into());
+            }
+            content.chapters
+        }
+        None => Vec::new(),
+    };
+    put_book(app, detail.into_book(chapters))
+}
+/// Called by the journalled identity migration; old/new collision checks precede all writes.
+pub(crate) fn rename_id_at(root: &Path, old: &str, new: &str) -> Result<(), String> {
+    let _transaction = library_transaction();
+    sqlite::valid_id(old)?;
+    sqlite::valid_id(new)?;
+    let mut db = sqlite::open(root)?;
+    let tx = sqlite::transaction(&mut db)?;
+    let from = sqlite::detail(&tx, old)?;
+    let to = sqlite::detail(&tx, new)?;
+    if from.is_some() && to.is_some() {
+        return Err("书籍 ID 迁移目标已存在".into());
+    }
+    if let Some(mut detail) = from {
+        detail.id = new.to_string();
+        tx.execute(
+            "UPDATE books SET id=?1,detail=?2 WHERE id=?3",
+            rusqlite::params![
+                new,
+                serde_json::to_string(&detail).map_err(|e| e.to_string())?,
+                old
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        let mut records = sqlite::records(&tx, "bookmarks", new)?;
+        fn remap(value: &mut Value, old: &str, new: &str) {
+            match value {
+                Value::Object(fields) => {
+                    for (key, value) in fields {
+                        if key == "bookId" && value.as_str() == Some(old) {
+                            *value = Value::String(new.into());
+                        } else {
+                            remap(value, old, new);
+                        }
+                    }
+                }
+                Value::Array(values) => {
+                    for value in values {
+                        remap(value, old, new);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for record in &mut records {
+            remap(record, old, new);
+        }
+        sqlite::put_records(&tx, "bookmarks", new, &records)?;
+    } else if to.is_none() {
+        return Err("书籍 ID 迁移缺少原书籍".into());
+    }
+    sqlite::commit(tx)
+}
+pub(crate) fn remap_metadata_at(
+    root: &Path,
+    field: &str,
+    remap: &std::collections::BTreeMap<String, String>,
+) -> Result<(), String> {
+    if remap.is_empty() || !root.join(sqlite::DATABASE).is_file() {
+        return Ok(());
+    }
+    let _transaction = library_transaction();
+    let mut db = sqlite::connect(root)?;
+    let tx = sqlite::transaction(&mut db)?;
+    for mut detail in sqlite::details(&tx)? {
+        let value = match field {
+            "groupId" => &mut detail.group_id,
+            "bookSourceId" => &mut detail.book_source_id,
+            _ => return Err("未知元信息引用".into()),
+        };
+        if let Some(new) = value.as_ref().and_then(|id| remap.get(id)) {
+            *value = Some(new.clone());
+            sqlite::save_detail(&tx, &detail)?;
+        }
+    }
+    sqlite::commit(tx)
 }
 
 #[cfg(test)]
@@ -2093,7 +2095,8 @@ mod tests {
             scope.spawn(|| {
                 start.wait();
                 let _transaction = library_transaction();
-                let mut content: BookContent = read_json_file(&dir.join(CONTENT_FILE), "正文").unwrap();
+                let mut content: BookContent =
+                    read_json_file(&dir.join(CONTENT_FILE), "正文").unwrap();
                 patch_chapters(
                     &mut content.chapters,
                     &[BookChapterPatch {
@@ -2389,7 +2392,10 @@ mod tests {
         let book = read_book_from_dir(&paths).unwrap().unwrap();
         assert_eq!(book.chapters.len(), 2);
         assert_eq!(book.chapters[0].title, "第一章（改名）");
-        assert_eq!(book.chapters[0].url.as_deref(), Some("https://example.com/c1"));
+        assert_eq!(
+            book.chapters[0].url.as_deref(),
+            Some("https://example.com/c1")
+        );
         assert_eq!(book.chapters[0].paragraphs, vec!["正文".to_string()]);
         assert!(book.chapters[1].paragraphs.is_empty());
 
@@ -2491,11 +2497,7 @@ mod tests {
         // 旧布局（迁移没成功留下的）
         let mut legacy = sample_book("b2");
         legacy.imported_at += 10;
-        fs::write(
-            dir.join("b2.json"),
-            serde_json::to_string(&legacy).unwrap(),
-        )
-        .unwrap();
+        fs::write(dir.join("b2.json"), serde_json::to_string(&legacy).unwrap()).unwrap();
         // 两种布局同时存在：只认目录，不能列出两本 b1
         let mut both = sample_book("b3");
         both.imported_at += 20;

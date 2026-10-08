@@ -9,7 +9,7 @@
 //!   导入的语义只有「合并」与「覆盖恢复」两种（见 [`ImportMode`]）。
 //!
 //! 归档就是一个 **zip 文件**（后缀 `.zip`，正文体积大必须压缩；同时用户能自己解开检查），
-//! 内部路径与应用数据目录一一对应：
+//! 保持原来的可移植 JSON 路径；书籍由 SQLite 转换为这些条目，其他数据按文件导出：
 //!
 //! ```text
 //! readerx-backup.json          清单：格式版本、导出版本、时间、是否含登录信息、各类条目数
@@ -41,7 +41,7 @@
 //! 界面与文档都要说清「这份文件里有账号登录信息，别随手分享」。日志里永远只有数量，
 //! 没有内容（与全项目口径一致）。
 
-mod archive;
+pub(crate) mod archive;
 mod export;
 mod import;
 mod merge;
@@ -59,7 +59,7 @@ use serde::{Deserialize, Serialize};
 pub(crate) const MANIFEST_NAME: &str = "readerx-backup.json";
 /// 归档格式标识；读到更高版本直接报错，而不是按旧语义读坏新数据
 pub(crate) const BACKUP_FORMAT: &str = "readerx-backup/1";
-/// 归档内的顶层目录名（与数据目录同名，一一对应）
+/// 归档内的顶层分类；books 是数据库书籍转换出的便携 JSON
 pub(crate) const STATE_DIR: &str = "state";
 pub(crate) const BOOKS_DIR: &str = "books";
 pub(crate) const IMAGES_DIR: &str = "images";

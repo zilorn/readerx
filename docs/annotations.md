@@ -1,5 +1,7 @@
 # 阅读注释
 
+书籍在应用目录使用 SQLite，备份仍为便携 JSON 条目；存储边界与旧数据迁移见 [书籍存储](book-storage.md)。
+
 在同一段落内选取文字，点选区菜单的「注释」即可写下一条文本注释。保存后，
 该段最后一个字符右侧出现 SVG 图标；点击图标可查看该段的全部注释、继续添加，
 或通过每条右侧的编辑按钮改写已有内容。单条注释最多 2000 个 UTF-16 单元，
@@ -15,7 +17,7 @@
 
 `src/lib/annotations.ts` 负责段落锚点与状态，`AnnotationSheet.tsx` 负责抽屉，
 `Reader.tsx` 接通选区和正文图标。读写通过 `readerx_annotations_get/put`，由 Rust
-在书库事务锁内原子保存到 `books/<id>/annotations.json`，与正文和书签文件分开。
+在书库事务锁内保存到 `books.sqlite3` 的 `annotations` 表，与章节和书签分别存表。
 纯浏览器开发模式只存内存，刷新页面后不保留。
 
 文件信封为 `schemaVersion: 1` 与 `annotations` 数组。每条记录包含独立 `id`、

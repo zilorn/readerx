@@ -55,6 +55,8 @@ readerx-log = { path = "crates/readerx-log" }
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# 仅书籍数据入库；bundled 为 Android / Linux / Windows 编译 SQLite。
+rusqlite = { version = "0.38", features = ["bundled"] }
 base64 = "0.22"
 # 跨设备书身份用 sha256 派生（见 src/sync/identity.rs）：同一个文件在两台设备上
 # 要算出同一个 id，不能用进程内随机种子的哈希。
