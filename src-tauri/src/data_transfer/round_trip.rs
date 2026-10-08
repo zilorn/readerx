@@ -735,8 +735,8 @@ fn invalid_sqlite_archive_fails_before_local_writes_and_cleans_temporary_files()
         None,
         Some("PRAGMA user_version=2;"),
         Some("UPDATE chapters SET chapter='broken';"),
-        Some("UPDATE books SET id='../outside';"),
-        Some("INSERT INTO annotations SELECT id,'{}' FROM books;"),
+        Some("UPDATE books SET id='../outside-' || id;"),
+        Some("INSERT OR REPLACE INTO annotations SELECT id,'{}' FROM books;"),
         Some("PRAGMA foreign_keys=OFF; INSERT INTO bookmarks VALUES('missing','[]');"),
         Some("DROP TABLE annotations; CREATE VIEW annotations AS SELECT book_id,records FROM bookmarks;"),
     ].iter().enumerate() {
