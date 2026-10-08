@@ -20,22 +20,23 @@
 在书库事务锁内保存到 `books.sqlite3` 的 `annotations` 表，与章节和书签分别存表。
 纯浏览器开发模式只存内存，刷新页面后不保留。
 
-文件信封为 `schemaVersion: 1` 与 `annotations` 数组。每条记录包含独立 `id`、
+SQLite 的 `records` 列保存注释数组；旧 JSON 备份信封为 `schemaVersion: 1` 与
+`annotations` 数组。每条记录包含独立 `id`、
 `chapterCid`、`unitIndex`、原段落文本的 SHA-256 `fingerprint`、相邻段落指纹
 `before/after`，以及该段聚合的 `notes` 数组。每条 note 包含 `id`、`text`、
-`createdAt` 与 `updatedAt`。文件内不重复保存 bookId，所属书籍由目录决定，
-因此书籍身份迁移时可随整个目录移动。
+`createdAt` 与 `updatedAt`。记录内不重复保存 bookId，归属由表的 `book_id` 外键决定，
+书籍身份迁移时级联更新。
 
 锚点使用原书的段落单元，显示替换、简繁转换和字号变化不改动其身份。
 正文重排后采用唯一文本指纹或邻段指纹定位；存在歧义或章节 cid 已变化时，
-保留文件里的记录，不将图标挂到无法确认的段落。
+保留数据库里的记录，不将图标挂到无法确认的段落。
 
 首次操作先读取该书的注释，按 note 计算本次保存差集，Rust 在同一书库事务内
-合并磁盘上的最新记录，成功后才更新界面。读取失败不作为空数组写回；保存失败保留草稿供重试。删除书籍时文件随目录删除并清除该书缓存。
+合并磁盘上的最新记录，成功后才更新界面。读取失败不作为空数组写回；保存失败保留草稿供重试。删除书籍时数据库级联删除注释并清除该书缓存。
 
 ## 备份
 
-全量备份包含注释文件。合并恢复以章节 cid、段落序号和文本指纹聚合记录，
+全量备份的 `books.sqlite3` 包含注释表。合并恢复以章节 cid、段落序号和文本指纹聚合记录，
 同段 note 按 id 取并集；重复 id 保留本机内容。覆盖恢复采用归档中的记录，
 恢复没有注释文件的旧备份时清空该书当前注释。导入后清除缓存，下次读取重新加载。
 
@@ -53,14 +54,14 @@
 已打开的阅读页和注释抽屉随之更新，正在编辑的草稿保留。
 
 同步协议升级为 `readerx-sync/4`，两端都需升级；旧端缺少注释 schema 和删除级联规则，
-在握手阶段拒绝混用。书库注释文件仍是 schemaVersion=1，无需改写已有正文或书签。
+在握手阶段拒绝混用。书库使用 SQLite（user_version=1），旧 JSON 信封仍按 schemaVersion=1 导入。
 
 ## 检查方法
 
 - `node scripts/annotations-test.mjs`：同段多条、编辑、书籍隔离、重复文字重定位、
   并发首次保存、读写失败保护及缓存失效。
-- `cargo test -p readerx --lib book_store`：按书文件读写、缺失文件、损坏文件及版本校验。
-- `cargo test -p readerx-sync` 和 `cargo test -p readerx --test sync_bridge`：逐条合并、并发编辑及裁决、第三设备转发、启动幂等、删书级联、旧快照保存、损坏文件失败与备份恢复。
+- `cargo test -p readerx --lib book_store`：按书记录读写、缺失记录、损坏记录及版本校验。
+- `cargo test -p readerx-sync` 和 `cargo test -p readerx --test sync_bridge`：逐条合并、并发编辑及裁决、第三设备转发、启动幂等、删书级联、旧快照保存、损坏记录失败与备份恢复。
 - `cargo test -p readerx --lib data_transfer`：真实 zip 与磁盘往返、同段合并、覆盖恢复及旧备份。
 - 界面验证：手机单页与桌面双页选区入口、段末点击、添加/编辑、字号变化与滚动模式；
   Android / Linux / Windows 原生应用和软键盘行为需在对应设备确认。
