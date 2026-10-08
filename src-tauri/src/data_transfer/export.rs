@@ -34,9 +34,10 @@ pub(super) fn export_to<R: tauri::Runtime>(
     report: &mut dyn FnMut(&str, u64, u64),
 ) -> Result<ExportSummary, String> {
     let root = crate::storage::data_root(app)?;
+    // Migration may archive the old global bookmark state; enumerate files afterwards.
+    let book_count = crate::book_store::list_book_meta(app)?.len() as u64;
     let mut state = Vec::new();
     walk(&root.join(STATE_DIR), STATE_DIR, &is_state_file, &mut state)?;
-    let book_count = crate::book_store::list_book_meta(app)?.len() as u64;
     let mut images = Vec::new();
     walk(
         &root.join(IMAGES_DIR),

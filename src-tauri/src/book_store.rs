@@ -1888,9 +1888,18 @@ pub(crate) fn export_books<R: tauri::Runtime>(
     let _transaction = library_transaction();
     let root = crate::storage::data_root(app)?;
     let db = sqlite::open(&root)?;
-    // Refuse a partial backup when any readable legacy book could not be imported.
-    if root.join("books").is_dir() && !scan_books_dir(&root.join("books"))?.is_empty() {
-        return Err("书籍迁移尚未完成，暂不能导出完整备份".into());
+    // Check file presence, not parsed metadata: corrupt books must also block partial backups.
+    if root.join("books").is_dir() {
+        for entry in fs::read_dir(root.join("books")).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let kind = entry.file_type().map_err(|e| e.to_string())?;
+            let path = entry.path();
+            if (kind.is_dir() && path.join(BOOKDETAIL_FILE).is_file())
+                || (kind.is_file() && path.extension().is_some_and(|e| e == "json"))
+            {
+                return Err("书籍迁移尚未完成，暂不能导出完整备份".into());
+            }
+        }
     }
     sqlite::export(&db, zip, report)
 }

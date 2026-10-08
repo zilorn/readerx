@@ -234,6 +234,35 @@ fn import(
 }
 
 #[test]
+fn export_migrates_global_bookmarks_before_state_scan_and_rejects_unreadable_books() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let (app, root) = setup();
+    seed_book(&root, "legacy", "旧书", "old.epub", 321, None);
+    fs::remove_file(root.join("books/legacy/bookmarks.json")).unwrap();
+    let marks = json!([{"id":"old-mark","bookId":"legacy","unknown":42}]);
+    seed_state(&root, "readerx.bookmarks", &json!({"legacy":marks}));
+    let backup = export(&app, &root, "global-marks", false);
+    let mut zip = zip::ZipArchive::new(fs::File::open(backup).unwrap()).unwrap();
+    assert!(zip.by_name("state/readerx.bookmarks.json").is_err());
+    let stored = archive::read_entry_json(&mut zip, "books/legacy/bookmarks.json")
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored["bookmarks"], marks);
+    let bad = root.join("books/bad/bookdetail.json");
+    fs::create_dir_all(bad.parent().unwrap()).unwrap();
+    fs::write(&bad, b"{broken").unwrap();
+    let destination = fs::File::create(export_path(&root, "must-fail")).unwrap();
+    assert!(export_to(
+        &app,
+        destination,
+        ExportOptions::default(),
+        &mut |_, _, _| {}
+    )
+    .is_err());
+    assert_eq!(fs::read(bad).unwrap(), b"{broken");
+}
+
+#[test]
 fn export_and_merge_import_restores_everything() {
     let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let (app, root) = setup();
