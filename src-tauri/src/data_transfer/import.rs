@@ -14,7 +14,7 @@ use super::archive::{self, ArchiveScan};
 use super::merge::{self, Remap};
 use super::plan::{self, ArchiveSource, BookAction, BookPlan, LocalBook};
 use super::{ImportMode, ImportSummary};
-use super::{BOOKS_DIR, IMAGES_DIR, SESSIONS_DIR, STATE_DIR};
+use super::{BOOKS_DIR, IMAGES_DIR, SESSIONS_DIR};
 use crate::book_store;
 use crate::models::BookSource;
 use crate::storage;
@@ -59,7 +59,15 @@ pub(super) fn apply<R: tauri::Runtime>(
         plan::read_archive_books(&mut zip, books.as_ref(), &scan, &archive_sources, mode)?;
 
     // 分组换算表：书与书源的 groupId 都要跟着走
-    let remap = plan::plan_remap(app, mode, &local_books, &archive_books, &mut zip, &scan)?;
+    let remap = plan::plan_remap(
+        app,
+        mode,
+        &local_books,
+        &archive_books,
+        &mut zip,
+        &scan,
+        books.as_ref(),
+    )?;
     let plan: Vec<BookPlan> = archive_books
         .iter()
         .map(|book| plan::plan_book(book, &local_books, mode))
@@ -78,7 +86,15 @@ pub(super) fn apply<R: tauri::Runtime>(
     write_images(app, &mut zip, &scan, &plan, mode, &mut summary, report)?;
     write_sources(&local_sources, &archive_sources, &remap, mode, &mut summary)?;
     write_sessions(app, &mut zip, &scan, report)?;
-    write_state(app, &mut zip, &scan, &remap, mode, &mut summary)?;
+    write_state(
+        app,
+        &mut zip,
+        books.as_ref(),
+        &scan,
+        &remap,
+        mode,
+        &mut summary,
+    )?;
 
     if mode == ImportMode::Replace {
         remove_extras(
@@ -455,14 +471,14 @@ fn write_sessions<R: tauri::Runtime>(
 fn write_state<R: tauri::Runtime>(
     app: &AppHandle<R>,
     zip: &mut ZipArchive<File>,
+    books: Option<&crate::book_store::BackupDatabase>,
     scan: &ArchiveScan,
     remap: &Remap,
     mode: ImportMode,
     summary: &mut ImportSummary,
 ) -> Result<(), String> {
     for key in &scan.state_keys {
-        let Some(incoming) = archive::read_entry_json(zip, &format!("{STATE_DIR}/{key}.json"))?
-        else {
+        let Some(incoming) = archive::read_state_entry(zip, books, key)? else {
             continue;
         };
         let changed = storage::update_state(app, key, |local| {

@@ -3,7 +3,7 @@ use super::*;
 use rusqlite::{params, Connection, OptionalExtension};
 
 pub(super) const DATABASE: &str = "books.sqlite3";
-const DATABASE_VERSION: i64 = 1;
+const DATABASE_VERSION: i64 = 2;
 
 fn sql(error: rusqlite::Error) -> String {
     format!("书库数据库操作失败: {error}")
@@ -52,6 +52,20 @@ pub(super) fn connect(root: &Path) -> Result<Connection, String> {
              CREATE TABLE migrated_books (id TEXT PRIMARY KEY);
              PRAGMA user_version=1;"
         ).map_err(sql)?;
+        tx.commit().map_err(sql)?;
+    }
+    if version < 2 {
+        let tx = db.transaction().map_err(sql)?;
+        tx.execute_batch(
+            "CREATE TABLE collections (key TEXT PRIMARY KEY);
+             CREATE TABLE groups (key TEXT NOT NULL REFERENCES collections(key) ON DELETE CASCADE,
+                position INTEGER NOT NULL, record TEXT NOT NULL, PRIMARY KEY(key,position));
+             CREATE TABLE rules (key TEXT NOT NULL REFERENCES collections(key) ON DELETE CASCADE,
+                position INTEGER NOT NULL, record TEXT NOT NULL, PRIMARY KEY(key,position));
+             CREATE TABLE migrated_states (key TEXT PRIMARY KEY);
+             PRAGMA user_version=2;",
+        )
+        .map_err(sql)?;
         tx.commit().map_err(sql)?;
     }
     Ok(db)
@@ -328,7 +342,9 @@ pub(super) fn save_chapter(
     Ok(())
 }
 pub(super) fn put(db: &Connection, book: &LocalBook) -> Result<(), String> {
-    save_detail(db, &BookDetail::from_book(book))?;
+    let mut next = BookDetail::from_book(book);
+    next.progress = detail(db, &book.id)?.and_then(|d| d.progress);
+    save_detail(db, &next)?;
     db.execute("DELETE FROM chapters WHERE book_id=?1", [&book.id])
         .map_err(sql)?;
     for (position, chapter) in book.chapters.iter().enumerate() {

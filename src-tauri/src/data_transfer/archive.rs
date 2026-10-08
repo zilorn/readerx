@@ -336,6 +336,13 @@ pub(super) fn open_books(
         destination.sync_all().map_err(|e| e.to_string())?;
     }
     let books = crate::book_store::BackupDatabase::open(temporary)?;
+    for key in books.state_keys()? {
+        if scan.state_keys.contains(&key) {
+            return Err("备份同时包含两种数据状态布局".into());
+        }
+        scan.state_keys.push(key);
+    }
+    scan.state_keys.sort();
     scan.books = books.ids()?;
     if scan.books.len() as u64 != scan.manifest.books {
         return Err("备份书籍数量与清单不符".into());
@@ -352,6 +359,19 @@ pub(super) fn open_books(
         }
     }
     Ok(Some(books))
+}
+
+pub(super) fn read_state_entry(
+    zip: &mut ZipArchive<File>,
+    books: Option<&crate::book_store::BackupDatabase>,
+    key: &str,
+) -> Result<Option<Value>, String> {
+    if let Some(books) = books {
+        if books.state_keys()?.iter().any(|k| k == key) {
+            return books.read_state(key);
+        }
+    }
+    read_entry_json(zip, &format!("{}/{key}.json", super::STATE_DIR))
 }
 
 pub(super) fn read_book_entry(

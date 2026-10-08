@@ -11,7 +11,7 @@ description: 修改 ReaderX 本地书库存储、稳定身份与旧数据迁移�
 
 | 功能 | 实现入口 | 按需资料 |
 | --- | --- | --- |
-| 本地书库存储、迁移、稳定 ID | src-tauri/src/book_store.rs、book_store/sqlite.rs、book_store/backup.rs、storage.rs、models.rs、sync/identity.rs、sync/book_ids.rs、sync/data_ids.rs；src/lib/books.ts、booksTypes.ts、dataIds.ts | [存储与身份约束](references/contracts.md#书库与稳定身份) |
+| 本地书库存储、迁移、稳定 ID | src-tauri/src/book_store.rs、book_store/sqlite.rs、book_store/backup.rs、book_store/state.rs、storage.rs、models.rs、sync/identity.rs、sync/book_ids.rs、sync/data_ids.rs；src/lib/books.ts、booksTypes.ts、dataIds.ts | [存储与身份约束](references/contracts.md#书库与稳定身份) |
 | 备份与恢复 | src-tauri/src/data_transfer/；src/lib/backup.ts、src/pages/DataBackup.tsx | [备份约束](references/contracts.md#备份与恢复)、[备份文档](../../../docs/backup.md) |
 | 同步协议、合并与传输 | src-tauri/crates/readerx-sync/ | [同步约束](references/contracts.md#局域网同步)、[同步文档](../../../docs/sync.md) 对应章节 |
 | 同步 App 接线与落库 | src-tauri/src/sync/；src/lib/sync.ts、src/components/SyncProgress.tsx | 同步文档 App 接线、实时落库与停止部分 |

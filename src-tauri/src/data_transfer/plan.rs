@@ -7,7 +7,7 @@
 use super::archive::{self, ArchiveScan};
 use super::merge::{self, Remap};
 use super::ImportMode;
-use super::{BOOKS_DIR, SOURCES_DIR, STATE_DIR};
+use super::{BOOKS_DIR, SOURCES_DIR};
 use crate::book_store::{self, BookSyncMeta};
 use crate::models::BookSource;
 use crate::storage;
@@ -267,6 +267,7 @@ pub(super) fn plan_remap<R: tauri::Runtime>(
     archive_books: &[ArchiveBook],
     zip: &mut ZipArchive<File>,
     scan: &ArchiveScan,
+    books: Option<&crate::book_store::BackupDatabase>,
 ) -> Result<Remap, String> {
     let mut remap = Remap::default();
     for book in archive_books {
@@ -284,8 +285,8 @@ pub(super) fn plan_remap<R: tauri::Runtime>(
 
     let local_groups = state_array(app, merge::GROUPS_KEY);
     let local_source_groups = state_array(app, merge::SOURCE_GROUPS_KEY);
-    let archive_groups = read_archive_groups(zip, scan, merge::GROUPS_KEY)?;
-    let archive_source_groups = read_archive_groups(zip, scan, merge::SOURCE_GROUPS_KEY)?;
+    let archive_groups = read_archive_groups(zip, scan, books, merge::GROUPS_KEY)?;
+    let archive_source_groups = read_archive_groups(zip, scan, books, merge::SOURCE_GROUPS_KEY)?;
     let mut seq = 0u64;
     remap.groups = map_groups(&local_groups, &archive_groups, "grp", &mut seq);
     remap.source_groups = map_groups(&local_source_groups, &archive_source_groups, "sg", &mut seq);
@@ -310,12 +311,13 @@ pub(super) fn plan_remap<R: tauri::Runtime>(
 fn read_archive_groups(
     zip: &mut ZipArchive<File>,
     scan: &ArchiveScan,
+    books: Option<&crate::book_store::BackupDatabase>,
     key: &str,
 ) -> Result<Vec<Value>, String> {
     if !scan.state_keys.iter().any(|item| item == key) {
         return Ok(Vec::new());
     }
-    let Some(value) = archive::read_entry_json(zip, &format!("{STATE_DIR}/{key}.json"))? else {
+    let Some(value) = archive::read_state_entry(zip, books, key)? else {
         return Ok(Vec::new());
     };
     Ok(value.as_array().cloned().unwrap_or_default())

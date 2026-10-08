@@ -130,6 +130,14 @@ fn seed_image(root: &Path, book_id: &str, hash: &str) {
 }
 
 fn seed_state(root: &Path, key: &str, value: &Value) {
+    if root.join("books.sqlite3").is_file() && crate::book_store::state::handles(key) {
+        crate::book_store::state::update_at(root, key, |state| {
+            *state = Some(value.clone());
+            Ok(())
+        })
+        .unwrap();
+        return;
+    }
     write_json(&root.join("state").join(format!("{key}.json")), value);
 }
 
@@ -733,7 +741,7 @@ fn invalid_sqlite_archive_fails_before_local_writes_and_cleans_temporary_files()
     seed_device_a(&root);
     for (index,change) in [
         None,
-        Some("PRAGMA user_version=2;"),
+        Some("PRAGMA user_version=999;"),
         Some("UPDATE chapters SET chapter='broken';"),
         Some("UPDATE books SET id='../outside-' || id;"),
         Some("INSERT OR REPLACE INTO annotations SELECT id,'{}' FROM books;"),

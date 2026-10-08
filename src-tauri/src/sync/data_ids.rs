@@ -13,6 +13,7 @@ pub fn migrate(root: &Path) -> Result<(), String> {
     }
     migrate_sources(root, &BTreeMap::new())?;
     let mut plan = FilePlan::default();
+    let mut states = BTreeMap::new();
     let mut groups = BTreeMap::new();
     let mut source_groups = BTreeMap::new();
     for (key, prefix, uid_of, remap) in [
@@ -30,10 +31,9 @@ pub fn migrate(root: &Path) -> Result<(), String> {
         ),
     ] {
         let relative = std::path::PathBuf::from(format!("state/{key}.json"));
-        if !root.join(&relative).exists() {
+        let Some(mut value) = read_collection(root, key)? else {
             continue;
-        }
-        let mut value = id_migration::read(&root.join(&relative))?;
+        };
         for item in value.as_array_mut().into_iter().flatten() {
             let old = text(item, "id");
             if old == "__hidden__" {
@@ -43,7 +43,11 @@ pub fn migrate(root: &Path) -> Result<(), String> {
             remap.insert(old, new.clone());
             item["id"] = Value::String(new);
         }
-        plan.writes.insert(relative, value);
+        if root.join("books.sqlite3").is_file() {
+            states.insert(key.to_string(), value);
+        } else {
+            plan.writes.insert(relative, value);
+        }
     }
     for path in id_migration::details(root)? {
         let mut value = id_migration::read(&path)?;
@@ -62,10 +66,9 @@ pub fn migrate(root: &Path) -> Result<(), String> {
         ("readerx.chapterRules", "cr-"),
     ] {
         let relative = std::path::PathBuf::from(format!("state/{key}.json"));
-        if !root.join(&relative).exists() {
+        let Some(mut value) = read_collection(root, key)? else {
             continue;
-        }
-        let mut value = id_migration::read(&root.join(&relative))?;
+        };
         for item in value.as_array_mut().into_iter().flatten() {
             if item.get("builtin").and_then(Value::as_bool) == Some(true) {
                 continue;
@@ -93,10 +96,14 @@ pub fn migrate(root: &Path) -> Result<(), String> {
             };
             item["id"] = Value::String(fallback);
         }
-        plan.writes.insert(relative, value);
+        if root.join("books.sqlite3").is_file() {
+            states.insert(key.to_string(), value);
+        } else {
+            plan.writes.insert(relative, value);
+        }
     }
     // 相同旧身份收敛为同一个 ID：保留第一项，避免重复出现在界面。
-    for value in plan.writes.values_mut() {
+    for value in plan.writes.values_mut().chain(states.values_mut()) {
         if let Some(items) = value.as_array_mut() {
             let mut seen = std::collections::BTreeSet::new();
             items.retain(|item| seen.insert(text(item, "id")));
@@ -109,10 +116,29 @@ pub fn migrate(root: &Path) -> Result<(), String> {
     // available for deriving the same mapping on retry.
     crate::book_store::remap_metadata_at(root, "groupId", &groups)?;
     plan.commit(root, JOURNAL)?;
+    // References are committed first. Old collection IDs remain available after a failure.
+    for (key, value) in states {
+        crate::book_store::state::update_at(root, &key, |state| {
+            *state = Some(value);
+            Ok(())
+        })?;
+    }
     if changed > 0 {
         log::info!("同步数据 ID 迁移完成 files={changed}");
     }
     Ok(())
+}
+fn read_collection(root: &Path, key: &str) -> Result<Option<Value>, String> {
+    if root.join("books.sqlite3").is_file() {
+        crate::book_store::state::read_at(root, key)
+    } else {
+        let path = root.join("state").join(format!("{key}.json"));
+        if path.is_file() {
+            id_migration::read(&path).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
 }
 /// Journal aliases before source files can be renamed by the source crate.
 /// A crash between source migration and DB updates must not lose the old ID mapping.

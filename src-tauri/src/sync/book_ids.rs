@@ -126,10 +126,18 @@ fn apply(root: &Path, plan: &BTreeMap<String, String>) -> Result<(), String> {
         "readerx.readingTime",
     ] {
         let path = root.join("state").join(format!("{key}.json"));
-        if !path.is_file() {
-            continue;
-        }
-        let mut value = read(&path)?;
+        let in_db = root.join("books.sqlite3").is_file() && crate::book_store::state::handles(key);
+        let mut value = if in_db {
+            let Some(value) = crate::book_store::state::read_at(root, key)? else {
+                continue;
+            };
+            value
+        } else {
+            if !path.is_file() {
+                continue;
+            }
+            read(&path)?
+        };
         replace_refs(&mut value, plan);
         if key == "readerx.shelf" || key == "readerx.bookmarks" {
             replace_keys(&mut value, plan)?;
@@ -140,7 +148,14 @@ fn apply(root: &Path, plan: &BTreeMap<String, String>) -> Result<(), String> {
                 replace_keys(books, plan)?;
             }
         }
-        atomic_write(&path, &value)?;
+        if in_db {
+            crate::book_store::state::update_at(root, key, |state| {
+                *state = Some(value);
+                Ok(())
+            })?;
+        } else {
+            atomic_write(&path, &value)?;
+        }
     }
     Ok(())
 }

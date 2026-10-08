@@ -1,6 +1,6 @@
 //! 持久化层（App 侧）：偏好 / 书架 / 分章规则等状态、听书缓存、以及应用数据根目录。
 //!
-//! - 状态按 key 存为 JSON 文件（`state/<key>.json`）；
+//! - 分组与规则存 SQLite，书架状态是 books 元信息中的进度视图；其他状态按 key 存 JSON；
 //! - **本地书籍**存入 `books.sqlite3`（见 `book_store.rs` 和 `book_store/sqlite.rs`）；
 //! - **书源与书源登录态**由 `readerx-source` crate 实现（见文件末尾的转发段）。
 //!
@@ -166,6 +166,9 @@ pub(crate) fn read_state<R: tauri::Runtime>(
     app: &AppHandle<R>,
     key: &str,
 ) -> Result<Option<Value>, String> {
+    if crate::book_store::state::handles(key) {
+        return crate::book_store::state::read_at(&data_root(app)?, key);
+    }
     let _transaction = state_transaction();
     read_state_path(&state_path(app, key)?)
 }
@@ -175,6 +178,10 @@ pub(crate) fn write_state<R: tauri::Runtime>(
     key: &str,
     value: &Value,
 ) -> Result<(), String> {
+    if crate::book_store::state::handles(key) {
+        crate::book_store::state::update_at(&data_root(app)?, key, |state| { *state = Some(value.clone()); Ok(()) })?;
+        return Ok(());
+    }
     let _transaction = state_transaction();
     write_state_path(&state_path(app, key)?, value)
 }
@@ -185,6 +192,9 @@ pub(crate) fn update_state<R: tauri::Runtime>(
     key: &str,
     update: impl FnOnce(&mut Option<Value>) -> Result<(), String>,
 ) -> Result<bool, String> {
+    if crate::book_store::state::handles(key) {
+        return crate::book_store::state::update_at(&data_root(app)?, key, update);
+    }
     update_state_path(&state_path(app, key)?, update)
 }
 
@@ -246,6 +256,10 @@ pub(crate) fn patch_shelf(
 }
 
 pub(crate) fn remove_state<R: tauri::Runtime>(app: &AppHandle<R>, key: &str) -> Result<(), String> {
+    if crate::book_store::state::handles(key) {
+        crate::book_store::state::update_at(&data_root(app)?, key, |state| { *state = None; Ok(()) })?;
+        return Ok(());
+    }
     let _transaction = state_transaction();
     let path = state_path(app, key)?;
     if path.exists() {

@@ -4,10 +4,10 @@
 
 ## 书库与稳定身份
 
-- book_store.rs / book_store/sqlite.rs / book_store/backup.rs 将书籍数据存入 data_root 下的 books.sqlite3（books、chapters、bookmarks、annotations）；正文按章增量更新，章节头、指纹和图片引用同事务提交。TTS、书源、状态 JSON 和图片字节不入库。数据库 user_version 与旧 JSON schemaVersion 分别维护，新增字段核对 models.rs、BookDetail 与前端 booksTypes.ts。见 [书籍存储](../../../../docs/book-storage.md)。
+- book_store.rs / book_store/sqlite.rs / book_store/backup.rs 将书籍数据存入 data_root 下的 books.sqlite3（books、chapters、bookmarks、annotations、groups、rules；进度直接在 books.detail.progress）；正文按章增量更新，章节头、指纹和图片引用同事务提交。TTS、书源、其他状态 JSON 和图片字节不入库。数据库 user_version 与旧 JSON schemaVersion 分别维护，新增字段核对 models.rs、BookDetail 与前端 booksTypes.ts。见 [书籍存储](../../../../docs/book-storage.md)。
 - 注释走 readerx_annotations_get/put，与正文/书签独立存表，旧 JSON 信封 schemaVersion=1，记录按段落聚合 notes；只在读取及写入成功后发布内存变化，读失败不得作为空数组覆盖。锚点不含 bookId，身份迁移由外键级联更新归属；删除/恢复失效缓存并阻止在飞读取回填。备份包含注释表并在同段合并 note id，覆盖旧备份的缺失文件清空该书注释；导出/导入/删除前等待注释写队列。同步按 note 独立实体，保存只发布差集且与落库串行；同段新增聚合、正文并发进冲突、删书级联，启动只补缺失实体并恢复引擎已有值。备份导入显式发布改写/删除/恢复，落库通过 AppliedChanges.annotations 按书刷新。契约见 [阅读注释](../../../../docs/annotations.md)，检查为 book_store、data_transfer、readerx-sync 与 sync_bridge 测试。
 - book_store 的读写入口在进程级书库事务锁内完成迁移、读取、修改、落盘及指纹更新；持锁时不调用同步引擎。单章补丁以 chapter.cid 定位，index 仅兼容旧载荷；先验证整批 cid 存在且唯一，再只改正文，保留当前目录标题/地址。
-- 普通状态写入使用同目录临时文件，先 sync_all 再重命名替换，Unix（含 Android）随后同步父目录；提交前失败保留旧文件并清理临时文件，目录同步失败返回“已替换”错误（不可假定已回滚）。Windows 仅同步文件并替换，不承诺断电后的目录持久性。普通状态读写/删除与 update_state 共用事务锁；读改写必须使用 update_state 闭包，闭包内不重入状态存储或同步引擎。阅读进度经 readerx_shelf_patch 按书提交增量，ensure 仅补缺失项，reset 在后端重置当前全部记录；不要恢复成前端整份旧书架快照覆盖。
+- 分组 / 书源分组 / 文本替换 / 分章规则经 book_store/state.rs 存库，书架 API 是 books.detail.progress 的视图；整书及元信息补丁不得清除进度。这些状态与书庫共用事务锁，旧 JSON 和回执同事务迁入，成功才归档；数据库 user_version=2，恢复兼容 v1。其他普通状态写入使用同目录临时文件，先 sync_all 再重命名替换，Unix（含 Android）随后同步父目录；提交前失败保留旧文件并清理临时文件，目录同步失败返回“已替换”错误（不可假定已回滚）。Windows 仅同步文件并替换，不承诺断电后的目录持久性。普通状态读写/删除与 update_state 共用事务锁；读改写必须使用 update_state 闭包，闭包内不重入状态存储或同步引擎。阅读进度经 readerx_shelf_patch 按书提交增量，ensure 仅补缺失项，reset 在后端重置当前全部记录；不要恢复成前端整份旧书架快照覆盖。
 - 旧整书 / 目录 JSON 逐本在事务内导入并保存迁移回执，成功才改名 .migrated 留底；失败保留读回退和重试，不影响其他书。归档中断不能重复导入旧数据覆盖新编辑。数据库身份改动和状态 / TTS 目录迁移保持可重跑。
 - 书库与同步共用稳定 ID；已有规范 ID 沿用，不能在每次编辑后按新名字/地址重新计算。身份算法以 sync/identity.rs 为准：在线书首次按书源地址与详情页地址派生，导入书按归一文件名与字节数派生。分组与书源首次按名称/地址派生后编辑沿用 ID；规则仍按内容派生。前端 dataIds.ts 与 Rust 种子、大小写和归一化口径保持一致。
 - 迁移顺序与启动入口检查 src-tauri/src/lib.rs：书籍迁移在 UI/同步访问前完成，data_ids 再处理分组、书源、规则及引用。迁移待办先落盘，每步可重跑；目录或身份冲突保留原数据并返回失败，不能覆盖目标。
@@ -16,7 +16,7 @@
 
 ## 备份与恢复
 
-- 归档入口按 data_transfer/archive.rs 分类与校验条目名，拒绝越界路径；不绕过 is_safe_entry 直接解压。plan.rs 只读规划，import.rs 写盘；书籍导入先经 import_book_json 在事务内写元信息和正文，再处理书签/注释；导出 readerx-backup/2，在书库锁内用 VACUUM INTO 生成一致的 books.sqlite3 快照并流式写 ZIP，书源仍导出 JSON，事务日志不进归档；导入先只读校验数据库，再逐书复用身份规划与合并入口，不整库替换或导入迁移回执；兼容 readerx-backup/1 JSON，图片流式处理。
+- 归档入口按 data_transfer/archive.rs 分类与校验条目名，拒绝越界路径；不绕过 is_safe_entry 直接解压。plan.rs 只读规划，import.rs 写盘；书籍导入先经 import_book_json 在事务内写元信息和正文，再处理书签/注释；导出 readerx-backup/2，在书库锁内用 VACUUM INTO 生成一致的 books.sqlite3 快照并流式写 ZIP，书源仍导出 JSON，分组、规则与进度只在数据库快照中导出，事务日志不进归档；导入先只读校验数据库，再逐书复用身份规划与合并入口，不整库替换或导入迁移回执；兼容 readerx-backup/1 JSON，图片流式处理。
 - 合并与覆盖语义不同：合并保留本机额外数据并按身份映射引用，偏好已有值保留；覆盖先写后删并清空归档缺失的内容类状态。新增 state 键时明确分类、合并规则、缺失语义与 ID 换算，不能直接全量 JSON 覆盖。
 - 书源会话与 WebDAV 密码默认过滤，显式包含才导出；sync/、tts-audio/、logs/ 和本机 reading-time-origin 不作为换机数据搬走。阅读时长 contributions 应保留，恢复后本机新增时间使用独立来源。
 - 覆盖删除书或书源前先调用同步删除钩子（定位身份仍需要旧数据），批量导入后调用 on_data_imported 全量对账。前端 import 完成后按 backup.ts 依赖顺序失效书签并重载分组、书库、进度、统计、规则、书源。

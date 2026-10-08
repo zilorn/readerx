@@ -74,7 +74,7 @@ pub(super) fn export_to<R: tauri::Runtime>(
         books: book_count,
         images: images.len() as u64,
         sources: sources.len() as u64,
-        state_keys: state.len() as u64,
+        state_keys: (state.len() + books.state_keys()?.len()) as u64,
     };
 
     let mut zip = archive::writer(destination);
@@ -178,7 +178,7 @@ fn redacted_webdav(path: &Path) -> Result<Vec<u8>, String> {
 /// 状态文件：`<key>.json`，key 必须合法（与 `readerx_state_get` 同一口径）
 fn is_state_file(name: &str) -> bool {
     name.strip_suffix(".json")
-        .map(crate::storage::valid_state_key)
+        .map(|key| crate::storage::valid_state_key(key) && !crate::book_store::state::handles(key))
         .unwrap_or(false)
 }
 

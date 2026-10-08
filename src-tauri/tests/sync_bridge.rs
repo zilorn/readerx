@@ -695,9 +695,10 @@ fn conflict_resolution_reports_materialization_failures_and_can_retry() {
             "activated": true, "hiddenGroupMigrated": true,
             "materializedOps": if pending { 0 } else { count },
         }));
-        // 用目录阻挡状态文件写入，真实触发持久化失败。
+        // 只阻断分组的 SQLite 写入，保留前一阶段的书源分组刷新。
         let path = app_data.join("state/readerx.groups.json");
-        std::fs::create_dir_all(&path).unwrap();
+        let db = rusqlite::Connection::open(app_data.join("books.sqlite3")).unwrap();
+        db.execute_batch("CREATE TRIGGER fail_groups BEFORE INSERT ON groups WHEN NEW.key='readerx.groups' BEGIN SELECT RAISE(ABORT,'injected'); END").unwrap();
         let applied = Arc::new(Mutex::new(Vec::<Value>::new()));
         let captured = applied.clone();
         let listener = handle.listen("readerx-sync-applied", move |event| {
@@ -716,7 +717,7 @@ fn conflict_resolution_reports_materialization_failures_and_can_retry() {
             assert!(applied.lock().unwrap().iter().any(|event| event["sourceGroups"] == true),
                 "指定实体落地失败不能吞掉此前已写回的书源分组刷新事件");
         }
-        std::fs::remove_dir(&path).unwrap();
+        db.execute_batch("DROP TRIGGER fail_groups").unwrap();
         service.resolve_conflict(&id, "remote").expect("恢复写盘后同一裁决可以重试");
         let groups = read_json(&path);
         assert_eq!(groups[0]["name"], "对端分组");

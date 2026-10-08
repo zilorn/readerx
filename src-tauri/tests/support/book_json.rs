@@ -43,7 +43,107 @@ fn connection(path: &Path) -> Option<(Connection, String, String)> {
         None
     }
 }
+fn state_location(path: &Path) -> Option<(Connection, String)> {
+    let state = path.parent()?;
+    if state.file_name()?.to_str()? != "state" || path.is_file() {
+        return None;
+    }
+    let key = path.file_stem()?.to_str()?;
+    if !matches!(
+        key,
+        "readerx.groups"
+            | "readerx.sourceGroups"
+            | "readerx.chapterRules"
+            | "readerx.textReplacements"
+            | "readerx.shelf"
+    ) {
+        return None;
+    }
+    let db = state.parent()?.join("books.sqlite3");
+    if !db.is_file() {
+        return None;
+    }
+    let db = Connection::open(db).unwrap();
+    db.execute_batch("PRAGMA foreign_keys=ON").unwrap();
+    Some((db, key.into()))
+}
+fn state_read(db: &Connection, key: &str) -> Value {
+    if key == "readerx.shelf" {
+        let mut out = serde_json::Map::new();
+        let mut q = db.prepare("SELECT id,detail FROM books").unwrap();
+        for row in q
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .unwrap()
+        {
+            let (id, raw) = row.unwrap();
+            let detail: Value = serde_json::from_str(&raw).unwrap();
+            if let Some(progress) = detail.get("progress") {
+                out.insert(id, progress.clone());
+            }
+        }
+        return Value::Object(out);
+    }
+    let table = if key.ends_with("groups") || key.ends_with("sourceGroups") {
+        "groups"
+    } else {
+        "rules"
+    };
+    let mut q = db
+        .prepare(&format!(
+            "SELECT record FROM {table} WHERE key=?1 ORDER BY position"
+        ))
+        .unwrap();
+    Value::Array(
+        q.query_map([key], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|r| serde_json::from_str(&r.unwrap()).unwrap())
+            .collect(),
+    )
+}
+fn state_write(db: &mut Connection, key: &str, value: &Value) {
+    let tx = db.transaction().unwrap();
+    if key == "readerx.shelf" {
+        let details: Vec<(String, String)> = {
+            let mut q = tx.prepare("SELECT id,detail FROM books").unwrap();
+            let rows = q.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+            rows.map(Result::unwrap).collect()
+        };
+        for (id, raw) in details {
+            let mut detail: Value = serde_json::from_str(&raw).unwrap();
+            detail.as_object_mut().unwrap().remove("progress");
+            if let Some(progress) = value.get(&id) {
+                detail["progress"] = progress.clone();
+            }
+            tx.execute(
+                "UPDATE books SET detail=?1 WHERE id=?2",
+                params![detail.to_string(), id],
+            )
+            .unwrap();
+        }
+    } else {
+        let table = if key.ends_with("groups") || key.ends_with("sourceGroups") {
+            "groups"
+        } else {
+            "rules"
+        };
+        tx.execute("DELETE FROM collections WHERE key=?1", [key])
+            .unwrap();
+        tx.execute("INSERT INTO collections(key) VALUES(?1)", [key])
+            .unwrap();
+        for (p, item) in value.as_array().unwrap().iter().enumerate() {
+            tx.execute(
+                &format!("INSERT INTO {table}(key,position,record) VALUES(?1,?2,?3)"),
+                params![key, p as i64, item.to_string()],
+            )
+            .unwrap();
+        }
+    }
+    tx.commit().unwrap();
+}
 pub fn read(path: &Path) -> Value {
+    if let Some((db, key)) = state_location(path) {
+        return state_read(&db, &key);
+    }
     let Some((db, id, file)) = connection(path) else {
         return serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
     };
@@ -79,6 +179,10 @@ pub fn read(path: &Path) -> Value {
     json!({"schemaVersion":1,(table):text.map(|s|serde_json::from_str::<Value>(&s).unwrap()).unwrap_or(json!([]))})
 }
 pub fn write(path: &Path, value: &Value) {
+    if let Some((mut db, key)) = state_location(path) {
+        state_write(&mut db, &key, value);
+        return;
+    }
     let Some((mut db, id, file)) = connection(path) else {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, serde_json::to_vec_pretty(value).unwrap()).unwrap();

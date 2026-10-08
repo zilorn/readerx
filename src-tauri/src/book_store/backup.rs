@@ -16,7 +16,7 @@ impl BackupDatabase {
         let version: i64 = db
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .map_err(sql)?;
-        if version != DATABASE_VERSION {
+        if !(1..=DATABASE_VERSION).contains(&version) {
             return Err("备份书库数据库格式版本不受支持".into());
         }
         let integrity: String = db
@@ -42,7 +42,30 @@ impl BackupDatabase {
         if foreign_key_error {
             return Err("备份书库数据库引用无效".into());
         }
+        if version >= 2 {
+            for table in ["collections", "groups", "rules"] {
+                let ordinary: bool = db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_list WHERE schema='main' AND name=?1 AND type='table')",
+                    [table], |r|r.get(0)).map_err(sql)?;
+                if !ordinary {
+                    return Err("备份缺少分组或规则数据表".into());
+                }
+            }
+            let mut query = db.prepare("SELECT key FROM collections").map_err(sql)?;
+            for row in query
+                .query_map([], |r| r.get::<_, String>(0))
+                .map_err(sql)?
+            {
+                let key = row.map_err(sql)?;
+                if !super::super::state::handles(&key) || key == "readerx.shelf" {
+                    return Err("备份包含未知数据集合".into());
+                }
+            }
+        }
         let backup = Self { db, temporary };
+        for key in backup.state_keys()? {
+            backup.read_state(&key)?;
+        }
         // Validate every payload before import can mutate local data, without loading the library.
         for id in backup.ids()? {
             valid_id(&id)?;
@@ -74,6 +97,28 @@ impl BackupDatabase {
             }
         }
         Ok(backup)
+    }
+    pub(crate) fn state_keys(&self) -> Result<Vec<String>, String> {
+        let version: i64 = self
+            .db
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .map_err(sql)?;
+        if version < 2 {
+            return Ok(Vec::new());
+        }
+        let mut query = self
+            .db
+            .prepare("SELECT key FROM collections ORDER BY key")
+            .map_err(sql)?;
+        let rows = query
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(sql)?;
+        let mut keys = rows.collect::<Result<Vec<_>, _>>().map_err(sql)?;
+        keys.push("readerx.shelf".into());
+        Ok(keys)
+    }
+    pub(crate) fn read_state(&self, key: &str) -> Result<Option<Value>, String> {
+        super::super::state::read(&self.db, key)
     }
     #[cfg(test)]
     pub(super) fn path(&self) -> &Path {

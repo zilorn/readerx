@@ -1,7 +1,7 @@
 //! 本地书籍数据存储在应用数据根的 `books.sqlite3`。
 //! 元信息、逐章正文与派生指纹、书签和注释经 SQLite 事务读写。
 //! 旧目录 / 整书 JSON 逐本迁移，成功后改名 `.migrated` 留底，失败保留读回退。
-//! TTS、书源、状态 JSON 与图片字节保持文件存储；备份仍采用原 JSON 归档格式。
+//! 分组、规则同库保存，书架进度在 books 元信息中；TTS、书源、其他状态及图片字节保持文件存储。
 
 use crate::models::{
     BookChapterPatch, BookMeta, BookMetaPatch, ChapterBlock, ChapterHead, LocalBook,
@@ -22,6 +22,8 @@ use tauri::AppHandle;
 
 #[path = "book_store/sqlite.rs"]
 mod sqlite;
+#[path = "book_store/state.rs"]
+pub(crate) mod state;
 
 /// 旧布局 / 便携备份的元信息文件名
 const BOOKDETAIL_FILE: &str = "bookdetail.json";
@@ -49,6 +51,8 @@ fn schema_version() -> u32 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BookDetail {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    progress: Option<Value>,
     #[serde(default = "schema_version")]
     schema_version: u32,
     id: String,
@@ -90,6 +94,7 @@ impl BookDetail {
     /// 从整书取元信息（正文留给 content.json）
     fn from_book(book: &LocalBook) -> Self {
         Self {
+            progress: None,
             schema_version: SCHEMA_VERSION,
             id: book.id.clone(),
             title: book.title.clone(),
@@ -664,11 +669,13 @@ pub(crate) fn patch_book_meta<R: tauri::Runtime>(
     let mut db = sqlite::open(&root)?;
     sqlite::require_book(&db, &root, id)?;
     let tx = sqlite::transaction(&mut db)?;
-    let mut book = sqlite::detail(&tx, id)?
-        .ok_or("书籍不存在")?
-        .into_book(Vec::new());
+    let detail = sqlite::detail(&tx, id)?.ok_or("书籍不存在")?;
+    let progress = detail.progress.clone();
+    let mut book = detail.into_book(Vec::new());
     if patch.apply_to(&mut book) {
-        sqlite::save_detail(&tx, &BookDetail::from_book(&book))?;
+        let mut detail = BookDetail::from_book(&book);
+        detail.progress = progress;
+        sqlite::save_detail(&tx, &detail)?;
     }
     sqlite::commit(tx)
 }
@@ -1900,6 +1907,8 @@ pub(crate) fn backup_books<R: tauri::Runtime>(
             }
         }
     }
+    let mut db = db;
+    state::migrate(&mut db, &root)?;
     sqlite::snapshot(&db, &root)
 }
 /// Backup JSON is a portable representation, not the on-disk database schema.
@@ -1934,6 +1943,7 @@ pub(crate) fn rename_id_at(root: &Path, old: &str, new: &str) -> Result<(), Stri
     sqlite::valid_id(old)?;
     sqlite::valid_id(new)?;
     let mut db = sqlite::open(root)?;
+    state::migrate(&mut db, root)?;
     let tx = sqlite::transaction(&mut db)?;
     let from = sqlite::detail(&tx, old)?;
     let to = sqlite::detail(&tx, new)?;
@@ -1948,6 +1958,9 @@ pub(crate) fn rename_id_at(root: &Path, old: &str, new: &str) -> Result<(), Stri
     }
     if let Some(mut detail) = from {
         detail.id = new.to_string();
+        if let Some(progress) = detail.progress.as_mut().and_then(Value::as_object_mut) {
+            progress.insert("bookId".into(), Value::String(new.into()));
+        }
         tx.execute(
             "UPDATE books SET id=?1,detail=?2 WHERE id=?3",
             rusqlite::params![
