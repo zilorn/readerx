@@ -193,13 +193,7 @@ pub(crate) fn is_safe_entry(name: &str) -> bool {
 
 /// 清单里的格式版本是否本程序读得懂
 pub(crate) fn format_supported(format: &str) -> bool {
-    match format.strip_prefix("readerx-backup/") {
-        Some(version) => version
-            .parse::<u32>()
-            .map(|v| (1..=2).contains(&v))
-            .unwrap_or(false),
-        None => false,
-    }
+    matches!(format, "readerx-backup/1" | "readerx-backup/2")
 }
 
 /// 当前时间（毫秒时间戳）
@@ -249,6 +243,7 @@ mod tests {
         assert!(format_supported("readerx-backup/1"));
         assert!(format_supported("readerx-backup/2"));
         assert!(!format_supported("readerx-backup/0"));
+        assert!(!format_supported("readerx-backup/02"));
         assert!(!format_supported("readerx-backup/3"));
         assert!(!format_supported("readerx-backup/x"));
         assert!(!format_supported("其它工具/1"));

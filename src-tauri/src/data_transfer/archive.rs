@@ -309,6 +309,9 @@ pub(super) fn open_books(
     scan: &mut ArchiveScan,
 ) -> Result<Option<crate::book_store::BackupDatabase>, String> {
     if scan.manifest.format != super::BACKUP_FORMAT {
+        if scan.entries.iter().any(|name| name == "books.sqlite3") {
+            return Err("备份书籍布局与格式版本不符".into());
+        }
         return Ok(None);
     }
     if scan.entries.iter().any(|name| name.starts_with("books/")) {
@@ -421,6 +424,44 @@ fn valid_image(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn archive_version_must_match_book_layout() {
+        let dir =
+            std::env::temp_dir().join(format!("readerx-archive-layout-{}", readerx_sync::new_id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("backup.zip");
+        for (format, mixed_json) in [("readerx-backup/1", false), ("readerx-backup/2", true)] {
+            let mut zip = writer(File::create(&path).unwrap());
+            let manifest = Manifest {
+                format: format.into(),
+                app_version: "test".into(),
+                created_at: 0,
+                credentials: false,
+                books: 0,
+                images: 0,
+                sources: 0,
+                state_keys: 0,
+            };
+            write_manifest(&mut zip, &manifest).unwrap();
+            zip.start_file("books.sqlite3", text_options(None)).unwrap();
+            zip.write_all(b"not a database").unwrap();
+            if mixed_json {
+                zip.start_file("books/a/bookdetail.json", text_options(None))
+                    .unwrap();
+                zip.write_all(b"{}").unwrap();
+            }
+            drop(zip.finish().unwrap());
+            let mut zip = open_zip_from(File::open(&path).unwrap()).unwrap();
+            let mut scan = classify(&mut zip, manifest, 0);
+            assert!(open_books(&dir, &mut zip, &mut scan).is_err());
+            assert!(
+                !dir.join("books").exists(),
+                "reject layout before extracting"
+            );
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn entry_allocation_ignores_declared_uncompressed_size() {
