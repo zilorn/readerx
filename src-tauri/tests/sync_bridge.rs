@@ -2118,7 +2118,9 @@ fn upgrade_migrates_book_ids_without_recreating_sync_entities() {
     let uid = bridge::local_uid(&handle, "local-old");
     let before = lock_engine(&local).entities_of_kind("book", true)[0].clone();
     readerx_lib::sync::book_ids::migrate(&handle).unwrap();
-    assert!(!root.join("books/local-old").exists());
+    assert!(!root.join("books/local-old/bookdetail.json").exists());
+    assert!(root.join("books/local-old/bookdetail.json.migrated").is_file());
+    assert_eq!(book_json::ids(&root), vec![uid.clone()], "旧 ID 应从数据库移除，留底不能重建旧书");
     assert_eq!(read_json(&root.join("books").join(&uid).join("bookdetail.json"))["id"], uid);
     assert_eq!(read_json(&root.join("books").join(&uid).join("bookmarks.json"))["bookmarks"][0]["bookId"], uid);
     let shelf = read_json(&root.join("state/readerx.shelf.json"));
