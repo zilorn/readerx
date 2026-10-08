@@ -3,7 +3,7 @@
 //! 采集口径与 `data_transfer/mod.rs` 的文件头一致：书籍（元信息 / 正文 / 书签）、
 //! 状态文件、插图、书源，外加**按需**的书源登录态。听书缓存、日志、同步目录不进来。
 //!
-//! 数据库正文按章节行流式写入归档，文件资源用 `std::io::copy`。
+//! 数据库生成一致快照后流式写入归档，文件资源用 `std::io::copy`。
 //! 不为导出复制整本或整库正文。
 
 use super::{archive, ExportOptions, ExportSummary, Manifest, BACKUP_FORMAT};
@@ -35,7 +35,8 @@ pub(super) fn export_to<R: tauri::Runtime>(
 ) -> Result<ExportSummary, String> {
     let root = crate::storage::data_root(app)?;
     // Migration may archive the old global bookmark state; enumerate files afterwards.
-    let book_count = crate::book_store::list_book_meta(app)?.len() as u64;
+    let books = crate::book_store::backup_books(app)?;
+    let book_count = books.ids()?.len() as u64;
     let mut state = Vec::new();
     walk(&root.join(STATE_DIR), STATE_DIR, &is_state_file, &mut state)?;
     let mut images = Vec::new();
@@ -95,7 +96,7 @@ pub(super) fn export_to<R: tauri::Runtime>(
         write_entries(&mut zip, entries, category, report)?;
     }
 
-    crate::book_store::export_books(app, &mut zip, report)?;
+    books.write_zip(&mut zip, report)?;
 
     let file = zip.finish().map_err(|e| format!("写入备份文件失败: {e}"))?;
     let bytes = file.metadata().map(|meta| meta.len()).unwrap_or(0);

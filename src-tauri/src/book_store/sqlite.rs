@@ -1,7 +1,6 @@
 //! SQLite implementation. Callers hold the book-store lock; no sync-engine calls here.
 use super::*;
 use rusqlite::{params, Connection, OptionalExtension};
-use std::io::Write;
 
 pub(super) const DATABASE: &str = "books.sqlite3";
 const DATABASE_VERSION: i64 = 1;
@@ -532,60 +531,10 @@ pub(super) fn delete(db: &Connection, id: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Archives stay JSON based and version-compatible. Stream chapters one row at a time.
-pub(super) fn export(
-    db: &Connection,
-    zip: &mut zip::ZipWriter<fs::File>,
-    report: &mut dyn FnMut(&str, u64, u64),
-) -> Result<u64, String> {
-    let details = details(db)?;
-    let total = details.len() as u64;
-    report("books", 0, total);
-    for (index, d) in details.iter().enumerate() {
-        let prefix = format!("books/{}/", d.id);
-        zip.start_file(
-            format!("{prefix}{BOOKDETAIL_FILE}"),
-            crate::data_transfer::archive::text_options(None),
-        )
-        .map_err(|e| e.to_string())?;
-        serde_json::to_writer(&mut *zip, d).map_err(|e| e.to_string())?;
-        zip.start_file(
-            format!("{prefix}{CONTENT_FILE}"),
-            crate::data_transfer::archive::text_options(None),
-        )
-        .map_err(|e| e.to_string())?;
-        zip.write_all(b"{\"schemaVersion\":1,\"chapters\":[")
-            .map_err(|e| e.to_string())?;
-        let mut statement = db
-            .prepare("SELECT chapter FROM chapters WHERE book_id=?1 ORDER BY position")
-            .map_err(sql)?;
-        let rows = statement
-            .query_map([&d.id], |r| r.get::<_, String>(0))
-            .map_err(sql)?;
-        for (i, row) in rows.enumerate() {
-            if i > 0 {
-                zip.write_all(b",").map_err(|e| e.to_string())?;
-            }
-            zip.write_all(row.map_err(sql)?.as_bytes())
-                .map_err(|e| e.to_string())?;
-        }
-        zip.write_all(b"]}").map_err(|e| e.to_string())?;
-        for (file, table, field) in [
-            (BOOKMARKS_FILE, "bookmarks", "bookmarks"),
-            (ANNOTATIONS_FILE, "annotations", "annotations"),
-        ] {
-            zip.start_file(
-                format!("{prefix}{file}"),
-                crate::data_transfer::archive::text_options(None),
-            )
-            .map_err(|e| e.to_string())?;
-            let value = serde_json::json!({"schemaVersion":1,(field):records(db, table, &d.id)?});
-            serde_json::to_writer(&mut *zip, &value).map_err(|e| e.to_string())?;
-        }
-        report("books", index as u64 + 1, total);
-    }
-    Ok(total)
-}
+#[path = "backup.rs"]
+mod backup;
+pub(super) use backup::snapshot;
+pub(crate) use backup::BackupDatabase;
 
 #[cfg(test)]
 mod tests {
@@ -823,29 +772,40 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
-    fn export_uses_portable_json_and_omits_database_bytes() {
+    fn export_is_a_standalone_sqlite_snapshot_including_wal() {
         let root = root("export");
         let db = open(&root).unwrap();
         let original = book("b1");
         put(&db, &original).unwrap();
-        let file = fs::File::create(root.join("backup.zip")).unwrap();
-        let mut zip = zip::ZipWriter::new(file);
-        assert_eq!(export(&db, &mut zip, &mut |_, _, _| {}).unwrap(), 1);
+        db.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
+        put_records(&db, "bookmarks", "b1", &[json!({"id":"m","bookId":"b1"})]).unwrap();
+        let backup = snapshot(&db, &root).unwrap();
+        let snapshot_path = backup.path().to_path_buf();
+        let mut changed = original.clone();
+        changed.title = "快照之后的编辑".into();
+        put(&db, &changed).unwrap();
+        let mut zip = zip::ZipWriter::new(fs::File::create(root.join("backup.zip")).unwrap());
+        backup.write_zip(&mut zip, &mut |_, _, _| {}).unwrap();
         drop(zip.finish().unwrap());
-        let file = fs::File::open(root.join("backup.zip")).unwrap();
-        let mut archive = zip::ZipArchive::new(file).unwrap();
-        assert!(archive.by_name(DATABASE).is_err());
-        let detail: BookDetail =
-            serde_json::from_reader(archive.by_name("books/b1/bookdetail.json").unwrap()).unwrap();
-        let content: BookContent =
-            serde_json::from_reader(archive.by_name("books/b1/content.json").unwrap()).unwrap();
+        let mut archive =
+            zip::ZipArchive::new(fs::File::open(root.join("backup.zip")).unwrap()).unwrap();
+        assert_eq!(archive.len(), 1);
+        let restored = root.join("restored.sqlite3");
+        std::io::copy(
+            &mut archive.by_name(DATABASE).unwrap(),
+            &mut fs::File::create(&restored).unwrap(),
+        )
+        .unwrap();
+        let restored = Connection::open(restored).unwrap();
         assert_eq!(
-            serde_json::to_value(detail.into_book(content.chapters)).unwrap(),
+            serde_json::to_value(get(&restored, "b1").unwrap().unwrap()).unwrap(),
             serde_json::to_value(original).unwrap()
         );
-        let records: Value =
-            serde_json::from_reader(archive.by_name("books/b1/annotations.json").unwrap()).unwrap();
-        assert_eq!(records["annotations"], json!([]));
+        assert_eq!(records(&restored, "bookmarks", "b1").unwrap()[0]["id"], "m");
+        drop(restored);
+        drop(archive);
+        drop(backup);
+        assert!(!snapshot_path.exists());
         drop(db);
         fs::remove_dir_all(root).unwrap();
     }

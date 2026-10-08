@@ -36,7 +36,8 @@ pub(super) fn apply<R: tauri::Runtime>(
     let bytes = file.metadata().map(|meta| meta.len()).unwrap_or(0);
     let mut zip = archive::open_zip_from(file)?;
     let manifest = archive::read_manifest(&mut zip)?;
-    let scan = archive::classify(&mut zip, manifest, bytes);
+    let mut scan = archive::classify(&mut zip, manifest, bytes);
+    let books = archive::open_books(&storage::data_root(app)?, &mut zip, &mut scan)?;
     log::info!(
         "开始导入备份 方式={} 书籍={} 插图={} 书源={} 状态={} 登录信息={}",
         mode.as_str(),
@@ -54,7 +55,8 @@ pub(super) fn apply<R: tauri::Runtime>(
     let local_books = plan::local_books(app)?;
     let local_sources = readerx_source::store::list_sources().unwrap_or_default();
     let archive_sources = plan::read_archive_sources(&mut zip, &scan)?;
-    let archive_books = plan::read_archive_books(&mut zip, &scan, &archive_sources, mode)?;
+    let archive_books =
+        plan::read_archive_books(&mut zip, books.as_ref(), &scan, &archive_sources, mode)?;
 
     // 分组换算表：书与书源的 groupId 都要跟着走
     let remap = plan::plan_remap(app, mode, &local_books, &archive_books, &mut zip, &scan)?;
@@ -63,7 +65,16 @@ pub(super) fn apply<R: tauri::Runtime>(
         .map(|book| plan::plan_book(book, &local_books, mode))
         .collect();
 
-    write_books(app, &mut zip, &plan, &remap, mode, &mut summary, report)?;
+    write_books(
+        app,
+        &mut zip,
+        books.as_ref(),
+        &plan,
+        &remap,
+        mode,
+        &mut summary,
+        report,
+    )?;
     write_images(app, &mut zip, &scan, &plan, mode, &mut summary, report)?;
     write_sources(&local_sources, &archive_sources, &remap, mode, &mut summary)?;
     write_sessions(app, &mut zip, &scan, report)?;
@@ -136,6 +147,7 @@ pub(super) fn apply<R: tauri::Runtime>(
 fn write_books<R: tauri::Runtime>(
     app: &AppHandle<R>,
     zip: &mut ZipArchive<File>,
+    books: Option<&book_store::BackupDatabase>,
     plan: &[BookPlan],
     remap: &Remap,
     mode: ImportMode,
@@ -151,9 +163,9 @@ fn write_books<R: tauri::Runtime>(
         }
         if item.action != BookAction::Skip {
             let prefix = format!("{BOOKS_DIR}/{}/", item.archive_id);
-            let detail = archive::read_entry(zip, &format!("{prefix}bookdetail.json"))?
+            let detail = archive::read_book_entry(zip, books, &format!("{prefix}bookdetail.json"))?
                 .ok_or("备份缺少书籍元信息")?;
-            let content = archive::read_entry(zip, &format!("{prefix}content.json"))?;
+            let content = archive::read_book_entry(zip, books, &format!("{prefix}content.json"))?;
             let detail = remap_detail(&detail, remap, mode)?;
             book_store::import_book_json(app, &item.local_id, &detail, content.as_deref())?;
             for name in &item.entries {
@@ -161,7 +173,7 @@ fn write_books<R: tauri::Runtime>(
                 if !matches!(file, "annotations.json" | "bookmarks.json") {
                     continue;
                 }
-                let Some(bytes) = archive::read_entry(zip, name)? else {
+                let Some(bytes) = archive::read_book_entry(zip, books, name)? else {
                     continue;
                 };
                 if file == "annotations.json" {
@@ -179,13 +191,13 @@ fn write_books<R: tauri::Runtime>(
         // 本机已有同一本书（另一个 id）：归档里的书签仍要并进本机那本，不能丢
         if item.action == BookAction::Skip {
             let name = format!("{BOOKS_DIR}/{}/bookmarks.json", item.archive_id);
-            if let Some(bytes) = archive::read_entry(zip, &name)? {
+            if let Some(bytes) = archive::read_book_entry(zip, books, &name)? {
                 merge_bookmark_file(app, &item.local_id, &bytes, mode)?;
             }
         }
         if item.action == BookAction::Skip {
             let name = format!("{BOOKS_DIR}/{}/annotations.json", item.archive_id);
-            if let Some(bytes) = archive::read_entry(zip, &name)? {
+            if let Some(bytes) = archive::read_book_entry(zip, books, &name)? {
                 merge_annotation_file(app, &item.local_id, &bytes, mode)?;
             }
         } else if mode == ImportMode::Replace

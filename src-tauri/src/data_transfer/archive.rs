@@ -301,6 +301,77 @@ pub(super) fn classify(zip: &mut ZipArchive<File>, manifest: Manifest, bytes: u6
     }
 }
 
+/// Extract only the v2 database to an owned temporary file, then validate it read-only.
+/// The live database is never replaced, including in Replace mode.
+pub(super) fn open_books(
+    root: &Path,
+    zip: &mut ZipArchive<File>,
+    scan: &mut ArchiveScan,
+) -> Result<Option<crate::book_store::BackupDatabase>, String> {
+    if scan.manifest.format != super::BACKUP_FORMAT {
+        return Ok(None);
+    }
+    if scan.entries.iter().any(|name| name.starts_with("books/")) {
+        return Err("备份同时包含两种书籍布局".into());
+    }
+    let dir = root.join("books");
+    crate::storage::ensure_dir(&dir)?;
+    let temporary = crate::temporary_file::TemporaryFile(
+        dir.join(format!(".restore-{}.tmp", readerx_sync::new_id())),
+    );
+    {
+        let mut destination = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary.0)
+            .map_err(|e| format!("创建备份临时文件失败: {e}"))?;
+        let mut entry = zip
+            .by_name("books.sqlite3")
+            .map_err(|_| "备份缺少书库数据库")?;
+        std::io::copy(&mut entry, &mut destination)
+            .map_err(|e| format!("读取备份书库失败: {e}"))?;
+        destination.sync_all().map_err(|e| e.to_string())?;
+    }
+    let books = crate::book_store::BackupDatabase::open(temporary)?;
+    scan.books = books.ids()?;
+    if scan.books.len() as u64 != scan.manifest.books {
+        return Err("备份书籍数量与清单不符".into());
+    }
+    // Logical names let both archive versions share identity planning and record merging.
+    for id in &scan.books {
+        for file in [
+            "bookdetail.json",
+            "content.json",
+            "bookmarks.json",
+            "annotations.json",
+        ] {
+            scan.entries.push(format!("books/{id}/{file}"));
+        }
+    }
+    Ok(Some(books))
+}
+
+pub(super) fn read_book_entry(
+    zip: &mut ZipArchive<File>,
+    books: Option<&crate::book_store::BackupDatabase>,
+    name: &str,
+) -> Result<Option<Vec<u8>>, String> {
+    if let Some(books) = books {
+        let mut parts = name.split('/');
+        if parts.next() != Some(super::BOOKS_DIR) {
+            return Err("非法的书籍条目".into());
+        }
+        let id = parts.next().ok_or("书籍条目缺少身份")?;
+        let file = parts.next().ok_or("书籍条目缺少类别")?;
+        if parts.next().is_some() {
+            return Err("非法的书籍条目".into());
+        }
+        books.read(id, file)
+    } else {
+        read_entry(zip, name)
+    }
+}
+
 /// 读一个条目的全部字节；条目不存在返回 `Ok(None)`
 pub(super) fn read_entry(
     zip: &mut ZipArchive<File>,

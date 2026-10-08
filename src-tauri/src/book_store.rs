@@ -1880,11 +1880,10 @@ pub(crate) fn contains_at<R: tauri::Runtime>(
     let root = crate::storage::data_root_at(app, root)?;
     Ok(sqlite::detail(&sqlite::open(&root)?, id)?.is_some())
 }
-pub(crate) fn export_books<R: tauri::Runtime>(
+pub(crate) use sqlite::BackupDatabase;
+pub(crate) fn backup_books<R: tauri::Runtime>(
     app: &AppHandle<R>,
-    zip: &mut zip::ZipWriter<fs::File>,
-    report: &mut dyn FnMut(&str, u64, u64),
-) -> Result<u64, String> {
+) -> Result<BackupDatabase, String> {
     let _transaction = library_transaction();
     let root = crate::storage::data_root(app)?;
     let db = sqlite::open(&root)?;
@@ -1901,7 +1900,7 @@ pub(crate) fn export_books<R: tauri::Runtime>(
             }
         }
     }
-    sqlite::export(&db, zip, report)
+    sqlite::snapshot(&db, &root)
 }
 /// Backup JSON is a portable representation, not the on-disk database schema.
 pub(crate) fn import_book_json<R: tauri::Runtime>(

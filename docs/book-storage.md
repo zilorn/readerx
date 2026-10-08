@@ -45,11 +45,15 @@ command 访问，数据形状和同步协议不变。
 
 ## 备份与同步
 
-备份格式不变：数据库书籍通过 `book_store::export_books` 转成原来的
-`books/<id>/{bookdetail,content,bookmarks,annotations}.json` 归档条目。
-正文按章节行写入 zip，不为导出复制整库正文；数据库文件及事务日志不进入归档。
-恢复通过 `book_store::import_book_json` 写入数据库，不在应用目录重建书籍 JSON。
-合并 / 覆盖恢复、缺失注释清空、书签合并和凭据过滤保持原语义。
+新备份为 `readerx-backup/2`：`book_store::backup_books` 在书库锁内通过
+`VACUUM INTO` 生成一致的 `books.sqlite3` 快照，流式压缩进 ZIP。
+不复制正在写入的数据库文件，也不导出 WAL / SHM / journal；书源仍为
+`book_sources/<id>.json`，状态与图片继续按文件导出。
+恢复只读打开归档数据库，先校验版本、完整性、引用与逐行数据，再将单书内容适配到
+现有 `book_store::import_book_json` 和记录合并入口，不整库覆盖本机数据库。
+归档里的迁移回执不导入本机。仍兼容旧 `readerx-backup/1` JSON 备份，
+合并 / 覆盖恢复、旧备份缺失注释清空、书签合并和凭据过滤保持原语义。
+快照位于受启动回收管理的 `books/*.tmp`，正常与失败退出均清理。
 有尚未完成迁移的旧书籍时拒绝导出不完整备份。
 
 同步元信息、目录、正文指纹、按需取章、封面与插图引用全部经 `book_store`。

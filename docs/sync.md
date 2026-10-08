@@ -1,6 +1,6 @@
 # 局域网同步（readerx-sync）
 
-书籍在应用目录使用 SQLite，备份仍为便携 JSON 条目；存储边界与旧数据迁移见 [书籍存储](book-storage.md)。
+书籍在应用目录与备份中使用 SQLite，书源和状态保持 JSON；存储边界与旧数据迁移见 [书籍存储](book-storage.md)。
 
 > 状态：**已接入 App**。本文件说明它解决什么问题、怎么用、边界在哪，
 > 以及 App 侧的接线方式（`src-tauri/src/sync/` 与 `src/lib/sync.ts`）。

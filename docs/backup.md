@@ -1,6 +1,6 @@
 # 数据备份与恢复（导入 / 导出）
 
-书籍在应用目录使用 SQLite，备份仍为便携 JSON 条目；存储边界与旧数据迁移见 [书籍存储](book-storage.md)。
+书籍在应用目录与备份中使用 SQLite，书源和状态保持 JSON；存储边界与旧数据迁移见 [书籍存储](book-storage.md)。
 
 > 状态：**已接入 App**（设置 → 数据 → 数据备份）。本文件说明备份里有什么、归档长什么样、
 > 导入的两种语义，以及与「局域网同步」的边界。
@@ -27,16 +27,19 @@
 ```text
 readerx-backup.json          清单：格式版本、导出版本、时间、是否含登录信息、各类条目数
 state/<key>.json             readerx.* 状态（书架进度、分组、书源分组、替换 / 分章规则、偏好…）
-books/<id>/bookdetail.json   书籍元信息（书名 / 作者 / 封面 / 分组归属…）
-books/<id>/content.json      章节正文
-books/<id>/bookmarks.json    书签
-books/<id>/annotations.json  段落注释
+books.sqlite3              书籍元信息、正文、书签与段落注释的一致快照
 images/<name>                章节插图 / PDF 页面图（文件名前缀就是它所属的书籍 id）
 book_sources/<id>.json       书源定义
 source_sessions/<id>.json    书源登录态（**仅当导出时勾选「包含登录信息」**）
 ```
 
-清单里的 `format` 是 `readerx-backup/1`：读到**更高**的版本直接报错，而不是按旧语义读坏新数据。
+清单里的 `format` 是 `readerx-backup/2`：书籍导出 SQLite，书源仍导出 `book_sources/<id>.json`。
+导入兼容 `readerx-backup/1` 的 `books/<id>/*.json`；更高版本直接报错。旧版 ReaderX 无法读取新备份。
+
+导出先在书库锁内通过 `VACUUM INTO` 生成一致快照，再流式写入 ZIP，事务日志不进归档。
+恢复先校验数据库版本、完整性、引用及逐行数据，再逐书执行身份映射与合并 / 覆盖，
+不直接替换本机数据库，也不移植归档里的旧 JSON 迁移回执。临时快照用完即删除，
+中断遗留文件由下次启动回收。
 
 **不在归档里**（刻意排除）：
 
