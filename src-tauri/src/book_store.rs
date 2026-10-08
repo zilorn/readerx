@@ -1925,6 +1925,12 @@ pub(crate) fn rename_id_at(root: &Path, old: &str, new: &str) -> Result<(), Stri
     let tx = sqlite::transaction(&mut db)?;
     let from = sqlite::detail(&tx, old)?;
     let to = sqlite::detail(&tx, new)?;
+    if from.is_some()
+        && (root.join("books").join(new).join(BOOKDETAIL_FILE).is_file()
+            || root.join("books").join(format!("{new}.json")).is_file())
+    {
+        return Err("书籍 ID 迁移目标仍有未迁入的旧书籍，原数据已保留".into());
+    }
     if from.is_some() && to.is_some() {
         return Err("书籍 ID 迁移目标已存在".into());
     }

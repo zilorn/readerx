@@ -59,7 +59,14 @@ pub fn migrate<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     }
     // 必须在任何修改之前验证，不能用远端身份覆盖无关本地目录。
     for new in plan.values() {
-        if book_store::contains_at(app, None, new)? {
+        if book_store::contains_at(app, None, new)?
+            || root
+                .join("books")
+                .join(new)
+                .join("bookdetail.json")
+                .is_file()
+            || root.join("books").join(format!("{new}.json")).is_file()
+        {
             return Err("书籍 ID 迁移目录冲突或旧布局未迁移完成；原数据已保留".into());
         }
     }

@@ -371,17 +371,27 @@ pub(super) fn put_records(
 }
 
 pub(super) fn metas(db: &Connection) -> Result<Vec<BookMeta>, String> {
-    // One indexed join reads only metadata and precomputed chapter heads, never chapter bodies.
-    let mut statement = db.prepare("SELECT b.detail,c.head FROM books b LEFT JOIN chapters c ON c.book_id=b.id ORDER BY b.id,c.position").map_err(sql)?;
+    // Read detail once per book: a join would repeat large covers for every chapter.
+    // The second query reads only precomputed heads, never chapter bodies.
+    let mut out: Vec<BookMeta> = details(db)?
+        .into_iter()
+        .map(|d| d.into_meta(Vec::new()))
+        .collect();
+    let indices: HashMap<String, usize> = out
+        .iter()
+        .enumerate()
+        .map(|(i, book)| (book.id.clone(), i))
+        .collect();
+    let mut statement = db
+        .prepare("SELECT book_id,head FROM chapters ORDER BY book_id,position")
+        .map_err(sql)?;
     let mut rows = statement.query([]).map_err(sql)?;
-    let mut out: Vec<BookMeta> = Vec::new();
     while let Some(row) = rows.next().map_err(sql)? {
-        let detail: BookDetail = decode(&row.get::<_, String>(0).map_err(sql)?)?;
-        if out.last().is_none_or(|last| last.id != detail.id) {
-            out.push(detail.into_meta(Vec::new()));
-        }
-        if let Some(s) = row.get::<_, Option<String>>(1).map_err(sql)? {
-            out.last_mut().unwrap().chapters.push(decode(&s)?);
+        let id: String = row.get(0).map_err(sql)?;
+        if let Some(&index) = indices.get(&id) {
+            out[index]
+                .chapters
+                .push(decode(&row.get::<_, String>(1).map_err(sql)?)?);
         }
     }
     Ok(out)
@@ -858,6 +868,16 @@ mod tests {
         assert!(super::super::rename_id_at(&root, "collision", new).is_err());
         let db = open(&root).unwrap();
         assert!(detail(&db, "collision").unwrap().is_some());
+        drop(db);
+        let blocked = "b-1111111111111111";
+        legacy(&root, &book(blocked));
+        let notes = root.join("books").join(blocked).join(ANNOTATIONS_FILE);
+        fs::write(&notes, b"broken").unwrap();
+        assert!(super::super::rename_id_at(&root, new, blocked).is_err());
+        let db = open(&root).unwrap();
+        assert!(detail(&db, new).unwrap().is_some());
+        assert!(detail(&db, blocked).unwrap().is_none());
+        assert_eq!(fs::read(notes).unwrap(), b"broken");
         drop(db);
         fs::remove_dir_all(root).unwrap();
     }
