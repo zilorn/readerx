@@ -33,4 +33,5 @@ jobs:
           cargo test --locked -p readerx --lib data_transfer
           cargo test --locked -p readerx --test sync_bridge
           cargo test --locked -p readerx-sync
-          cargo test --locked -p readerx-source
+          # Isolate the existing concurrency timing test from other Boa test workloads.
+          cargo test --locked -p readerx-source -- --test-threads=1
