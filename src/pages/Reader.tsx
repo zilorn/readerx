@@ -1,3 +1,4 @@
+import { ChapterEditSheet } from "../components/ChapterEditSheet";
 import { AnnotationSheet, type AnnotationTarget } from "../components/AnnotationSheet";
 import { AnnotationIcon } from "../components/icons";
 import {
@@ -1049,6 +1050,7 @@ export default function ReaderPage() {
   const [tocByHover, setTocByHover] = createSignal(false);
   const [bmPanelOpen, setBmPanelOpen] = createSignal(false);
   const [readerSettingsOpen, setReaderSettingsOpen] = createSignal(false);
+  const [chapterEditTarget, setChapterEditTarget] = createSignal<{ bookId: string; index: number; chapter: LocalBookChapter } | null>(null);
   const [annotationTarget, setAnnotationTarget] = createSignal<AnnotationTarget | null>(null);
   // 文本替换抽屉：replaceSeed 非空表示从选区菜单进入（查找框预填所选文字）
   const [replaceSheetOpen, setReplaceSheetOpen] = createSignal(false);
@@ -1733,7 +1735,7 @@ export default function ReaderPage() {
     }
     openAnnotation(start.unit, true);
   }
-  createEffect(on(() => `${bookId()}|${chapterCid()}`, () => setAnnotationTarget(null)));
+  createEffect(on(() => `${bookId()}|${chapterCid()}`, () => { setAnnotationTarget(null); setChapterEditTarget(null); }));
 
   // 滚动模式：正文单元分片挂载数量（0 起逐片增长）。超大章节整章一次建 DOM 会
   // 长时间卡住首屏，这里先挂一片（≥首屏），之后每帧追加一片，直到整章挂完。
@@ -2565,7 +2567,7 @@ export default function ReaderPage() {
       bmPanelOpen() ||
       readerSettingsOpen() ||
       replaceSheetOpen() ||
-      annotationTarget() !== null ||
+      annotationTarget() !== null || chapterEditTarget() !== null ||
       bookSearchOpen() ||
       searchSession() !== null ||
       downloadOpen()
@@ -2623,7 +2625,7 @@ export default function ReaderPage() {
       !tocOpen() &&
       !bmPanelOpen() &&
       !readerSettingsOpen() &&
-      !replaceSheetOpen() && !annotationTarget() &&
+      !replaceSheetOpen() && !annotationTarget() && !chapterEditTarget() &&
       !bookSearchOpen() &&
       !jumpBackHint(),
   );
@@ -3268,7 +3270,7 @@ export default function ReaderPage() {
       bmPanelOpen() ||
       readerSettingsOpen() ||
       replaceSheetOpen() ||
-      annotationTarget() !== null ||
+      annotationTarget() !== null || chapterEditTarget() !== null ||
       bookSearchOpen()
     ) {
       return false;
@@ -3958,7 +3960,7 @@ export default function ReaderPage() {
     !!chapter() && !volumeScrollEndCid() && !resumeTarget() &&
     !contentPendingGate() && !remoteReloading() &&
     !menuOpen() && !tocOpen() && !bmPanelOpen() && !bookSearchOpen() &&
-    !readerSettingsOpen() && !replaceSheetOpen() && !annotationTarget() && !downloadOpen() &&
+    !readerSettingsOpen() && !replaceSheetOpen() && !annotationTarget() && !chapterEditTarget() && !downloadOpen() &&
     !ttsSettingsOpen() && !ttsDecodeGuideOpen() && !reloadRisk() && !updateConflict() &&
     !selSpan() && !selMenu(),
   );
@@ -4084,7 +4086,7 @@ export default function ReaderPage() {
         bookSearchOpen() ||
         readerSettingsOpen() ||
         replaceSheetOpen() ||
-        annotationTarget() !== null ||
+        annotationTarget() !== null || chapterEditTarget() !== null ||
         downloadOpen() ||
         !isPaged()
       )
@@ -4098,7 +4100,7 @@ export default function ReaderPage() {
   // 桌面端贴边呼出（鼠标操作，手机端不参与）：上 / 下边缘 → 顶栏 + 底栏一起弹出，
   // 右边缘 → 目录侧栏滑出；鼠标离开边缘与浮层后只收起「悬浮呼出」的这一份
   createEdgeHoverReveal({
-    enabled: () => isDesktopShell() && !autoPageEnabled() && !annotationTarget(),
+    enabled: () => isDesktopShell() && !autoPageEnabled() && !annotationTarget() && !chapterEditTarget(),
     frameEl: () => frameRef,
     onMenuEdge: () => {
       if (menuOpen()) return; // 已经开着（点按呼出的也算）：不动它，也不接管收起
@@ -4615,7 +4617,7 @@ export default function ReaderPage() {
             ref={areaRef}
             class="relative min-h-0 flex-1 overflow-hidden [-webkit-touch-callout:none]"
             // 注释表单聚焦时只滚动抽屉内容，避免浏览器挪动被裁切的阅读区。
-            style={{ overflow: annotationTarget() ? "clip" : undefined }}
+            style={{ overflow: (annotationTarget() || chapterEditTarget()) ? "clip" : undefined }}
             onPointerDown={onSurfacePointerDown}
             onPointerUp={onSurfacePointerUp}
             onPointerMove={onSurfacePointerMove}
@@ -5470,7 +5472,7 @@ export default function ReaderPage() {
                 !tocOpen() &&
                 !bmPanelOpen() &&
                 !bookSearchOpen() &&
-                !annotationTarget() &&
+                !annotationTarget() && !chapterEditTarget() &&
                 !replaceSheetOpen() &&
                 !readerSettingsOpen() &&
                 !searchSession()
@@ -5518,12 +5520,36 @@ export default function ReaderPage() {
             />
 
             {/* 阅读设置（底部状态栏显示与进度口径） */}
+            <Show when={chapterEditTarget()}>
+              {(target) => <ChapterEditSheet bookId={target().bookId} index={target().index} chapter={target().chapter}
+                onClose={() => setChapterEditTarget(null)} onSaved={() => {
+                  if (bookId() === target().bookId && chapter()?.cid === target().chapter.cid) {
+                    setResumeTarget(null);
+                    setPageIdx(0);
+                    setViewOffset(0);
+                    if (scrollRef) scrollRef.scrollTop = 0;
+                  }
+                  setChapterEditTarget(null);
+                  showToast(t("readerChrome.edit.saved"));
+                }} />}
+            </Show>
             <ReaderSettingsSheet
               open={readerSettingsOpen()}
               autoPageEnabled={autoPageEnabled()}
               onAutoPageChange={toggleAutoPage}
               onClose={() => setReaderSettingsOpen(false)}
               onOpenReplace={openReplaceManager}
+              editBody={{
+                disabled: contentLoad() !== "ready" || !chapter() || !chapterHasContent(chapter()!) || remoteReloading() || checkingUpdate(),
+                onOpen: () => {
+                  const original = localBookById(bookId())?.chapters[chapterIdx()];
+                  if (!original || !chapterHasContent(original) || remoteReloading() || checkingUpdate()) return;
+                  ttsPlayer.stop();
+                  setReaderSettingsOpen(false);
+                  setMenuOpen(false);
+                  setChapterEditTarget({ bookId: bookId(), index: chapterIdx(), chapter: original });
+                },
+              }}
               onlineReload={
                 isRemoteBook()
                   ? {

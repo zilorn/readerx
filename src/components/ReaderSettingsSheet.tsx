@@ -22,6 +22,7 @@ import {
 import {
   ChevronRightIcon,
   CloseIcon,
+  EditIcon,
   RefreshIcon,
   ReplaceIcon,
   SettingsIcon,
@@ -38,6 +39,7 @@ export interface ReaderSettingsSheetProps {
   onAutoPageChange: () => void;
   /** 打开文本替换抽屉（列出本书可用替换并支持增删改） */
   onOpenReplace: () => void;
+  editBody: { disabled: boolean; onOpen: () => void };
   /** 在线书「重新加载本章」：提供即在设置中显示该入口（本章正在重新加载时 disabled） */
   onlineReload?: {
     disabled: boolean;
@@ -215,6 +217,16 @@ export function ReaderSettingsSheet(props: ReaderSettingsSheetProps) {
 
           <div class="mt-3">
             <Card>
+              <button type="button"
+                class="flex w-full items-center gap-3 px-4 py-[13px] text-left transition-colors disabled:opacity-45 active:bg-surface-2"
+                disabled={props.editBody.disabled} onClick={props.editBody.onOpen}>
+                <span class="grid h-9 w-9 flex-none place-items-center rounded-[10px] bg-surface-2 text-accent"><EditIcon size={18} /></span>
+                <span class="flex min-w-0 flex-1 flex-col gap-0.5">
+                  <span class="text-[14.5px] font-medium">{t("readerChrome.settings.editBody")}</span>
+                  <span class="text-[11.5px] text-text-3">{t(props.editBody.disabled ? "readerChrome.edit.unavailable" : "readerChrome.settings.editBodyDesc")}</span>
+                </span>
+                <ChevronRightIcon size={17} class="flex-none text-text-3" />
+              </button>
               <button
                 type="button"
                 class="flex w-full items-center gap-3 px-4 py-[13px] text-left transition-colors active:bg-surface-2"
