@@ -10,7 +10,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   checks:
-    name: Static checks (no build)
+    name: Frontend and workflow checks
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -24,9 +24,6 @@ jobs:
         run: pnpm run i18n:check
       - name: Artifact collection regression (fixtures only)
         run: node --test scripts/collect-artifacts.test.mjs
-      - name: Rust workspace manifests (no compilation)
-        working-directory: src-tauri
-        run: cargo metadata --locked --no-deps --format-version 1 > "$RUNNER_TEMP/cargo-metadata.json"
       - name: GitHub Actions syntax
         run: |
           curl --fail --silent --show-error --location \
@@ -34,3 +31,13 @@ jobs:
             --output "$RUNNER_TEMP/actionlint.tar.gz"
           tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP" actionlint
           "$RUNNER_TEMP/actionlint" -color
+  rust:
+    name: Rust workspace and test target checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup-build
+      - name: Check Rust code and test targets (no application bundle)
+        working-directory: src-tauri
+        run: cargo check --locked --workspace --all-targets

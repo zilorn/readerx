@@ -22,18 +22,19 @@
 ## PR 自动检查
 
 所有目标分支的 PR 在 opened / synchronize / reopened / ready_for_review 时触发，不使用路径过滤。重复更新取消旧检查。
-PR CI 只做检查，不运行前端生产构建、Rust 编译 / 测试或 Android / Windows 打包，不上传构建产物。
+PR CI 只做检查，不运行前端生产构建、`cargo build`、Rust 测试或 Android / Windows 打包，不上传构建产物。
+Rust 使用 `cargo check` 检查代码与测试目标；Cargo 仍会编译依赖和运行构建脚本，但不会生成应用安装包。Linux Job 安装 Tauri 检查所需系统开发库。
 
 | 检查步骤 | 检查范围 |
 | --- | --- |
 | TypeScript types | `tsc --noEmit`，只做类型检查 |
 | i18n keys and user-facing text | `i18n:check`，检查词典与界面文案 |
 | Artifact collection regression | Node 测试使用临时模拟 APK 文件，验证收集与命名规则，不构建 APK |
-| Rust workspace manifests | `cargo metadata --locked --no-deps`，只解析 workspace 清单，不编译；不验证 Rust 类型或运行回归 |
+| Rust workspace and test target checks | `cargo check --locked --workspace --all-targets`，检查 Rust 代码和测试目标，不执行测试、不打包 |
 | GitHub Actions syntax | 固定版本 actionlint 检查工作流语法 |
 
 自动 PR 检查使用 `pull_request` 和只读 contents 权限，不接入签名 Secrets。首次贡献者仍受 GitHub 的工作流审批策略限制。
 **Test book storage and data compatibility** 改为只支持手动触发；需要验证 SQLite、迁移、备份与同步时再手动运行，它会构建前端并编译执行 Rust 测试。
-Android / Desktop 手动构建和 tag 发布继续独立运行。分支保护的 required checks 需在仓库设置中选择 `Static checks (no build)`；工作流文件本身不会修改保护规则。
+Android / Desktop 手动构建和 tag 发布继续独立运行。分支保护的 required checks 需在仓库设置中选择 `Frontend and workflow checks` 与 `Rust workspace and test target checks`；工作流文件本身不会修改保护规则。
 
 产物命名由 `scripts/collect-artifacts.mjs` 统一处理。Android `--abi arm64-v8a` 只收 arm64；省略 `--abi` 时 release 仍要求四个 ABI 齐全，保持 tag 发布的验收条件。
