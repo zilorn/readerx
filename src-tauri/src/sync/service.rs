@@ -1091,7 +1091,7 @@ impl<R: tauri::Runtime> SyncService<R> {
         }
     }
 
-    /// 书籍被删除（**必须在本地删文件之前调用**：定位书身份要读 `bookdetail.json`）。
+    /// 书籍被删除（**必须在本地删书之前调用**：定位书身份要读取书籍元信息）。
     pub fn on_book_deleted(&self, book_id: &str) {
         let Some(engine) = self.engine() else {
             return;

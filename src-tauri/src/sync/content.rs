@@ -1,11 +1,11 @@
 //! 正文来源：把 App 的书库接到同步引擎的**正文通道**上（见 `readerx_sync::content`）。
 //!
-//! 引擎只认识「书实体 id + 章节 cid」，不认识 App 的 `books/<id>/content.json` 布局，
+//! 引擎只认识「书实体 id + 章节 cid」，不认识 App 的 SQLite 书库，
 //! 也不知道本机书 id 与书实体 id 的对应关系 —— 这一层就干这两件事：
 //!
 //! ```text
-//! 引擎问：这本书有哪些章？          → 读 books/<id>/digest.json（小文件，写正文时顺手更新）
-//! 引擎说：把这几章的正文给我        → 顺序扫 content.json，只留命中的章节
+//! 引擎问：这本书有哪些章？          → 查询数据库章节指纹（与正文同事务更新）
+//! 引擎说：把这几章的正文给我        → 通过 cid 索引读取命中的章节
 //! ```
 //!
 //! 收到对端的正文不在这里落地（那是 [`super::bridge`] 的事）：引擎先存进自己的暂存区，
@@ -17,7 +17,7 @@
 //! 各有各的存法，这里负责翻译成引擎认识的资源：
 //!
 //! ```text
-//! 封面    bookdetail.json 里的 data URL   → 名字固定 `cover`
+//! 封面    数据库元信息里的 data URL   → 名字固定 `cover`
 //! 插图    images/<设备无关的名字>.png      → 名字 = 图片地址的哈希（正文块里就是这么引用的）
 //! ```
 //!
@@ -91,8 +91,7 @@ impl<R: tauri::Runtime> AppContent<R> {
     fn local_id(&self, uid: &str) -> Option<String> {
         // 迁移后的书直接按同步 ID 定位，新增 / 恢复书籍不受旧索引节流影响。
         if super::book_ids::canonical_id(uid)
-            && crate::storage::data_root_at(&self.app, self.root()).ok()?
-                .join("books").join(uid).join("bookdetail.json").is_file()
+            && crate::book_store::contains_at(&self.app, self.root(), uid).ok()?
         {
             return Some(uid.to_string());
         }

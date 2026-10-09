@@ -11,6 +11,7 @@
 //! 也能在单元测试里直接用真实文件跑。
 
 use super::{is_safe_entry, Manifest, MANIFEST_NAME};
+use serde_json::Value;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::Path;
@@ -125,7 +126,7 @@ pub(super) fn writer(file: File) -> ZipWriter<File> {
 }
 
 /// 文本类条目（JSON）的压缩参数
-pub(super) fn text_options(source: Option<&Path>) -> SimpleFileOptions {
+pub(crate) fn text_options(source: Option<&Path>) -> SimpleFileOptions {
     file_options(source, CompressionMethod::Deflated)
 }
 
@@ -301,6 +302,100 @@ pub(super) fn classify(zip: &mut ZipArchive<File>, manifest: Manifest, bytes: u6
     }
 }
 
+/// Extract only the v2 database to an owned temporary file, then validate it read-only.
+/// The live database is never replaced, including in Replace mode.
+pub(super) fn open_books(
+    root: &Path,
+    zip: &mut ZipArchive<File>,
+    scan: &mut ArchiveScan,
+) -> Result<Option<crate::book_store::BackupDatabase>, String> {
+    if scan.manifest.format != super::BACKUP_FORMAT {
+        if scan.entries.iter().any(|name| name == "books.sqlite3") {
+            return Err("备份书籍布局与格式版本不符".into());
+        }
+        return Ok(None);
+    }
+    if scan.entries.iter().any(|name| name.starts_with("books/")) {
+        return Err("备份同时包含两种书籍布局".into());
+    }
+    let dir = root.join("books");
+    crate::storage::ensure_dir(&dir)?;
+    let temporary = crate::temporary_file::TemporaryFile(
+        dir.join(format!(".restore-{}.tmp", readerx_sync::new_id())),
+    );
+    {
+        let mut destination = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary.0)
+            .map_err(|e| format!("创建备份临时文件失败: {e}"))?;
+        let mut entry = zip
+            .by_name("books.sqlite3")
+            .map_err(|_| "备份缺少书库数据库")?;
+        std::io::copy(&mut entry, &mut destination)
+            .map_err(|e| format!("读取备份书库失败: {e}"))?;
+        destination.sync_all().map_err(|e| e.to_string())?;
+    }
+    let books = crate::book_store::BackupDatabase::open(temporary)?;
+    for key in books.state_keys()? {
+        if scan.state_keys.contains(&key) {
+            return Err("备份同时包含两种数据状态布局".into());
+        }
+        scan.state_keys.push(key);
+    }
+    scan.state_keys.sort();
+    scan.books = books.ids()?;
+    if scan.books.len() as u64 != scan.manifest.books {
+        return Err("备份书籍数量与清单不符".into());
+    }
+    // Logical names let both archive versions share identity planning and record merging.
+    for id in &scan.books {
+        for file in [
+            "bookdetail.json",
+            "content.json",
+            "bookmarks.json",
+            "annotations.json",
+        ] {
+            scan.entries.push(format!("books/{id}/{file}"));
+        }
+    }
+    Ok(Some(books))
+}
+
+pub(super) fn read_state_entry(
+    zip: &mut ZipArchive<File>,
+    books: Option<&crate::book_store::BackupDatabase>,
+    key: &str,
+) -> Result<Option<Value>, String> {
+    if let Some(books) = books {
+        if books.state_keys()?.iter().any(|k| k == key) {
+            return books.read_state(key);
+        }
+    }
+    read_entry_json(zip, &format!("{}/{key}.json", super::STATE_DIR))
+}
+
+pub(super) fn read_book_entry(
+    zip: &mut ZipArchive<File>,
+    books: Option<&crate::book_store::BackupDatabase>,
+    name: &str,
+) -> Result<Option<Vec<u8>>, String> {
+    if let Some(books) = books {
+        let mut parts = name.split('/');
+        if parts.next() != Some(super::BOOKS_DIR) {
+            return Err("非法的书籍条目".into());
+        }
+        let id = parts.next().ok_or("书籍条目缺少身份")?;
+        let file = parts.next().ok_or("书籍条目缺少类别")?;
+        if parts.next().is_some() {
+            return Err("非法的书籍条目".into());
+        }
+        books.read(id, file)
+    } else {
+        read_entry(zip, name)
+    }
+}
+
 /// 读一个条目的全部字节；条目不存在返回 `Ok(None)`
 pub(super) fn read_entry(
     zip: &mut ZipArchive<File>,
@@ -350,6 +445,44 @@ fn valid_image(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn archive_version_must_match_book_layout() {
+        let dir =
+            std::env::temp_dir().join(format!("readerx-archive-layout-{}", readerx_sync::new_id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("backup.zip");
+        for (format, mixed_json) in [("readerx-backup/1", false), ("readerx-backup/2", true)] {
+            let mut zip = writer(File::create(&path).unwrap());
+            let manifest = Manifest {
+                format: format.into(),
+                app_version: "test".into(),
+                created_at: 0,
+                credentials: false,
+                books: 0,
+                images: 0,
+                sources: 0,
+                state_keys: 0,
+            };
+            write_manifest(&mut zip, &manifest).unwrap();
+            zip.start_file("books.sqlite3", text_options(None)).unwrap();
+            zip.write_all(b"not a database").unwrap();
+            if mixed_json {
+                zip.start_file("books/a/bookdetail.json", text_options(None))
+                    .unwrap();
+                zip.write_all(b"{}").unwrap();
+            }
+            drop(zip.finish().unwrap());
+            let mut zip = open_zip_from(File::open(&path).unwrap()).unwrap();
+            let mut scan = classify(&mut zip, manifest, 0);
+            assert!(open_books(&dir, &mut zip, &mut scan).is_err());
+            assert!(
+                !dir.join("books").exists(),
+                "reject layout before extracting"
+            );
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn entry_allocation_ignores_declared_uncompressed_size() {

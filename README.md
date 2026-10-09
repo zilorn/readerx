@@ -65,6 +65,8 @@ pnpm build
 
 端口 1420 已被占用时，请复用现有开发服务器。Rust 测试需在 `src-tauri/` 中运行。
 
+Actions 的手动签名 arm64 构建与 PR 检查说明见 [CI 与构建](./docs/ci.md)。
+
 ## 文档与贡献
 
 | 文档 | 内容 |

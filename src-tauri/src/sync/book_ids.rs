@@ -42,6 +42,10 @@ pub fn migrate<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     let mut plan = BTreeMap::new();
     let mut targets = BTreeMap::new();
     for book in books {
+        if !book_store::contains_at(app, None, &book.id)? {
+            log::warn!("书籍尚未迁入数据库，保留旧 ID 等待重试 id={}", book.id);
+            continue;
+        }
         let uid = bridge::book_uid_of(app, &book);
         if targets.insert(uid.clone(), book.id.clone()).is_some() {
             return Err("书库存在重复同步身份，请先处理重复书籍；原数据已保留".into());
@@ -54,8 +58,15 @@ pub fn migrate<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<(), String> {
         return Ok(());
     }
     // 必须在任何修改之前验证，不能用远端身份覆盖无关本地目录。
-    for (old, new) in &plan {
-        if !root.join("books").join(old).is_dir() || root.join("books").join(new).exists() {
+    for new in plan.values() {
+        if book_store::contains_at(app, None, new)?
+            || root
+                .join("books")
+                .join(new)
+                .join("bookdetail.json")
+                .is_file()
+            || root.join("books").join(format!("{new}.json")).is_file()
+        {
             return Err("书籍 ID 迁移目录冲突或旧布局未迁移完成；原数据已保留".into());
         }
     }
@@ -74,24 +85,29 @@ fn apply(root: &Path, plan: &BTreeMap<String, String>) -> Result<(), String> {
         if !storage::valid_component(old) || !canonical_id(new) {
             return Err("书籍 ID 迁移待办包含非法 ID".into());
         }
-        let from = root.join("books").join(old);
-        let to = root.join("books").join(new);
-        if from.exists() && to.exists() {
-            return Err("书籍 ID 迁移目标已存在".into());
-        }
-        let dir = if from.exists() { &from } else { &to };
-        let detail = dir.join("bookdetail.json");
-        let mut value = read(&detail)?;
-        value["id"] = Value::String(new.clone());
-        atomic_write(&detail, &value)?;
-        let bookmarks = dir.join("bookmarks.json");
-        if bookmarks.is_file() {
-            let mut value = read(&bookmarks)?;
-            replace_refs(&mut value, plan);
-            atomic_write(&bookmarks, &value)?;
-        }
-        if from.exists() {
-            fs::rename(from, to).map_err(|e| format!("迁移书籍目录失败: {e}"))?;
+        if root.join("books.sqlite3").is_file() {
+            book_store::rename_id_at(root, old, new)?;
+        } else {
+            // Pure legacy fixture / interrupted pre-SQLite migration.
+            let from = root.join("books").join(old);
+            let to = root.join("books").join(new);
+            if from.exists() && to.exists() {
+                return Err("书籍 ID 迁移目标已存在".into());
+            }
+            let dir = if from.exists() { &from } else { &to };
+            let detail = dir.join("bookdetail.json");
+            let mut value = read(&detail)?;
+            value["id"] = Value::String(new.clone());
+            atomic_write(&detail, &value)?;
+            let bookmarks = dir.join("bookmarks.json");
+            if bookmarks.is_file() {
+                let mut value = read(&bookmarks)?;
+                replace_refs(&mut value, plan);
+                atomic_write(&bookmarks, &value)?;
+            }
+            if from.exists() {
+                fs::rename(from, to).map_err(|e| e.to_string())?;
+            }
         }
         // 图片文件名是正文引用的一部分，原样保留；听书缓存按书籍目录搬迁。
         let cache = root.join("tts-audio").join(old);
@@ -110,10 +126,18 @@ fn apply(root: &Path, plan: &BTreeMap<String, String>) -> Result<(), String> {
         "readerx.readingTime",
     ] {
         let path = root.join("state").join(format!("{key}.json"));
-        if !path.is_file() {
-            continue;
-        }
-        let mut value = read(&path)?;
+        let in_db = root.join("books.sqlite3").is_file() && crate::book_store::state::handles(key);
+        let mut value = if in_db {
+            let Some(value) = crate::book_store::state::read_at(root, key)? else {
+                continue;
+            };
+            value
+        } else {
+            if !path.is_file() {
+                continue;
+            }
+            read(&path)?
+        };
         replace_refs(&mut value, plan);
         if key == "readerx.shelf" || key == "readerx.bookmarks" {
             replace_keys(&mut value, plan)?;
@@ -124,7 +148,14 @@ fn apply(root: &Path, plan: &BTreeMap<String, String>) -> Result<(), String> {
                 replace_keys(books, plan)?;
             }
         }
-        atomic_write(&path, &value)?;
+        if in_db {
+            crate::book_store::state::update_at(root, key, |state| {
+                *state = Some(value);
+                Ok(())
+            })?;
+        } else {
+            atomic_write(&path, &value)?;
+        }
     }
     Ok(())
 }

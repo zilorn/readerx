@@ -1,0 +1,66 @@
+name: Build Android (signed arm64, no publish)
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: build-android-signed-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  signed-arm64:
+    name: Signed release APK (arm64-v8a)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-targets: aarch64-linux-android
+      - uses: ./.github/actions/setup-android
+      - name: Configure Android signing (secrets)
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          umask 077
+          if [ -z "$KEYSTORE_B64" ] || [ -z "$KEYSTORE_PASSWORD" ] || [ -z "$KEY_ALIAS" ] || [ -z "$KEY_PASSWORD" ]; then
+            echo "::error::缺少签名 secrets。请在仓库 Settings -> Secrets and variables -> Actions 配置"
+            echo "::error::ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS / ANDROID_KEY_PASSWORD。"
+            exit 1
+          fi
+          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/android-release.keystore"
+          python3 - <<'PYTHON'
+          import os
+          from pathlib import Path
+          # Encode UTF-16 code units for java.util.Properties, preserving special characters.
+          def prop(value):
+              raw = value.encode('utf-16-be')
+              return ''.join('\\u%04x' % int.from_bytes(raw[i:i+2], 'big') for i in range(0, len(raw), 2))
+          values = {'keyAlias': os.environ['KEY_ALIAS'], 'password': os.environ['KEY_PASSWORD'],
+                    'storePassword': os.environ['KEYSTORE_PASSWORD'],
+                    'storeFile': os.environ['RUNNER_TEMP'] + '/android-release.keystore'}
+          Path('src-tauri/gen/android/keystore.properties').write_text(
+              ''.join(f'{key}={prop(value)}\n' for key, value in values.items()))
+          PYTHON
+
+      - name: Build signed arm64 APK
+        run: pnpm tauri android build --apk --target aarch64 --split-per-abi --ci
+        timeout-minutes: 90
+      - name: Collect and verify signed arm64 APK
+        run: |
+          node scripts/collect-artifacts.mjs android --abi arm64-v8a --out "$RUNNER_TEMP/artifacts"
+          BUILD_TOOLS="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
+          "$BUILD_TOOLS/apksigner" verify --verbose "$RUNNER_TEMP"/artifacts/*.apk
+          "$BUILD_TOOLS/aapt" dump badging "$RUNNER_TEMP"/artifacts/*.apk | grep -Fx "native-code: 'arm64-v8a'"
+      - name: Remove signing files
+        if: always()
+        run: rm -f "$RUNNER_TEMP/android-release.keystore" src-tauri/gen/android/keystore.properties
+      - uses: actions/upload-artifact@v6
+        with:
+          name: readerx-android-arm64-signed
+          path: ${{ runner.temp }}/artifacts/*.apk
+          if-no-files-found: error
+          retention-days: 14

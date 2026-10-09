@@ -43,6 +43,14 @@ tauri-plugin-tts-api（MIT）
 
 【后端 / Rust】
 
+rusqlite（MIT）
+    书籍元信息、章节、书签与注释的 SQLite 存储和事务
+    https://github.com/rusqlite/rusqlite
+
+SQLite（Public Domain）
+    随应用编译的数据库引擎（rusqlite bundled）
+    https://sqlite.org/copyright.html
+
 mobi（MIT）
     解析 MOBI 元信息
     https://github.com/vv9k/mobi-rs

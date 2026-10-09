@@ -9,15 +9,12 @@
 //!   导入的语义只有「合并」与「覆盖恢复」两种（见 [`ImportMode`]）。
 //!
 //! 归档就是一个 **zip 文件**（后缀 `.zip`，正文体积大必须压缩；同时用户能自己解开检查），
-//! 内部路径与应用数据目录一一对应：
+//! 书籍导出一致的 SQLite 快照，书源与状态保持 JSON；兼容导入旧 JSON 备份：
 //!
 //! ```text
 //! readerx-backup.json          清单：格式版本、导出版本、时间、是否含登录信息、各类条目数
 //! state/<key>.json             readerx.* 状态（书架进度、分组、替换 / 分章规则、偏好…）
-//! books/<id>/bookdetail.json   书籍元信息
-//! books/<id>/content.json      章节正文
-//! books/<id>/bookmarks.json    书签
-//! books/<id>/annotations.json  段落注释
+//! books.sqlite3              书籍元信息、章节正文、书签与注释的一致快照
 //! images/<name>                章节插图 / PDF 页面图（文件名前缀就是它所属的书籍 id）
 //! book_sources/<id>.json       书源定义
 //! source_sessions/<id>.json    书源登录态（**仅当导出时勾选「包含登录信息」**）
@@ -41,7 +38,7 @@
 //! 界面与文档都要说清「这份文件里有账号登录信息，别随手分享」。日志里永远只有数量，
 //! 没有内容（与全项目口径一致）。
 
-mod archive;
+pub(crate) mod archive;
 mod export;
 mod import;
 mod merge;
@@ -58,8 +55,8 @@ use serde::{Deserialize, Serialize};
 /// 清单文件名（归档内路径）
 pub(crate) const MANIFEST_NAME: &str = "readerx-backup.json";
 /// 归档格式标识；读到更高版本直接报错，而不是按旧语义读坏新数据
-pub(crate) const BACKUP_FORMAT: &str = "readerx-backup/1";
-/// 归档内的顶层目录名（与数据目录同名，一一对应）
+pub(crate) const BACKUP_FORMAT: &str = "readerx-backup/2";
+/// 归档内的顶层分类；books 仅用于兼容旧 JSON 备份
 pub(crate) const STATE_DIR: &str = "state";
 pub(crate) const BOOKS_DIR: &str = "books";
 pub(crate) const IMAGES_DIR: &str = "images";
@@ -196,10 +193,7 @@ pub(crate) fn is_safe_entry(name: &str) -> bool {
 
 /// 清单里的格式版本是否本程序读得懂
 pub(crate) fn format_supported(format: &str) -> bool {
-    match format.strip_prefix("readerx-backup/") {
-        Some(version) => version.parse::<u32>().map(|v| v <= 1).unwrap_or(false),
-        None => false,
-    }
+    matches!(format, "readerx-backup/1" | "readerx-backup/2")
 }
 
 /// 当前时间（毫秒时间戳）
@@ -247,7 +241,10 @@ mod tests {
     fn only_known_backup_formats_are_accepted() {
         assert!(format_supported(BACKUP_FORMAT));
         assert!(format_supported("readerx-backup/1"));
-        assert!(!format_supported("readerx-backup/2"));
+        assert!(format_supported("readerx-backup/2"));
+        assert!(!format_supported("readerx-backup/0"));
+        assert!(!format_supported("readerx-backup/02"));
+        assert!(!format_supported("readerx-backup/3"));
         assert!(!format_supported("readerx-backup/x"));
         assert!(!format_supported("其它工具/1"));
     }

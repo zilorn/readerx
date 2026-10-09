@@ -23,6 +23,7 @@ description: 修改 ReaderX 书源引擎、Boa 宿主 API、浏览器认证后�
 - 桌面登录看 src-tauri/plugins/tauri-plugin-webview-login；Linux 用 WebKitGTK CookieManager 读取含 httpOnly 的 Cookie；页面存储能力以 src/desktop.rs 的实测表为准，不用宿主 eval 读隔离的页面 localStorage。探针生成逻辑在引擎 storage.rs，后端不解析其内部结构。桌面正常收尾与 Android 一样不要求 Cookie 非空，仍采集并透传存储探针；等待标记按求值字符串解码后的完整值比较，不匹配快照子串。
 - 数据根目录由宿主 store::init_data_root 指定。修改格式前检查 store.rs 布局和旧数据，保持 App/CLI 共用数据兼容，明确迁移方式。
 - 书源稳定 ID 与迁移查看 src-tauri/crates/readerx-source/src/id_migration.rs；涉及在线书引用、分组或同步身份时同时读 [数据技能](../readerx-data/SKILL.md)，检查 src-tauri/src/sync/data_ids.rs 与 src/lib/dataIds.ts，不因编辑书源地址重建已有稳定 ID。
+- App 保存书源通过 sync/data_ids.rs 的 save_source；文件仍由共享书源 crate 写入，数据库中的 bookSourceId 引用与迁移映射由 App 维护。旧元信息损坏时保留映射并延后引用迁移。
 - 新 App command 同步 src-tauri/src/lib.rs 注册与 capability；书源变动同步相应 docs/。
 
 ## 验证与交付

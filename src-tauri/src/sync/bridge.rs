@@ -408,7 +408,7 @@ fn publish_book_locked<R: tauri::Runtime>(
 
 /// 删除一本书：书实体进墓碑（书签按级联规则一起删），并删掉它的进度实体。
 ///
-/// **必须在本地删文件之前调用**：定位书身份要读 `bookdetail.json`。
+/// **必须在本地删书之前调用**：定位书身份要读取书籍元信息。
 pub fn publish_book_delete<R: tauri::Runtime>(
     app: &AppHandle<R>,
     engine: &SharedEngine,
@@ -921,7 +921,7 @@ pub(crate) fn reconcile_annotations_mode<R: tauri::Runtime>(
     if let Ok(Some(rules)) = storage::read_state(app, CHAPTER_RULES_KEY) {
         publish_chapter_rules(app, engine, &rules)?;
     }
-    // 目录（结构）：只扫 content.json 的章节头，不解析正文 —— 首次启用同步时
+    // 目录（结构）：只读数据库章节头，不解析正文 —— 首次启用同步时
     // 要把现有书库的目录一起灌进引擎，不能按「读整本」的代价来
     match book_store::list_sync_structures(app) {
         Ok(structures) => {
@@ -1623,7 +1623,7 @@ fn collect_snapshots(
             // 本地清单（规则条数少，重建比逐条对账更好推理，也不会漏掉删除）
             "text_replace" => snapshots.push(Snapshot::TextReplace),
             "chapter_rule" => snapshots.push(Snapshot::ChapterRule),
-            // 目录：整份落到本地 content.json（按 cid 复用原有正文）
+            // 目录：整份落到本地数据库（按 cid 复用原有正文）
             "book_structure" => snapshots.push(Snapshot::Structure {
                 book_uid: book_ref_of(entity),
                 deleted,
@@ -1832,7 +1832,7 @@ fn apply_progress<R: tauri::Runtime>(
     })
 }
 
-/// 按引擎里的书签实体重写某本书的 `bookmarks.json`。
+/// 按引擎里的书签实体重写某本书的数据库书签。
 fn apply_bookmarks<R: tauri::Runtime>(
     app: &AppHandle<R>,
     engine: &SharedEngine,
@@ -2161,7 +2161,7 @@ fn apply_source<R: tauri::Runtime>(
             return Ok(false);
         }
     }
-    readerx_source::id_migration::save_source(&storage::data_root(app)?, &source, found.map(|old| old.id.as_str()).unwrap_or(uid))?;
+    super::data_ids::save_source(&storage::data_root(app)?, &source, found.map(|old| old.id.as_str()).unwrap_or(uid))?;
     Ok(true)
 }
 

@@ -50,6 +50,7 @@ fn setup() -> (tauri::AppHandle<tauri::test::MockRuntime>, PathBuf) {
     ] {
         let _ = std::fs::remove_dir_all(data_root.join(sub));
     }
+    let _ = std::fs::remove_file(data_root.join("books.sqlite3"));
     (handle, data_root)
 }
 
@@ -88,18 +89,12 @@ fn shared_app() -> (tauri::AppHandle<tauri::test::MockRuntime>, PathBuf) {
     (handle, data_root)
 }
 
-fn write_json(path: &Path, value: &Value) {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).unwrap();
-    }
-    std::fs::write(path, serde_json::to_string_pretty(value).unwrap()).unwrap();
-}
+#[path = "support/book_json.rs"]
+mod book_json;
+fn write_json(path: &Path, value: &Value) { book_json::write(path, value); }
+fn read_json(path: &Path) -> Value { book_json::read(path) }
 
-fn read_json(path: &Path) -> Value {
-    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
-}
-
-/// 造一本本地书（与 `book_store.rs` 的目录布局一致：书签单独一个文件）。
+/// 造一本升级前的本地书：在 book_store 首次访问时迁入数据库。
 fn seed_local_book(data_root: &Path, id: &str, title: &str) {
     seed_book(&data_root.join("books").join(id), id, title, "三体.epub", true);
 }
@@ -358,6 +353,10 @@ fn sync_once(client: &SharedEngine, server: &SharedEngine) -> readerx_sync::Sync
 
 /// 目录下的文件名（不存在时为空）。
 fn list_files(dir: &Path) -> Vec<String> {
+    if dir.file_name().and_then(|n|n.to_str()) == Some("books") {
+        let root = dir.parent().unwrap();
+        if root.join("books.sqlite3").is_file() { return book_json::ids(root); }
+    }
     std::fs::read_dir(dir)
         .map(|items| {
             items
@@ -696,9 +695,11 @@ fn conflict_resolution_reports_materialization_failures_and_can_retry() {
             "activated": true, "hiddenGroupMigrated": true,
             "materializedOps": if pending { 0 } else { count },
         }));
-        // 用目录阻挡状态文件写入，真实触发持久化失败。
+        // 只阻断分组的 SQLite 写入，保留前一阶段的书源分组刷新。
         let path = app_data.join("state/readerx.groups.json");
-        std::fs::create_dir_all(&path).unwrap();
+        readerx_lib::sync::book_ids::migrate(&handle).unwrap();
+        let db = rusqlite::Connection::open(app_data.join("books.sqlite3")).unwrap();
+        db.execute_batch("CREATE TRIGGER fail_groups BEFORE INSERT ON groups WHEN NEW.key='readerx.groups' BEGIN SELECT RAISE(ABORT,'injected'); END").unwrap();
         let applied = Arc::new(Mutex::new(Vec::<Value>::new()));
         let captured = applied.clone();
         let listener = handle.listen("readerx-sync-applied", move |event| {
@@ -717,7 +718,7 @@ fn conflict_resolution_reports_materialization_failures_and_can_retry() {
             assert!(applied.lock().unwrap().iter().any(|event| event["sourceGroups"] == true),
                 "指定实体落地失败不能吞掉此前已写回的书源分组刷新事件");
         }
-        std::fs::remove_dir(&path).unwrap();
+        db.execute_batch("DROP TRIGGER fail_groups").unwrap();
         service.resolve_conflict(&id, "remote").expect("恢复写盘后同一裁决可以重试");
         let groups = read_json(&path);
         assert_eq!(groups[0]["name"], "对端分组");
@@ -1188,17 +1189,12 @@ fn synced_content_creates_the_book_locally() {
         "对端的正文应先落在暂存区"
     );
 
-    // 落地：本机按引擎里的元信息建书，并把正文写进 content.json
+    // 落地：本机按引擎里的元信息建书，并把正文写进 SQLite。
     let changes = bridge::materialize(&handle, &local, 0, &mut index).unwrap();
     assert!(changes.books, "新书落地要刷新书架：{changes:?}");
     assert_eq!(changes.chapters.len(), 1, "{changes:?}");
 
-    let book_ids: Vec<String> = std::fs::read_dir(app_data.join("books"))
-        .unwrap()
-        .flatten()
-        .filter(|entry| entry.path().is_dir())
-        .map(|entry| entry.file_name().to_string_lossy().to_string())
-        .collect();
+    let book_ids = book_json::ids(&app_data);
     assert_eq!(book_ids.len(), 1, "应该正好新建一本：{book_ids:?}");
     let book_id = &book_ids[0];
     assert_eq!(book_id, &uid, "接收端必须直接使用同步书籍 ID");
@@ -1217,10 +1213,14 @@ fn synced_content_creates_the_book_locally() {
     assert_eq!(chapters[1]["paragraphs"][0], json!("正文二"));
     assert!(chapters[2]["paragraphs"].as_array().unwrap().is_empty());
 
-    assert!(
-        app_data.join("books").join(book_id).join("digest.json").is_file(),
-        "正文落地要顺手写下章节指纹缓存"
-    );
+    let db = rusqlite::Connection::open(app_data.join("books.sqlite3")).unwrap();
+    let mut query = db.prepare("SELECT digest FROM chapters WHERE book_id=?1 ORDER BY position").unwrap();
+    let digests: Vec<Value> = query.query_map([book_id], |row|row.get::<_, String>(0)).unwrap()
+        .map(|row|serde_json::from_str(&row.unwrap()).unwrap()).collect();
+    assert_eq!(digests.len(), 3);
+    assert!(!digests[0]["hash"].as_str().unwrap().is_empty());
+    assert!(!digests[1]["hash"].as_str().unwrap().is_empty());
+    assert_eq!(digests[2]["hash"], "", "未下载章节没有正文指纹");
     assert!(
         lock_engine(&local).staged_bodies(&uid).is_empty(),
         "落地完成后暂存区要清干净"
@@ -1232,12 +1232,7 @@ fn synced_content_creates_the_book_locally() {
     // 再落地一次不该重复建书
     let again = bridge::materialize(&handle, &local, usize::MAX, &mut index).unwrap();
     assert!(again.chapters.is_empty() && !again.books, "重复落地应无事发生：{again:?}");
-    let still: Vec<String> = std::fs::read_dir(app_data.join("books"))
-        .unwrap()
-        .flatten()
-        .filter(|entry| entry.path().is_dir())
-        .map(|entry| entry.file_name().to_string_lossy().to_string())
-        .collect();
+    let still = book_json::ids(&app_data);
     assert_eq!(still, book_ids);
 }
 
@@ -1808,6 +1803,7 @@ fn hidden_group_membership_survives_sync_and_can_be_cleared() {
     sync_once(&local, &peer.engine);
     // 将远端暂存作为新设备数据拉回：本地书库清空，验证建书时也保留归属。
     std::fs::remove_dir_all(app_data.join("books")).unwrap();
+    std::fs::remove_file(app_data.join("books.sqlite3")).unwrap();
     drop(local);
     let fresh = local_engine(&handle, &app_data);
     sync_once(&fresh, &peer.engine);
@@ -1817,7 +1813,7 @@ fn hidden_group_membership_survives_sync_and_can_be_cleared() {
     assert_eq!(ids.len(), 1);
     let path = app_data.join("books").join(&ids[0]).join("bookdetail.json");
     assert_eq!(read_json(&path)["groupId"], "__hidden__");
-    assert!(!app_data.join("state/readerx.groups.json").exists(), "不能额外创建普通分组");
+    assert_eq!(read_json(&app_data.join("state/readerx.groups.json")), json!([]), "不能额外创建普通分组");
     lock_engine(&peer.engine).set_field(&uid, "group", json!(null)).unwrap();
     sync_once(&fresh, &peer.engine);
     bridge::materialize(&handle, &fresh, 0, &mut index).unwrap();
@@ -1987,12 +1983,12 @@ fn sync_service_streams_large_books_and_saves_before_stop_or_disconnect() {
 
     // 落库失败不能推进操作游标；移除写盘障碍后无需重新接收即可恢复。
     let cursor = read_json(&app_data.join("sync/settings.json"))["materializedOps"].clone();
-    let obstacle = app_data.join("books").join(&ids[0]).join("bookdetail.json.tmp");
-    std::fs::create_dir(&obstacle).unwrap();
+    let blocker = rusqlite::Connection::open(app_data.join("books.sqlite3")).unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
     lock_engine(&peer.engine).set_field(&uid, "title", json!("同步后的书名")).unwrap();
     assert!(service.sync_with_addr_now(&server.local_addr().to_string()).is_err());
     assert_eq!(read_json(&app_data.join("sync/settings.json"))["materializedOps"], cursor);
-    std::fs::remove_dir(&obstacle).unwrap();
+    blocker.execute_batch("ROLLBACK").unwrap();
     service.sync_with_addr_now(&server.local_addr().to_string()).unwrap();
     assert_eq!(read_json(&app_data.join("books").join(&ids[0]).join("bookdetail.json"))["title"], "同步后的书名");
 
@@ -2124,7 +2120,9 @@ fn upgrade_migrates_book_ids_without_recreating_sync_entities() {
     let uid = bridge::local_uid(&handle, "local-old");
     let before = lock_engine(&local).entities_of_kind("book", true)[0].clone();
     readerx_lib::sync::book_ids::migrate(&handle).unwrap();
-    assert!(!root.join("books/local-old").exists());
+    assert!(!root.join("books/local-old/bookdetail.json").exists());
+    assert!(root.join("books/local-old/bookdetail.json.migrated").is_file());
+    assert_eq!(book_json::ids(&root), vec![uid.clone()], "旧 ID 应从数据库移除，留底不能重建旧书");
     assert_eq!(read_json(&root.join("books").join(&uid).join("bookdetail.json"))["id"], uid);
     assert_eq!(read_json(&root.join("books").join(&uid).join("bookmarks.json"))["bookmarks"][0]["bookId"], uid);
     let shelf = read_json(&root.join("state/readerx.shelf.json"));
@@ -2236,7 +2234,7 @@ fn annotations_sync_merge_conflict_resolution_restart_and_book_deletion() {
         let _pin = readerx_lib::pin_data_root(Some(b.data_root.clone()));
         assert_eq!(bridge::materialize(&app, &b.engine, 0, &mut index_b).unwrap().deleted_books, vec![uid.clone()]);
     }
-    assert!(!path_b.exists());
+    assert!(!book_json::ids(&b.data_root).contains(&uid));
 }
 
 #[test]
@@ -2257,10 +2255,12 @@ fn annotation_save_with_stale_snapshot_preserves_remote_add_and_edit() {
     assert_eq!(notes.iter().find(|n| n["id"] == "n2").unwrap()["text"], "远端改写");
     assert_eq!(notes.iter().find(|n| n["id"] == "n3").unwrap()["text"], "远端新增");
     assert_eq!(notes.iter().find(|n| n["id"] == "n1").unwrap()["text"], "本机修改第一条");
-    // 损坏文件必须保留原样、向上返回失败。
-    std::fs::write(&path, "broken").unwrap();
+    // 损坏数据库记录必须保留原样、向上返回失败。
+    let db = rusqlite::Connection::open(root.join("books.sqlite3")).unwrap();
+    db.execute("UPDATE annotations SET records='broken' WHERE book_id='local-save'", []).unwrap();
     assert!(service.save_annotations("local-save", &previous, &next).is_err());
-    assert_eq!(std::fs::read_to_string(path).unwrap(), "broken");
+    let raw: String = db.query_row("SELECT records FROM annotations WHERE book_id='local-save'", [], |row|row.get(0)).unwrap();
+    assert_eq!(raw, "broken");
 }
 
 #[test]

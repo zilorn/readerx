@@ -3,12 +3,11 @@
 //! 采集口径与 `data_transfer/mod.rs` 的文件头一致：书籍（元信息 / 正文 / 书签）、
 //! 状态文件、插图、书源，外加**按需**的书源登录态。听书缓存、日志、同步目录不进来。
 //!
-//! **正文以字节流写进归档**（`std::io::copy`，不解析）：一本几百兆的书不会在内存里
-//! 再复制一份，导出内存占用与书库体积无关。
+//! 数据库生成一致快照后流式写入归档，文件资源用 `std::io::copy`。
+//! 不为导出复制整本或整库正文。
 
 use super::{archive, ExportOptions, ExportSummary, Manifest, BACKUP_FORMAT};
-use super::{BOOKS_DIR, IMAGES_DIR, SESSIONS_DIR, SOURCES_DIR, STATE_DIR};
-use std::collections::HashSet;
+use super::{IMAGES_DIR, SESSIONS_DIR, SOURCES_DIR, STATE_DIR};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -35,10 +34,11 @@ pub(super) fn export_to<R: tauri::Runtime>(
     report: &mut dyn FnMut(&str, u64, u64),
 ) -> Result<ExportSummary, String> {
     let root = crate::storage::data_root(app)?;
+    // Migration may archive the old global bookmark state; enumerate files afterwards.
+    let books = crate::book_store::backup_books(app)?;
+    let book_count = books.ids()?.len() as u64;
     let mut state = Vec::new();
     walk(&root.join(STATE_DIR), STATE_DIR, &is_state_file, &mut state)?;
-    let mut books = Vec::new();
-    walk(&root.join(BOOKS_DIR), BOOKS_DIR, &is_data_file, &mut books)?;
     let mut images = Vec::new();
     walk(
         &root.join(IMAGES_DIR),
@@ -62,17 +62,10 @@ pub(super) fn export_to<R: tauri::Runtime>(
             &mut sessions,
         )?;
     }
-    for list in [
-        &mut state,
-        &mut books,
-        &mut images,
-        &mut sources,
-        &mut sessions,
-    ] {
+    for list in [&mut state, &mut images, &mut sources, &mut sessions] {
         list.sort_by(|a, b| a.name.cmp(&b.name));
     }
 
-    let book_count = distinct_books(&books);
     let manifest = Manifest {
         format: BACKUP_FORMAT.to_string(),
         app_version: app.package_info().version.to_string(),
@@ -81,7 +74,7 @@ pub(super) fn export_to<R: tauri::Runtime>(
         books: book_count,
         images: images.len() as u64,
         sources: sources.len() as u64,
-        state_keys: state.len() as u64,
+        state_keys: (state.len() + books.state_keys()?.len()) as u64,
     };
 
     let mut zip = archive::writer(destination);
@@ -96,13 +89,14 @@ pub(super) fn export_to<R: tauri::Runtime>(
 
     for (category, entries) in [
         ("state", &state),
-        ("books", &books),
         ("images", &images),
         ("sources", &sources),
         ("sessions", &sessions),
     ] {
         write_entries(&mut zip, entries, category, report)?;
     }
+
+    books.write_zip(&mut zip, report)?;
 
     let file = zip.finish().map_err(|e| format!("写入备份文件失败: {e}"))?;
     let bytes = file.metadata().map(|meta| meta.len()).unwrap_or(0);
@@ -181,23 +175,10 @@ fn redacted_webdav(path: &Path) -> Result<Vec<u8>, String> {
     Ok(text.into_bytes())
 }
 
-/// 只看一层：归档里 `books/<id>/...` 的书籍本数
-fn distinct_books(entries: &[Entry]) -> u64 {
-    let mut ids: HashSet<&str> = HashSet::new();
-    for entry in entries {
-        let mut parts = entry.name.splitn(3, '/');
-        parts.next();
-        if let Some(id) = parts.next() {
-            ids.insert(id);
-        }
-    }
-    ids.len() as u64
-}
-
 /// 状态文件：`<key>.json`，key 必须合法（与 `readerx_state_get` 同一口径）
 fn is_state_file(name: &str) -> bool {
     name.strip_suffix(".json")
-        .map(crate::storage::valid_state_key)
+        .map(|key| crate::storage::valid_state_key(key) && !crate::book_store::state::handles(key))
         .unwrap_or(false)
 }
 
@@ -208,7 +189,7 @@ fn is_id_file(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// 书籍目录与插图目录里的普通数据文件（写盘中途留下的临时文件不要）
+/// 插图目录里的普通数据文件（写盘中途留下的临时文件不要）
 fn is_data_file(name: &str) -> bool {
     !name.starts_with('.') && !name.ends_with(".tmp") && !name.ends_with(".migrated")
 }

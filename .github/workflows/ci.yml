@@ -1,0 +1,43 @@
+name: PR CI
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: pr-ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  checks:
+    name: Frontend and workflow checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup-build
+        with:
+          system-deps: 'false'
+      - name: TypeScript types (no emit)
+        run: pnpm exec tsc --noEmit
+      - name: i18n keys and user-facing text
+        run: pnpm run i18n:check
+      - name: Artifact collection regression (fixtures only)
+        run: node --test scripts/collect-artifacts.test.mjs
+      - name: GitHub Actions syntax
+        run: |
+          curl --fail --silent --show-error --location \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz \
+            --output "$RUNNER_TEMP/actionlint.tar.gz"
+          tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -color
+  rust:
+    name: Rust workspace and test target checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup-build
+      - name: Check Rust code and test targets (no application bundle)
+        working-directory: src-tauri
+        run: cargo check --locked --workspace --all-targets

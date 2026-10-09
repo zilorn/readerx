@@ -56,18 +56,18 @@ fn setup() -> (tauri::AppHandle<tauri::test::MockRuntime>, PathBuf) {
     ] {
         let _ = fs::remove_dir_all(data_root.join(sub));
     }
+    fs::create_dir_all(&data_root).unwrap();
+    let _ = std::fs::remove_file(data_root.join("books.sqlite3"));
     (handle, data_root)
 }
 
+#[path = "../../tests/support/book_json.rs"]
+mod book_json;
 fn write_json(path: &Path, value: &Value) {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).unwrap();
-    }
-    fs::write(path, serde_json::to_string_pretty(value).unwrap()).unwrap();
+    book_json::write(path, value);
 }
-
 fn read_json(path: &Path) -> Value {
-    serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+    book_json::read(path)
 }
 
 /// 造一本本地书（与 `book_store.rs` 的目录布局一致）
@@ -130,6 +130,14 @@ fn seed_image(root: &Path, book_id: &str, hash: &str) {
 }
 
 fn seed_state(root: &Path, key: &str, value: &Value) {
+    if root.join("books.sqlite3").is_file() && crate::book_store::state::handles(key) {
+        crate::book_store::state::update_at(root, key, |state| {
+            *state = Some(value.clone());
+            Ok(())
+        })
+        .unwrap();
+        return;
+    }
     write_json(&root.join("state").join(format!("{key}.json")), value);
 }
 
@@ -234,6 +242,39 @@ fn import(
 }
 
 #[test]
+fn export_migrates_global_bookmarks_before_state_scan_and_rejects_unreadable_books() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let (app, root) = setup();
+    seed_book(&root, "legacy", "旧书", "old.epub", 321, None);
+    fs::remove_file(root.join("books/legacy/bookmarks.json")).unwrap();
+    let marks = json!([{"id":"old-mark","bookId":"legacy","unknown":42}]);
+    seed_state(&root, "readerx.bookmarks", &json!({"legacy":marks}));
+    let backup = export(&app, &root, "global-marks", false);
+    let mut zip = zip::ZipArchive::new(fs::File::open(&backup).unwrap()).unwrap();
+    assert!(zip.by_name("state/readerx.bookmarks.json").is_err());
+    let manifest = archive::read_manifest(&mut zip).unwrap();
+    let mut scan = archive::classify(&mut zip, manifest, 0);
+    let books = archive::open_books(&root, &mut zip, &mut scan)
+        .unwrap()
+        .unwrap();
+    let stored: Value =
+        serde_json::from_slice(&books.read("legacy", "bookmarks.json").unwrap().unwrap()).unwrap();
+    assert_eq!(stored["bookmarks"], marks);
+    let bad = root.join("books/bad/bookdetail.json");
+    fs::create_dir_all(bad.parent().unwrap()).unwrap();
+    fs::write(&bad, b"{broken").unwrap();
+    let destination = fs::File::create(export_path(&root, "must-fail")).unwrap();
+    assert!(export_to(
+        &app,
+        destination,
+        ExportOptions::default(),
+        &mut |_, _, _| {}
+    )
+    .is_err());
+    assert_eq!(fs::read(bad).unwrap(), b"{broken");
+}
+
+#[test]
 fn export_and_merge_import_restores_everything() {
     let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let (app, root) = setup();
@@ -258,6 +299,7 @@ fn export_and_merge_import_restores_everything() {
     ] {
         let _ = fs::remove_dir_all(root.join(sub));
     }
+    let _ = fs::remove_file(root.join("books.sqlite3"));
     let summary = import(&app, &backup, ImportMode::Merge);
     assert_eq!(summary.books_added, 2);
     assert_eq!(summary.sources_added, 1);
@@ -293,11 +335,17 @@ fn export_and_merge_import_restores_everything() {
         "卷首"
     );
     assert_eq!(
-        read_json(&root.join(format!("book_sources/{}.json", crate::sync::identity::source_uid("https://a.example.com"))))["bookSourceUrl"],
+        read_json(&root.join(format!(
+            "book_sources/{}.json",
+            crate::sync::identity::source_uid("https://a.example.com")
+        )))["bookSourceUrl"],
         "https://a.example.com"
     );
     assert_eq!(
-        read_json(&root.join(format!("source_sessions/{}.json", crate::sync::identity::source_uid("https://a.example.com"))))["cookie"],
+        read_json(&root.join(format!(
+            "source_sessions/{}.json",
+            crate::sync::identity::source_uid("https://a.example.com")
+        )))["cookie"],
         "sid=secret"
     );
     // 偏好类状态原样回来（换机时是「本机没有」→ 取归档那份）
@@ -338,9 +386,17 @@ fn export_without_credentials_leaves_login_state_and_passwords_out() {
     // 导入后本机的登录态不被删（归档没带它，不等于「用户不要了」）
     let summary = import(&app, &backup, ImportMode::Merge);
     assert_eq!(summary.books_updated, 2);
-    assert!(root.join(format!("source_sessions/{}.json", crate::sync::identity::source_uid("https://a.example.com"))).is_file());
+    assert!(root
+        .join(format!(
+            "source_sessions/{}.json",
+            crate::sync::identity::source_uid("https://a.example.com")
+        ))
+        .is_file());
     assert_eq!(
-        read_json(&root.join(format!("source_sessions/{}.json", crate::sync::identity::source_uid("https://a.example.com"))))["cookie"],
+        read_json(&root.join(format!(
+            "source_sessions/{}.json",
+            crate::sync::identity::source_uid("https://a.example.com")
+        )))["cookie"],
         "sid=secret"
     );
 }
@@ -377,7 +433,10 @@ fn merge_keeps_local_extras_and_newer_progress() {
     assert_eq!(summary.books_removed, 0);
 
     // 本机多出来的书一本都不动
-    assert!(root.join("books/b-3e75c5b1cc830167/bookdetail.json").is_file());
+    assert_eq!(
+        read_json(&root.join("books/b-3e75c5b1cc830167/bookdetail.json"))["title"],
+        "超新星纪元"
+    );
     // 进度按 updatedAt 取新的：本机那份更靠后 → 保留本机
     let shelf = read_json(&root.join("state/readerx.shelf.json"));
     assert_eq!(shelf["b-5e20dcb39c59dc92"]["chapter"], 9);
@@ -467,6 +526,7 @@ fn merge_matches_the_same_book_from_another_device_by_identity() {
     ] {
         let _ = fs::remove_dir_all(root.join(sub));
     }
+    fs::remove_file(root.join("books.sqlite3")).unwrap();
     seed_book(&root, "local-other", "三体", "三体.epub", 1024, None);
     seed_state(
         &root,
@@ -536,6 +596,198 @@ fn archive_read_json(path: &Path, entry: &str) -> Value {
         .clone()
 }
 
+/// Build an actual v1 JSON archive to keep old-format import coverage independent of v2.
+fn convert_to_v1(root: &Path, path: &Path, omitted: Option<&str>) {
+    use std::io::Write;
+    let mut original = zip::ZipArchive::new(fs::File::open(path).unwrap()).unwrap();
+    let mut manifest = archive::read_manifest(&mut original).unwrap();
+    let mut scan = archive::classify(&mut original, manifest.clone(), 0);
+    let books = archive::open_books(root, &mut original, &mut scan)
+        .unwrap()
+        .unwrap();
+    manifest.format = "readerx-backup/1".into();
+    let temporary = path.with_extension("test.zip");
+    let mut rewritten = zip::ZipWriter::new(fs::File::create(&temporary).unwrap());
+    archive::write_manifest(&mut rewritten, &manifest).unwrap();
+    for index in 0..original.len() {
+        let mut entry = original.by_index(index).unwrap();
+        if matches!(entry.name(), "books.sqlite3" | "readerx-backup.json") {
+            continue;
+        }
+        rewritten
+            .start_file(entry.name(), archive::text_options(None))
+            .unwrap();
+        std::io::copy(&mut entry, &mut rewritten).unwrap();
+    }
+    // Materialize SQLite collections/progress as the real old JSON archive layout.
+    for key in books.state_keys().unwrap() {
+        if let Some(value) = books.read_state(&key).unwrap() {
+            rewritten
+                .start_file(format!("state/{key}.json"), archive::text_options(None))
+                .unwrap();
+            rewritten
+                .write_all(&serde_json::to_vec(&value).unwrap())
+                .unwrap();
+        }
+    }
+    for id in &scan.books {
+        for file in [
+            "bookdetail.json",
+            "content.json",
+            "bookmarks.json",
+            "annotations.json",
+        ] {
+            let name = format!("books/{id}/{file}");
+            if omitted == Some(name.as_str()) {
+                continue;
+            }
+            rewritten
+                .start_file(name, archive::text_options(None))
+                .unwrap();
+            let mut value: Value =
+                serde_json::from_slice(&books.read(id, file).unwrap().unwrap()).unwrap();
+            if file == "bookdetail.json" {
+                value.as_object_mut().unwrap().remove("progress");
+            }
+            rewritten
+                .write_all(&serde_json::to_vec(&value).unwrap())
+                .unwrap();
+        }
+    }
+    drop(rewritten.finish().unwrap());
+    drop(original);
+    drop(books);
+    fs::rename(temporary, path).unwrap();
+}
+
+#[test]
+fn sqlite_export_keeps_sources_json_and_v1_import_restores_books() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let (app, root) = setup();
+    seed_device_a(&root);
+    let backup = export(&app, &root, "layout", false);
+    let mut zip = archive::open_zip_from(fs::File::open(&backup).unwrap()).unwrap();
+    let manifest = archive::read_manifest(&mut zip).unwrap();
+    assert_eq!(manifest.format, "readerx-backup/2");
+    assert!(zip.by_name("books.sqlite3").is_ok());
+    for key in crate::book_store::state::KEYS {
+        assert!(
+            zip.by_name(&format!("state/{key}.json")).is_err(),
+            "{key} must be inside SQLite"
+        );
+    }
+    assert!(!zip.file_names().any(|name| name.starts_with("books/")
+        || name.ends_with("-wal")
+        || name.ends_with("-shm")));
+    let source = zip
+        .file_names()
+        .find(|n| n.starts_with("book_sources/"))
+        .unwrap()
+        .to_string();
+    let value = archive::read_entry_json(&mut zip, &source)
+        .unwrap()
+        .unwrap();
+    assert!(value["bookSourceUrl"].is_string());
+    drop(zip);
+    // A fresh v2 restore imports book rows, never the old device's migration receipts.
+    let (_, root) = setup();
+    let summary = import(&app, &backup, ImportMode::Replace);
+    assert_eq!(summary.books_added, 2);
+    let db = rusqlite::Connection::open(root.join("books.sqlite3")).unwrap();
+    let receipts: i64 = db
+        .query_row("SELECT count(*) FROM migrated_books", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(receipts, 0);
+    let receipts: i64 = db
+        .query_row("SELECT count(*) FROM migrated_states", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(receipts, 0);
+    drop(db);
+    convert_to_v1(&root, &backup, None);
+    let mut zip = archive::open_zip_from(fs::File::open(&backup).unwrap()).unwrap();
+    assert_eq!(
+        archive::read_manifest(&mut zip).unwrap().format,
+        "readerx-backup/1"
+    );
+    assert!(zip.by_name("books.sqlite3").is_err());
+    drop(zip);
+    let (_, root) = setup();
+    let summary = import(&app, &backup, ImportMode::Merge);
+    assert_eq!(summary.books_added, 2);
+    let books = crate::book_store::list_book_meta(&app).unwrap();
+    assert_eq!(books.len(), 2);
+    assert!(
+        !read_json(&root.join("books/b-5e20dcb39c59dc92/content.json"))["chapters"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// Mutate the SQLite payload without ever touching the local database.
+fn rewrite_database(path: &Path, root: &Path, change: Option<&str>) {
+    let mut original = archive::open_zip_from(fs::File::open(path).unwrap()).unwrap();
+    let temporary = path.with_extension("test.zip");
+    let database = root.join("tampered.sqlite3");
+    {
+        let mut entry = original.by_name("books.sqlite3").unwrap();
+        std::io::copy(&mut entry, &mut fs::File::create(&database).unwrap()).unwrap();
+    }
+    if let Some(sql) = change {
+        let db = rusqlite::Connection::open(&database).unwrap();
+        db.execute_batch(sql).unwrap();
+    }
+    let mut rewritten = zip::ZipWriter::new(fs::File::create(&temporary).unwrap());
+    for index in 0..original.len() {
+        let mut entry = original.by_index(index).unwrap();
+        if entry.name() == "books.sqlite3" {
+            if change.is_some() {
+                rewritten
+                    .start_file(entry.name(), archive::text_options(None))
+                    .unwrap();
+                std::io::copy(&mut fs::File::open(&database).unwrap(), &mut rewritten).unwrap();
+            }
+        } else {
+            rewritten
+                .start_file(entry.name(), archive::text_options(None))
+                .unwrap();
+            std::io::copy(&mut entry, &mut rewritten).unwrap();
+        }
+    }
+    drop(rewritten.finish().unwrap());
+    drop(original);
+    fs::rename(temporary, path).unwrap();
+    fs::remove_file(database).unwrap();
+}
+
+#[test]
+fn invalid_sqlite_archive_fails_before_local_writes_and_cleans_temporary_files() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let (app, root) = setup();
+    seed_device_a(&root);
+    for (index,change) in [
+        None,
+        Some("PRAGMA user_version=999;"),
+        Some("UPDATE chapters SET chapter='broken';"),
+        Some("UPDATE groups SET record='broken';"),
+        Some("UPDATE rules SET record='[]';"),
+        Some("UPDATE books SET detail=json_set(detail,'$.progress',1);"),
+        Some("UPDATE books SET id='../outside-' || id;"),
+        Some("INSERT OR REPLACE INTO annotations SELECT id,'{}' FROM books;"),
+        Some("PRAGMA foreign_keys=OFF; INSERT INTO bookmarks VALUES('missing','[]');"),
+        Some("DROP TABLE annotations; CREATE VIEW annotations AS SELECT book_id,records FROM bookmarks;"),
+    ].iter().enumerate() {
+        let backup = export(&app,&root,&format!("invalid-{index}"),false);
+        let before = fs::read(root.join("books.sqlite3")).unwrap();
+        rewrite_database(&backup,&root,*change);
+        for mode in [ImportMode::Merge,ImportMode::Replace] {
+            assert!(apply(&app,&backup.to_string_lossy(),mode,&mut |_,_,_|{}).is_err(),"invalid case {index}");
+            assert_eq!(fs::read(root.join("books.sqlite3")).unwrap(),before,"invalid archive must not change local data");
+            assert!(!fs::read_dir(root.join("books")).unwrap().flatten().any(|e|e.file_name().to_string_lossy().ends_with(".tmp")),"temporary snapshot must be cleaned");
+        }
+    }
+}
+
 #[test]
 fn annotations_survive_archive_merge_replace_and_old_backup() {
     let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
@@ -550,6 +802,7 @@ fn annotations_survive_archive_merge_replace_and_old_backup() {
     );
     let backup = export(&app, &root, "annotations", false);
     fs::remove_dir_all(root.join("books")).unwrap();
+    fs::remove_file(root.join("books.sqlite3")).unwrap();
     import(&app, &backup, ImportMode::Merge);
     assert_eq!(read_json(&path)["annotations"][0], paragraph);
     let mut local = paragraph.clone();
@@ -568,12 +821,33 @@ fn annotations_survive_archive_merge_replace_and_old_backup() {
     );
     import(&app, &backup, ImportMode::Replace);
     assert_eq!(read_json(&path)["annotations"][0], paragraph);
-    fs::remove_file(&path).unwrap();
     let old_backup = export(&app, &root, "without-annotations", false);
+    // Reproduce a backup written before annotations existed, rather than merely storing an empty list.
+    convert_to_v1(
+        &root,
+        &old_backup,
+        Some(&format!("books/{id}/annotations.json")),
+    );
     write_json(&path, &json!({"schemaVersion":1,"annotations":[paragraph]}));
     import(&app, &old_backup, ImportMode::Replace);
     assert!(read_json(&path)["annotations"]
         .as_array()
         .unwrap()
         .is_empty());
+}
+
+#[test]
+fn metadata_patch_keeps_progress_in_the_same_book_row() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let (app, root) = setup();
+    seed_device_a(&root);
+    crate::storage::read_state(&app, "readerx.shelf").unwrap();
+    let patch = serde_json::from_value(json!({"title":"新标题","groupId":"new-group"})).unwrap();
+    crate::book_store::patch_book_meta(&app, "local-a", &patch).unwrap();
+    let detail = read_json(&root.join("books/local-a/bookdetail.json"));
+    assert_eq!(detail["title"], "新标题");
+    assert_eq!(detail["groupId"], "new-group");
+    assert_eq!(detail["progress"]["chapter"], 1);
+    assert_eq!(detail["progress"]["charOffset"], 10);
+    assert!(!root.join("state/readerx.shelf.json").exists());
 }

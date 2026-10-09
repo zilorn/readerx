@@ -7,7 +7,7 @@
 use super::archive::{self, ArchiveScan};
 use super::merge::{self, Remap};
 use super::ImportMode;
-use super::{BOOKS_DIR, SOURCES_DIR, STATE_DIR};
+use super::{BOOKS_DIR, SOURCES_DIR};
 use crate::book_store::{self, BookSyncMeta};
 use crate::models::BookSource;
 use crate::storage;
@@ -60,7 +60,7 @@ pub(super) struct BookPlan {
     pub(super) entries: Vec<String>,
 }
 
-/// 本机书籍 id 与身份（读 `bookdetail.json`，不碰正文）
+/// 本机书籍 id 与身份（读数据库元信息，不碰正文）
 pub(super) fn local_books<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<LocalBook>, String> {
     let metas = book_store::list_sync_meta(app)?;
     // 书源地址只读一次：书籍身份要用它，逐本去列书源会变成 O(书 × 源)
@@ -88,7 +88,9 @@ fn local_source_urls() -> HashMap<String, String> {
 /// 书籍身份：与 `readerx_sync::bridge` 同一口径，只是书源地址的来源由调用方给
 /// （归档里的书要用**归档自己的**书源地址，否则跨设备对不上）
 fn book_uid(meta: &BookSyncMeta, source_urls: &HashMap<String, String>) -> String {
-    if crate::sync::book_ids::canonical_id(&meta.id) { return meta.id.clone(); }
+    if crate::sync::book_ids::canonical_id(&meta.id) {
+        return meta.id.clone();
+    }
     let source_url = meta
         .book_source_id
         .as_deref()
@@ -127,6 +129,7 @@ pub(super) fn read_archive_sources(
 
 pub(super) fn read_archive_books(
     zip: &mut ZipArchive<File>,
+    books: Option<&crate::book_store::BackupDatabase>,
     scan: &ArchiveScan,
     sources: &[ArchiveSource],
     mode: ImportMode,
@@ -150,8 +153,11 @@ pub(super) fn read_archive_books(
             .cloned()
             .collect();
         let uid = if mode == ImportMode::Merge {
-            match archive::read_entry_json(zip, &format!("{prefix}bookdetail.json"))? {
-                Some(value) => book_uid(&meta_from_detail(&value), &source_urls),
+            match archive::read_book_entry(zip, books, &format!("{prefix}bookdetail.json"))? {
+                Some(bytes) => book_uid(
+                    &meta_from_detail(&serde_json::from_slice(&bytes).map_err(|e| e.to_string())?),
+                    &source_urls,
+                ),
                 None => String::new(),
             }
         } else {
@@ -261,6 +267,7 @@ pub(super) fn plan_remap<R: tauri::Runtime>(
     archive_books: &[ArchiveBook],
     zip: &mut ZipArchive<File>,
     scan: &ArchiveScan,
+    books: Option<&crate::book_store::BackupDatabase>,
 ) -> Result<Remap, String> {
     let mut remap = Remap::default();
     for book in archive_books {
@@ -278,8 +285,8 @@ pub(super) fn plan_remap<R: tauri::Runtime>(
 
     let local_groups = state_array(app, merge::GROUPS_KEY);
     let local_source_groups = state_array(app, merge::SOURCE_GROUPS_KEY);
-    let archive_groups = read_archive_groups(zip, scan, merge::GROUPS_KEY)?;
-    let archive_source_groups = read_archive_groups(zip, scan, merge::SOURCE_GROUPS_KEY)?;
+    let archive_groups = read_archive_groups(zip, scan, books, merge::GROUPS_KEY)?;
+    let archive_source_groups = read_archive_groups(zip, scan, books, merge::SOURCE_GROUPS_KEY)?;
     let mut seq = 0u64;
     remap.groups = map_groups(&local_groups, &archive_groups, "grp", &mut seq);
     remap.source_groups = map_groups(&local_source_groups, &archive_source_groups, "sg", &mut seq);
@@ -304,12 +311,13 @@ pub(super) fn plan_remap<R: tauri::Runtime>(
 fn read_archive_groups(
     zip: &mut ZipArchive<File>,
     scan: &ArchiveScan,
+    books: Option<&crate::book_store::BackupDatabase>,
     key: &str,
 ) -> Result<Vec<Value>, String> {
     if !scan.state_keys.iter().any(|item| item == key) {
         return Ok(Vec::new());
     }
-    let Some(value) = archive::read_entry_json(zip, &format!("{STATE_DIR}/{key}.json"))? else {
+    let Some(value) = archive::read_state_entry(zip, books, key)? else {
         return Ok(Vec::new());
     };
     Ok(value.as_array().cloned().unwrap_or_default())

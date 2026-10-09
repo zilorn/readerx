@@ -1,0 +1,43 @@
+name: Test book storage and data compatibility
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-data-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  data-tests:
+    name: Linux storage, backup and sync regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup-build
+      - name: Prepare frontend assets
+        run: pnpm build
+      - name: SQLite book storage and state
+        working-directory: src-tauri
+        run: cargo test --locked -p readerx --lib book_store
+      - name: Book identity migrations
+        working-directory: src-tauri
+        run: cargo test --locked -p readerx --lib sync::book_ids
+      - name: Group and rule identity migrations
+        working-directory: src-tauri
+        run: cargo test --locked -p readerx --lib sync::data_ids
+      - name: Backup export, import and compatibility
+        working-directory: src-tauri
+        run: cargo test --locked -p readerx --lib data_transfer
+      - name: App sync persistence integration
+        working-directory: src-tauri
+        run: cargo test --locked -p readerx --test sync_bridge
+      - name: Sync protocol regression
+        working-directory: src-tauri
+        run: cargo test --locked -p readerx-sync
+      - name: Source engine regression (serial Boa tests)
+        working-directory: src-tauri
+        run: cargo test --locked -p readerx-source -- --test-threads=1

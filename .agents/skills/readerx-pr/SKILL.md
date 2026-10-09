@@ -19,6 +19,7 @@ description: 按 pr: 请求把 issue 或需求做成 Pull Request：读取需求
 - 按 worktree 技能创建 `.worktree/<name>` 与分支 `codex/<name>`，名称取任务关键词；已存在同名目录或分支时先确认，不覆盖已有工作。
 - 默认从最新 main 起分支；用户指定其他目标分支时尊重该选择，并在 PR 中使用对应 base。
 - 在 worktree 内完成改动，运行适用检查：`pnpm exec tsc --noEmit`、`pnpm run i18n:check`、`pnpm build`；涉及 Rust 时在 src-tauri 运行对应 crate 的检查。
+- PR 自动检查、手动签名 arm64 APK、签名 Secrets 与产物验收见 [CI 与构建](../../../docs/ci.md)；CI 文件变动检查 Actions 语法，产物收集脚本变动运行 `node --test scripts/collect-artifacts.test.mjs`。
 - 同步更新受影响的文档、中英文文案与项目 skill；只提交本次任务文件，提交信息用中文 `feat/fix/docs: 内容`，改动较大时按完整改动分批提交。
 
 ## 推送与创建 PR

@@ -14,7 +14,7 @@ use super::archive::{self, ArchiveScan};
 use super::merge::{self, Remap};
 use super::plan::{self, ArchiveSource, BookAction, BookPlan, LocalBook};
 use super::{ImportMode, ImportSummary};
-use super::{BOOKS_DIR, IMAGES_DIR, SESSIONS_DIR, STATE_DIR};
+use super::{BOOKS_DIR, IMAGES_DIR, SESSIONS_DIR};
 use crate::book_store;
 use crate::models::BookSource;
 use crate::storage;
@@ -36,7 +36,8 @@ pub(super) fn apply<R: tauri::Runtime>(
     let bytes = file.metadata().map(|meta| meta.len()).unwrap_or(0);
     let mut zip = archive::open_zip_from(file)?;
     let manifest = archive::read_manifest(&mut zip)?;
-    let scan = archive::classify(&mut zip, manifest, bytes);
+    let mut scan = archive::classify(&mut zip, manifest, bytes);
+    let books = archive::open_books(&storage::data_root(app)?, &mut zip, &mut scan)?;
     log::info!(
         "开始导入备份 方式={} 书籍={} 插图={} 书源={} 状态={} 登录信息={}",
         mode.as_str(),
@@ -54,20 +55,46 @@ pub(super) fn apply<R: tauri::Runtime>(
     let local_books = plan::local_books(app)?;
     let local_sources = readerx_source::store::list_sources().unwrap_or_default();
     let archive_sources = plan::read_archive_sources(&mut zip, &scan)?;
-    let archive_books = plan::read_archive_books(&mut zip, &scan, &archive_sources, mode)?;
+    let archive_books =
+        plan::read_archive_books(&mut zip, books.as_ref(), &scan, &archive_sources, mode)?;
 
     // 分组换算表：书与书源的 groupId 都要跟着走
-    let remap = plan::plan_remap(app, mode, &local_books, &archive_books, &mut zip, &scan)?;
+    let remap = plan::plan_remap(
+        app,
+        mode,
+        &local_books,
+        &archive_books,
+        &mut zip,
+        &scan,
+        books.as_ref(),
+    )?;
     let plan: Vec<BookPlan> = archive_books
         .iter()
         .map(|book| plan::plan_book(book, &local_books, mode))
         .collect();
 
-    write_books(app, &mut zip, &plan, &remap, mode, &mut summary, report)?;
+    write_books(
+        app,
+        &mut zip,
+        books.as_ref(),
+        &plan,
+        &remap,
+        mode,
+        &mut summary,
+        report,
+    )?;
     write_images(app, &mut zip, &scan, &plan, mode, &mut summary, report)?;
     write_sources(&local_sources, &archive_sources, &remap, mode, &mut summary)?;
     write_sessions(app, &mut zip, &scan, report)?;
-    write_state(app, &mut zip, &scan, &remap, mode, &mut summary)?;
+    write_state(
+        app,
+        &mut zip,
+        books.as_ref(),
+        &scan,
+        &remap,
+        mode,
+        &mut summary,
+    )?;
 
     if mode == ImportMode::Replace {
         remove_extras(
@@ -80,15 +107,35 @@ pub(super) fn apply<R: tauri::Runtime>(
         )?;
     }
 
-    let aliases = archive_sources.iter().map(|source| {
-        let local = if mode == ImportMode::Merge {
-            local_sources.iter().find(|local| same_source(&local.book_source_url, &source.url))
-        } else { None };
-        let target = local.map(|local| crate::sync::identity::entity_id(&local.id, "s-", crate::sync::identity::source_uid(&local.book_source_url)))
-            .unwrap_or_else(|| crate::sync::identity::entity_id(&source.id, "s-", crate::sync::identity::source_uid(&source.url)));
-        (source.id.clone(), target)
-    }).collect();
-    readerx_source::id_migration::migrate(&storage::data_root(app)?, &aliases)?;
+    let aliases = archive_sources
+        .iter()
+        .map(|source| {
+            let local = if mode == ImportMode::Merge {
+                local_sources
+                    .iter()
+                    .find(|local| same_source(&local.book_source_url, &source.url))
+            } else {
+                None
+            };
+            let target = local
+                .map(|local| {
+                    crate::sync::identity::entity_id(
+                        &local.id,
+                        "s-",
+                        crate::sync::identity::source_uid(&local.book_source_url),
+                    )
+                })
+                .unwrap_or_else(|| {
+                    crate::sync::identity::entity_id(
+                        &source.id,
+                        "s-",
+                        crate::sync::identity::source_uid(&source.url),
+                    )
+                });
+            (source.id.clone(), target)
+        })
+        .collect();
+    crate::sync::data_ids::migrate_sources(&storage::data_root(app)?, &aliases)?;
     crate::sync::book_ids::migrate(app)?;
     crate::sync::data_ids::migrate(&storage::data_root(app)?)?;
 
@@ -116,13 +163,13 @@ pub(super) fn apply<R: tauri::Runtime>(
 fn write_books<R: tauri::Runtime>(
     app: &AppHandle<R>,
     zip: &mut ZipArchive<File>,
+    books: Option<&book_store::BackupDatabase>,
     plan: &[BookPlan],
     remap: &Remap,
     mode: ImportMode,
     summary: &mut ImportSummary,
     report: &mut dyn FnMut(&str, u64, u64),
 ) -> Result<(), String> {
-    let root = storage::data_root(app)?.join(BOOKS_DIR);
     report("books", 0, plan.len() as u64);
     for (index, item) in plan.iter().enumerate() {
         match item.action {
@@ -131,43 +178,42 @@ fn write_books<R: tauri::Runtime>(
             BookAction::Skip => summary.books_skipped += 1,
         }
         if item.action != BookAction::Skip {
-            let dir = root.join(&item.local_id);
-            // 元信息先落盘，复用 write_bytes 的父目录创建；注释合并不能依赖归档字母顺序。
-            let entries = item.entries.iter()
-                .filter(|name| name.ends_with("/bookdetail.json"))
-                .chain(item.entries.iter().filter(|name| !name.ends_with("/bookdetail.json")));
-            for name in entries {
-                let Some(file) = name.rsplit('/').next() else {
+            let prefix = format!("{BOOKS_DIR}/{}/", item.archive_id);
+            let detail = archive::read_book_entry(zip, books, &format!("{prefix}bookdetail.json"))?
+                .ok_or("备份缺少书籍元信息")?;
+            let content = archive::read_book_entry(zip, books, &format!("{prefix}content.json"))?;
+            let detail = remap_detail(&detail, remap, mode)?;
+            book_store::import_book_json(app, &item.local_id, &detail, content.as_deref())?;
+            for name in &item.entries {
+                let file = name.rsplit('/').next().unwrap_or_default();
+                if !matches!(file, "annotations.json" | "bookmarks.json") {
                     continue;
-                };
-                let Some(bytes) = archive::read_entry(zip, name)? else {
-                    continue;
-                };
-                match file {
-                    "bookdetail.json" => {
-                        let value = remap_detail(&bytes, remap, mode)?;
-                        write_bytes(&dir.join(file), &value)?;
-                    }
-                    "annotations.json" => {
-                        merge_annotation_file(app, &item.local_id, &bytes, mode)?;
-                    }
-                    "bookmarks.json" => {
-                        merge_bookmark_file(app, &item.local_id, &bytes, mode)?;
-                    }
-                    _ => write_bytes(&dir.join(file), &bytes)?,
                 }
+                let Some(bytes) = archive::read_book_entry(zip, books, name)? else {
+                    continue;
+                };
+                if file == "annotations.json" {
+                    merge_annotation_file(app, &item.local_id, &bytes, mode)?;
+                } else {
+                    merge_bookmark_file(app, &item.local_id, &bytes, mode)?;
+                }
+            }
+            if mode == ImportMode::Replace
+                && !item.entries.iter().any(|n| n.ends_with("/bookmarks.json"))
+            {
+                book_store::put_bookmarks(app, &item.local_id, &[])?;
             }
         }
         // 本机已有同一本书（另一个 id）：归档里的书签仍要并进本机那本，不能丢
         if item.action == BookAction::Skip {
             let name = format!("{BOOKS_DIR}/{}/bookmarks.json", item.archive_id);
-            if let Some(bytes) = archive::read_entry(zip, &name)? {
+            if let Some(bytes) = archive::read_book_entry(zip, books, &name)? {
                 merge_bookmark_file(app, &item.local_id, &bytes, mode)?;
             }
         }
         if item.action == BookAction::Skip {
             let name = format!("{BOOKS_DIR}/{}/annotations.json", item.archive_id);
-            if let Some(bytes) = archive::read_entry(zip, &name)? {
+            if let Some(bytes) = archive::read_book_entry(zip, books, &name)? {
                 merge_annotation_file(app, &item.local_id, &bytes, mode)?;
             }
         } else if mode == ImportMode::Replace
@@ -425,14 +471,14 @@ fn write_sessions<R: tauri::Runtime>(
 fn write_state<R: tauri::Runtime>(
     app: &AppHandle<R>,
     zip: &mut ZipArchive<File>,
+    books: Option<&crate::book_store::BackupDatabase>,
     scan: &ArchiveScan,
     remap: &Remap,
     mode: ImportMode,
     summary: &mut ImportSummary,
 ) -> Result<(), String> {
     for key in &scan.state_keys {
-        let Some(incoming) = archive::read_entry_json(zip, &format!("{STATE_DIR}/{key}.json"))?
-        else {
+        let Some(incoming) = archive::read_state_entry(zip, books, key)? else {
             continue;
         };
         let changed = storage::update_state(app, key, |local| {
@@ -474,7 +520,7 @@ fn remove_extras<R: tauri::Runtime>(
         if keep_books.contains(book.id.as_str()) {
             continue;
         }
-        // 同步删除要读 bookdetail.json 定位身份，必须在删文件之前
+        // 同步删除要读书籍元信息定位身份，必须在删书之前
         hook.on_book_deleted(&book.id);
         book_store::delete_book(app, &book.id)?;
         summary.books_removed += 1;
