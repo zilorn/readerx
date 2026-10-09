@@ -22,6 +22,7 @@
  *   --target <三元组>   desktop 必填，平台与架构都从三元组解析（如 aarch64-pc-windows-msvc）
  *   --target-dir <目录> desktop 的 target 根目录，默认 src-tauri/target
  *   --out <目录>        产物输出目录，不存在则创建
+ *   --abi <ABI>         android 只收指定 ABI；未指定时 release 仍要求四个 ABI 齐全
  *   --debug             android 收集 debug 变体（默认 release）
  *
  * 收不到任何产物、或 release APK 未签名时以非零码退出：宁可让工作流失败，
@@ -60,7 +61,7 @@ function fail(message) {
 function usage() {
   console.error("用法:");
   console.error("  node scripts/collect-artifacts.mjs desktop --target <Rust 三元组> --out <目录>");
-  console.error("  node scripts/collect-artifacts.mjs android [--debug] --out <目录>");
+  console.error("  node scripts/collect-artifacts.mjs android [--debug] [--abi <ABI>] --out <目录>");
 }
 
 /** 解析命令行；未知参数直接报错，避免工作流里写错参数却静默少收产物 */
@@ -68,6 +69,7 @@ function parseArgs(argv) {
   const options = {
     mode: argv[0],
     debug: false,
+    abi: "",
     target: "",
     targetDir: join(ROOT, "src-tauri", "target"),
     out: "",
@@ -84,10 +86,11 @@ function parseArgs(argv) {
       options.debug = true;
       continue;
     }
-    if (arg !== "--target" && arg !== "--target-dir" && arg !== "--out") fail(`未知参数 "${arg}"`);
+    if (arg !== "--abi" && arg !== "--target" && arg !== "--target-dir" && arg !== "--out") fail(`未知参数 "${arg}"`);
     const value = argv[++i];
     if (!value) fail(`${arg} 缺少取值`);
-    if (arg === "--target") options.target = value;
+    if (arg === "--abi") options.abi = value;
+    else if (arg === "--target") options.target = value;
     else if (arg === "--target-dir") options.targetDir = value;
     else options.out = value;
   }
@@ -96,6 +99,8 @@ function parseArgs(argv) {
   if (options.mode === "desktop" && !options.target) fail("desktop 需要 --target <Rust 三元组>");
   if (options.mode === "desktop" && options.debug) fail("--debug 只适用于 android");
   if (options.mode === "android" && options.target) fail("--target 只适用于 desktop");
+  if (options.abi && (options.mode !== "android" || !Object.values(ANDROID_ABIS).includes(options.abi))) fail("--abi 仅支持 Android 已知 ABI");
+  if (options.abi === "universal" && !options.debug) fail("release 不支持 universal ABI");
   return options;
 }
 
@@ -126,11 +131,11 @@ function desktopArtifacts(targetDir, target) {
  * debug 变体按实际存在的 flavor 收（`--apk` 出 universal，指定单一目标时只出那一个 ABI）；
  * release 变体要求四个 ABI 齐全，且不接受未签名产物 —— 签名没接上要当场失败。
  */
-function androidArtifacts(debug) {
+function androidArtifacts(debug, abi) {
   const apkDir = join(ROOT, "src-tauri", "gen", "android", "app", "build", "outputs", "apk");
   if (!existsSync(apkDir)) fail(`未找到 APK 输出目录 ${relative(ROOT, apkDir)}`);
 
-  const flavors = debug
+  const flavors = abi ? [Object.keys(ANDROID_ABIS).find((flavor) => ANDROID_ABIS[flavor] === abi)] : debug
     ? readdirSync(apkDir)
         .filter((name) => ANDROID_ABIS[name] && existsSync(join(apkDir, name, "debug")))
         .sort()
@@ -153,7 +158,8 @@ function androidArtifacts(debug) {
     const names = readdirSync(variantDir)
       .filter((name) => extname(name) === ".apk")
       .sort();
-    const name = names.find((candidate) => candidate === `app-${flavor}-${variant}.apk`) ?? names[0];
+    const name = names.find((candidate) => candidate === `app-${flavor}-${variant}.apk`)
+      ?? names.find((candidate) => debug || !candidate.endsWith("-unsigned.apk"));
     if (!name) fail(`未找到 ${abi} 的 ${variant} APK（期望 ${relative(ROOT, variantDir)}/*.apk）`);
     found.push({ file: join(variantDir, name), abi });
   }
@@ -190,7 +196,7 @@ if (options.mode === "desktop") {
   }));
 } else {
   const suffix = options.debug ? "-debug" : "";
-  renames = androidArtifacts(options.debug).map(({ file, abi }) => ({
+  renames = androidArtifacts(options.debug, options.abi).map(({ file, abi }) => ({
     file,
     name: `${product}-${version}-android-${abi}${suffix}.apk`,
   }));

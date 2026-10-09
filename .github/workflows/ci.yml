@@ -1,0 +1,57 @@
+name: PR CI
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: pr-ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  frontend:
+    name: Frontend types, i18n and production build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup-build
+        with:
+          system-deps: 'false'
+      - name: Artifact collection regression
+        run: node --test scripts/collect-artifacts.test.mjs
+      - run: pnpm exec tsc --noEmit
+      - run: pnpm run i18n:check
+      - run: pnpm build
+  windows:
+    name: Windows Rust workspace compilation
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup-build
+      - run: pnpm build
+      - name: Check workspace and test targets
+        working-directory: src-tauri
+        run: cargo check --locked --workspace --all-targets
+  android:
+    name: Android arm64 debug APK (no secrets)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-targets: aarch64-linux-android
+      - uses: ./.github/actions/setup-android
+      - name: Build arm64 debug APK
+        run: pnpm tauri android build --apk --debug --target aarch64 --split-per-abi --ci
+        timeout-minutes: 90
+      - name: Collect arm64 debug APK
+        run: node scripts/collect-artifacts.mjs android --debug --abi arm64-v8a --out "${{ runner.temp }}/artifacts"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: readerx-pr-android-arm64-debug
+          path: ${{ runner.temp }}/artifacts/*.apk
+          if-no-files-found: error
+          retention-days: 7
