@@ -13,6 +13,7 @@
 ## 阅读排版与位置
 
 - src/pages/Reader.tsx 接线；src/lib/readerLayout.ts 算几何，pagination.ts 分页，renderWindow.ts 管渲染窗口，readerPageTurn.ts / readerAutoPage.ts 管翻页。调整某项能力时优先改对应模块。
+- 分页翻页只挂载当前与前后相邻屏，`Reader.tsx` 的 `mountedSpreads` / `renderPagedSpread` 按屏首和分页结果的页数组复用 DOM；目标屏在折页中直接显示，落页仅切换可见性与当前屏引用，不重挂已加载图片。`readerPageTurn.ts` 只克隆当前纸面，目标屏不能再克隆；分页图使用 eager / sync，滚动图保持 lazy / async。选区与书签闪亮查询限定当前屏，避免命中相邻屏。运行 `node scripts/reader-page-turn-test.mjs` 验证复用、单双页、窗口释放、打断/回弹和跨章取消；原生 `readerx-img` 协议的瞬时显示仍需在设备上观察。
 - 分页始终按单页列宽排版；宽屏双页是相邻两页组成一屏，跳页、书签定位与翻页需沿用 spreadStart 对齐屏首。滚动模式仍为单栏；不能用双页整块宽度传给单页排版器。
 - 阅读进度使用稳定 chapterCid 与章节镜像字符偏移，查看 src/lib/progress.ts；字号、窗口宽度或排版变化不能把页码当持久化位置。
 - 进度累计字符缓存仅按书籍对象 WeakMap 保存，不强引用整书；正文更新与显示副本沿用新对象独立统计。缓存改动运行 `node --expose-gc scripts/progress-cache-test.mjs`，验证同 ID 内容隔离与对象回收。

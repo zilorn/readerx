@@ -15,6 +15,7 @@ import {
   createComputed,
   createEffect,
   createMemo,
+  createRenderEffect,
   createSignal,
   on,
   onCleanup,
@@ -584,8 +585,8 @@ function TitleBlock(props: {
 /**
  * 图片：分页按已计算尺寸渲染；滚动按自然比例自适配。
  * 在线书图片在阅读时下载：未就绪显示占位（转圈），失败显示占位与单张「重试」。
- * 图片本体来自本地文件（readerx-img 协议直读）；`loading=lazy` + `decoding=async`
- * 让离屏图片不参与解码 —— 图文混排的大章节因此不会一次性把整章位图读进内存。
+ * 图片本体来自本地文件（readerx-img 协议直读）。滚动模式保持 lazy / async；
+ * 分页仅挂载当前与相邻屏，使用 eager / sync 提前解码，落页时复用已加载的节点。
  */
 function ImageBlock(props: {
   /** 可直接渲染的地址（在线书为网络地址；老数据可能是 data URL） */
@@ -667,8 +668,8 @@ function ImageBlock(props: {
           src={source() ?? ""}
           alt={props.alt ?? ""}
           draggable={false}
-          loading="lazy"
-          decoding="async"
+          loading={props.natural ? "lazy" : "eager"}
+          decoding={props.natural ? "async" : "sync"}
           // 本地副本文件缺失（被判为裂图）时立刻转为「可重试」占位
           onError={() => setBrokenSrc(source())}
           class="mx-auto max-w-full rounded-md object-contain"
@@ -766,8 +767,8 @@ function InlineImageBlock(props: {
         src={source() ?? ""}
         alt={props.alt ?? ""}
         draggable={false}
-        loading="lazy"
-        decoding="async"
+        loading={props.natural ? "lazy" : "eager"}
+        decoding={props.natural ? "async" : "sync"}
         // 本地副本文件缺失（被判为裂图）时立刻转为「可重试」占位
         onError={() => setBrokenSrc(source())}
         class="mx-[0.12em] max-w-full rounded-sm object-contain"
@@ -2419,22 +2420,13 @@ export default function ReaderPage() {
     return spreadStart(clamped, pageColumns());
   }
 
-  /**
-   * 当前屏显示的页（双页模式两页并排；末屏可能只剩左页一页）。
-   * 数组元素就是分页结果里的页数组引用，`<For>` 据此复用 DOM：翻一屏只重挂新出现的页。
-   */
-  const spreadPages = createMemo<PageFragment[][]>(() => {
-    if (!isPaged()) return [];
-    const pages = paged()?.pages;
-    if (!pages || pages.length === 0) return [];
+  /** 只保留当前屏和前后相邻屏；<For> 按屏首复用整屏 DOM，预览落页不重挂图片。 */
+  const mountedSpreads = createMemo(() => {
+    if (!isPaged() || totalPages() === 0) return [];
     const first = snapPage(pageIdx());
-    const out: PageFragment[][] = [];
-    for (let i = 0; i < pageColumns(); i++) {
-      const page = pages[first + i];
-      if (!page) break;
-      out.push(page);
-    }
-    return out;
+    const step = pageColumns();
+    // 当前屏放在最前，屏外节点不可交互，正文查询另外限定在当前屏。
+    return [first, first - step, first + step].filter((index) => index >= 0 && index < totalPages());
   });
 
   /** 当前屏页号（1 起）：单页 from === to，双页 from–to —— 页码显示与朗读跳页共用 */
@@ -2443,18 +2435,6 @@ export default function ReaderPage() {
     const from = total > 0 ? snapPage(pageIdx()) + 1 : 0;
     const to = Math.min(from + pageColumns() - 1, total);
     return { from, to, total, count: total, spread: to > from };
-  });
-
-  /**
-   * 当前屏**实际显示**的正文总宽：双页 = 两页 + 中缝，末屏只剩一页时就只有一页宽。
-   * 正文按页槽从左往右摆（不居中：只剩一页时它仍在左页位置，与前面每一屏的左页对齐），
-   * 页号据此居中在自己的那几页下方。
-   */
-  const spreadWidth = createMemo(() => {
-    const count = spreadPages().length;
-    const geo = geometry();
-    if (!geo || count === 0) return 0;
-    return count * geo.columnWidth + (count - 1) * geo.gap;
   });
 
   // 用户手动翻页 / 跳页 / 切章后落回朗读句所在屏（跟读页）→ 恢复跟读跟随。
@@ -3179,7 +3159,8 @@ export default function ReaderPage() {
       return pageTurn.begin(pageAnimRef, undefined, dir);
     }
     setPagePreviewIndex(next);
-    return !!pagePreviewRef && pageTurn.begin(pageAnimRef, pagePreviewRef, dir);
+    const preview = pageAnimRef.parentElement?.querySelector<HTMLElement>(`[data-reader-spread="${next}"]`);
+    return !!preview && pageTurn.begin(pageAnimRef, preview, dir);
   }
 
   function onSurfacePointerMove(e: PointerEvent): void {
@@ -3922,7 +3903,6 @@ export default function ReaderPage() {
   }
 
   let pageAnimRef: HTMLDivElement | undefined;
-  let pagePreviewRef: HTMLDivElement | undefined;
   const [pagePreviewIndex, setPagePreviewIndex] = createSignal<number | null>(null);
   const pageTurn = createReaderPageTurn();
   onCleanup(() => pageTurn.cancel());
@@ -4425,7 +4405,7 @@ export default function ReaderPage() {
     const mode = isPaged();
     const pg = paged();
     const pageNow = snapPage(pageIdx());
-    const root = areaRef;
+    const root = mode ? pageAnimRef : areaRef;
     if (!current || !root) return;
     if (p.chapter !== chapterIdx()) return; // 章节切换尚未落地
     const mir = mirror();
@@ -4474,27 +4454,28 @@ export default function ReaderPage() {
     }),
   );
 
-  function renderPagedSpread(first: number, live: boolean) {
-    const visiblePages = () => live
-      ? spreadPages()
-      : (paged()?.pages.slice(first, first + pageColumns()) ?? []);
-    const visibleWidth = () => live
-      ? spreadWidth()
-      : visiblePages().length * layout()!.textWidth + Math.max(0, visiblePages().length - 1) * geometry()!.gap;
-    const counter = () => live ? pageCounter() : {
+  function renderPagedSpread(first: number) {
+    const live = () => first === snapPage(pageIdx());
+    const visible = () => live() || first === pagePreviewIndex();
+    const visiblePages = createMemo(() => paged()?.pages.slice(first, first + pageColumns()) ?? []);
+    const visibleWidth = () => visiblePages().length * layout()!.textWidth + Math.max(0, visiblePages().length - 1) * geometry()!.gap;
+    const counter = () => ({
       from: first + 1,
       to: Math.min(first + pageColumns(), totalPages()),
       total: totalPages(),
       spread: visiblePages().length > 1,
-    };
-    return (
+    });
+    let surface!: HTMLDivElement;
+    let columns!: HTMLDivElement;
+    const spread = (
       <div
-        ref={(el) => { if (live) pageAnimRef = el; else pagePreviewRef = el; }}
+        ref={surface}
+        data-reader-spread={first}
         class="absolute inset-0 select-none overflow-hidden"
-        classList={{ invisible: live && resumeTarget() !== null }}
-        aria-hidden={!live}
-        inert={!live}
-        style={{ "touch-action": "none", opacity: live ? "1" : "0", "pointer-events": live ? "auto" : "none" }}
+        classList={{ invisible: live() && resumeTarget() !== null }}
+        aria-hidden={!live()}
+        inert={!live()}
+        style={{ "touch-action": "none", opacity: visible() ? "1" : "0", "pointer-events": live() ? "auto" : "none" }}
       >
         <div
           class="mx-auto flex h-full flex-col"
@@ -4505,7 +4486,7 @@ export default function ReaderPage() {
         >
           <div style={{ height: `${readerTopPad()}px`, "flex": "none" }} />
           <div
-            ref={(el) => { if (live) colRef = el; }}
+            ref={columns}
             class="relative flex w-full flex-none"
             style={{
               height: `${layout()!.pageHeight}px`,
@@ -4573,6 +4554,18 @@ export default function ReaderPage() {
         </div>
       </div>
     );
+    // 引用随真实当前屏同步更新，选区和翻页命中同一个已保留的正文节点。
+    createRenderEffect(() => {
+      if (live()) {
+        pageAnimRef = surface;
+        colRef = columns;
+      }
+    });
+    onCleanup(() => {
+      if (pageAnimRef === surface) pageAnimRef = undefined;
+      if (colRef === columns) colRef = undefined;
+    });
+    return spread;
   }
 
   return (
@@ -4640,12 +4633,9 @@ export default function ReaderPage() {
                   /* 分页模式：左右翻页视图（select-none：由自绘选区接管文本选取）。
                      宽窗口下一屏并排两页（见 lib/readerLayout.ts）：块内按列宽排字，
                      中缝由 flex 的 gap 给出，末屏只剩一页时居中。 */
-                  <>
-                    {renderPagedSpread(0, true)}
-                    <Show when={pagePreviewIndex() !== null}>
-                      {renderPagedSpread(pagePreviewIndex()!, false)}
-                    </Show>
-                  </>
+                  <For each={mountedSpreads()}>
+                    {(first) => renderPagedSpread(first)}
+                  </For>
                 }
               >
                 {/* 滚动模式：整章上下滚动（始终单栏；宽窗口下正文列居中限宽） */}
@@ -5456,7 +5446,7 @@ export default function ReaderPage() {
 
             {/* 长按/拖选文本后的自定义菜单（搜索模式下让位给命中高亮） */}
             <SelectionMenu
-              rootRef={() => areaRef}
+              rootRef={() => isPaged() ? pageAnimRef : areaRef}
               insets={() => {
                 const s = safeInsets();
                 // 菜单条上下沿至少离屏幕边缘/刘海一个可见间距，避免贴到屏幕顶/底
