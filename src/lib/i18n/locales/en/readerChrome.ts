@@ -6,6 +6,14 @@
  * The reading page itself (src/pages/Reader.tsx) owns the `reader.` prefix.
  */
 export const readerChrome = {
+  "readerChrome.settings.editBody": "Edit chapter text",
+  "readerChrome.settings.editBodyDesc": "Edit the original chapter text; keep images",
+  "readerChrome.edit.unavailable": "Chapter content is unavailable or updating",
+  "readerChrome.edit.confirmTitle": "Overwrite chapter text?",
+  "readerChrome.edit.confirmDesc": "After saving, the previous content becomes invalid and cannot be recovered. Bookmarks and annotations may lose their positions. Reading returns to the start of this chapter.",
+  "readerChrome.edit.conflict": "The chapter has changed. Close and reopen the editor.",
+  "readerChrome.edit.failed": "Failed to save chapter text",
+  "readerChrome.edit.saved": "Chapter text saved",
   "readerChrome.annotation.invalid": "Invalid note records",
   "readerChrome.selection.annotation": "Annotate",
   "readerChrome.annotation.title": "Paragraph notes",

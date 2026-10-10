@@ -6,6 +6,14 @@
  * 阅读页正文（src/pages/Reader.tsx）用 `reader.` 前缀，两边不要互相引用。
  */
 export const readerChrome = {
+  "readerChrome.settings.editBody": "编辑正文",
+  "readerChrome.settings.editBodyDesc": "修改当前章原文，保留图片",
+  "readerChrome.edit.unavailable": "章节正文尚未就绪或正在更新",
+  "readerChrome.edit.confirmTitle": "确认覆盖正文？",
+  "readerChrome.edit.confirmDesc": "保存后，先前内容会失效，无法找回。书签和注释可能无法定位；阅读位置将回到本章开头。",
+  "readerChrome.edit.conflict": "章节已被更新，请关闭并重新打开编辑正文",
+  "readerChrome.edit.failed": "保存正文失败",
+  "readerChrome.edit.saved": "正文已保存",
   "readerChrome.annotation.invalid": "注释记录格式无效",
   "readerChrome.selection.annotation": "注释",
   "readerChrome.annotation.title": "段落注释",
