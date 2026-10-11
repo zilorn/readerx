@@ -4471,11 +4471,17 @@ export default function ReaderPage() {
       <div
         ref={surface}
         data-reader-spread={first}
-        class="absolute inset-0 select-none overflow-hidden"
+        class="absolute inset-0 select-none overflow-hidden bg-bg"
         classList={{ invisible: live() && resumeTarget() !== null }}
         aria-hidden={!live()}
         inert={!live()}
-        style={{ "touch-action": "none", opacity: visible() ? "1" : "0", "pointer-events": live() ? "auto" : "none" }}
+        style={{
+          "touch-action": "none",
+          opacity: visible() ? "1" : "0",
+          // 预览纸张遮住旧正文；显式层级不依赖 keyed DOM 重排后的兄弟顺序。
+          "z-index": first === pagePreviewIndex() ? "1" : "0",
+          "pointer-events": live() ? "auto" : "none",
+        }}
       >
         <div
           class="mx-auto flex h-full flex-col"
