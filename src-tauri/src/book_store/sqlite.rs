@@ -4,6 +4,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 pub(super) const DATABASE: &str = "books.sqlite3";
 const DATABASE_VERSION: i64 = 2;
+// 首次导入旧目录时仍需归档既有缓存；新指纹存于 chapters 行。
+const LEGACY_DIGEST_FILE: &str = "digest.json";
 
 fn sql(error: rusqlite::Error) -> String {
     format!("书库数据库操作失败: {error}")
@@ -216,7 +218,7 @@ fn migrate(db: &mut Connection, root: &Path) -> Result<(), String> {
                     CONTENT_FILE,
                     BOOKMARKS_FILE,
                     ANNOTATIONS_FILE,
-                    DIGEST_FILE,
+                    LEGACY_DIGEST_FILE,
                 ] {
                     let file = books.join(&id).join(name);
                     if file.is_file() {
