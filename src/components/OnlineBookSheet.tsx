@@ -5,15 +5,18 @@
  * 目录加载完成前不可加入书架（书架元数据以目录为骨架）。
  */
 import { Drawer } from "./Drawer";
-import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, Show, onCleanup } from "solid-js";
 import { Portal } from "solid-js/web";
 import { useNavigate } from "@solidjs/router";
-import { callRemoteSource } from "../lib/backend";
+import { buildSourceChapterContent } from "../lib/sourceContent";
+import { callRemoteSource, fetchRemoteChapterContents } from "../lib/backend";
 import type { BookItem, ChapterItem } from "../lib/bookSourcesTypes";
 import { normalizeBookTags } from "../lib/booksTypes";
 import { hanText, hanTextList } from "../lib/hanDisplay";
 import { bookMetaList } from "../lib/books";
-import { addOnlineBookToShelf, fetchBookToc, mergeBookDetail, type PickedBook } from "../lib/online";
+import { addOnlineBookToShelf, fetchBookToc, mergeBookDetail, rememberPicked, switchOnlineBookSource, type PickedBook } from "../lib/online";
+import type { SourceCandidate } from "../lib/onlineSearch";
+import { reportFailure } from "../lib/errorReport";
 import { notifyAddedToShelf } from "../lib/groups";
 import { showToast } from "../lib/toast";
 import { t } from "../lib/i18n";
@@ -38,12 +41,25 @@ export interface OnlineBookSheetProps {
   /** 当前预览的书；null 表示关闭抽屉 */
   pick: PickedBook | null;
   onClose: () => void;
+  candidates?: SourceCandidate[];
+  targetBookId?: string;
   /** 书名 / 作者 / 标签的快速搜索回调：调用方借此发起搜索（不提供则这些文字仅展示） */
   onQuickSearch?: (keyword: string) => void;
 }
 
 export function OnlineBookSheet(props: OnlineBookSheetProps) {
   const navigate = useNavigate();
+  const [selected, setSelected] = createSignal<PickedBook | null>(null);
+  const [addedBookId, setAddedBookId] = createSignal<string>();
+  const [confirmSwitch, setConfirmSwitch] = createSignal<boolean | null>(null);
+  createEffect(() => { setSelected(props.pick); setConfirmSwitch(null); setAddedBookId(undefined); });
+  onCleanup(() => { seq += 1; contentSeq += 1; });
+  const selectSource = (candidate: SourceCandidate) => {
+    if (adding()) return;
+    setConfirmSwitch(null);
+    setSelected({ ...candidate, key: rememberPicked(candidate.source, candidate.item) });
+  };
+
 
   /** 当前展示用书籍信息（打开时先取搜索命中项，详情接口返回后合并富化） */
   const [info, setInfo] = createSignal<BookItem | null>(null);
@@ -61,11 +77,45 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
 
   /** 请求序号：换书 / 关闭后使仍在途的旧请求失效 */
   let seq = 0;
+  let contentSeq = 0;
+  const [previewChapter, setPreviewChapter] = createSignal<ChapterItem | null>(null);
+  const [previewText, setPreviewText] = createSignal<string[]>([]);
+  const [contentBusy, setContentBusy] = createSignal(false);
+  const [contentError, setContentError] = createSignal("");
+  async function previewContent(chapter: ChapterItem) {
+    const p = selected();
+    if (!p || adding()) return;
+    const run = ++contentSeq;
+    setPreviewChapter(chapter);
+    setPreviewText([]);
+    setContentError("");
+    setContentBusy(true);
+    try {
+      const results = await fetchRemoteChapterContents(p.source.id, info() ?? p.item, [chapter]);
+      if (run !== contentSeq) return;
+      const result = results[0];
+      if (!result?.ok) throw new Error(result?.error || t("discover.error.chapterFetchFailed"));
+      setPreviewText(buildSourceChapterContent(result.text, chapter.chapterUrl).paragraphs);
+    } catch (error) {
+      if (run === contentSeq) {
+        setContentError(error instanceof Error ? error.message : String(error));
+        reportFailure(t("discover.error.chapterFetchFailed"), error);
+      }
+    } finally {
+      if (run === contentSeq) setContentBusy(false);
+    }
+  }
+
   /** 当前详情（bookDetail）拉取中的 Promise；入架前等待它，确保用富化后的信息（含封面）落盘 */
   let pendingDetail: Promise<void> | null = null;
 
   function beginLoad(p: PickedBook | null) {
     seq += 1;
+    contentSeq += 1;
+    setPreviewChapter(null);
+    setPreviewText([]);
+    setContentBusy(false);
+    setContentError("");
     pendingDetail = null;
     setInfo(p?.item ?? null);
     setInfoBusy(false);
@@ -92,7 +142,7 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
   }
 
   createEffect(() => {
-    beginLoad(props.pick);
+    beginLoad(selected());
   });
 
   async function loadDetail(p: PickedBook, run: number): Promise<void> {
@@ -144,13 +194,19 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
 
   /** 该书是否已在书架（按书源 + 详情页 URL 匹配） */
   const existingBook = createMemo(() => {
-    const p = props.pick;
+    const p = selected();
     if (!p) return null;
     return (
       bookMetaList().find(
-        (b) => b.bookSourceId === p.source.id && b.bookUrl === p.item.bookUrl,
+        (b) => b.bookSourceId === p.source.id && b.bookUrl === (info()?.bookUrl ?? p.item.bookUrl),
       ) ?? null
     );
+  });
+
+  const switchTarget = createMemo(() => {
+    const book = bookMetaList().find((b) => b.id === (props.targetBookId ?? addedBookId()) && b.format === "online");
+    const p = selected();
+    return book && p && (book.bookSourceId !== p.source.id || book.bookUrl !== (info()?.bookUrl ?? p.item.bookUrl)) ? book : null;
   });
 
   const inShelf = createMemo(() => existingBook() !== null);
@@ -191,10 +247,13 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
   );
 
   /** 「仅加入书架 / 加入书架并阅读」共用流程 */
-  async function addToShelf(openReader: boolean): Promise<void> {
-    const p = props.pick;
+  async function addToShelf(openReader: boolean, confirmed = false): Promise<void> {
+    const p = selected();
     if (!p || adding()) return;
-    const existing = existingBook();
+    const target = switchTarget();
+    if (target && !confirmed) { setConfirmSwitch(openReader); return; }
+    const run = seq;
+    const existing = target ? null : existingBook();
     let bookId = existing?.id;
     if (!existing) {
       const list = chapters();
@@ -213,15 +272,23 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
             /* 详情失败不阻塞入架 */
           }
         }
+        if (run !== seq) { setAdding(false); return; }
         // 用富化后的信息入架（简介等一并保存）
-        const book = await addOnlineBookToShelf(p.source, info() ?? p.item, list);
-        bookId = book.id;
-        // 入架成功：提示条右侧的「加入分组」按钮直接拉起移入分组抽屉
-        notifyAddedToShelf(book.id);
+        if (target) {
+          await switchOnlineBookSource(target.id, p.source, info() ?? p.item, list);
+          bookId = target.id;
+          setConfirmSwitch(null);
+          showToast(t("discover.sources.switched"));
+        } else {
+          const book = await addOnlineBookToShelf(p.source, info() ?? p.item, list);
+          bookId = book.id;
+          setAddedBookId(book.id);
+          notifyAddedToShelf(book.id);
+        }
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         setActionError(msg);
-        showToast(msg, true);
+        reportFailure(t("discover.sources.actionFailed"), e);
         setAdding(false);
         return;
       }
@@ -259,7 +326,7 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
           <div class="flex flex-none items-center gap-2 border-b border-border px-4 py-3">
             <span class="text-[15px] font-bold">{t("discover.sheet.title")}</span>
             <span class="min-w-0 flex-1 truncate text-xs text-text-3">
-              {props.pick?.source.name ?? ""}
+              {selected()?.source.name ?? ""}
             </span>
             <button
               class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
@@ -270,6 +337,23 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
             </button>
           </div>
 
+          <Show when={(props.candidates?.length ?? 0) > 1}>
+            <label class="flex flex-none items-center gap-2 border-b border-border px-4 py-2 text-xs">
+              <span>{t("discover.sources.choose")}</span>
+              <select class="min-w-0 flex-1 rounded-lg bg-surface-2 p-2" disabled={adding()}
+                value={selected()?.key}
+                onChange={(event) => {
+                  const candidate = props.candidates?.find((c) => rememberPicked(c.source, c.item) === event.currentTarget.value);
+                  if (candidate) selectSource(candidate);
+                }}>
+                <For each={props.candidates}>{(candidate) => (
+                  <option value={rememberPicked(candidate.source, candidate.item)}>
+                    {candidate.source.name}{bookMetaList().some((b) => b.bookSourceId === candidate.source.id && b.bookUrl === candidate.item.bookUrl) ? ` · ${t("discover.online.inShelf")}` : ""}
+                  </option>
+                )}</For>
+              </select>
+            </label>
+          </Show>
           <ScrollArea class="min-h-0 flex-1">
             <div class="px-[18px] pb-2 pt-2.5">
               {/* 封面 + 基本信息 */}
@@ -277,7 +361,7 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
                 {/* 书源返回 cover 时展示真实封面（经书源会话下载）；无封面回退首字渐变占位 */}
                 <SourceCover
                   variant="sheet"
-                  sourceId={props.pick?.source.id ?? ""}
+                  sourceId={selected()?.source.id ?? ""}
                   url={coverSrc()}
                   referer={info()?.bookUrl}
                   title={hanText(info()?.bookName ?? "")}
@@ -376,6 +460,18 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
                 </Show>
               </section>
 
+              <Show when={previewChapter()}>
+                <section class="mt-4 rounded-xl border border-border p-3">
+                  <h3 class="mb-2 text-sm font-semibold">{hanText(previewChapter()!.chapterName)}</h3>
+                  <Show when={contentBusy()}><p class="text-xs text-text-3">{t("common.loading")}</p></Show>
+                  <Show when={contentError()}><p class="text-xs text-danger">{contentError()}</p></Show>
+                  <div class="max-h-64 overflow-y-auto text-sm leading-relaxed">
+                    <For each={previewText()}>{(paragraph) => <p class="mb-2 whitespace-pre-wrap">{hanText(paragraph)}</p>}</For>
+                    <Show when={!contentBusy() && !contentError() && !previewText().length}><p>{t("discover.sources.emptyText")}</p></Show>
+                  </div>
+                </section>
+              </Show>
+
               {/* 目录 */}
               <section class="mt-4">
                 <div class="mb-2 flex items-center gap-1.5">
@@ -408,7 +504,7 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
                             <Show when={!tocUnsupported()}>
                               <button
                                 class="flex-none rounded-lg bg-danger-weak px-2.5 py-1 text-[11.5px] font-semibold text-danger active:opacity-80"
-                                onClick={() => beginLoad(props.pick)}
+                                onClick={() => beginLoad(selected())}
                               >
                                 {t("common.retry")}
                               </button>
@@ -427,14 +523,14 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
                   <div class="divide-y divide-border overflow-hidden rounded-[12px] border border-border bg-surface">
                     <For each={visibleChapters()}>
                       {(ch, index) => (
-                        <div class="flex items-center gap-2.5 px-3 py-[9px]">
+                        <button class="flex w-full items-center gap-2.5 px-3 py-[9px] text-left active:bg-surface-2" disabled={adding()} onClick={() => void previewContent(ch)}>
                           <span class="w-9 flex-none text-right text-[11px] tabular-nums text-text-3">
                             {index() + 1}
                           </span>
                           <span class="min-w-0 flex-1 truncate text-[12.5px] text-text">
                             {hanText(ch.chapterName)}
                           </span>
-                        </div>
+                        </button>
                       )}
                     </For>
                   </div>
@@ -460,25 +556,34 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
                 {actionError()}
               </p>
             </Show>
+            <Show when={confirmSwitch() !== null}>
+              <div class="mb-3 rounded-xl border border-border p-3" role="alert">
+                <p class="text-xs leading-relaxed">{t("discover.sources.confirm")}</p>
+                <div class="mt-2 flex gap-3">
+                  <button disabled={adding()} onClick={() => setConfirmSwitch(null)}>{t("common.cancel")}</button>
+                  <button class="text-accent" disabled={adding()} onClick={() => void addToShelf(confirmSwitch()!, true)}>{t("discover.sources.apply")}</button>
+                </div>
+              </div>
+            </Show>
             <div class="flex items-center gap-2.5">
-              <Show when={!inShelf()}>
+              <Show when={!inShelf() || switchTarget()}>
                 <button
                   class="inline-flex min-w-0 flex-1 items-center justify-center gap-1.5 rounded-xl border border-border bg-bg px-3 py-[11px] text-[13.5px] font-medium text-text-2 transition-colors active:bg-surface-2 disabled:opacity-50"
                   disabled={adding() || !tocReady()}
                   onClick={() => void addToShelf(false)}
                 >
-                  {t("discover.online.addToShelf")}
+                  {switchTarget() ? t("discover.sources.apply") : t("discover.online.addToShelf")}
                 </button>
               </Show>
               <button
                 class="inline-flex min-w-0 flex-1 items-center justify-center gap-1.5 rounded-xl bg-accent px-3 py-[11px] text-[13.5px] font-semibold text-on-accent transition-[scale,opacity] duration-100 active:scale-[0.98] active:opacity-90 disabled:opacity-50"
-                disabled={adding() || (!inShelf() && !tocReady())}
+                disabled={adding() || ((!!switchTarget() || !inShelf()) && !tocReady())}
                 onClick={() => void addToShelf(true)}
               >
                 <Show
                   when={adding()}
                   fallback={
-                    inShelf()
+                    switchTarget() ? t("discover.sources.applyAndRead") : inShelf()
                       ? t("discover.online.startReading")
                       : t("discover.online.addAndRead")
                   }

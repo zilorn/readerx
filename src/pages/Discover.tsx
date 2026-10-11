@@ -25,7 +25,9 @@ import {
 import { SourceGroupChips, sourceGroupChips } from "../components/SourceGroupChips";
 import { callRemoteSource } from "../lib/backend";
 import type { BookItem, BookSourceSummary } from "../lib/bookSourcesTypes";
-import { normalizeBookTags } from "../lib/booksTypes";
+import { mergeSearchResults, toItem, type SearchGroup } from "../lib/onlineSearch";
+import { bookMetaList, ensureLocalBooksLoaded } from "../lib/books";
+import { bookSourceSummaryById } from "../lib/bookSources";
 import { hanText } from "../lib/hanDisplay";
 import { rememberPicked, type PickedBook } from "../lib/online";
 import { currentSourceParallel, lastSourceGroupFilter, rememberSourceGroupFilter } from "../lib/store";
@@ -40,35 +42,13 @@ const log = createLogger("discover");
 
 type Mode = "search" | "discover";
 
-/** 搜索/发现列表最多展示的条数（搜索结果边到边上屏，超出部分丢弃） */
+/** 搜索最多展示 120 个书名；仍接收这些书名后续返回的来源。 */
 const RESULT_LIMIT = 120;
 
 interface ResultEntry {
   source: BookSourceSummary;
   item: BookItem;
-}
-
-/** 把书源返回的裸记录归一化成 BookItem（bookName/bookUrl 必填，其余字段过滤后透传） */
-function toItem(raw: unknown): BookItem | null {
-  const item = raw as Record<string, unknown> | null;
-  if (!item || typeof item.bookName !== "string" || typeof item.bookUrl !== "string") {
-    return null;
-  }
-  const bookName: string = item.bookName;
-  const bookUrl: string = item.bookUrl;
-  const str = (key: string): string | undefined =>
-    typeof item[key] === "string" ? (item[key] as string) : undefined;
-  const tags = normalizeBookTags(item.tags);
-  return {
-    bookName,
-    bookUrl,
-    author: str("author"),
-    cover: str("cover"),
-    intro: str("intro"),
-    latest: str("latest"),
-    updateTime: str("updateTime"),
-    ...(tags.length > 0 ? { tags } : {}),
-  };
+  candidates?: ResultEntry[];
 }
 
 /** 搜索结果/发现列表共用行 */
@@ -114,7 +94,7 @@ function ResultRow(props: { entry: ResultEntry; onClick: () => void }) {
       </span>
       <span class="flex flex-none flex-col items-end gap-0.5">
         <i class="not-italic block max-w-[110px] truncate rounded-full bg-surface-2 px-1.5 py-0.5 text-[9.5px] font-semibold text-text-3">
-          {source.name}
+          {props.entry.candidates ? t("discover.sources.count", { count: new Set(props.entry.candidates.map((c) => c.source.id)).size }) : source.name}
         </i>
         <ChevronRightIcon size={16} class="text-text-3/70" />
       </span>
@@ -125,6 +105,7 @@ function ResultRow(props: { entry: ResultEntry; onClick: () => void }) {
 export default function DiscoverPage() {
   const navigate = useNavigate();
   void ensureBookSourcesLoaded();
+  void ensureLocalBooksLoaded();
   void ensureSourceGroupsLoaded();
 
   const [mode, setMode] = createSignal<Mode>("search");
@@ -133,7 +114,7 @@ export default function DiscoverPage() {
   const [searchDone, setSearchDone] = createSignal(false);
   const [searchProgress, setSearchProgress] = createSignal(0);
   const [searchTotal, setSearchTotal] = createSignal(0);
-  const [results, setResults] = createSignal<ResultEntry[]>([]);
+  const [results, setResults] = createSignal<SearchGroup[]>([]);
   const [errorText, setErrorText] = createSignal("");
   // 点击结果后弹出的在线书详情抽屉（不切路由，保留搜索/发现页状态）
   const [preview, setPreview] = createSignal<PickedBook | null>(null);
@@ -218,7 +199,21 @@ export default function DiscoverPage() {
             : "discover.browse.groupNoSources",
         );
 
+  const [previewCandidates, setPreviewCandidates] = createSignal<ResultEntry[]>([]);
+  const [previewBookId, setPreviewBookId] = createSignal<string>();
+
   function openPreview(entry: ResultEntry) {
+    const candidates = [...(entry.candidates ?? [entry])];
+    const shelf = bookMetaList().find((b) => b.format === "online" && b.title.trim() === entry.item.bookName.trim());
+    const source = shelf?.bookSourceId ? bookSourceSummaryById(shelf.bookSourceId) : undefined;
+    if (shelf && source && shelf.bookUrl) {
+      entry = { source, item: { bookName: shelf.title, bookUrl: shelf.bookUrl, author: shelf.author } };
+      if (!candidates.some((c) => c.source.id === source.id && c.item.bookUrl === shelf.bookUrl)) candidates.unshift(entry);
+    } else {
+      entry = candidates[Math.floor(Math.random() * candidates.length)];
+    }
+    setPreviewCandidates(candidates);
+    setPreviewBookId(shelf?.id);
     // 仍登记会话级 pick，保持与 /online/:key 深链的兼容
     const key = rememberPicked(entry.source, entry.item);
     setPreview({ key, source: entry.source, item: entry.item });
@@ -338,7 +333,7 @@ export default function DiscoverPage() {
         if (batch.length > 0) {
           // 该源一出结果就上屏（不等其余书源跑完），列表顺序即书源返回顺序
           found += batch.length;
-          setResults((prev) => [...prev, ...batch].slice(0, RESULT_LIMIT));
+          setResults((prev) => mergeSearchResults(prev, batch, RESULT_LIMIT));
         }
         // 逐源 debug（只记条数与耗时，不记书目内容）
         log.debug(
@@ -726,6 +721,11 @@ export default function DiscoverPage() {
       {/* 在线书详情抽屉：点击结果行弹出，不离开本页（保留搜索词 / 结果 / 滚动状态） */}
       <OnlineBookSheet
         pick={preview()}
+        candidates={mergeSearchResults([], [
+          ...previewCandidates(),
+          ...(results().find((group) => group.item.bookName.trim() === preview()?.item.bookName.trim())?.candidates ?? []),
+        ], 1)[0]?.candidates ?? []}
+        targetBookId={previewBookId()}
         onClose={() => setPreview(null)}
         onQuickSearch={(kw) => {
           // 点书名 / 作者 / 标签 → 收起抽屉并按该词快速搜索

@@ -26,6 +26,13 @@
 - 章节正文编辑入口为 `ReaderSettingsSheet`，抽屉为 `ChapterEditSheet`，文本与图片锚点转换在 `src/lib/chapterEditing.ts`。编辑原章而非显示副本；确认覆盖后经 `updateBookChapters` 队列复核 cid / 地址 / 原文并合并最新图片引用，只回写正文，成功回章首。取消丢弃草稿，失败保留草稿；交互与图片策略见 [抽屉文档](../../../../docs/drawers.md#章节正文编辑)，回归运行 `node scripts/chapter-editing-test.mjs`。
 - 简繁转换与文本替换沿用 src/lib/hanDisplay.ts、textReplacements.ts 的显示派生路径，不改写存盘正文和章节 cid。显示文本变化时检查进度恢复、搜索、书签和朗读是否仍使用一致的镜像。
 
+## 在线搜索与换源
+
+- `src/lib/onlineSearch.ts` 按去除首尾空白后的原始书名合并搜索结果；最多 120 个书名，已保留书名的后续来源仍补入，来源按 sourceId + bookUrl 去重。不按作者或展示简繁转换结果合并。
+- `Discover` 点击合并项随机预览一个来源；同名在线书已在书架时优先使用书架绑定。`OnlineBookSheet` 的候选切换只改会话状态，详情、目录、文字预览按请求序号隔离；点击章节预览文字，完整图片阅读仍走入架后的阅读器。
+- `BookDetail` 的换源入口由 `BookSourceSwitch` 按原始书名搜索所有已启用且支持搜索的书源；阅读器点击书名到详情页后使用相同入口。仅在线书显示，逐源失败不抹去成功候选，关闭后停止分发并丢弃在飞结果。
+- 已入架书明确确认后由 `switchOnlineBookSource` 停止旧任务、推进目录世代，在既有整书写队列内替换来源绑定、目录、简介和书源标签；稳定 ID、手编标签、分组、书签、注释和进度记录保留。旧正文不跨源继承，即使 URL 相同。目录序号与正文差异可能需要重新定位进度、书签或注释，确认区必须说明。回归运行 `node scripts/online-sources-test.mjs`。
+
 ## 在线正文与图片
 
 - src/lib/online.ts 管窗口预取、批量下载、重载和目录更新；src/lib/chapterImages.ts / imageAssets.ts 管图片状态与本地资源。引擎逐章任务在 src-tauri/src/chapter_runs.rs，宿主调用或规则改动使用书源引擎技能。

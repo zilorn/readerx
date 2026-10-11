@@ -4,6 +4,16 @@
  * 抛给用户看的错误。
  */
 export const discover = {
+  "discover.sources.emptyText": "本章没有可预览的文字，可加入书架后阅读图片。",
+  "discover.sources.count": "共 {count} 个书源",
+  "discover.sources.choose": "切换书源",
+  "discover.sources.current": "当前书源",
+  "discover.sources.switched": "已切换书源",
+  "discover.sources.actionFailed": "书源操作失败",
+  "discover.sources.apply": "确认换源",
+  "discover.sources.applyAndRead": "换源并阅读",
+  "discover.sources.failed": "{count} 个书源搜索失败，可关闭后重试",
+  "discover.sources.confirm": "换源会替换本书目录、简介和书源标签，并清空已下载正文。书籍、分组、书签和注释保留；阅读进度保留章节序号，目录差异可能导致位置、书签或注释需要重新定位。是否继续？",
   // 页头与入口
   "discover.page.manageSources": "书源管理",
   "discover.page.sourcesLoading": "书源加载中…",
