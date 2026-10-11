@@ -41,3 +41,44 @@ jobs:
       - name: Check Rust code and test targets (no application bundle)
         working-directory: src-tauri
         run: cargo check --locked --workspace --all-targets
+  android-arm64:
+    name: Signed Android arm64 APK
+    # 签名要用仓库 Secrets，而 GitHub 不会把 Secrets 交给 fork PR 的工作流（安全机制），
+    # fork PR 在这里跳过，避免贡献者看到注定失败的检查；同仓库分支 PR 与手动触发照常构建。
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-targets: aarch64-linux-android
+      - uses: ./.github/actions/setup-android
+      - uses: ./.github/actions/setup-android-signing
+        with:
+          keystore-base64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          keystore-password: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          key-alias: ${{ secrets.ANDROID_KEY_ALIAS }}
+          key-password: ${{ secrets.ANDROID_KEY_PASSWORD }}
+      # 只出 arm64：--split-per-abi 让 Gradle 执行 assembleArm64Release，
+      # 产物落在 apk/arm64/release（口径见 cargo-mobile2 的 apk::build）
+      - name: Build signed arm64 APK
+        run: pnpm tauri android build --apk --target aarch64 --split-per-abi --ci
+        timeout-minutes: 90
+      # 收集时顺带验收：签名有效 + 原生库只有 arm64-v8a，与手动签名构建同一套检查
+      - name: Collect and verify signed arm64 APK
+        run: |
+          node scripts/collect-artifacts.mjs android --abi arm64-v8a --out "$RUNNER_TEMP/artifacts"
+          BUILD_TOOLS="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
+          "$BUILD_TOOLS/apksigner" verify --verbose "$RUNNER_TEMP"/artifacts/*.apk
+          "$BUILD_TOOLS/aapt" dump badging "$RUNNER_TEMP"/artifacts/*.apk | grep -Fx "native-code: 'arm64-v8a'"
+      - name: Remove signing files
+        if: always()
+        run: rm -f "$RUNNER_TEMP/android-release.keystore" src-tauri/gen/android/keystore.properties
+      - name: Upload signed APK artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: readerx-pr-android-arm64-signed
+          path: ${{ runner.temp }}/artifacts/*.apk
+          if-no-files-found: error
+          retention-days: 7

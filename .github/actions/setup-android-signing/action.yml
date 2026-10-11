@@ -1,0 +1,66 @@
+# Android release 签名配置（由仓库 Secrets 生成 keystore 与 keystore.properties）
+#
+# 抽出来的理由：签名 arm64 包的地方不止一处（手动签名构建 / PR CI），
+# 口令的 UTF-16 转义、失败提示与文件位置各写一遍迟早走偏。
+#
+# Secrets 不能直接在复合 action 里读取，只能由调用方通过 inputs 传入：
+#   - uses: ./.github/actions/setup-android-signing
+#     with:
+#       keystore-base64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+#       keystore-password: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+#       key-alias: ${{ secrets.ANDROID_KEY_ALIAS }}
+#       key-password: ${{ secrets.ANDROID_KEY_PASSWORD }}
+#
+# 复合 action 没有 post 钩子，签名文件由调用方在构建后清理：
+#   rm -f "$RUNNER_TEMP/android-release.keystore" src-tauri/gen/android/keystore.properties
+
+name: Setup Android signing
+description: 由仓库 Secrets 生成 release keystore 与 src-tauri/gen/android/keystore.properties
+
+inputs:
+  keystore-base64:
+    description: keystore 文件的 base64（Secrets 里的 ANDROID_KEYSTORE_BASE64）
+    required: false
+  keystore-password:
+    description: keystore 口令（ANDROID_KEYSTORE_PASSWORD）
+    required: false
+  key-alias:
+    description: 签名 key 别名（ANDROID_KEY_ALIAS）
+    required: false
+  key-password:
+    description: key 口令（ANDROID_KEY_PASSWORD）
+    required: false
+
+runs:
+  using: composite
+  steps:
+    # required 留空是为了让缺 Secret 时给出可读的中文提示，而不是 GitHub 的通用报错。
+    - name: Write keystore and keystore.properties
+      shell: bash
+      env:
+        KEYSTORE_B64: ${{ inputs.keystore-base64 }}
+        KEYSTORE_PASSWORD: ${{ inputs.keystore-password }}
+        KEY_ALIAS: ${{ inputs.key-alias }}
+        KEY_PASSWORD: ${{ inputs.key-password }}
+      run: |
+        set -euo pipefail
+        umask 077
+        if [ -z "$KEYSTORE_B64" ] || [ -z "$KEYSTORE_PASSWORD" ] || [ -z "$KEY_ALIAS" ] || [ -z "$KEY_PASSWORD" ]; then
+          echo "::error::缺少签名 secrets。请在仓库 Settings -> Secrets and variables -> Actions 配置"
+          echo "::error::ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS / ANDROID_KEY_PASSWORD。"
+          exit 1
+        fi
+        echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/android-release.keystore"
+        python3 - <<'PYTHON'
+        import os
+        from pathlib import Path
+        # Encode UTF-16 code units for java.util.Properties, preserving special characters.
+        def prop(value):
+            raw = value.encode('utf-16-be')
+            return ''.join('\\u%04x' % int.from_bytes(raw[i:i+2], 'big') for i in range(0, len(raw), 2))
+        values = {'keyAlias': os.environ['KEY_ALIAS'], 'password': os.environ['KEY_PASSWORD'],
+                  'storePassword': os.environ['KEYSTORE_PASSWORD'],
+                  'storeFile': os.environ['RUNNER_TEMP'] + '/android-release.keystore'}
+        Path(os.environ['GITHUB_WORKSPACE'], 'src-tauri', 'gen', 'android', 'keystore.properties').write_text(
+            ''.join(f'{key}={prop(value)}\n' for key, value in values.items()))
+        PYTHON
