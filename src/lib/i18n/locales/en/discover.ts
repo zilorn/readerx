@@ -4,6 +4,20 @@
  * (src/lib/online.ts) and the in-book search panel.
  */
 export const discover = {
+  "discover.sources.emptyText": "No text to preview. Add to your shelf to read images.",
+  "discover.sources.count": "{count} sources",
+  "discover.sources.count_one": "{count} source",
+  "discover.sources.count_other": "{count} sources",
+  "discover.sources.choose": "Switch source",
+  "discover.sources.current": "Current source",
+  "discover.sources.switched": "Source switched",
+  "discover.sources.actionFailed": "Source operation failed",
+  "discover.sources.apply": "Apply source",
+  "discover.sources.applyAndRead": "Switch and read",
+  "discover.sources.failed_one": "Search failed for {count} source. Close and reopen to retry.",
+  "discover.sources.failed_other": "Search failed for {count} sources. Close and reopen to retry.",
+  "discover.sources.failed": "Search failed for {count} sources. Close and reopen to retry.",
+  "discover.sources.confirm": "Switching replaces the table of contents, introduction and source tags, and clears downloaded text. The book, groups, bookmarks and annotations remain. The chapter index is retained; differences may require relocating your reading position, bookmarks or annotations. Continue?",
   // Page header and entry points
   "discover.page.manageSources": "Manage sources",
   "discover.page.sourcesLoading": "Loading sources…",

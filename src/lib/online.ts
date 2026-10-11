@@ -30,6 +30,7 @@ import {
 } from "./chapterImages";
 import {
   addBookRecord,
+  ensureLocalBookContent,
   bookMetaById,
   localBookById,
   updateBookChapterInPlace,
@@ -2000,6 +2001,37 @@ export async function applyOnlineTocOverwrite(
     `chapters=${next?.chapters.length ?? 0}`,
   );
   return next?.chapters.length ?? 0;
+}
+
+/** 换源整书写入：保持稳定 ID；不复用不同来源的正文或图片引用。 */
+export async function switchOnlineBookSource(
+  bookId: string, source: BookSourceSummary, item: BookItem, fresh: ChapterItem[],
+): Promise<void> {
+  const original = await ensureLocalBookContent(bookId);
+  if (!original || !isOnlineBook(original)) throw new Error(t("discover.error.bookGone"));
+  if (!fresh.length) throw new Error(t("discover.error.tocEmpty"));
+  stopChapterFetches(bookId);
+  bumpTocEpoch(bookId);
+  const next = await updateBookContent(bookId, (latest) => {
+    if (!isOnlineBook(latest) || latest.bookSourceId !== original.bookSourceId || latest.bookUrl !== original.bookUrl) {
+      throw new Error(t("discover.error.tocChanged"));
+    }
+    const tags = normalizeBookTags(item.tags);
+    return {
+      ...latest,
+      bookSourceId: source.id,
+      bookUrl: item.bookUrl,
+      intro: item.intro?.trim() || undefined,
+      tags: mergeSourceBookTags(normalizeBookTags(latest.tags), latest.sourceTags, tags),
+      sourceTags: tags,
+      chapters: fresh.map((chapter, index) => ({
+        cid: chapterCid(index), title: chapter.chapterName,
+        url: chapter.chapterUrl, paragraphs: [],
+      })),
+    };
+  });
+  if (!next) throw new Error(t("discover.error.bookGone"));
+  log.info("在线书换源完成", `book=${bookId}`, `source=${source.id}`, `chapters=${fresh.length}`);
 }
 
 // ---------------------------------------------------------------------------

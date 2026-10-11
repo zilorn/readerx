@@ -3,6 +3,7 @@ import { useNavigate, useParams } from "@solidjs/router";
 import { LoadingScreen } from "../components/LoadingScreen";
 import { PageHeader } from "../components/PageHeader";
 import { BookCover } from "../components/BookCover";
+import { BookSourceSwitch } from "../components/BookSourceSwitch";
 import { BookMetaSheet } from "../components/BookMetaSheet";
 import { TagChips } from "../components/TagChips";
 import { QuickSearchText } from "../components/QuickSearchText";
@@ -128,6 +129,7 @@ export default function BookDetailPage() {
   const book = createMemo(() => bookMetaById(bookId()));
   /** 展示用副本（简繁转换）；编辑抽屉与「重新拉取书籍信息」一律用原始记录，避免把转换结果写回书库 */
   const displayBook = createMemo(() => withHanMeta(book()));
+  const [switchOpen, setSwitchOpen] = createSignal(false);
   const [editOpen, setEditOpen] = createSignal(false);
   /** 在线书：重新拉取简介 / 封面 / 标签（书源 bookDetail）是否进行中 */
   const [refreshing, setRefreshing] = createSignal(false);
@@ -294,6 +296,13 @@ export default function BookDetailPage() {
               </div>
             </div>
 
+            <Show when={book() && isOnlineBook(book()!)}>
+              <button class="rounded-xl border border-border bg-surface px-4 py-3 text-sm font-medium text-accent"
+                disabled={refreshing()} onClick={() => setSwitchOpen(true)}>
+                {t("discover.sources.choose")}
+              </button>
+            </Show>
+
             {/* 标签 */}
             <section>
               <h3 class="mb-2 text-[12.5px] font-medium tracking-[0.04em] text-text-3">
@@ -349,6 +358,8 @@ export default function BookDetailPage() {
           </div>
         </Show>
       </Show>
+
+      <Show when={switchOpen() && book()}>{(current) => <BookSourceSwitch book={current()} onClose={() => setSwitchOpen(false)} />}</Show>
 
       {/* 编辑书籍信息抽屉（每次打开重新挂载，表单初值来自当前书籍） */}
       <Show when={editOpen() && book()}>
