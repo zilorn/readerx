@@ -34,6 +34,7 @@ devtools = ["tauri/devtools"]
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
+tauri-plugin-clipboard-manager = "~2.3.3"
 tauri-plugin-http = "2"
 tauri-plugin-fs = "2"
 # 桌面端「导入本地书」用系统文件选择器（Android 走 SAF 的 input[type=file]）

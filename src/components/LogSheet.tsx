@@ -16,6 +16,7 @@ import { CloseIcon, CopyIcon, RefreshIcon, TerminalIcon, TrashIcon } from "./ico
 import { ScrollArea } from "./ScrollArea";
 import { showToast } from "../lib/toast";
 import { reportFailure } from "../lib/errorReport";
+import { writeClipboardText } from "../lib/clipboard";
 import {
   clearLogs,
   readLogTail,
@@ -114,7 +115,7 @@ export function LogSheet(props: LogSheetProps) {
       return;
     }
     try {
-      await navigator.clipboard.writeText(text);
+      await writeClipboardText(text);
       showToast(t("settings.logs.copied"));
     } catch (error) {
       reportFailure(t("settings.logs.copyFailed"), error);
