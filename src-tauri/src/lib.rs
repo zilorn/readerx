@@ -101,6 +101,7 @@ pub fn run() {
     let result = builder
         .plugin(volume_keys::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_fs::init())
         // 桌面端导入本地书：系统文件选择器（移动端不支持，插件在那边会报错，故按平台注册）

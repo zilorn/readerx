@@ -16,6 +16,10 @@ App、书源引擎（`readerx-source`）、独立二进制 `readerx-source`、�
 应用数据目录按平台由 Tauri 决定（Linux 通常为 `~/.local/share/<bundle id>`，Android 在应用私有目录下）。
 在应用内看日志不必去找文件：**设置 → 调试 → 应用日志**，可直接按级别筛选、切换文件、复制与清空。
 
+日志复制取当前所选文件的筛选结果。Android 与桌面 Tauri 应用通过原生剪贴板插件写入
+系统剪贴板（仅启用 `clipboard-manager:allow-write-text`）；浏览器开发环境使用网页
+Clipboard API。原生入口见 `src/lib/clipboard.ts`，失败仍由日志页显示原因，不记录复制内容。
+
 ## 文件怎么分
 
 **一天一个目录、一次启动一个文件**：
