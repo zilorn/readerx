@@ -23,6 +23,7 @@ description: 开发或修改 ReaderX 的 SolidJS 页面、路由、共享状态�
 - 抽屉交互：读 [抽屉文档](../../../docs/drawers.md)。不为说明功能增加无意义页面或提示。
 - 日志与失败：读 [日志文档](../../../docs/logging.md)。使用 createLogger，失败走 reportFailure，避免重复记错或输出正文、凭据。
 - 剪贴板：日志复制使用 src/lib/clipboard.ts 的 writeClipboardText；Tauri 宿主走原生 clipboard-manager 插件，浏览器开发环境走 Clipboard API。插件在 src-tauri/src/lib.rs 注册，只在主窗口 capability 授予文本写入权限；失败交给调用方 reportFailure，不记录剪贴板内容。
+- 原生插件依赖：JS 包与 Rust crate 的主次版本必须一致；剪贴板两端使用 ~ 约束次版本，更新时同时修改并检查锁文件中的实际版本。新增或更新 Tauri 插件后运行 pnpm tauri info 检查版本配对，单独 cargo check 或 pnpm build 无法覆盖 Android 构建的版本检查。
 - 简繁词典：同时修改 scripts/han-dict.mjs 的 HAN_DICT_SECTIONS 与 src/lib/hanDict.ts 的 SECTIONS，保持 readerx-han-dict/1 格式契约。src/generated/han-dict-<方向>.bin 由 Vite 的 hanDict 插件在 dev/build 自动生成，数据来自 opencc-js，不手写或入库。大块数据使用构建期压缩资源、运行时按需加载，不改成 JS 模块。
 
 ## 完成检查
