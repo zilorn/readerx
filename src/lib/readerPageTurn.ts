@@ -1,4 +1,4 @@
-/** 阅读器纸张折叠层：只复制当前屏 DOM，不改变正文、选区或阅读进度。 */
+/** 阅读器纸张折叠层：复制当前屏纸面，底下露出真实目标屏，不改变选区或阅读进度。 */
 export function createReaderPageTurn() {
   let root: HTMLDivElement | undefined;
   let front: HTMLDivElement | undefined;
@@ -39,6 +39,11 @@ export function createReaderPageTurn() {
     copy.style.visibility = "visible";
     copy.style.animation = "none";
     copy.style.background = "var(--bg)";
+    // 纸面克隆只包含当前屏。沿用已加载的地址，避免 lazy / async 在动画中再留空帧。
+    copy.querySelectorAll("img").forEach((img) => {
+      img.loading = "eager";
+      img.decoding = "sync";
+    });
     return copy;
   }
 
@@ -82,8 +87,9 @@ export function createReaderPageTurn() {
     root.setAttribute("aria-hidden", "true");
     root.setAttribute("data-reader-turn", "");
     root.inert = true;
-    Object.assign(root.style, { pointerEvents: "none", zIndex: "15", background: "var(--bg)" });
-    if (preview) root.append(snapshot(preview));
+    // 目标屏由 Reader 保留并显示，动画和落页始终用同一批图片节点。
+    // 跨章尚无目标正文时仍以纸张底色兜底。
+    Object.assign(root.style, { pointerEvents: "none", zIndex: "15", background: preview ? "transparent" : "var(--bg)" });
     front = layer();
     front.append(snapshot(surface));
     back = layer();
