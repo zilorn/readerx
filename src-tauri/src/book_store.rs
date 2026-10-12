@@ -371,7 +371,7 @@ fn scan_json_file<T: DeserializeOwned>(path: &Path) -> Result<T, String> {
 }
 
 // ---------------------------------------------------------------------------
-// 目录布局的读写（纯路径，便于单测）
+// 旧目录布局的读取与测试夹具
 // ---------------------------------------------------------------------------
 
 /// 整本书拆成 `bookdetail.json` + `content.json` 落盘（各自原子替换）。
@@ -387,44 +387,7 @@ fn write_book_files(dir: &Path, book: LocalBook) -> Result<(), String> {
         chapters: book.chapters,
     };
     write_json_atomic(&dir.join(CONTENT_FILE), &content, "书籍正文")?;
-    write_digest_file(dir, &content.chapters)?;
     write_json_atomic(&dir.join(BOOKDETAIL_FILE), &detail, "书籍元信息")
-}
-
-/// 只回写正文（逐章回写用）
-#[cfg(test)]
-fn write_book_content(dir: &Path, chapters: &[LocalBookChapter]) -> Result<(), String> {
-    write_book_content_with_digests(dir, chapters, None)
-}
-
-/// 写正文 + 章节指纹缓存：`digests` 为 `Some` 时直接用调用方算好的（逐章回写路径
-/// 只重算改动的那几章），`None` 时整本重算。
-#[cfg(test)]
-fn write_book_content_with_digests(
-    dir: &Path,
-    chapters: &[LocalBookChapter],
-    digests: Option<Vec<ChapterDigest>>,
-) -> Result<(), String> {
-    let content = BookContent {
-        schema_version: SCHEMA_VERSION,
-        chapters: chapters.to_vec(),
-    };
-    write_json_atomic(&dir.join(CONTENT_FILE), &content, "书籍正文")?;
-    match digests {
-        Some(digests) => {
-            // 插图引用同样只在被回写的那几章上更新：其余章保持缓存里的原值
-            let mut assets = read_digest_assets(dir, chapters.len());
-            for (index, chapter) in chapters.iter().enumerate() {
-                if let Some(slot) = assets.get_mut(index) {
-                    *slot = ChapterAssets {
-                        locals: chapter_asset_locals(chapter),
-                    };
-                }
-            }
-            write_digest_file_with(dir, digests, assets)
-        }
-        None => write_digest_file(dir, chapters),
-    }
 }
 
 /// 读整本书（不含图片迁移；调用方按需再迁移）
@@ -467,24 +430,6 @@ fn read_meta_from_dir(dir: &Path) -> Result<Option<BookMeta>, String> {
     Ok(Some(detail.into_meta(chapters)))
 }
 
-/// 旧布局整书文件 → 目录布局（幂等）：先写齐两个新文件，成功后才删旧文件。
-/// 任何一步失败都保留旧文件，调用方下次仍能按旧布局读出来。
-#[cfg(test)]
-fn convert_legacy_book(
-    dir: &Path,
-    legacy: &Path,
-    images_root: Option<&Path>,
-) -> Result<(), String> {
-    let mut book: LocalBook = read_json_file(legacy, "书籍")?;
-    // 旧数据里的 data URL 图片：迁移机会只有这一次，顺手抽成文件
-    if let Some(root) = images_root {
-        crate::book_images::migrate_book(root, &mut book);
-    }
-    crate::storage::ensure_dir(dir)?;
-    write_book_files(dir, book)?;
-    fs::remove_file(legacy).map_err(|e| format!("删除旧书籍文件失败: {e}"))
-}
-
 /// 读一本书的书签（文件缺失 / 空文件都按「没有书签」处理）
 fn read_bookmarks_file(path: &Path) -> Result<Vec<Value>, String> {
     if !path.is_file() {
@@ -509,7 +454,7 @@ fn write_bookmarks_file(path: &Path, bookmarks: &[Value]) -> Result<(), String> 
 }
 
 // ---------------------------------------------------------------------------
-// 旧布局迁移
+// 书库事务
 // ---------------------------------------------------------------------------
 
 /// 所有书库入口共用事务锁；不持锁调用同步引擎，避免引擎与磁盘锁顺序反转。
@@ -517,43 +462,6 @@ fn write_bookmarks_file(path: &Path, bookmarks: &[Value]) -> Result<(), String> 
 fn library_transaction() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: Mutex<()> = Mutex::new(());
     LOCK.lock().unwrap_or_else(|error| error.into_inner())
-}
-
-/// 把「全库一份」的旧书签按书拆开写进各自的 `books/<id>/bookmarks.json`（幂等）。
-/// 返回（已写入的书数，因书籍目录还不存在而暂时跳过的书数）——调用方据此决定
-/// 能否归档旧文件：只要还有书没迁过来，旧文件就不能动。
-#[cfg(test)]
-fn split_legacy_bookmarks(legacy: &Path, books_dir: &Path) -> Result<(u64, u64), String> {
-    let text = fs::read_to_string(legacy).map_err(|e| format!("读取旧书签失败: {e}"))?;
-    let map: HashMap<String, Vec<Value>> =
-        serde_json::from_str(&text).map_err(|e| format!("解析旧书签失败: {e}"))?;
-    let mut migrated = 0u64;
-    let mut pending = 0u64;
-    for (book_id, bookmarks) in map {
-        if bookmarks.is_empty() {
-            continue;
-        }
-        if !crate::storage::valid_component(&book_id) {
-            log::warn!("旧书签里的书籍 id 非法，已跳过");
-            continue;
-        }
-        let dir = books_dir.join(&book_id);
-        if !dir.is_dir() {
-            if books_dir.join(format!("{book_id}.json")).is_file() {
-                // 这本书还在旧布局里（它自己的迁移没成功）：书签这次不能迁，
-                // 旧文件先留着，等书迁过来再一起搬
-                pending += 1;
-                log::debug!("旧书签对应的书籍尚未迁移，本次跳过");
-            } else {
-                // 书早就删了：孤儿书签没有归属，丢弃（留着只会越积越多）
-                log::debug!("旧书签对应的书籍已不存在，已丢弃");
-            }
-            continue;
-        }
-        write_bookmarks_file(&dir.join(BOOKMARKS_FILE), &bookmarks)?;
-        migrated += 1;
-    }
-    Ok((migrated, pending))
 }
 
 // ---------------------------------------------------------------------------
@@ -623,38 +531,6 @@ pub(crate) fn put_book_chapters<R: tauri::Runtime>(
     let root = crate::storage::data_root(app)?;
     let mut db = sqlite::open(&root)?;
     sqlite::patch(&mut db, &root, id, updates)
-}
-
-/// 下标仅是旧客户端的提示；身份必须以 cid 为准，目录变更不能改变正文归属。
-#[cfg(test)]
-fn patch_chapters(
-    chapters: &mut [LocalBookChapter],
-    updates: &[BookChapterPatch],
-) -> Result<Vec<usize>, String> {
-    let mut indices = Vec::with_capacity(updates.len());
-    for update in updates {
-        let cid = &update.chapter.cid;
-        if cid.is_empty() {
-            return Err("章节补丁缺少 cid".to_string());
-        }
-        let mut matches = chapters
-            .iter()
-            .enumerate()
-            .filter(|(_, chapter)| chapter.cid == *cid);
-        let Some((index, _)) = matches.next() else {
-            return Err("章节目录已变化，补丁对应章节不存在".to_string());
-        };
-        if matches.next().is_some() {
-            return Err("章节 cid 重复，无法定位补丁".to_string());
-        }
-        indices.push(index);
-    }
-    // 先验证整批，再修改；只写正文，目录里的标题和地址保留最新值。
-    for (update, &index) in updates.iter().zip(&indices) {
-        chapters[index].paragraphs = update.chapter.paragraphs.clone();
-        chapters[index].blocks = update.chapter.blocks.clone();
-    }
-    Ok(indices)
 }
 
 /// 只改元信息（分组 / 书名 / 封面 / 标签…）：只读写 books 行，
@@ -795,6 +671,13 @@ pub(crate) fn patch_annotations<R: tauri::Runtime>(
 pub(crate) fn delete_book<R: tauri::Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), String> {
     let _transaction = library_transaction();
     let root = crate::storage::data_root(app)?;
+    delete_book_at(&root, id)?;
+    crate::storage::remove_book_tts_cache(app, id)?;
+    log::info!("书籍已删除 id={id}（含书签、注释与听书缓存）");
+    Ok(())
+}
+
+fn delete_book_at(root: &Path, id: &str) -> Result<(), String> {
     let db = sqlite::open(&root)?;
     sqlite::valid_id(id)?;
     let mut locals: Vec<_> = sqlite::assets(&db, id)?
@@ -838,8 +721,6 @@ pub(crate) fn delete_book<R: tauri::Runtime>(app: &AppHandle<R>, id: &str) -> Re
         }
         Err(error) => log::warn!("删书后插图引用检查失败，保留图片：{error}"),
     }
-    crate::storage::remove_book_tts_cache(app, id)?;
-    log::info!("书籍已删除 id={id}（含书签、注释与听书缓存）");
     Ok(())
 }
 
@@ -868,46 +749,6 @@ pub(crate) fn normalize_book_images<R: tauri::Runtime>(
     sqlite::put(&tx, &book)?;
     sqlite::commit(tx)?;
     Ok(true)
-}
-
-/// 先保存待删书的插图引用，再删书籍文件；只清理其余书籍不再引用的文件。
-#[cfg(test)]
-fn delete_book_files(books: &Path, images: Option<&Path>, id: &str) -> Result<(), String> {
-    let dir = books.join(id);
-    let legacy = books.join(format!("{id}.json"));
-    let mut locals = HashSet::new();
-    // 旧布局迁移失败时仍有可能带着本地图片引用，两份文件都要在删除前读取。
-    for path in [dir.join(CONTENT_FILE), legacy.clone()] {
-        match image_locals_from_file(&path) {
-            Ok(names) => locals.extend(names),
-            Err(error) => log::warn!(
-                "待删书籍插图引用读取失败 id={id}：{}",
-                readerx_log::redact::urls_in_text(&error)
-            ),
-        }
-    }
-    if dir.is_dir() {
-        fs::remove_dir_all(&dir).map_err(|e| format!("删除书籍失败: {e}"))?;
-    }
-    if legacy.is_file() {
-        fs::remove_file(&legacy).map_err(|e| format!("删除书籍失败: {e}"))?;
-    }
-    if let Some(images) = images.filter(|_| !locals.is_empty()) {
-        match remaining_image_locals(books) {
-            Ok(referenced) => {
-                let locals: Vec<_> = locals.into_iter().collect();
-                crate::book_images::remove_book_images(images, &locals, |name| {
-                    !referenced.contains(name)
-                });
-            }
-            // 无法确认是否共用时保留图片，删书仍成功，避免破坏其他书的插图。
-            Err(error) => log::warn!(
-                "书库插图引用检查失败，已跳过图片清理 id={id}：{}",
-                readerx_log::redact::urls_in_text(&error)
-            ),
-        }
-    }
-    Ok(())
 }
 
 // 插图引用扫描只保留 local，跳过正文和 data URL；新旧布局共用 chapters 字段。
@@ -1164,17 +1005,6 @@ pub(crate) fn get_sync_meta<R: tauri::Runtime>(
         .map(|book| BookSyncMeta::from_detail(&BookDetail::from_book(book))))
 }
 
-/// 目录布局的可同步元信息（纯路径，便于单测）。
-#[cfg(test)]
-fn sync_meta_from_dir(dir: &Path) -> Result<Option<BookSyncMeta>, String> {
-    let path = dir.join(BOOKDETAIL_FILE);
-    if !path.is_file() {
-        return Ok(None);
-    }
-    let detail: BookDetail = read_json_file(&path, "书籍元信息")?;
-    Ok(Some(BookSyncMeta::from_detail(&detail)))
-}
-
 /// 列出全部本地书的可同步元信息（两种布局都认，口径与书架列表一致）。
 ///
 /// 只读数据库 detail；迁移失败的旧书籍仍使用元信息回退。
@@ -1219,6 +1049,10 @@ pub(crate) fn apply_sync_meta<R: tauri::Runtime>(
 ) -> Result<bool, String> {
     let _transaction = library_transaction();
     let root = crate::storage::data_root(app)?;
+    apply_sync_meta_at(&root, id, want)
+}
+
+fn apply_sync_meta_at(root: &Path, id: &str, want: &BookSyncMeta) -> Result<bool, String> {
     let mut db = sqlite::open(&root)?;
     let tx = sqlite::transaction(&mut db)?;
     let Some(mut detail) = sqlite::detail(&tx, id)? else {
@@ -1254,43 +1088,6 @@ pub(crate) fn apply_sync_meta<R: tauri::Runtime>(
     Ok(true)
 }
 
-/// [`apply_sync_meta`] 的纯路径版本（便于单测）。
-#[cfg(test)]
-fn apply_sync_meta_in_dir(dir: &Path, want: &BookSyncMeta) -> Result<bool, String> {
-    let path = dir.join(BOOKDETAIL_FILE);
-    if !path.is_file() {
-        // 书已经不在了（对端刚同步来、本地却没这个文件）：不是错误，跳过即可
-        return Ok(false);
-    }
-    let mut detail: BookDetail = read_json_file(&path, "书籍元信息")?;
-    if BookSyncMeta::from_detail(&detail) == *want {
-        return Ok(false);
-    }
-    detail.title = want.title.clone();
-    detail.author = want.author.clone();
-    detail.intro = want.intro.clone();
-    detail.format = want.format.clone();
-    detail.file_name = want.file_name.clone();
-    detail.size = want.size;
-    detail.split_desc = want.split_desc.clone();
-    detail.source = want.source.clone();
-    detail.book_url = want.book_url.clone();
-    detail.book_source_id = want.book_source_id.clone();
-    detail.group_id = want.group_id.clone();
-    detail.tags = if want.tags.is_empty() {
-        None
-    } else {
-        Some(want.tags.clone())
-    };
-    detail.source_tags = if want.source_tags.is_empty() {
-        None
-    } else {
-        Some(want.source_tags.clone())
-    };
-    write_json_atomic(&path, &detail, "书籍元信息")?;
-    Ok(true)
-}
-
 // ---------------------------------------------------------------------------
 // 同步桥接视图：章节目录（结构）
 // ---------------------------------------------------------------------------
@@ -1321,46 +1118,6 @@ pub(crate) fn chapter_refs(chapters: &[LocalBookChapter]) -> Vec<ChapterRef> {
             url: chapter.url.clone(),
         })
         .collect()
-}
-
-/// `content.json` 的目录扫描视图：**只取章节头**，段落与结构化块一律不解析
-/// （serde 对未声明字段走忽略语义：字符串只扫描、不分配），因此扫一本几百 MB 的书
-/// 也不会把正文读进内存 —— 对账要为每本书算一份目录，不能按「读整本」的代价来。
-#[cfg(test)]
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ChapterRefScan {
-    #[serde(default)]
-    cid: String,
-    #[serde(default)]
-    title: String,
-    #[serde(default)]
-    url: Option<String>,
-}
-
-#[cfg(test)]
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ContentRefScan {
-    #[serde(default)]
-    chapters: Vec<ChapterRefScan>,
-}
-
-#[cfg(test)]
-fn scan_chapter_refs(path: &Path) -> Result<Vec<ChapterRef>, String> {
-    if !path.is_file() {
-        return Ok(Vec::new());
-    }
-    let scan: ContentRefScan = scan_json_file(path)?;
-    Ok(scan
-        .chapters
-        .into_iter()
-        .map(|chapter| ChapterRef {
-            cid: chapter.cid,
-            title: chapter.title,
-            url: chapter.url,
-        })
-        .collect())
 }
 
 /// 列出全部本地书的目录（同步对账用；两种布局都认）。
@@ -1452,89 +1209,12 @@ pub(crate) fn apply_sync_structure<R: tauri::Runtime>(
     Ok(true)
 }
 
-/// [`apply_sync_structure`] 的纯路径版本（便于单测）。
-#[cfg(test)]
-fn apply_sync_structure_in_dir(dir: &Path, want: &[ChapterRef]) -> Result<bool, String> {
-    let content_path = dir.join(CONTENT_FILE);
-    let current = scan_chapter_refs(&content_path)?;
-    if current == want {
-        return Ok(false);
-    }
-    let content: BookContent = if content_path.is_file() {
-        read_json_file(&content_path, "书籍正文")?
-    } else {
-        BookContent {
-            schema_version: SCHEMA_VERSION,
-            chapters: Vec::new(),
-        }
-    };
-    let mut by_cid: HashMap<String, LocalBookChapter> = content
-        .chapters
-        .into_iter()
-        .map(|chapter| (chapter.cid.clone(), chapter))
-        .collect();
-    let chapters: Vec<LocalBookChapter> = want
-        .iter()
-        .map(|entry| match by_cid.remove(&entry.cid) {
-            Some(mut chapter) => {
-                // 正文留用，只把目录里的元信息对齐（标题 / 地址可能在对端改过）
-                chapter.title = entry.title.clone();
-                chapter.url = entry.url.clone();
-                chapter
-            }
-            None => LocalBookChapter {
-                cid: entry.cid.clone(),
-                title: entry.title.clone(),
-                paragraphs: Vec::new(),
-                blocks: None,
-                url: entry.url.clone(),
-            },
-        })
-        .collect();
-    write_book_content(dir, &chapters)?;
-    Ok(true)
-}
-
 // ---------------------------------------------------------------------------
-// 同步桥接视图：正文（指纹缓存 / 按需取章 / 落地）
+// 同步桥接视图：正文（按需取章 / 落地）
 // ---------------------------------------------------------------------------
-
-/// 旧章节指纹缓存文件名；升级时归档。生产指纹与正文同事务存储在章节行内。
-const DIGEST_FILE: &str = "digest.json";
-
-/// 指纹文件格式：章节顺序与 `content.json` 一一对应（`hash` 为空串 = 该章没有正文）。
-#[cfg(test)]
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct BookDigestFile {
-    #[serde(default = "schema_version")]
-    schema_version: u32,
-    /// 生成这份指纹时 `content.json` 的修改时间（毫秒）与字节数：对不上说明有人在
-    /// 外面改过正文，缓存作废、重建一次。
-    #[serde(default)]
-    content_mtime_ms: u64,
-    #[serde(default)]
-    content_size: u64,
-    #[serde(default)]
-    chapters: Vec<ChapterDigest>,
-    /// 各章正文里引用到的插图本地副本文件名（与 `chapters` 同下标）。
-    ///
-    /// 资源通道对账要的就是这个：**引用**（图上没下下来时也要算引用）与
-    /// 「`chapters` 里的正文指纹」共用一次整本扫描，因此不必为了同步再解析一遍正文。
-    #[serde(default)]
-    assets: Vec<ChapterAssets>,
-}
-
-/// 一章正文里引用到的插图（见 [`BookDigestFile::assets`]）。
-#[cfg(test)]
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ChapterAssets {
-    #[serde(default)]
-    locals: Vec<String>,
-}
 
 /// 一章正文里引用到的插图本地副本文件名（整行图 + 段内图，去掉重复）。
+/// SQLite 写入章节行时也使用这一清单。
 fn chapter_asset_locals(chapter: &LocalBookChapter) -> Vec<String> {
     let mut locals: Vec<String> = Vec::new();
     for block in chapter.blocks.iter().flatten() {
@@ -1550,20 +1230,6 @@ fn chapter_asset_locals(chapter: &LocalBookChapter) -> Vec<String> {
     locals.sort();
     locals.dedup();
     locals
-}
-
-#[cfg(test)]
-fn content_stamp(path: &Path) -> (u64, u64) {
-    let Ok(metadata) = fs::metadata(path) else {
-        return (0, 0);
-    };
-    let mtime = metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|delta| delta.as_millis() as u64)
-        .unwrap_or(0);
-    (mtime, metadata.len())
 }
 
 /// 一章正文的指纹（与引擎同一口径：只算正文，标题 / 地址 / 字数不参与）。
@@ -1589,87 +1255,9 @@ fn chapter_digest(chapter: &LocalBookChapter) -> ChapterDigest {
     }
 }
 
-/// 写指纹缓存（正文写完之后调用；写失败只记日志，不影响正文本身）。
-#[cfg(test)]
-fn write_digest_file(dir: &Path, chapters: &[LocalBookChapter]) -> Result<(), String> {
-    write_digest_file_with(dir, chapter_digests(chapters), chapter_assets(chapters))
-}
-
-/// 整本重算：章节指纹 + 插图引用（两者共用一次遍历）。
+/// 未迁移书籍回退读取时，逐章重算正文指纹。
 fn chapter_digests(chapters: &[LocalBookChapter]) -> Vec<ChapterDigest> {
     chapters.iter().map(chapter_digest).collect()
-}
-
-/// 见 [`chapter_digests`]。
-#[cfg(test)]
-fn chapter_assets(chapters: &[LocalBookChapter]) -> Vec<ChapterAssets> {
-    chapters
-        .iter()
-        .map(|chapter| ChapterAssets {
-            locals: chapter_asset_locals(chapter),
-        })
-        .collect()
-}
-
-/// 写指纹缓存（调用方已经算好两份清单，见 [`write_book_content_with_digests`] 的逐章路径）。
-#[cfg(test)]
-fn write_digest_file_with(
-    dir: &Path,
-    chapters: Vec<ChapterDigest>,
-    assets: Vec<ChapterAssets>,
-) -> Result<(), String> {
-    let (mtime, size) = content_stamp(&dir.join(CONTENT_FILE));
-    let file = BookDigestFile {
-        schema_version: SCHEMA_VERSION,
-        content_mtime_ms: mtime,
-        content_size: size,
-        chapters,
-        assets,
-    };
-    write_json_atomic(&dir.join(DIGEST_FILE), &file, "章节指纹")
-}
-
-/// 读指纹缓存里的插图引用（逐章回写路径要保留没动过的那些章）。
-///
-/// 缓存缺失 / 过期 / 长度对不上时返回等长的空清单：那几章的引用会在下一次整本重算时补上，
-/// 资源通道据此把它们当成「还没落地」—— 宁可不搬，也不要把错的引用发出去。
-#[cfg(test)]
-fn read_digest_assets(dir: &Path, chapters: usize) -> Vec<ChapterAssets> {
-    let cached = read_json_file::<BookDigestFile>(&dir.join(DIGEST_FILE), "章节指纹")
-        .ok()
-        .filter(|file| file.assets.len() == chapters)
-        .map(|file| file.assets)
-        .unwrap_or_default();
-    let mut assets = cached;
-    assets.resize_with(chapters, ChapterAssets::default);
-    assets
-}
-
-/// 读指纹缓存；缓存缺失 / 过期时**从正文重建**（一次整本解析，之后都走缓存）。
-#[cfg(test)]
-fn read_digest_file(dir: &Path) -> Result<Vec<ChapterDigest>, String> {
-    let content_path = dir.join(CONTENT_FILE);
-    let (mtime, size) = content_stamp(&content_path);
-    if let Ok(file) = read_json_file::<BookDigestFile>(&dir.join(DIGEST_FILE), "章节指纹") {
-        if file.content_mtime_ms == mtime && file.content_size == size {
-            return Ok(file.chapters);
-        }
-    }
-    // 缓存作废：整本重算（一次遍历同时补齐章节指纹与插图引用）
-    let chapters = if content_path.is_file() {
-        read_json_file::<BookContent>(&content_path, "书籍正文")?.chapters
-    } else {
-        Vec::new()
-    };
-    let digests: Vec<ChapterDigest> = chapter_digests(&chapters);
-    if dir.is_dir() {
-        if let Err(error) = write_digest_file(dir, &chapters) {
-            log::debug!("章节指纹缓存写入失败（下次重建）：{error}");
-        } else {
-            log::info!("已按正文重建章节指纹缓存 dir={}", dir.display());
-        }
-    }
-    Ok(digests)
 }
 
 /// 同步对账用：某本书**有正文**的章节摘要（没有正文的章节不返回）。
@@ -1743,7 +1331,7 @@ pub(crate) fn set_cover_at<R: tauri::Runtime>(
 
 /// 同步对账用：某本书正文里引用到的插图（资源名 + 本地副本文件名）。
 ///
-/// 与 [`read_sync_digests`] 同一份缓存、同一份来源（章节指纹），因此资源通道对账
+/// 与章节指纹一同存储在 SQLite 章节行，因此资源通道对账
 /// **不需要解析正文**。没有本地副本的引用（还没下载下来）不在这里 —— 资源通道会按
 /// 「引用 + 内容」的并集把它们当成「缺的那一份」。
 pub(crate) fn read_sync_asset_refs_at<R: tauri::Runtime>(
@@ -2056,97 +1644,6 @@ mod tests {
 
     use crate::models::ChapterBlock;
 
-    #[test]
-    fn chapter_patch_follows_identity_after_reorder_and_keeps_directory_fields() {
-        let mut chapters = vec![
-            sample_chapter("b", "新标题", "旧正文"),
-            sample_chapter("a", "A", "A正文"),
-        ];
-        let patch = BookChapterPatch {
-            index: 1,
-            chapter: sample_chapter("b", "旧标题", "新正文"),
-        };
-        assert_eq!(patch_chapters(&mut chapters, &[patch]).unwrap(), vec![0]);
-        assert_eq!(chapters[0].title, "新标题");
-        assert_eq!(chapters[0].paragraphs, vec!["新正文"]);
-        assert_eq!(chapters[1].paragraphs, vec!["A正文"]);
-        let patches = [
-            BookChapterPatch {
-                index: 0,
-                chapter: sample_chapter("a", "A", "不应写入"),
-            },
-            BookChapterPatch {
-                index: 1,
-                chapter: sample_chapter("deleted", "删除章", "正文"),
-            },
-        ];
-        assert!(patch_chapters(&mut chapters, &patches).is_err());
-        assert_eq!(chapters[1].paragraphs, vec!["A正文"]);
-        chapters[1].cid = "b".into();
-        assert!(patch_chapters(
-            &mut chapters,
-            &[BookChapterPatch {
-                index: 0,
-                chapter: sample_chapter("b", "B", "正文")
-            }]
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn concurrent_structure_and_body_updates_keep_both_changes() {
-        let dir = temp_dir("concurrent");
-        let chapters = vec![
-            sample_chapter("a", "A", "旧正文"),
-            sample_chapter("b", "B", "B正文"),
-        ];
-        write_book_content(&dir, &chapters).unwrap();
-        let start = std::sync::Barrier::new(2);
-        std::thread::scope(|scope| {
-            scope.spawn(|| {
-                start.wait();
-                let _transaction = library_transaction();
-                apply_sync_structure_in_dir(
-                    &dir,
-                    &[
-                        ChapterRef {
-                            cid: "b".into(),
-                            title: "B".into(),
-                            url: None,
-                        },
-                        ChapterRef {
-                            cid: "a".into(),
-                            title: "新A".into(),
-                            url: None,
-                        },
-                    ],
-                )
-                .unwrap();
-            });
-            scope.spawn(|| {
-                start.wait();
-                let _transaction = library_transaction();
-                let mut content: BookContent =
-                    read_json_file(&dir.join(CONTENT_FILE), "正文").unwrap();
-                patch_chapters(
-                    &mut content.chapters,
-                    &[BookChapterPatch {
-                        index: 0,
-                        chapter: sample_chapter("a", "旧A", "下载正文"),
-                    }],
-                )
-                .unwrap();
-                std::thread::yield_now();
-                write_book_content(&dir, &content.chapters).unwrap();
-            });
-        });
-        let content: BookContent = read_json_file(&dir.join(CONTENT_FILE), "正文").unwrap();
-        assert_eq!(content.chapters[0].cid, "b");
-        assert_eq!(content.chapters[1].title, "新A");
-        assert_eq!(content.chapters[1].paragraphs, vec!["下载正文"]);
-        fs::remove_dir_all(dir).unwrap();
-    }
-
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "readerx-book-store-test-{name}-{}",
@@ -2199,104 +1696,93 @@ mod tests {
         }
     }
 
-    fn write_image_book(books: &Path, id: &str, locals: &[&str], legacy: bool, inline: bool) {
-        let blocks: Vec<_> = locals
-            .iter()
-            .map(|local| {
-                if inline {
-                    serde_json::json!({"kind": "p", "text": "正文", "imgs": [{"local": local}]})
-                } else {
-                    serde_json::json!({"kind": "img", "local": local})
-                }
-            })
-            .collect();
-        let value = serde_json::json!({"id": id, "chapters": [{"blocks": blocks}]});
-        let path = if legacy {
-            books.join(format!("{id}.json"))
-        } else {
-            let dir = books.join(id);
-            fs::create_dir_all(&dir).unwrap();
-            fs::write(dir.join(BOOKMARKS_FILE), "{}").unwrap();
-            dir.join(CONTENT_FILE)
-        };
-        write_json_atomic(&path, &value, "测试书籍").unwrap();
+    #[test]
+    fn sqlite_sync_meta_preserves_local_fields_and_skips_missing_books() {
+        let root = temp_dir("sqlite-sync-meta");
+        let db = sqlite::open(&root).unwrap();
+        sqlite::put(&db, &sample_book("b1")).unwrap();
+        drop(db);
+
+        let db = sqlite::open(&root).unwrap();
+        let original = sqlite::detail(&db, "b1").unwrap().unwrap();
+        let mut want = BookSyncMeta::from_detail(&original);
+        want.title = "同步书名".into();
+        want.group_id = None;
+        want.tags = vec!["科幻".into()];
+        drop(db);
+
+        assert!(apply_sync_meta_at(&root, "b1", &want).unwrap());
+        assert!(!apply_sync_meta_at(&root, "b1", &want).unwrap());
+        assert!(!apply_sync_meta_at(&root, "missing", &want).unwrap());
+        let db = sqlite::open(&root).unwrap();
+        let updated = sqlite::detail(&db, "b1").unwrap().unwrap();
+        assert_eq!(BookSyncMeta::from_detail(&updated), want);
+        assert_eq!(updated.cover, original.cover);
+        assert_eq!(updated.hue, original.hue);
+        assert_eq!(updated.imported_at, original.imported_at);
+        assert_eq!(updated.book_source_id, original.book_source_id);
+        assert!(sqlite::detail(&db, "missing").unwrap().is_none());
+        drop(db);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn delete_book_removes_exclusive_images_before_losing_references() {
-        let root = temp_dir("delete-exclusive");
-        let books = root.join("books");
+    fn sqlite_delete_keeps_shared_images_and_removes_last_reference() {
+        let root = temp_dir("sqlite-delete-images");
         let images = root.join("images");
-        fs::create_dir_all(&books).unwrap();
         fs::create_dir_all(&images).unwrap();
-        let block = "1111111111111111111111111111111111111111.png";
-        let inline = "2222222222222222222222222222222222222222.jpg";
-        let pdf = "b1_3333333333333333333333333333333333333333.png";
-        let unrelated = "4444444444444444444444444444444444444444.png";
-        write_image_book(&books, "b1", &[block, pdf, block], false, false);
-        // 同一书的旧文件也必须在删除前取引用，段内图不能漏掉。
-        write_image_book(&books, "b1", &[inline], true, true);
-        for name in [block, inline, pdf, unrelated] {
+        let shared = "1111111111111111111111111111111111111111.png";
+        let unique = "b1_2222222222222222222222222222222222222222.jpg";
+        let unrelated = "3333333333333333333333333333333333333333.png";
+        let mut first = sample_book("b1");
+        first.chapters[0].blocks.as_mut().unwrap()[0].local = Some(shared.into());
+        first.chapters[0].blocks.as_mut().unwrap()[0].imgs =
+            Some(vec![crate::models::ChapterInlineImage {
+                at: 0,
+                src: None,
+                alt: None,
+                remote: None,
+                local: Some(unique.into()),
+            }]);
+        let mut second = sample_book("b2");
+        second.chapters[0].blocks.as_mut().unwrap()[0].local = Some(shared.into());
+        let db = sqlite::open(&root).unwrap();
+        sqlite::put(&db, &first).unwrap();
+        sqlite::put(&db, &second).unwrap();
+        drop(db);
+        for name in [shared, unique, unrelated] {
             fs::write(images.join(name), b"image").unwrap();
         }
 
-        delete_book_files(&books, Some(&images), "b1").unwrap();
-        assert!(!books.join("b1").exists());
-        assert!(!books.join("b1.json").exists());
-        for name in [block, inline, pdf] {
-            assert!(!images.join(name).exists(), "独占插图应被删除: {name}");
-        }
-        assert!(images.join(unrelated).exists(), "不能清理本书未引用的图片");
-        // 重复删除不存在的书仍成功。
-        delete_book_files(&books, Some(&images), "b1").unwrap();
+        delete_book_at(&root, "b1").unwrap();
+        assert!(images.join(shared).exists());
+        assert!(!images.join(unique).exists());
+        assert!(images.join(unrelated).exists());
+        delete_book_at(&root, "b2").unwrap();
+        assert!(!images.join(shared).exists());
+        delete_book_at(&root, "b2").unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn delete_book_preserves_shared_images_until_last_reference_is_deleted() {
-        let root = temp_dir("delete-shared");
-        let books = root.join("books");
+    fn sqlite_delete_keeps_images_when_legacy_references_are_corrupt() {
+        let root = temp_dir("sqlite-delete-corrupt");
         let images = root.join("images");
-        fs::create_dir_all(&books).unwrap();
-        fs::create_dir_all(&images).unwrap();
-        // 两种书籍布局、两种图片命名都要检查其他书的引用。
-        for deleted_legacy in [false, true] {
-            for remaining_legacy in [false, true] {
-                for name in [
-                    "1111111111111111111111111111111111111111.png",
-                    "b1_1111111111111111111111111111111111111111.png",
-                ] {
-                    write_image_book(&books, "b1", &[name], deleted_legacy, false);
-                    write_image_book(&books, "b2", &[name], remaining_legacy, true);
-                    fs::write(images.join(name), b"shared image").unwrap();
-
-                    delete_book_files(&books, Some(&images), "b1").unwrap();
-                    assert_eq!(fs::read(images.join(name)).unwrap(), b"shared image");
-                    delete_book_files(&books, Some(&images), "b2").unwrap();
-                    assert!(!images.join(name).exists(), "最后一个引用删除后应清理插图");
-                }
-            }
-        }
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn delete_book_keeps_images_when_remaining_references_cannot_be_read() {
-        let root = temp_dir("delete-corrupt");
-        let books = root.join("books");
-        let images = root.join("images");
-        fs::create_dir_all(&books).unwrap();
         fs::create_dir_all(&images).unwrap();
         let name = "1111111111111111111111111111111111111111.png";
-        write_image_book(&books, "b1", &[name], false, false);
-        write_image_book(&books, "b2", &[name], false, true);
-        fs::write(books.join("b2").join(CONTENT_FILE), "{broken").unwrap();
-        fs::write(images.join(name), b"shared image").unwrap();
+        let mut book = sample_book("b1");
+        book.chapters[0].blocks.as_mut().unwrap()[0].local = Some(name.into());
+        let db = sqlite::open(&root).unwrap();
+        sqlite::put(&db, &book).unwrap();
+        drop(db);
+        let books = root.join("books");
+        fs::create_dir_all(&books).unwrap();
+        fs::write(books.join("b2.json"), "{broken").unwrap();
+        fs::write(images.join(name), b"image").unwrap();
 
-        delete_book_files(&books, Some(&images), "b1").unwrap();
-        assert!(!books.join("b1").exists());
-        assert!(books.join("b2").exists());
-        assert!(images.join(name).exists(), "读取失败不能当成无人引用");
+        delete_book_at(&root, "b1").unwrap();
+        assert!(images.join(name).exists(), "无法确认剩余引用时应保留插图");
+        assert!(books.join("b2.json").exists());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -2339,133 +1825,6 @@ mod tests {
         assert_eq!(meta.chapters.len(), 1);
         assert_eq!(meta.chapters[0].cid, "c0001");
         assert_eq!(meta.chapters[0].chars, 2);
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    /// 同步视图：只读元信息，且能把同步结果写回来（封面 / 导入时间 / 色相不受影响）。
-    #[test]
-    fn sync_meta_round_trip_keeps_local_only_fields() {
-        let dir = temp_dir("sync-meta");
-        let paths = dir.join("b1");
-        fs::create_dir_all(&paths).unwrap();
-        write_book_files(&paths, sample_book("b1")).unwrap();
-
-        let meta = sync_meta_from_dir(&paths).unwrap().unwrap();
-        assert_eq!(meta.title, "测试书");
-        assert_eq!(meta.tags, vec!["标签".to_string()]);
-        assert_eq!(meta.source_tags, vec!["源标签".to_string()]);
-        assert_eq!(meta.group_id, Some("g1".to_string()));
-        assert_eq!(meta.book_source_id, Some("src1".to_string()));
-
-        // 值完全相同 → 不写盘
-        assert!(!apply_sync_meta_in_dir(&paths, &meta).unwrap());
-
-        // 改书名 / 标签 / 分组 → 只有这些字段变
-        let want = BookSyncMeta {
-            title: "同步来的书名".to_string(),
-            tags: vec!["科幻".to_string()],
-            group_id: None,
-            ..meta.clone()
-        };
-        assert!(apply_sync_meta_in_dir(&paths, &want).unwrap());
-        let back = sync_meta_from_dir(&paths).unwrap().unwrap();
-        assert_eq!(back.title, "同步来的书名");
-        assert_eq!(back.tags, vec!["科幻".to_string()]);
-        assert_eq!(back.group_id, None);
-        // 本机字段原样保留：封面、色相、导入时间、书源 id 不参与同步
-        let detail: BookDetail =
-            read_json_file(&paths.join(BOOKDETAIL_FILE), "书籍元信息").unwrap();
-        assert_eq!(detail.cover.as_deref(), Some("data:image/png;base64,AAAA"));
-        assert_eq!(detail.hue, 7);
-        assert_eq!(detail.imported_at, 1_700_000_000);
-        assert_eq!(detail.book_source_id.as_deref(), Some("src1"));
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    /// 书已经被删（目录里没有 bookdetail.json）时返回 false，不报错也不造空文件。
-    #[test]
-    fn sync_meta_missing_book_is_not_an_error() {
-        let dir = temp_dir("sync-meta-missing");
-        fs::create_dir_all(&dir).unwrap();
-        assert!(sync_meta_from_dir(&dir).unwrap().is_none());
-        assert!(!apply_sync_meta_in_dir(&dir, &BookSyncMeta::default()).unwrap());
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    /// 目录落地：按 cid 复用正文，目录没变一个字节都不写。
-    #[test]
-    fn sync_structure_keeps_chapter_bodies() {
-        let dir = temp_dir("sync-structure");
-        let paths = dir.join("b1");
-        fs::create_dir_all(&paths).unwrap();
-        write_book_files(&paths, sample_book("b1")).unwrap();
-
-        // 目录一致 → 不写盘（更不解析整本正文）
-        let current = scan_chapter_refs(&paths.join(CONTENT_FILE)).unwrap();
-        assert!(!apply_sync_structure_in_dir(&paths, &current).unwrap());
-
-        // 改名 + 加一章：第一章正文留用，新章没有正文
-        let want = vec![
-            ChapterRef {
-                cid: "c0001".to_string(),
-                title: "第一章（改名）".to_string(),
-                url: Some("https://example.com/c1".to_string()),
-            },
-            ChapterRef {
-                cid: "c0002".to_string(),
-                title: "第二章".to_string(),
-                url: None,
-            },
-        ];
-        assert!(apply_sync_structure_in_dir(&paths, &want).unwrap());
-        let book = read_book_from_dir(&paths).unwrap().unwrap();
-        assert_eq!(book.chapters.len(), 2);
-        assert_eq!(book.chapters[0].title, "第一章（改名）");
-        assert_eq!(
-            book.chapters[0].url.as_deref(),
-            Some("https://example.com/c1")
-        );
-        assert_eq!(book.chapters[0].paragraphs, vec!["正文".to_string()]);
-        assert!(book.chapters[1].paragraphs.is_empty());
-
-        // 去掉一章：目录以同步结果为准
-        assert!(apply_sync_structure_in_dir(&paths, &want[..1]).unwrap());
-        let book = read_book_from_dir(&paths).unwrap().unwrap();
-        assert_eq!(book.chapters.len(), 1);
-        assert_eq!(book.chapters[0].cid, "c0001");
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn legacy_file_converts_and_is_removed() {
-        let dir = temp_dir("legacy");
-        let legacy = dir.join("b2.json");
-        fs::write(&legacy, serde_json::to_string(&sample_book("b2")).unwrap()).unwrap();
-
-        let target = dir.join("b2");
-        convert_legacy_book(&target, &legacy, None).unwrap();
-
-        assert!(!legacy.exists(), "迁移成功后旧文件应删除");
-        let restored = read_book_from_dir(&target).unwrap().unwrap();
-        assert_eq!(restored.title, "测试书");
-        assert_eq!(restored.chapters.len(), 1);
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn legacy_file_survives_failed_conversion() {
-        let dir = temp_dir("legacy-bad");
-        let legacy = dir.join("b3.json");
-        fs::write(&legacy, "{ 不是 JSON").unwrap();
-
-        let target = dir.join("b3");
-        assert!(convert_legacy_book(&target, &legacy, None).is_err());
-        assert!(legacy.is_file(), "迁移失败必须保留旧文件");
-        assert!(!target.exists());
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -2551,47 +1910,4 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn legacy_bookmarks_split_per_book() {
-        let dir = temp_dir("legacy-marks");
-        let books = dir.join("books");
-        fs::create_dir_all(books.join("b1")).unwrap();
-        // b2 还是旧布局（它自己的迁移没成功）：书签这次不能迁，旧文件必须留着
-        fs::write(books.join("b2.json"), "{}").unwrap();
-        let legacy = dir.join("readerx.bookmarks.json");
-        fs::write(
-            &legacy,
-            serde_json::json!({
-                // 书已迁到目录布局：书签跟着落进它的目录
-                "b1": [{ "id": "bm-1" }, { "id": "bm-2" }],
-                // 书还没迁过来：这次跳过
-                "b2": [{ "id": "bm-3" }],
-                // 空列表不必建文件
-                "b3": [],
-                // 书早就删了：孤儿书签丢弃，不算「没迁完」
-                "b9": [{ "id": "bm-9" }],
-            })
-            .to_string(),
-        )
-        .unwrap();
-
-        let (migrated, pending) = split_legacy_bookmarks(&legacy, &books).unwrap();
-        assert_eq!((migrated, pending), (1, 1));
-        let marks = read_bookmarks_file(&books.join("b1").join(BOOKMARKS_FILE)).unwrap();
-        assert_eq!(marks.len(), 2);
-        assert!(!books.join("b9").exists(), "孤儿书签不该造出书籍目录");
-
-        // 第二本书迁好后重跑一次：这次全部迁完，可以归档旧文件
-        fs::create_dir_all(books.join("b2")).unwrap();
-        let (migrated, pending) = split_legacy_bookmarks(&legacy, &books).unwrap();
-        assert_eq!((migrated, pending), (2, 0));
-        assert_eq!(
-            read_bookmarks_file(&books.join("b2").join(BOOKMARKS_FILE))
-                .unwrap()
-                .len(),
-            1
-        );
-
-        let _ = fs::remove_dir_all(&dir);
-    }
 }
