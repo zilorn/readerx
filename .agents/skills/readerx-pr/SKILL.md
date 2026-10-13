@@ -1,6 +1,6 @@
 ---
 name: readerx-pr
-description: 按 pr: 请求把 issue 或需求做成 Pull Request：读取需求、创建 worktree 完成开发与验证、推送分支并按模板创建 PR；普通本地开发、版本发布与未要求 PR 的任务不触发。
+description: "按 pr: 请求把 issue 或需求做成 Pull Request：读取需求、创建 worktree 完成开发与验证、推送分支并按模板创建 PR；普通本地开发、版本发布与未要求 PR 的任务不触发。"
 ---
 
 # ReaderX PR 交付
@@ -21,6 +21,12 @@ description: 按 pr: 请求把 issue 或需求做成 Pull Request：读取需求
 - 在 worktree 内完成改动，运行适用检查：`pnpm exec tsc --noEmit`、`pnpm run i18n:check`、`pnpm build`；涉及 Rust 时在 src-tauri 运行对应 crate 的检查。
 - PR 自动检查、手动签名 arm64 APK、签名 Secrets 与产物验收见 [CI 与构建](../../../docs/ci.md)；CI 文件变动检查 Actions 语法，产物收集脚本变动运行 `node --test scripts/collect-artifacts.test.mjs`。
 - 同步更新受影响的文档、中英文文案与项目 skill；只提交本次任务文件，提交信息用中文 `feat/fix/docs: 内容`，改动较大时按完整改动分批提交。
+
+## 图片与截图交付
+
+- 禁止把二进制图片（如 PNG、JPEG、GIF、WebP、AVIF、ICO）加入任何 Git 提交；不通过改扩展名、Base64 编码或 Git LFS 绕过此限制。
+- 将验证截图保存在仓库外或被忽略的临时目录，通过 PR 附件或仓库外的可访问链接交付。无法上传时在 PR 中说明截图交付限制，并保留实际验证结果与复现步骤；不为满足模板的截图要求把图片提交进仓库。
+- 每次提交前检查 `git diff --cached --name-only` 与 `git diff --cached --numstat`，结合文件内容识别二进制图片并取消暂存；推送前用 `git log --numstat --format=oneline <base>..HEAD` 检查本次分支的每个新增提交，避免只检查最终文件树而遗漏已提交后又删除的图片。
 
 ## 推送与创建 PR
 
