@@ -3,7 +3,8 @@ use super::*;
 use rusqlite::{params, Connection, OptionalExtension};
 
 pub(super) const DATABASE: &str = "books.sqlite3";
-const DATABASE_VERSION: i64 = 2;
+pub(super) mod translation;
+const DATABASE_VERSION: i64 = 3;
 // 首次导入旧目录时仍需归档既有缓存；新指纹存于 chapters 行。
 const LEGACY_DIGEST_FILE: &str = "digest.json";
 
@@ -69,6 +70,15 @@ pub(super) fn connect(root: &Path) -> Result<Connection, String> {
         )
         .map_err(sql)?;
         tx.commit().map_err(sql)?;
+    }
+    if version < 3 {
+        db.execute_batch("BEGIN;
+            CREATE TABLE translations(book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE ON UPDATE CASCADE,
+                cid TEXT NOT NULL, key TEXT NOT NULL, text TEXT NOT NULL, PRIMARY KEY(book_id,cid,key));
+            CREATE TABLE translation_books(book_id TEXT PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE ON UPDATE CASCADE, state TEXT NOT NULL);
+            CREATE TABLE translation_epochs(book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE ON UPDATE CASCADE,
+                cid TEXT NOT NULL, epoch INTEGER NOT NULL, PRIMARY KEY(book_id,cid));
+            PRAGMA user_version=3; COMMIT;").map_err(sql)?;
     }
     Ok(db)
 }
@@ -338,6 +348,13 @@ pub(super) fn save_chapter(
     position: usize,
     chapter: &LocalBookChapter,
 ) -> Result<(), String> {
+    let old: Option<(String,String)> = db.query_row("SELECT cid,digest FROM chapters WHERE book_id=?1 AND position=?2",
+        params![id,position as i64], |r| Ok((r.get(0)?,r.get(1)?))).optional().map_err(sql)?;
+    if let Some((cid,digest)) = old {
+        if cid != chapter.cid || digest != encode(&chapter_digest(chapter))? {
+            translation::invalidate_translations(db,id,&cid)?;
+        }
+    }
     db.execute("INSERT INTO chapters(book_id,position,cid,chapter,head,digest,assets) VALUES(?1,?2,?3,?4,?5,?6,?7)
         ON CONFLICT(book_id,position) DO UPDATE SET cid=excluded.cid,chapter=excluded.chapter,head=excluded.head,digest=excluded.digest,assets=excluded.assets",
         params![id, position as i64, chapter.cid, encode(chapter)?, encode(&head(chapter)?)?, encode(&chapter_digest(chapter))?, encode(&chapter_asset_locals(chapter))?]).map_err(sql)?;
@@ -347,11 +364,12 @@ pub(super) fn put(db: &Connection, book: &LocalBook) -> Result<(), String> {
     let mut next = BookDetail::from_book(book);
     next.progress = detail(db, &book.id)?.and_then(|d| d.progress);
     save_detail(db, &next)?;
-    db.execute("DELETE FROM chapters WHERE book_id=?1", [&book.id])
-        .map_err(sql)?;
     for (position, chapter) in book.chapters.iter().enumerate() {
         save_chapter(db, &book.id, position, chapter)?;
     }
+    let removed = strings(db,"SELECT cid FROM chapters WHERE book_id=?1 AND position>=?2",params![book.id,book.chapters.len() as i64])?;
+    for cid in removed { translation::invalidate_translations(db,&book.id,&cid)?; }
+    db.execute("DELETE FROM chapters WHERE book_id=?1 AND position>=?2",params![book.id,book.chapters.len() as i64]).map_err(sql)?;
     Ok(())
 }
 pub(super) fn records(db: &Connection, table: &str, id: &str) -> Result<Vec<Value>, String> {

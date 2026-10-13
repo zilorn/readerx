@@ -41,3 +41,14 @@
 - reading_time.rs 串行累加并原子替换状态；contributions 是来源累计值，顶层 days/books 是显示视图。同步对同一来源、同一统计项取最大值，再对来源求和，不能把远端累计值再次作为增量相加。
 - sync/reading_time.rs 发布不可变累计快照，身份含来源、统计项与累计值；保留乱序、重复、第三设备转发和旧备份重发的幂等性。来源标识 reading-time-origin 留在设备本地，书籍删除/进度重置不清历史统计。
 - 旧 v1 数据迁移一次后保存；浏览器开发模式仅内存保存。统计改动检查恢复后新增来源与同步落地重载，不只检查本机计数。
+
+
+## 智能翻译数据
+
+SQLite user_version=3 新增 translations、translation_books、translation_epochs；版本 1/2 自动迁移。
+readerx_translations_get/put/invalidate 只读写本地书库，不调用同步钩子。每批追加最多 15 条，
+事务中校验正文摘要 + 重取版本租约，编辑/重新获取后拒绝旧响应回填。全局配置 readerx.translation
+含接口凭据，不进入日志/备份；备份快照清空三张翻译表并 VACUUM，确保没有空闲页凭据。
+实现 src-tauri/src/book_store/sqlite/translation.rs；约束见
+[智能翻译](../../../../docs/smart-translation.md)。运行 book_store / data_transfer Rust 回归及前端
+`node scripts/translation-test.mjs`；无需修改同步协议。

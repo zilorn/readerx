@@ -1,3 +1,4 @@
+import { translation } from "./en/translation";
 /**
  * English dictionary (target language).
  *
@@ -33,6 +34,7 @@ import { backup } from "./en/backup";
 import type { MessageKey } from "./zh-CN";
 
 export const en: Record<MessageKey, string> & Record<string, string> = {
+  ...translation,
   ...common,
   ...shell,
   ...settings,

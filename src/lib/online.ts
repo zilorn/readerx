@@ -13,6 +13,7 @@
  *   先到先得（只有「重新加载本章」能覆盖已有正文），目录覆盖更新推进「目录世代」让按旧
  *   下标在飞的回写作废。
  */
+import { invalidateTranslations } from "./translation/engine";
 import { createSignal } from "solid-js";
 import {
   callRemoteSource,
@@ -1755,6 +1756,7 @@ export async function reloadChapterContent(
   };
 
   try {
+    await invalidateTranslations(bookId, chapter.cid);
     const results = await fetchRemoteChapterContents(sourceId, toBookItem(book), [
       { chapterName: chapter.title, chapterUrl: chapter.url },
     ]);

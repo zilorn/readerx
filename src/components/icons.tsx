@@ -680,3 +680,7 @@ export function AnnotationIcon(p: SvgIconProps) {
     </Icon>
   );
 }
+
+export function TranslateIcon(props: { size?: number; class?: string }) {
+  return <svg width={props.size ?? 20} height={props.size ?? 20} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" class={props.class} aria-hidden="true"><path d="M3 5h12M9 3v2M5 5c1 5 4 8 9 10M13 5c-1 5-4 8-9 10M14 21l4-10 4 10M15.5 17h5" /></svg>;
+}

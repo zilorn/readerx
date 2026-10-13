@@ -44,7 +44,7 @@ function textLengthOf(node: Node): number {
 
 /** 元素子树内的文本总长（含书签/朗读等嵌套 span 的文本） */
 export function elementTextLength(el: Element): number {
-  return textLengthOf(el);
+  return el.hasAttribute("data-source-length") ? Number(el.getAttribute("data-source-length")) : textLengthOf(el);
 }
 
 /**
@@ -56,7 +56,8 @@ export function charNodeAtOffset(
   el: Element,
   offset: number,
 ): { node: Text; offset: number } | null {
-  const target = Math.max(0, Math.floor(offset));
+  const sourceLength = elementTextLength(el);
+  const target = Math.max(0, Math.floor(el.hasAttribute("data-source-length") && sourceLength > 0 ? offset * textLengthOf(el) / sourceLength : offset));
   let acc = 0;
   const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
   let cur: Node | null;
@@ -80,13 +81,14 @@ export function charOffsetInElement(
   node: Node,
   offset: number,
 ): number {
+  const map = (value: number) => el.hasAttribute("data-source-length") && textLengthOf(el) > 0 ? Math.floor(value * elementTextLength(el) / textLengthOf(el)) : value;
   if (node === el) {
     let acc = 0;
     const children = node.childNodes;
     for (let i = 0; i < offset && i < children.length; i++) {
       acc += textLengthOf(children[i]);
     }
-    return acc;
+    return map(acc);
   }
   const isText = node.nodeType === Node.TEXT_NODE;
   let acc = 0;
@@ -94,16 +96,16 @@ export function charOffsetInElement(
   let cur: Node | null;
   while ((cur = walker.nextNode())) {
     if (isText) {
-      if (cur === node) return acc + offset;
+      if (cur === node) return map(acc + offset);
       acc += (cur as Text).data.length;
     } else if (el.contains(node) && node.contains(cur)) {
       // 边界落在某个中间元素内：其前内容计数，再按子节点下标取边界前文本
-      return acc + offsetInNodeChildren(node, offset);
+      return map(acc + offsetInNodeChildren(node, offset));
     } else {
       acc += (cur as Text).data.length;
     }
   }
-  return acc + (isText ? offset : 0);
+  return map(acc + (isText ? offset : 0));
 }
 
 /** node 是中间元素时：其前 offset 个子节点包含的文本总长 */

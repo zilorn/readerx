@@ -50,7 +50,7 @@ export interface ChapterInlineImage extends ChapterImageRef {
  *   与 p 的段内锚点渲染口径一致，只是居中独占一行。
  */
 export type ChapterBlock =
-  | { kind: "p"; text: string; imgs?: ChapterInlineImage[] }
+  | { kind: "p"; text: string; imgs?: ChapterInlineImage[]; translation?: { text: string; only: boolean } }
   | { kind: "h"; level: number; text: string }
   | ({ kind: "img" } & ChapterImageRef);
 

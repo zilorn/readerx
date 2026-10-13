@@ -15,6 +15,7 @@ description: 修改 ReaderX 本地书库存储、稳定身份与旧数据迁移�
 | 备份与恢复 | src-tauri/src/data_transfer/；src/lib/backup.ts、src/pages/DataBackup.tsx | [备份约束](references/contracts.md#备份与恢复)、[备份文档](../../../docs/backup.md) |
 | 同步协议、合并与传输 | src-tauri/crates/readerx-sync/ | [同步约束](references/contracts.md#局域网同步)、[同步文档](../../../docs/sync.md) 对应章节 |
 | 同步 App 接线与落库 | src-tauri/src/sync/；src/lib/sync.ts、src/components/SyncProgress.tsx | 同步文档 App 接线、实时落库与停止部分 |
+| 智能翻译缓存、局部配置、术语表与失效 | src-tauri/src/book_store/sqlite/translation.rs、commands.rs；src/lib/translation/ | [智能翻译数据](references/contracts.md#智能翻译数据) |
 | 阅读时长 | src/lib/readingTime.ts、src/pages/ReadingTime.tsx；src-tauri/src/reading_time.rs、sync/reading_time.rs | [计时约束](references/contracts.md#阅读时长)、[阅读时长文档](../../../docs/reading-time.md) |
 
 持久化由 Rust 承担；readerx-sync 保持独立于 Tauri/GUI，宿主书库读写与界面事件留在 App 接线层。修改书源存储或登录态时同时使用 [书源引擎技能](../readerx-source-engine/SKILL.md)。日志沿用 [日志文档](../../../docs/logging.md)。

@@ -46,6 +46,7 @@ import {
   ChevronDownIcon,
   CopyIcon,
   ReplaceIcon,
+  TranslateIcon,
   SpeakerIcon,
 } from "./icons";
 
@@ -83,6 +84,7 @@ export interface SelectionMenuProps {
   /** 阅读上下文标识（书 + 章节）：变化即收起保留态，换章后原选区无从对应 */
   contextKey?: () => string;
   onCopy: (text: string) => void;
+  onTranslate?: (target: SelectionTarget) => void;
   /** 注释：统一传入原生/自定义选区，按段落聚合。 */
   onAnnotation?: (target: SelectionTarget) => void;
   /** 原生选区模式：书签（页面内部换算偏移） */
@@ -540,6 +542,12 @@ export function SelectionMenu(props: SelectionMenuProps) {
                   <AnnotationIcon size={17} />
                   <span>{t("readerChrome.selection.annotation")}</span>
                 </button>
+              </Show>
+              <Show when={props.onTranslate}>
+                <button class="flex h-9 flex-none items-center gap-1.5 rounded-xl px-3 text-[13px] text-text-2 active:bg-surface-2" onClick={() => {
+                  const selected = target(); if (!selected) return;
+                  props.onTranslate?.(selected); hide();
+                }}><TranslateIcon size={17} /><span>{t("translation.translate")}</span></button>
               </Show>
               <Show when={props.onReplace}>
                 <div class="mx-1 h-5 w-px flex-none bg-border" />

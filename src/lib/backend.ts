@@ -788,3 +788,51 @@ export async function extractMobi(bytes: Uint8Array): Promise<MobiContent> {
     throw new Error(t(key));
   }
 }
+
+// 智能翻译：按章读取、按批追加；失败直接交给业务层处理，不能降级成可写空缓存。
+const memoryTranslationBooks = new Map<string, import("./translation/types").TranslationBookState>();
+const memoryTranslations = new Map<string, import("./translation/types").TranslationCache>();
+const translationEpochs = new Map<string, number>();
+export async function readTranslationBook(bookId: string): Promise<import("./translation/types").TranslationBookState> {
+  if (!tauri) return structuredClone(memoryTranslationBooks.get(bookId) ?? { overrides: {}, terms: [] });
+  return invoke("readerx_translations_get", { bookId, cid: null });
+}
+export async function putTranslationBook(bookId: string, value: import("./translation/types").TranslationBookState): Promise<void> {
+  if (!tauri) { memoryTranslationBooks.set(bookId, structuredClone(value)); return; }
+  await invoke("readerx_translations_put", { bookId, cid: null, revision: "", value });
+}
+function memoryTranslationRevision(bookId: string, cid: string): string {
+  const chapter = memoryBooks.get(bookId)?.chapters.find(ch => ch.cid === cid);
+  if (!chapter) throw new Error(t("translation.stale"));
+  return JSON.stringify([translationEpochs.get(`${bookId}|${cid}`) ?? 0, chapter.paragraphs, chapter.blocks]);
+}
+export async function readTranslationCache(bookId: string, cid: string): Promise<import("./translation/types").TranslationCache> {
+  if (tauri) return invoke("readerx_translations_get", { bookId, cid });
+  const key = `${bookId}|${cid}`;
+  const revision = memoryTranslationRevision(bookId, cid);
+  let cache = memoryTranslations.get(key);
+  if (cache?.revision !== revision) { cache = { revision, entries: {} }; memoryTranslations.set(key, cache); }
+  return structuredClone(cache!);
+}
+export async function putTranslationCache(bookId: string, cid: string, revision: string, value: Record<string,string>): Promise<boolean> {
+  if (tauri) return invoke("readerx_translations_put", { bookId, cid, revision, value });
+  if (memoryTranslationRevision(bookId, cid) !== revision) return false;
+  const cache = await readTranslationCache(bookId, cid);
+  memoryTranslations.set(`${bookId}|${cid}`, { revision, entries: { ...cache.entries, ...value } });
+  return true;
+}
+export async function invalidateRemoteTranslations(bookId: string, cid: string): Promise<void> {
+  if (tauri) { await invoke("readerx_translations_invalidate", { bookId, cid }); return; }
+  const key = `${bookId}|${cid}`;
+  translationEpochs.set(key, (translationEpochs.get(key) ?? 0) + 1);
+  memoryTranslations.delete(key);
+}
+
+export async function readTranslationSettings<T>(): Promise<T | null> {
+  if (!tauri) return (memoryState.get("readerx.translation") as T) ?? null;
+  return invoke<T | null>("readerx_state_get", { key: "readerx.translation" });
+}
+export async function putTranslationSettings(value: unknown): Promise<void> {
+  if (!tauri) { memoryState.set("readerx.translation",value); return; }
+  await invoke("readerx_state_set", { key: "readerx.translation", value });
+}

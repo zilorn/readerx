@@ -52,3 +52,14 @@
 ## 跨功能验证
 
 前端检查按 SKILL.md 执行。按改动选择实际交互：窄屏/宽屏与单双页切换后的阅读位置、重复文本及跨段书签、含图或纯图章节、目录覆盖期间取消下载、两种听书引擎暂停与取消跟读。统计计时和同步/恢复后的缓存重载使用 [数据技能](../../readerx-data/SKILL.md)，无需为无关功能重复全量实测。
+
+
+## 智能翻译
+
+入口为 src/lib/translation/（配置、提供商协议、采样/指纹、任务调度、阅读接线）、
+src/pages/TranslationSettings.tsx 与 BookTranslationSettings / TranslationPopup / GlossarySheet。
+全局总开关默认关闭，按书覆盖项沿用未修改的全局项。译文是显示副本，保持原文单元编号；
+pagination.ts 的译文片段按源字符跨度映射进度，测量与渲染字号一致；重排前撤去翻页动画，
+沿用阅读位置恢复通道。折叠浮窗复用选区定位规则，翻页/换章收起。完整约束见
+[智能翻译](../../../../docs/smart-translation.md)。回归：`node scripts/translation-test.mjs`，
+追加既有阅读位置、翻页、选区、注释和章节编辑检查；真实服务与原生平台单独实测。

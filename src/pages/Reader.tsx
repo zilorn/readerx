@@ -1,3 +1,7 @@
+import { createReaderTranslation } from "../lib/translation/reader";
+import { selectionTranslation } from "../lib/translation/engine";
+import { TranslationPopup, type TranslationPopupTarget } from "../components/TranslationPopup";
+import { TranslateIcon } from "../components/icons";
 import { ChapterEditSheet } from "../components/ChapterEditSheet";
 import { AnnotationSheet, type AnnotationTarget } from "../components/AnnotationSheet";
 import { AnnotationIcon } from "../components/icons";
@@ -852,6 +856,8 @@ function ParagraphContent(props: {
 /** 分页视图里的单个片段 */
 function PagedFragment(props: {
   fragment: PageFragment;
+  folded?: boolean;
+  onTranslate?: (unit: number, element: HTMLElement) => void;
   annotated: boolean;
   onAnnotation: (unit: number) => void;
   layout: PaginateLayout;
@@ -868,17 +874,20 @@ function PagedFragment(props: {
       <p
         data-u={fragment.unit}
         data-c={fragment.cstart}
-        style={asCss(paragraphStyle(layout, fragment.indent, fragment.end))}
+        data-source-length={fragment.sourceLength}
+        data-translation={fragment.translated ? "true" : undefined}
+        style={{ ...asCss(paragraphStyle(layout, fragment.indent, fragment.end)), position: "relative", ...(fragment.translated ? { "font-size": `${layout.fontSize * (fragment.translationOnly ? 1 : 0.88)}px`, color: "var(--text-2)", "margin-bottom": fragment.end ? `${layout.fontSize * layout.paraSpacingEm}px` : "0" } : {}) }}
       >
         <ParagraphContent
           text={fragment.text}
           imgs={fragment.imgs}
-          cstart={fragment.cstart}
+          cstart={fragment.translated ? 0 : fragment.cstart}
           unit={fragment.unit}
-          onAnnotation={fragment.end && props.annotated ? () => props.onAnnotation(fragment.unit) : undefined}
-          marks={props.marks}
+          onAnnotation={!fragment.translated && fragment.end && props.annotated ? () => props.onAnnotation(fragment.unit) : undefined}
+          marks={fragment.translated ? [] : props.marks}
           onImageRetry={props.onImageRetry}
         />
+        <Show when={props.folded && !fragment.translated && fragment.indent}><button data-reader-ui type="button" class="absolute -right-4 top-0 grid size-4 place-items-center text-accent" aria-label={t("translation.view")} onPointerDown={event => { event.preventDefault(); event.stopPropagation(); }} onClick={event => { event.stopPropagation(); props.onTranslate?.(fragment.unit, event.currentTarget.closest("p")!); }}><TranslateIcon size={14} /></button></Show>
       </p>
     );
   }
@@ -906,6 +915,8 @@ function PagedFragment(props: {
 function ScrollBlock(props: {
   layout: PaginateLayout;
   block: ReaderBlock;
+  folded?: boolean;
+  onTranslate?: (unit: number, element: HTMLElement) => void;
   annotated: boolean;
   onAnnotation: (unit: number) => void;
   unit: number;
@@ -916,7 +927,8 @@ function ScrollBlock(props: {
   const layout = props.layout;
   if (block.kind === "p") {
     return (
-      <p data-u={props.unit} data-c={0} style={asCss(paragraphStyle(layout, true, true))}>
+      <>
+      <Show when={!block.translation?.only}><p data-u={props.unit} data-c={0} style={{ ...asCss(paragraphStyle(layout, true, true)), position: "relative" }}>
         <ParagraphContent
           text={block.text}
           imgs={block.imgs}
@@ -927,7 +939,10 @@ function ScrollBlock(props: {
           natural
           onImageRetry={props.onImageRetry}
         />
-      </p>
+        <Show when={props.folded}><button data-reader-ui type="button" class="absolute -right-4 top-0 grid size-4 place-items-center text-accent" aria-label={t("translation.view")} onPointerDown={event => { event.preventDefault(); event.stopPropagation(); }} onClick={event => { event.stopPropagation(); props.onTranslate?.(props.unit, event.currentTarget.closest("p")!); }}><TranslateIcon size={14} /></button></Show>
+      </p></Show>
+      <Show when={block.translation}>{translation => <p data-u={props.unit} data-c={0} data-source-length={block.text.length} data-translation="true" style={{ ...asCss(paragraphStyle(layout, true, true)), "font-size": `${layout.fontSize * (translation().only ? 1 : 0.88)}px`, color: "var(--text-2)", "margin-bottom": `${layout.fontSize * layout.paraSpacingEm}px` }}><ParagraphContent text={translation().text} imgs={translation().only ? block.imgs?.map(img => ({ ...img, at: block.text.length ? Math.floor(img.at * translation().text.length / block.text.length) : 0 })) : undefined} cstart={0} unit={props.unit} marks={[]} natural onImageRetry={props.onImageRetry} /></p>}</Show>
+      </>
     );
   }
   if (block.kind === "h") {
@@ -1041,6 +1056,8 @@ export default function ReaderPage() {
    * 章节正文是惰性转换的（读到哪一章才转哪一章），打开大书不会先卡一下。
    */
   const book = createMemo(() => withHanBook(withDisplayReplacements(rawBook(), bookId())));
+  const [translationTarget, setTranslationTarget] = createSignal<TranslationPopupTarget | null>(null);
+  let resumeTranslation = false;
   const [chapterIdx, setChapterIdx] = createSignal(0);
   const [pageIdx, setPageIdx] = createSignal(0);
   const [menuOpen, setMenuOpen] = createSignal(false);
@@ -1704,6 +1721,42 @@ export default function ReaderPage() {
     const ch = rawAnnotationChapter();
     return ch ? chapterUnits(ch) : [];
   });
+  function preserveTranslationPosition(): void {
+    const ch = chapter();
+    if (!ch || resumeTarget()?.cid === ch.cid) return;
+    resetPageTurn();
+    const pos = captureReadingPos();
+    if (!pos) return;
+    const first = paged()?.pages[pageIdx()]?.find(fragment => fragment.kind === "p" || fragment.kind === "h");
+    resumeTranslation = isPaged() ? first?.kind === "p" && !!first.translated : !!scrollRef?.querySelector(`[data-translation][data-u="${unitAtGlobalOffset(mirror(),pos.char)?.unit ?? -1}"]`);
+    setResumeTarget({ cid: ch.cid, char: pos.char });
+  }
+  const translation = createReaderTranslation({
+    bookId, book: rawBook, chapter: rawAnnotationChapter,
+    beforeChange: preserveTranslationPosition,
+    startUnit: () => unitAtGlobalOffset(mirror(), viewOffset())?.unit ?? 0,
+  });
+  const displayUnits = createMemo<ReaderBlock[]>(() => units().map((unit,index) => {
+    const text = translation.translations()[index];
+    if (unit.kind !== "p" || !text || !translation.settings().enabled || translation.settings().mode === "original" || (translation.settings().folded && translation.settings().mode === "bilingual")) return unit;
+    return { ...unit, translation: { text, only: translation.settings().mode === "translated" } };
+  }));
+  // 设置切换在正文 DOM 更新前锁定原文坐标；异步到达沿用相同恢复通道。
+  createComputed(on(() => [chapterCid(), displayUnits()] as const, ([cid], previous) => { if (previous && cid === previous[0]) preserveTranslationPosition(); }));
+  createEffect(on([chapterCid, pageIdx], () => setTranslationTarget(null)));
+  function openParagraphTranslation(unit: number, element: HTMLElement): void {
+    const raw = rawAnnotationUnits()[unit]; if (raw?.kind !== "p") return;
+    const root = areaRef; if (!root) return;
+    const box = element.getBoundingClientRect(), bounds = root.getBoundingClientRect();
+    setTranslationTarget({ text: raw.text, x: box.left - bounds.left + box.width / 2, geometry: { top: box.top - bounds.top, bottom: box.bottom - bounds.top, firstLineTop: box.top - bounds.top, pageTop: readerTopPad(), lineHeight: layout()!.fontSize * 1.95, handles: [] } });
+  }
+  function translateSelection(target: SelectionTarget): void {
+    const root = areaRef; if (!root) return;
+    const rect = target.range.getBoundingClientRect(), bounds = root.getBoundingClientRect();
+    const geometry = target.custom?.avoid ?? { top: rect.top - bounds.top, bottom: rect.bottom - bounds.top, firstLineTop: rect.top - bounds.top, pageTop: readerTopPad(), lineHeight: layout()!.fontSize * 1.95, handles: [] };
+    setTranslationTarget({ text: target.text, x: rect.left - bounds.left + rect.width / 2, geometry });
+    clearVisibleSelection();
+  }
   const annotationUnits = createMemo(() => {
     const map = new Map<number, string>();
     const raw = rawAnnotationUnits();
@@ -1793,7 +1846,7 @@ export default function ReaderPage() {
   } | null = null;
   const pageSource = createMemo<LocalBookChapter | null>(() => {
     const ch = chapter();
-    const u = units();
+    const u = displayUnits();
     if (!ch) {
       pageSourceCache = null;
       return null;
@@ -1815,6 +1868,7 @@ export default function ReaderPage() {
         blocks.push({
           kind: "p",
           text: block.text,
+          ...(block.translation ? { translation: block.translation } : {}),
           ...(block.imgs?.length ? { imgs: block.imgs } : {}),
         });
         paragraphs.push(block.text);
@@ -1833,7 +1887,7 @@ export default function ReaderPage() {
     }
     // 需要结构化块的场合：标题块、整行图，以及**带段内插图的段落**（退回 paragraphs 会丢图）
     const hasStructured = blocks.some(
-      (b) => b.kind !== "p" || (b.kind === "p" && !!b.imgs?.length),
+      (b) => b.kind !== "p" || (b.kind === "p" && (!!b.imgs?.length || !!b.translation)),
     );
     const chapterView: LocalBookChapter = {
       cid: ch.cid,
@@ -2667,12 +2721,13 @@ export default function ReaderPage() {
     const out = new Array<number>(pg.pages.length);
     let cursor = 0;
     for (let pi = 0; pi < pg.pages.length; pi++) {
-      out[pi] = cursor;
+      const first = pg.pages[pi].find(f => f.kind === "p" || f.kind === "h");
+      out[pi] = first && (first.kind === "p" || first.kind === "h") ? (mir.unitStart[first.unit] ?? 0) + first.cstart : cursor;
       for (const f of pg.pages[pi]) {
         if (f.kind !== "p" && f.kind !== "h") continue;
         const base = mir.unitStart[f.unit] ?? -1;
         if (base < 0) continue;
-        const end = base + f.cstart + f.text.length;
+        const end = base + f.cstart + (f.kind === "p" ? f.sourceLength ?? f.text.length : f.text.length);
         if (end > cursor) cursor = end;
       }
     }
@@ -2692,7 +2747,7 @@ export default function ReaderPage() {
         if (f.kind !== "p" && f.kind !== "h") continue;
         const base = mir.unitStart[f.unit] ?? -1;
         if (base < 0) continue;
-        const end = base + f.cstart + f.text.length;
+        const end = base + f.cstart + (f.kind === "p" ? f.sourceLength ?? f.text.length : f.text.length);
         if (end > cursor) cursor = end;
       }
       spans.push([start, cursor]);
@@ -2824,7 +2879,7 @@ export default function ReaderPage() {
       }
       return false;
     }
-    const el = root.querySelector<HTMLElement>(`[data-u="${pos.unit}"]`);
+    const el = (resumeTranslation ? root.querySelector<HTMLElement>(`[data-translation][data-u="${pos.unit}"]`) : null) ?? root.querySelector<HTMLElement>(`[data-u="${pos.unit}"]`);
     if (!el) return false;
     const base = mir.unitStart[pos.unit] ?? -1;
     if (base < 0) return false;
@@ -2873,7 +2928,8 @@ export default function ReaderPage() {
     if (isPaged()) {
       const pg = paged();
       if (!pg) return; // 分页重排中，等下一个 tick
-      const page = pageIndexOfChar(pg.pages, mir, target.char);
+      const page = pageIndexOfChar(pg.pages, mir, target.char, resumeTranslation);
+      resumeTranslation = false;
       const next = snapPage(page < 0 ? pg.pages.length - 1 : page);
       // 先落到目标页、再解除隐藏：正文首次可见即是恢复位置，不闪章节开头
       if (next !== pageIdx()) setPageIdx(next);
@@ -2882,12 +2938,13 @@ export default function ReaderPage() {
     }
     const root = scrollRef;
     if (!root) return; // 正文尚未挂载，等下一个 tick
-    if (scrollToCharOffset(root, target.char)) setResumeTarget(null);
+    if (scrollToCharOffset(root, target.char)) { resumeTranslation = false; setResumeTarget(null); }
   }
 
   /** 滚动模式滚动事件：帧节流后按视口顶部文本提交位置；
       用户手动滚动（浏览器原生 scroll 事件）同时解除跟读跟随 */
   function onScrollBody(e: Event): void {
+    setTranslationTarget(null);
     if (scrollFrame) return;
     const userScrolled = e.isTrusted === true;
     scrollFrame = requestAnimationFrame(() => {
@@ -3802,7 +3859,7 @@ export default function ReaderPage() {
       if (pointerType === "touch" || pointerType === "mouse" || pointerType === "pen") {
         const target = e.target as HTMLElement | null;
         const dataEl = target?.closest?.("[data-u]");
-        if (dataEl) {
+        if (dataEl && !dataEl.hasAttribute("data-translation")) {
           const downChar = mirrorOffsetAtPoint(e.clientX, e.clientY);
           selPress = {
             x: e.clientX,
@@ -4360,7 +4417,7 @@ export default function ReaderPage() {
   let flashRaf = 0;
 
   /** 字符偏移落在哪一页（分页结果片段均带 unit/cstart） */
-  function pageIndexOfChar(pages: PageFragment[][], mir: TextMirror, g: number): number {
+  function pageIndexOfChar(pages: PageFragment[][], mir: TextMirror, g: number, preferTranslated = false): number {
     for (let pi = 0; pi < pages.length; pi++) {
       const page = pages[pi];
       for (const f of page) {
@@ -4368,10 +4425,11 @@ export default function ReaderPage() {
         const base = mir.unitStart[f.unit] ?? -1;
         if (base < 0) continue;
         const s = base + f.cstart;
-        if (g >= s && g < s + f.text.length) return pi;
+        if (preferTranslated && (f.kind !== "p" || !f.translated)) continue;
+        if (g >= s && g < s + (f.kind === "p" ? f.sourceLength ?? f.text.length : f.text.length)) return pi;
       }
     }
-    return -1;
+    return preferTranslated ? pageIndexOfChar(pages, mir, g) : -1;
   }
 
   function jumpToBookmark(bookmark: Bookmark): void {
@@ -4511,6 +4569,8 @@ export default function ReaderPage() {
                     {(fragment) => (
                       <PagedFragment
                         fragment={fragment}
+                        folded={fragment.kind === "p" && translation.canFold((rawAnnotationUnits()[fragment.unit] as { text?: string })?.text ?? "")}
+                        onTranslate={openParagraphTranslation}
                         annotated={fragment.kind === "p" && annotationUnits().has(fragment.unit)}
                         onAnnotation={(unit) => openAnnotation(unit, false)}
                         layout={layout()!}
@@ -4670,11 +4730,13 @@ export default function ReaderPage() {
                           : t("reader.authorSuffix", { author: book()!.author })
                       }
                     />
-                    <For each={units().slice(0, scrollShown())}>
+                    <For each={displayUnits().slice(0, scrollShown())}>
                       {(block, idx) => (
                         <ScrollBlock
                           layout={layout()!}
                           block={block}
+                          folded={block.kind === "p" && translation.canFold((rawAnnotationUnits()[idx()] as { text?: string })?.text ?? "")}
+                          onTranslate={openParagraphTranslation}
                           annotated={annotationUnits().has(idx())}
                           onAnnotation={(unit) => openAnnotation(unit, false)}
                           unit={idx()}
@@ -5450,6 +5512,8 @@ export default function ReaderPage() {
               }}
             />
 
+            <Show when={translationTarget()} keyed>{target => <TranslationPopup target={target} root={() => areaRef} insets={{ top: Math.max(safeInsets().top + 10,14), bottom: Math.max(safeInsets().bottom + 8,14) }} onClose={() => setTranslationTarget(null)} translate={signal => selectionTranslation(rawBook()!,rawAnnotationChapter()!,target.text,signal)} />}</Show>
+            <Show when={translation.failure()}><button data-reader-ui class="absolute bottom-10 left-1/2 z-40 -translate-x-1/2 rounded-xl border border-border bg-surface px-4 py-2 text-[12px] text-accent shadow-md" onClick={() => translation.retry()}>{t("translation.failed")} · {t("translation.retry")}</button></Show>
             {/* 长按/拖选文本后的自定义菜单（搜索模式下让位给命中高亮） */}
             <SelectionMenu
               rootRef={() => isPaged() ? pageAnimRef : areaRef}
@@ -5468,11 +5532,12 @@ export default function ReaderPage() {
                 !tocOpen() &&
                 !bmPanelOpen() &&
                 !bookSearchOpen() &&
-                !annotationTarget() && !chapterEditTarget() &&
+                !annotationTarget() && !chapterEditTarget() && !translationTarget() &&
                 !replaceSheetOpen() &&
                 !readerSettingsOpen() &&
                 !searchSession()
               }
+              onTranslate={translation.settings().enabled ? translateSelection : undefined}
               onCopy={(text) => void handleCopyText(text)}
               onBookmark={(range) => handleBookmarkRange(range)}
               onSpeak={(range) => handleSpeakFromRange(range)}
@@ -5530,6 +5595,7 @@ export default function ReaderPage() {
                 }} />}
             </Show>
             <ReaderSettingsSheet
+              bookId={bookId()}
               open={readerSettingsOpen()}
               autoPageEnabled={autoPageEnabled()}
               onAutoPageChange={toggleAutoPage}

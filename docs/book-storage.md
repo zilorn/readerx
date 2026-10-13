@@ -75,3 +75,11 @@ command 访问，数据形状和同步协议不变。
 `cargo test -p readerx --lib data_transfer`、`cargo test -p readerx --test sync_bridge` 和
 `cargo test -p readerx-sync`。PR 的 Test book storage and data compatibility 工作流执行这些检查。
 跨 Android / Windows 的原生构建和实际双设备同步仍需对应环境验证。
+
+
+## 智能翻译（数据库版本 3）
+
+新增按书外键级联的译文、局部配置/术语表、章节重取版本表。正文写入在同一事务内失效
+已改动章节的缓存；翻译批次使用正文摘要和版本租约拒绝过期响应，不修改原文或同步协议。
+翻译数据和凭据不进备份，快照清理后 VACUUM；完整字段和生命周期见
+[智能翻译](smart-translation.md)。
