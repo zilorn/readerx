@@ -74,6 +74,17 @@ assert.notEqual(
   ]),
   key,
 );
+assert.equal(
+  core.translationKey("text", defaults, [
+    { source: "A", target: "B", note: "n" },
+    { source: "C", target: "D", note: "" },
+  ]),
+  core.translationKey("text", defaults, [
+    { note: "", target: "D", source: "C" },
+    { note: "n", target: "B", source: "A" },
+  ]),
+  "术语表经 Rust JSON 字段排序或清单重排后，重启仍命中缓存",
+);
 const chapters = Array.from({ length: 100 }, (_, i) => ({
   paragraphs: Array.from({ length: 50 }, (_, j) =>
     `Chapter ${i}, paragraph ${j}. `.repeat(100),

@@ -20,7 +20,10 @@ export function translationKey(
     settings.model,
     settings.effort,
     fingerprint(settings.apiKey),
-    terms,
+    // Rust JSON 对象字段会排序，改用固定字段顺序；术语清单排列也不改变语义。
+    terms
+      .map((term) => [term.source, term.target, term.note])
+      .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)),
   ]);
 }
 export function chapterText(chapter: LocalBookChapter): string[] {
