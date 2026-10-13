@@ -3,6 +3,7 @@ use super::*;
 use rusqlite::{params, Connection, OptionalExtension};
 
 pub(super) const DATABASE: &str = "books.sqlite3";
+#[path = "sqlite/translation.rs"]
 pub(super) mod translation;
 const DATABASE_VERSION: i64 = 3;
 // 首次导入旧目录时仍需归档既有缓存；新指纹存于 chapters 行。
