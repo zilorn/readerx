@@ -56,8 +56,15 @@ export function createReaderTranslation(props: {
   );
   // 在线阅读窗口陆续到达正文时，只观察最多后续五章；不会扫描整本。
   const futureKey = createMemo(() => {
-    const count = settings().pretranslate;
-    if (!count) return "";
+    const config = settings();
+    const count = config.pretranslate;
+    if (
+      !config.enabled ||
+      config.mode === "original" ||
+      (config.folded && config.mode === "bilingual") ||
+      !count
+    )
+      return "";
     const book = props.book();
     const ci =
       book?.chapters.findIndex((ch) => ch.cid === props.chapter()?.cid) ?? -1;
@@ -92,9 +99,8 @@ export function createReaderTranslation(props: {
           !book ||
           !config.enabled ||
           config.mode === "original" ||
-          (config.folded &&
-            config.mode === "bilingual" &&
-            config.pretranslate === 0)
+          // 折叠模式只在打开段落浮窗时翻译，忽略已保存的预翻译章数。
+          (config.folded && config.mode === "bilingual")
         )
           return;
         const id = props.bookId();
@@ -108,34 +114,33 @@ export function createReaderTranslation(props: {
               (a < start ? a + units.length : a) -
               (b < start ? b + units.length : b),
           );
-          if (!(config.folded && config.mode === "bilingual"))
-            await translatedTexts(
-              id,
-              chapter,
-              order.flatMap((index) =>
-                units[index].kind === "p"
-                  ? [(units[index] as { text: string }).text]
-                  : [],
-              ),
-              config,
-              terms,
-              controller.signal,
-              (entries) => {
-                const map: Record<number, string> = {};
-                units.forEach((unit, index) => {
-                  if (unit.kind !== "p") return;
-                  const text =
-                    entries[translationKey(unit.text, config, terms)];
-                  if (text) map[index] = text;
-                });
-                if (
-                  JSON.stringify(map) !== JSON.stringify(untrack(translations))
-                ) {
-                  untrack(props.beforeChange);
-                  setTranslations(map);
-                }
-              },
-            );
+          await translatedTexts(
+            id,
+            chapter,
+            order.flatMap((index) =>
+              units[index].kind === "p"
+                ? [(units[index] as { text: string }).text]
+                : [],
+            ),
+            config,
+            terms,
+            controller.signal,
+            (entries) => {
+              const map: Record<number, string> = {};
+              units.forEach((unit, index) => {
+                if (unit.kind !== "p") return;
+                const text =
+                  entries[translationKey(unit.text, config, terms)];
+                if (text) map[index] = text;
+              });
+              if (
+                JSON.stringify(map) !== JSON.stringify(untrack(translations))
+              ) {
+                untrack(props.beforeChange);
+                setTranslations(map);
+              }
+            },
+          );
           // 只翻译当前章及随后 1~5 章，不遍历剩余全书。未取回正文的在线章等待现有阅读窗口。
           const ci = book.chapters.findIndex((ch) => ch.cid === chapter.cid);
           for (let offset = 1; offset <= config.pretranslate; offset++) {

@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import ts from "typescript";
-import { createSignal } from "solid-js";
+import * as solid from "../node_modules/solid-js/dist/solid.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
+const { createRoot, createSignal } = solid;
 function load(path, imports) {
   return readFile(
     new URL(`../src/lib/translation/${path}.ts`, import.meta.url),
@@ -242,22 +243,27 @@ let active = 0,
   peak = 0,
   calls = 0,
   batchSizes = [];
+let termCalls = 0;
+const [readerSettings, setReaderSettings] = createSignal(defaults);
+const [bookState, setBookState] = createSignal({ terms: [] });
 const settings = {
-  effectiveTranslationSettings: () => defaults,
+  effectiveTranslationSettings: readerSettings,
   ensureTranslationBook: async () => {},
   ensureTranslationSettings: async () => {},
-  translationBookState: () => ({ terms: [] }),
-  saveTranslationBook: async () => {},
+  translationBookState: bookState,
+  saveTranslationBook: async (_, patch) =>
+    setBookState((old) => ({ ...old, ...patch })),
+};
+const pagination = {
+  chapterUnits: (chapter) =>
+    chapter.paragraphs.map((text) => ({ kind: "p", text })),
 };
 const engine = await load("engine", {
   "solid-js": { createSignal },
   "../i18n": i18n,
   "./core": core,
   "./settings": settings,
-  "../pagination": {
-    chapterUnits: (chapter) =>
-      chapter.paragraphs.map((text) => ({ kind: "p", text })),
-  },
+  "../pagination": pagination,
   "../backend": {
     readTranslationCache: async () => {
       reads++;
@@ -276,7 +282,10 @@ const engine = await load("engine", {
     },
   },
   "./provider": {
-    generateTerms: async () => [],
+    generateTerms: async () => {
+      termCalls++;
+      return [];
+    },
     translateBatch: async (texts, _, __, signal) => {
       calls++;
       active++;
@@ -352,6 +361,129 @@ const cancelled = engine.translatedTexts(
 setTimeout(() => controller.abort(), 1);
 await assert.rejects(cancelled);
 assert.equal(disk.size, 0, "取消后不落地请求结果");
+
+// 使用真实 Solid 浏览器响应式运行时与翻译引擎，验证阅读调度和弹窗共用的按需入口。
+const failures = [];
+const readerModule = await load("reader", {
+  "solid-js": solid,
+  "../pagination": pagination,
+  "./engine": engine,
+  "./settings": settings,
+  "./core": core,
+  "../errorReport": { reportFailure: (...args) => failures.push(args) },
+  "../i18n": i18n,
+});
+const tick = () => new Promise((resolve) => setImmediate(resolve));
+async function until(predicate) {
+  const deadline = Date.now() + 2000;
+  while (!predicate()) {
+    assert.ok(Date.now() < deadline, "翻译调度应在限定时间内完成");
+    await tick();
+  }
+}
+const readingBook = {
+  id: "folded-book",
+  chapters: Array.from({ length: 7 }, (_, index) => ({
+    cid: `folded-${index}`,
+    paragraphs: [
+      `First paragraph of chapter ${index}.`,
+      `Second paragraph of chapter ${index}.`,
+    ],
+  })),
+};
+for (const pretranslate of [0, 1, 5]) {
+  disk.clear();
+  setBookState({ terms: [] });
+  setReaderSettings({
+    ...defaults, folded: true, pretranslate, glossary: true,
+    provider: "openai", model: "test",
+  });
+  const baseline = { calls, termCalls, reads, writes };
+  const [book, setBook] = createSignal(readingBook);
+  const [chapterIndex, setChapterIndex] = createSignal(0);
+  let reader, dispose;
+  createRoot((cleanup) => {
+    dispose = cleanup;
+    reader = readerModule.createReaderTranslation({
+      bookId: () => readingBook.id,
+      book,
+      chapter: () => book().chapters[chapterIndex()],
+      startUnit: () => 0,
+      beforeChange: () => assert.fail("折叠浮窗不能触发正文重排"),
+    });
+  });
+  try {
+    await tick();
+    assert.equal(termCalls, baseline.termCalls, "展开前不自动生成术语表");
+    assert.equal(reader.busy(), false);
+    setChapterIndex(1);
+    setBook((old) => ({
+      ...old,
+      chapters: old.chapters.map((ch, index) => index === 2
+        ? { ...ch, paragraphs: [...ch.paragraphs, "Newly downloaded online paragraph."] }
+        : ch),
+    }));
+    reader.retry();
+    await engine.invalidateTranslations(readingBook.id, book().chapters[1].cid);
+    await tick();
+    assert.deepEqual({ calls, termCalls, reads, writes }, baseline,
+      `折叠模式忽略预翻译 ${pretranslate} 章，换章/在线正文到达/重试/缓存失效均不请求`);
+    const current = book().chapters[1];
+    const selected = current.paragraphs[0];
+    assert.equal(reader.canFold(selected), true);
+    assert.equal(await engine.selectionTranslation(book(), current, selected, signal), "译:" + selected);
+    assert.equal(calls, baseline.calls + 1, "展开只翻译选中段落");
+    assert.equal(batchSizes.at(-1), 1);
+    assert.equal(termCalls, baseline.termCalls + 1, "首次展开才生成所需术语表");
+    await tick();
+    assert.equal(calls, baseline.calls + 1, "术语表更新后仍不触发后台翻译");
+    await engine.selectionTranslation(book(), current, selected, signal);
+    assert.equal(calls, baseline.calls + 1, "再次展开复用缓存");
+    assert.deepEqual(reader.translations(), {});
+    assert.equal(reader.failure(), "");
+  } finally {
+    dispose();
+  }
+}
+
+// 折叠开关只约束双语模式；展开内嵌译文或切到仅译文仍沿用已保存的预翻译配置。
+disk.clear();
+setReaderSettings({ ...defaults, folded: true, pretranslate: 1 });
+let reader, dispose;
+createRoot((cleanup) => {
+  dispose = cleanup;
+  reader = readerModule.createReaderTranslation({
+    bookId: () => readingBook.id,
+    book: () => readingBook,
+    chapter: () => readingBook.chapters[0],
+    startUnit: () => 0,
+    beforeChange: () => {},
+  });
+});
+try {
+  await tick();
+  for (const mode of ["bilingual", "translated"]) {
+    disk.clear();
+    const before = calls;
+    setReaderSettings({ ...defaults, mode, folded: mode === "translated", pretranslate: 1 });
+    await until(() => !reader.busy());
+    assert.equal(calls, before + 2, "当前章与后续一章正常翻译");
+    assert.equal(Object.keys(reader.translations()).length, 2);
+  }
+  disk.clear();
+  const before = calls;
+  setReaderSettings({ ...defaults, pretranslate: 5 });
+  await until(() => calls > before);
+  setReaderSettings({ ...defaults, folded: true, pretranslate: 5 });
+  await until(() => active === 0);
+  assert.equal(calls, before + 1, "切回折叠模式取消在飞任务，不继续预翻译");
+  assert.equal(disk.size, 0, "已取消的自动翻译不回填缓存");
+  assert.equal(reader.busy(), false);
+  assert.deepEqual(reader.translations(), {});
+  assert.deepEqual(failures, []);
+} finally {
+  dispose();
+}
 console.log(
-  "translation regression passed: cache, leases, cancellation, batches, concurrency, protocols, response validation, secret-safe failures, sampling",
+  "translation regression passed: cache, leases, cancellation, batches, concurrency, protocols, response validation, secret-safe failures, sampling, folded on-demand translation and pre-translation isolation",
 );

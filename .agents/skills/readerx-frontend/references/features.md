@@ -60,6 +60,8 @@
 src/pages/TranslationSettings.tsx 与 BookTranslationSettings / TranslationPopup / GlossarySheet。
 全局总开关默认关闭，按书覆盖项沿用未修改的全局项。译文是显示副本，保持原文单元编号；
 pagination.ts 的译文片段按源字符跨度映射进度，测量与渲染字号一致；重排前撤去翻页动画，
-沿用阅读位置恢复通道。折叠浮窗复用选区定位规则，翻页/换章收起。完整约束见
+沿用阅读位置恢复通道。双语折叠模式仅在展开浮窗时翻译单段，忽略预翻译章数，
+不提前生成术语表；切回内嵌双语或仅译文后恢复已保存的预翻译配置。
+折叠浮窗复用选区定位规则，翻页/换章收起。完整约束见
 [智能翻译](../../../../docs/smart-translation.md)。回归：`node scripts/translation-test.mjs`，
 追加既有阅读位置、翻页、选区、注释和章节编辑检查；真实服务与原生平台单独实测。
