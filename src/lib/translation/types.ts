@@ -40,6 +40,13 @@ export interface TranslationCache {
   revision: string;
   entries: Record<string, string>;
 }
+export interface TranslationSource {
+  source: string;
+  kind: "paragraph" | "selection";
+}
+export interface TranslationWriteEntry extends TranslationSource {
+  text: string;
+}
 export interface ParagraphTranslation {
   text: string;
   only: boolean;

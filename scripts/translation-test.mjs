@@ -32,6 +32,7 @@ const core = await load("core", {
   "@noble/hashes/sha2.js": { sha256 },
   "@noble/hashes/utils.js": { bytesToHex },
 });
+const sources = await load("sources", {});
 const defaults = { ...types.DEFAULT_TRANSLATION_SETTINGS, enabled: true };
 assert.equal(
   core.foreignBook([
@@ -263,6 +264,7 @@ const engine = await load("engine", {
   "../i18n": i18n,
   "./core": core,
   "./settings": settings,
+  "./sources": sources,
   "../pagination": pagination,
   "../backend": {
     readTranslationCache: async () => {
@@ -273,12 +275,15 @@ const engine = await load("engine", {
     putTranslationCache: async (_, __, expected, entries) => {
       writes++;
       if (stale || revision !== expected) return false;
-      Object.entries(entries).forEach(([key, text]) => disk.set(key, text));
+      for (const entry of Object.values(entries)) {
+        assert.equal(typeof entry.source, "string");
+        assert.ok(["paragraph", "selection"].includes(entry.kind));
+      }
+      Object.entries(entries).forEach(([key, entry]) => disk.set(key, entry.text));
       return true;
     },
     invalidateRemoteTranslations: async () => {
       revision = "2";
-      disk.clear();
     },
   },
   "./provider": {
@@ -303,6 +308,7 @@ const engine = await load("engine", {
 });
 const chapter = { cid: "c", paragraphs: [] };
 const texts = Array.from({ length: 46 }, (_, i) => `foreign ${i}`);
+chapter.paragraphs = texts;
 let batches = 0;
 await engine.translatedTexts(
   "b",
@@ -341,10 +347,11 @@ await assert.rejects(
 assert.equal(calls, before, "读失败不得当作空缓存请求或覆盖");
 failRead = false;
 await engine.invalidateTranslations("b", "c");
-assert.equal(disk.size, 0);
+assert.equal(disk.size, 46, "重取只推进租约，保留原文未变的译文");
+disk.clear();
 stale = true;
 await assert.rejects(
-  engine.translatedTexts("b", chapter, ["changed"], defaults, [], signal),
+  engine.translatedTexts("b", { ...chapter, paragraphs: ["changed"] }, ["changed"], defaults, [], signal),
   /stale/,
 );
 assert.equal(disk.size, 0);
@@ -361,6 +368,11 @@ const cancelled = engine.translatedTexts(
 setTimeout(() => controller.abort(), 1);
 await assert.rejects(cancelled);
 assert.equal(disk.size, 0, "取消后不落地请求结果");
+const beforeUnmatched = writes;
+const unmatchedText = "Display replacement absent from the original chapter";
+const unmatched = await engine.translatedTexts("b", chapter, [unmatchedText], defaults, [], signal);
+assert.equal(unmatched[core.translationKey(unmatchedText, defaults, [])], "译:" + unmatchedText);
+assert.equal(writes, beforeUnmatched, "无法匹配原文的显示选区可翻译但不写入原文缓存");
 
 // 使用真实 Solid 浏览器响应式运行时与翻译引擎，验证阅读调度和弹窗共用的按需入口。
 const failures = [];

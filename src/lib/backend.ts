@@ -10,6 +10,8 @@ import { reportFailure } from "./errorReport";
 import { openExternal } from "./external";
 import { t } from "./i18n";
 import { createLogger } from "./logger";
+import { createTranslationSources } from "./translation/sources";
+import type { TranslationWriteEntry } from "./translation/types";
 import type {
   BookImageFile,
   BookImageInfo,
@@ -123,7 +125,9 @@ export async function getRemoteBook(id: string): Promise<LocalBook | null> {
 
 export async function saveRemoteBook(book: LocalBook): Promise<void> {
   if (!tauri) {
-    memoryBooks.set(book.id, book);
+    const previous = memoryBooks.get(book.id)?.chapters ?? [];
+    memoryBooks.set(book.id, structuredClone(book));
+    reconcileMemoryBookTranslations(book.id, previous);
     return;
   }
   book.id = await invoke<string>("readerx_book_put", { book });
@@ -142,15 +146,17 @@ export async function saveRemoteBookChapters(
   if (!tauri) {
     const book = memoryBooks.get(bookId);
     if (book) {
+      const previous = structuredClone(book.chapters);
       const chapters = updates.map((update) => {
         const matches = book.chapters.filter((item) => item.cid === update.chapter.cid);
         if (matches.length !== 1 || !update.chapter.cid) throw new Error("章节目录已变化");
         return matches[0];
       });
       updates.forEach((update, index) => {
-        chapters[index].paragraphs = update.chapter.paragraphs;
-        chapters[index].blocks = update.chapter.blocks;
+        chapters[index].paragraphs = structuredClone(update.chapter.paragraphs);
+        chapters[index].blocks = structuredClone(update.chapter.blocks);
       });
+      reconcileMemoryBookTranslations(bookId, previous);
     }
     return;
   }
@@ -159,7 +165,10 @@ export async function saveRemoteBookChapters(
 
 export async function deleteRemoteBook(id: string): Promise<void> {
   if (!tauri) {
+    const previous = memoryBooks.get(id)?.chapters ?? [];
     memoryBooks.delete(id);
+    reconcileMemoryBookTranslations(id, previous);
+    memoryTranslationBooks.delete(id);
     memoryBookmarks.delete(id);
     memoryAnnotations.delete(id);
     return;
@@ -791,8 +800,30 @@ export async function extractMobi(bytes: Uint8Array): Promise<MobiContent> {
 
 // 智能翻译：按章读取、按批追加；失败直接交给业务层处理，不能降级成可写空缓存。
 const memoryTranslationBooks = new Map<string, import("./translation/types").TranslationBookState>();
-const memoryTranslations = new Map<string, import("./translation/types").TranslationCache>();
+const memoryTranslations = new Map<string, { revision: string; entries: Record<string, TranslationWriteEntry> }>();
 const translationEpochs = new Map<string, number>();
+function reconcileMemoryBookTranslations(bookId: string, previous: LocalBookChapter[]): void {
+  const current = memoryBooks.get(bookId)?.chapters ?? [];
+  for (const cid of new Set([...previous, ...current].map((chapter) => chapter.cid))) {
+    const before = previous.find((chapter) => chapter.cid === cid);
+    const after = current.find((chapter) => chapter.cid === cid);
+    if (JSON.stringify([before?.paragraphs, before?.blocks]) !== JSON.stringify([after?.paragraphs, after?.blocks])) {
+      const key = `${bookId}|${cid}`;
+      translationEpochs.set(key, (translationEpochs.get(key) ?? 0) + 1);
+      pruneMemoryTranslations(bookId, cid);
+    }
+  }
+}
+function pruneMemoryTranslations(bookId: string, cid: string): void {
+  const key = `${bookId}|${cid}`;
+  const chapter = memoryBooks.get(bookId)?.chapters.find((chapter) => chapter.cid === cid);
+  if (!chapter) { memoryTranslations.delete(key); return; }
+  const cache = memoryTranslations.get(key);
+  if (!cache) return;
+  const sources = createTranslationSources(chapter);
+  cache.entries = Object.fromEntries(Object.entries(cache.entries).filter(([, entry]) => sources.matches(entry)));
+  cache.revision = memoryTranslationRevision(bookId, cid);
+}
 export async function readTranslationBook(bookId: string): Promise<import("./translation/types").TranslationBookState> {
   if (!tauri) return structuredClone(memoryTranslationBooks.get(bookId) ?? { overrides: {}, terms: [] });
   return invoke("readerx_translations_get", { bookId, cid: null });
@@ -810,22 +841,26 @@ export async function readTranslationCache(bookId: string, cid: string): Promise
   if (tauri) return invoke("readerx_translations_get", { bookId, cid });
   const key = `${bookId}|${cid}`;
   const revision = memoryTranslationRevision(bookId, cid);
-  let cache = memoryTranslations.get(key);
-  if (cache?.revision !== revision) { cache = { revision, entries: {} }; memoryTranslations.set(key, cache); }
-  return structuredClone(cache!);
+  pruneMemoryTranslations(bookId, cid);
+  const cache = memoryTranslations.get(key);
+  return { revision, entries: Object.fromEntries(Object.entries(cache?.entries ?? {}).map(([key, entry]) => [key, entry.text])) };
 }
-export async function putTranslationCache(bookId: string, cid: string, revision: string, value: Record<string,string>): Promise<boolean> {
+export async function putTranslationCache(bookId: string, cid: string, revision: string, value: Record<string,TranslationWriteEntry>): Promise<boolean> {
   if (tauri) return invoke("readerx_translations_put", { bookId, cid, revision, value });
   if (memoryTranslationRevision(bookId, cid) !== revision) return false;
-  const cache = await readTranslationCache(bookId, cid);
-  memoryTranslations.set(`${bookId}|${cid}`, { revision, entries: { ...cache.entries, ...value } });
+  const chapter = memoryBooks.get(bookId)!.chapters.find((chapter) => chapter.cid === cid)!;
+  const sources = createTranslationSources(chapter);
+  if (Object.keys(value).length > 15 || Object.values(value).some((entry) => !sources.matches(entry))) return false;
+  const key = `${bookId}|${cid}`;
+  const cache = memoryTranslations.get(key);
+  memoryTranslations.set(key, { revision, entries: { ...cache?.entries, ...structuredClone(value) } });
   return true;
 }
 export async function invalidateRemoteTranslations(bookId: string, cid: string): Promise<void> {
   if (tauri) { await invoke("readerx_translations_invalidate", { bookId, cid }); return; }
   const key = `${bookId}|${cid}`;
   translationEpochs.set(key, (translationEpochs.get(key) ?? 0) + 1);
-  memoryTranslations.delete(key);
+  pruneMemoryTranslations(bookId, cid);
 }
 
 export async function readTranslationSettings<T>(): Promise<T | null> {

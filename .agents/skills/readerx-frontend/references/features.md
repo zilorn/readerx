@@ -64,4 +64,5 @@ pagination.ts 的译文片段按源字符跨度映射进度，测量与渲染字
 不提前生成术语表；切回内嵌双语或仅译文后恢复已保存的预翻译配置。
 折叠浮窗复用选区定位规则，翻页/换章收起。完整约束见
 [智能翻译](../../../../docs/smart-translation.md)。回归：`node scripts/translation-test.mjs`，
+原文匹配与浏览器缓存回归：`node scripts/translation-storage-test.mjs`；SQLite 逐原文清理契约见数据技能。
 追加既有阅读位置、翻页、选区、注释和章节编辑检查；真实服务与原生平台单独实测。

@@ -22,6 +22,7 @@ import {
   translationBookState,
 } from "./settings";
 import type { GlossaryTerm, TranslationSettings } from "./types";
+import { createTranslationSources } from "./sources";
 import { createSignal } from "solid-js";
 
 const [cacheVersion, setCacheVersion] = createSignal(0);
@@ -121,6 +122,7 @@ export async function translatedTexts(
   signal: AbortSignal,
   onBatch?: (entries: Record<string, string>) => void,
 ): Promise<Record<string, string>> {
+  const sources = createTranslationSources(chapter);
   const cache = await readTranslationCache(bookId, chapter.cid);
   signal.throwIfAborted();
   const out: Record<string, string> = {};
@@ -175,12 +177,18 @@ export async function translatedTexts(
             const result = Object.fromEntries(
               batch.map(([key], index) => [key, texts[index]]),
             );
+            const entries = Object.fromEntries(batch.flatMap(([key, sourceText]) => {
+              const source = sources.source(sourceText);
+              // 显示替换后的选区可能不对应原文：仍显示译文，但不写入原文缓存。
+              return source ? [[key, { ...source, text: result[key] }]] : [];
+            }));
             if (
+              Object.keys(entries).length &&
               !(await putTranslationCache(
                 bookId,
                 chapter.cid,
                 cache.revision,
-                result,
+                entries,
               ))
             )
               throw new Error(t("translation.stale"));

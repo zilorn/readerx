@@ -45,10 +45,14 @@
 
 ## 智能翻译数据
 
-SQLite user_version=3 新增 translations、translation_books、translation_epochs；版本 1/2 自动迁移。
+SQLite user_version=4，translations 保存 source/kind/text，另有 translation_books、translation_epochs；
+版本 1/2 自动迁移，版本 3 仅重建无法回溯原文的旧译文缓存，保留书籍、局部配置和术语表。
 readerx_translations_get/put/invalidate 只读写本地书库，不调用同步钩子。每批追加最多 15 条，
-事务中校验正文摘要 + 重取版本租约，编辑/重新获取后拒绝旧响应回填。全局配置 readerx.translation
+事务中校验正文摘要、版本租约与原文；save_chapter 按稳定 cid 在正文事务内只删原文已变或移除的译文。
+完整段落精确匹配，选区按原文片段匹配；blocks 优先，图片更新、段落/章节重排保留有效缓存。
+重取开始只推进租约，失败/取消/相同正文不清缓存；旧响应拒绝回填，删除章节清理对应 cid。
+全局配置 readerx.translation
 含接口凭据，不进入日志/备份；备份快照清空三张翻译表并 VACUUM，确保没有空闲页凭据。
 实现 src-tauri/src/book_store/sqlite/translation.rs；约束见
 [智能翻译](../../../../docs/smart-translation.md)。运行 book_store / data_transfer Rust 回归及前端
-`node scripts/translation-test.mjs`；无需修改同步协议。
+`node scripts/translation-test.mjs`、`node scripts/translation-storage-test.mjs`；无需修改同步协议。
