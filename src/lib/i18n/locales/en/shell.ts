@@ -27,6 +27,8 @@ export const shell = {
   "shell.sidebar.expand": "Expand sidebar",
   "shell.sidebar.collapse": "Collapse sidebar",
 
+  "shell.window.pageTitle": "ReaderX - {title}",
+  "shell.window.exitFullscreen": "Exit fullscreen",
   "shell.window.minimize": "Minimize",
   "shell.window.maximize": "Maximize",
   "shell.window.restore": "Restore",

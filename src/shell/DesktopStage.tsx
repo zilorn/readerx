@@ -193,6 +193,7 @@ export function DesktopStage(props: DesktopStageProps) {
             >
               <PageBody
                 component={pane.component}
+                pagePath={pane.path}
                 renderChildren={pane.id === currentId()}
                 contentClass={contentClass(pane.path)}
                 onScrollEl={(el) => {

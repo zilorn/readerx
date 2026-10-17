@@ -1,5 +1,6 @@
 import { Show, type JSX } from "solid-js";
 import { ChevronLeftIcon } from "./icons";
+import { registerPageTitle, usesWindowPageTitle } from "../shell/pageTitle";
 import { t } from "../lib/i18n";
 
 interface PageHeaderProps {
@@ -17,32 +18,35 @@ interface PageHeaderProps {
 
 /** 通用页头（吸顶；次级页传入 onBack 显示返回键） */
 export function PageHeader(props: PageHeaderProps) {
+  registerPageTitle(props);
   return (
-    <header class="sticky top-0 z-20 bg-topbar-bg pt-[max(env(safe-area-inset-top),8px)] backdrop-blur-[14px] select-none">
-      <div class="flex items-center justify-between gap-3 px-[18px] pb-0.5 pt-2">
-        <Show when={props.onBack}>
-          <button
-            class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
-            type="button"
-            aria-label={props.backLabel ?? t("common.back")}
-            onClick={props.onBack}
-          >
-            <ChevronLeftIcon />
-          </button>
-        </Show>
-        {/* 标题保持单行；副标题空间不足时换行，避免长说明挤压标题。 */}
-        <div class="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2 gap-y-0.5">
-          <h1 class="max-w-full flex-none truncate text-[22px] font-bold tracking-[0.02em]">
-            {props.title}
-          </h1>
-          {props.subtitle && (
-            <span class="min-w-0 max-w-full break-words text-xs text-text-3">
-              {props.subtitle}
-            </span>
-          )}
+    <header class="sticky top-0 z-20 bg-topbar-bg backdrop-blur-[14px] select-none" style={{ "padding-top": usesWindowPageTitle() ? "0" : "max(env(safe-area-inset-top),8px)" }}>
+      <Show when={!usesWindowPageTitle()}>
+        <div class="flex items-center justify-between gap-3 px-[18px] pb-0.5 pt-2">
+          <Show when={props.onBack}>
+            <button
+              class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
+              type="button"
+              aria-label={props.backLabel ?? t("common.back")}
+              onClick={props.onBack}
+            >
+              <ChevronLeftIcon />
+            </button>
+          </Show>
+          {/* 标题保持单行；副标题空间不足时换行，避免长说明挤压标题。 */}
+          <div class="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2 gap-y-0.5">
+            <h1 class="max-w-full flex-none truncate text-[22px] font-bold tracking-[0.02em]">
+              {props.title}
+            </h1>
+            {props.subtitle && (
+              <span class="min-w-0 max-w-full break-words text-xs text-text-3">
+                {props.subtitle}
+              </span>
+            )}
+          </div>
+          {props.right}
         </div>
-        {props.right}
-      </div>
+      </Show>
       {props.children}
     </header>
   );

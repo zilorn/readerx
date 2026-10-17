@@ -9,11 +9,14 @@ import { Suspense, type Component, type JSX } from "solid-js";
 import { Dynamic } from "solid-js/web";
 import { ScrollArea } from "./ScrollArea";
 import { LoadingScreen } from "./LoadingScreen";
+import { PageTitlePathContext } from "../shell/pageTitle";
 import { t } from "../lib/i18n";
 
 export interface PageBodyProps {
   /** 常驻（保活）页面组件；与 children 互斥 */
   component?: Component;
+  /** 保活页的固定路径；懒加载完成时路由可能已经切走。 */
+  pagePath?: string;
   /** 瞬态页面：路由出口内容 */
   children?: JSX.Element;
   /** 是否渲染路由出口（离场中的层不渲染：出口是共享快照，抢 DOM） */
@@ -34,7 +37,11 @@ export function PageBody(props: PageBodyProps) {
           </div>
         }
       >
-        {props.component ? <Dynamic component={props.component} /> : null}
+        {props.component ? (
+          <PageTitlePathContext.Provider value={props.pagePath}>
+            <Dynamic component={props.component} />
+          </PageTitlePathContext.Provider>
+        ) : null}
         {!props.component && (props.renderChildren ?? true) ? props.children : null}
       </Suspense>
     </ScrollArea>
