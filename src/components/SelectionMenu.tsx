@@ -126,7 +126,7 @@ const COLOR_LABEL_KEYS: Record<BookmarkColor, MessageKey> = {
   purple: "readerChrome.selection.color.purple",
 };
 
-const BAR_H = 46;
+const BAR_H = 58;
 const SIDE = 8;
 /** 抬起后等待 click 派发的兜底时长（ms）：超时仍未派发（手势被系统接管等）就自行解冻对账 */
 const PRESS_FALLBACK_MS = 400;
@@ -484,7 +484,7 @@ export function SelectionMenu(props: SelectionMenuProps) {
               class="flex flex-none items-center px-1.5"
             >
               <button
-                class="flex h-9 flex-none cursor-pointer items-center gap-1.5 rounded-xl px-3 text-[13px] text-text-2 transition-colors active:bg-surface-2"
+                class="flex h-12 min-w-[44px] flex-none cursor-pointer flex-col items-center justify-center gap-0.5 rounded-xl px-2 text-[13px] whitespace-nowrap text-text-2 transition-colors active:bg-surface-2"
                 onClick={() => props.onCopy(current().text)}
               >
                 <CopyIcon size={17} />
@@ -492,7 +492,7 @@ export function SelectionMenu(props: SelectionMenuProps) {
               </button>
               <div class="mx-1 h-5 w-px flex-none bg-border" />
               <button
-                class="flex h-9 flex-none cursor-pointer items-center gap-1.5 rounded-xl px-3 text-[13px] text-text-2 transition-colors active:bg-surface-2"
+                class="flex h-12 min-w-[44px] flex-none cursor-pointer flex-col items-center justify-center gap-0.5 rounded-xl px-2 text-[13px] whitespace-nowrap text-text-2 transition-colors active:bg-surface-2"
                 onClick={() => {
                   releasePin();
                   const c = props.custom?.() ?? null;
@@ -506,7 +506,7 @@ export function SelectionMenu(props: SelectionMenuProps) {
               {/* 书签右侧的伸缩按钮：展开线条与颜色选项 */}
               <Show when={props.onApplyMark}>
                 <button
-                  class="grid h-9 w-6 flex-none cursor-pointer place-items-center rounded-lg text-text-3 transition-[background-color,color,scale] active:scale-[0.92] active:bg-surface-2"
+                  class="grid h-12 w-6 flex-none cursor-pointer place-items-center rounded-lg text-text-3 transition-[background-color,color,scale] active:scale-[0.92] active:bg-surface-2"
                   classList={{ "text-accent": markPanel() }}
                   aria-label={t("readerChrome.selection.markStyle")}
                   aria-expanded={markPanel()}
@@ -519,7 +519,7 @@ export function SelectionMenu(props: SelectionMenuProps) {
               </Show>
               <div class="mx-1 h-5 w-px flex-none bg-border" />
               <button
-                class="flex h-9 flex-none cursor-pointer items-center gap-1.5 rounded-xl px-3 text-[13px] text-text-2 transition-colors active:bg-surface-2"
+                class="flex h-12 min-w-[44px] flex-none cursor-pointer flex-col items-center justify-center gap-0.5 rounded-xl px-2 text-[13px] whitespace-nowrap text-text-2 transition-colors active:bg-surface-2"
                 onClick={() => {
                   releasePin();
                   const c = props.custom?.() ?? null;
@@ -533,7 +533,7 @@ export function SelectionMenu(props: SelectionMenuProps) {
               <Show when={props.onAnnotation}>
                 <div class="mx-1 h-5 w-px flex-none bg-border" />
                 <button
-                  class="flex h-9 flex-none cursor-pointer items-center gap-1.5 rounded-xl px-3 text-[13px] text-text-2 active:bg-surface-2"
+                  class="flex h-12 min-w-[44px] flex-none cursor-pointer flex-col items-center justify-center gap-0.5 rounded-xl px-2 text-[13px] whitespace-nowrap text-text-2 active:bg-surface-2"
                   onClick={() => {
                     const selected = target();
                     if (selected) props.onAnnotation?.(selected);
@@ -544,7 +544,7 @@ export function SelectionMenu(props: SelectionMenuProps) {
                 </button>
               </Show>
               <Show when={props.onTranslate}>
-                <button class="flex h-9 flex-none items-center gap-1.5 rounded-xl px-3 text-[13px] text-text-2 active:bg-surface-2" onClick={() => {
+                <button class="flex h-12 min-w-[44px] flex-none cursor-pointer flex-col items-center justify-center gap-0.5 rounded-xl px-2 text-[13px] whitespace-nowrap text-text-2 active:bg-surface-2" onClick={() => {
                   const selected = target(); if (!selected) return;
                   props.onTranslate?.(selected); hide();
                 }}><TranslateIcon size={17} /><span>{t("translation.translate")}</span></button>
@@ -552,7 +552,7 @@ export function SelectionMenu(props: SelectionMenuProps) {
               <Show when={props.onReplace}>
                 <div class="mx-1 h-5 w-px flex-none bg-border" />
                 <button
-                  class="flex h-9 flex-none cursor-pointer items-center gap-1.5 rounded-xl px-3 text-[13px] text-text-2 transition-colors active:bg-surface-2"
+                  class="flex h-12 min-w-[44px] flex-none cursor-pointer flex-col items-center justify-center gap-0.5 rounded-xl px-2 text-[13px] whitespace-nowrap text-text-2 transition-colors active:bg-surface-2"
                   onClick={() => {
                     const text = current().text.trim();
                     if (!text) return;
