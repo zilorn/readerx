@@ -17,6 +17,7 @@ import { reportFailure } from "../lib/errorReport";
 import { createAndroidBackHandler } from "../lib/androidBack";
 export function GlossarySheet(props: { bookId: string; onClose: () => void }) {
   const [terms, setTerms] = createSignal<GlossaryTerm[]>([]);
+  let glossaryTarget: string | undefined;
   const [ready, setReady] = createSignal(false);
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal("");
@@ -37,7 +38,12 @@ export function GlossarySheet(props: { bookId: string; onClose: () => void }) {
       ensureTranslationBook(props.bookId),
     ])
       .then(() => {
-        setTerms(structuredClone(translationBookState(props.bookId)!.terms));
+        const state = translationBookState(props.bookId)!;
+        setTerms(structuredClone(state.terms));
+        // 草稿沿用条目所属语言；只有新建的空表才使用当前配置。
+        glossaryTarget = state.glossaryTarget ?? (state.terms.length
+          ? undefined
+          : effectiveTranslationSettings(props.bookId).target);
         setReady(true);
       })
       .catch((err) => reportFailure(t("translation.loadFailed"), err));
@@ -48,13 +54,17 @@ export function GlossarySheet(props: { bookId: string; onClose: () => void }) {
     try {
       const book = await ensureLocalBookContent(props.bookId);
       if (!book) return;
+      const settings = effectiveTranslationSettings(props.bookId);
       const result = await bookTerms(
         book,
-        effectiveTranslationSettings(props.bookId),
+        settings,
         controller.signal,
         true,
       );
-      if (!controller.signal.aborted) setTerms(result);
+      if (!controller.signal.aborted) {
+        setTerms(result);
+        glossaryTarget = settings.target;
+      }
     } catch (err) {
       if (!controller.signal.aborted) {
         setError(err instanceof Error ? err.message : t("translation.failed"));
@@ -69,7 +79,7 @@ export function GlossarySheet(props: { bookId: string; onClose: () => void }) {
     try {
       await saveTranslationBook(props.bookId, {
         terms: normalizeTerms(terms()),
-        glossaryTarget: effectiveTranslationSettings(props.bookId).target,
+        glossaryTarget,
       });
       props.onClose();
     } catch (err) {

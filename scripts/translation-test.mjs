@@ -516,17 +516,63 @@ const oldController = new AbortController();
 const firstGlossary = engine.bookTerms(glossaryBook, glossarySettings, oldController.signal);
 await until(() => pendingTerms.length === 1);
 oldController.abort();
+const firstRejected = assert.rejects(firstGlossary, { name: "AbortError" });
 const newController = new AbortController();
 const nextGlossary = engine.bookTerms(glossaryBook, glossarySettings, newController.signal);
 await until(() => pendingTerms.length === 2);
 pendingTerms[0].reject(new DOMException("Aborted", "AbortError"));
-await assert.rejects(firstGlossary, { name: "AbortError" });
+await firstRejected;
 const sharedGlossary = engine.bookTerms(glossaryBook, glossarySettings, signal);
 await tick();
 assert.equal(pendingTerms.length, 2, "旧任务收尾后，新任务仍可共享");
 pendingTerms[1].resolve([{ source: "name", target: "译名", note: "" }]);
 assert.deepEqual(await nextGlossary, await sharedGlossary);
 assert.equal(bookState().glossaryTarget, defaults.target);
+
+// 先加入者或后加入者取消都只影响自己；剩余使用者继续复用同一请求。
+for (const cancelOwner of [true, false]) {
+  setBookState({ terms: [] });
+  pendingTerms.length = 0;
+  const owner = new AbortController(), joiner = new AbortController();
+  const ownerTask = engine.bookTerms(glossaryBook, glossarySettings, owner.signal);
+  await until(() => pendingTerms.length === 1);
+  const joinerTask = engine.bookTerms(glossaryBook, glossarySettings, joiner.signal);
+  await tick();
+  assert.equal(pendingTerms.length, 1);
+  const cancelled = cancelOwner ? ownerTask : joinerTask;
+  const survivor = cancelOwner ? joinerTask : ownerTask;
+  const rejected = assert.rejects(cancelled, { name: "AbortError" });
+  (cancelOwner ? owner : joiner).abort();
+  await rejected;
+  assert.equal(pendingTerms[0].signal.aborted, false, "任一使用者仍在等待时不能停止共享生成");
+  const third = engine.bookTerms(glossaryBook, glossarySettings, signal);
+  await tick();
+  assert.equal(pendingTerms.length, 1, "单个使用者取消后任务仍可加入");
+  const terms = [{ source: "name", target: "译名", note: "" }];
+  pendingTerms[0].resolve(terms);
+  assert.deepEqual(await survivor, terms);
+  assert.deepEqual(await third, terms);
+  assert.deepEqual(bookState().terms, terms);
+}
+
+setBookState({ terms: [] });
+pendingTerms.length = 0;
+const allOwner = new AbortController(), allJoiner = new AbortController();
+const allFirst = engine.bookTerms(glossaryBook, glossarySettings, allOwner.signal);
+const allSecond = engine.bookTerms(glossaryBook, glossarySettings, allJoiner.signal);
+const bothRejected = Promise.all([
+  assert.rejects(allFirst, { name: "AbortError" }),
+  assert.rejects(allSecond, { name: "AbortError" }),
+]);
+await until(() => pendingTerms.length === 1);
+allOwner.abort();
+assert.equal(pendingTerms[0].signal.aborted, false);
+allJoiner.abort();
+await bothRejected;
+assert.equal(pendingTerms[0].signal.aborted, true, "全部取消后停止底层生成");
+pendingTerms[0].resolve([{ source: "late", target: "迟到", note: "" }]);
+await tick();
+assert.deepEqual(bookState(), { terms: [] }, "全部取消后迟到结果不能落库");
 generateTerms = async () => [];
 
 // 真实阅读调度：生成术语表期间换章，新章不需要点击重试。

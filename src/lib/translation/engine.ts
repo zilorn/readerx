@@ -34,10 +34,46 @@ export async function invalidateTranslations(
   await invalidateRemoteTranslations(bookId, cid);
   setCacheVersion((n) => n + 1);
 }
-const glossaryTasks = new Map<
-  string,
-  { task: Promise<GlossaryTerm[]>; signal: AbortSignal }
->();
+interface GlossaryTask {
+  task: Promise<GlossaryTerm[]>;
+  controller: AbortController;
+  consumers: number;
+  settled: boolean;
+}
+const glossaryTasks = new Map<string, GlossaryTask>();
+function joinGlossaryTask(
+  entry: GlossaryTask,
+  signal: AbortSignal,
+): Promise<GlossaryTerm[]> {
+  signal.throwIfAborted();
+  entry.consumers++;
+  return new Promise((resolve, reject) => {
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      signal.removeEventListener("abort", abort);
+      entry.consumers--;
+      // 任务拥有独立的取消控制器，最后一个使用者离开才停止生成。
+      if (!entry.consumers && !entry.settled) entry.controller.abort();
+    };
+    const abort = () => {
+      release();
+      reject(signal.reason);
+    };
+    signal.addEventListener("abort", abort, { once: true });
+    void entry.task.then(
+      (terms) => {
+        release();
+        resolve(terms);
+      },
+      (error) => {
+        release();
+        reject(error);
+      },
+    );
+  });
+}
 export async function bookTerms(
   book: LocalBook,
   settings: TranslationSettings,
@@ -61,14 +97,21 @@ export async function bookTerms(
     fingerprint(settings.apiKey),
   ]);
   const existing = glossaryTasks.get(key);
-  if (existing && !existing.signal.aborted) return existing.task;
-  const task = generateTerms(
-    representativeSamples(book.chapters),
-    settings,
-    signal,
-  )
+  if (existing && !existing.controller.signal.aborted)
+    return joinGlossaryTask(existing, signal);
+  const controller = new AbortController();
+  // 先登记使用者，再开始请求，确保同步取消也能被任务接收。
+  const task = Promise.resolve()
+    .then(() => {
+      controller.signal.throwIfAborted();
+      return generateTerms(
+        representativeSamples(book.chapters),
+        settings,
+        controller.signal,
+      );
+    })
     .then(async (terms) => {
-      signal.throwIfAborted();
+      controller.signal.throwIfAborted();
       await saveTranslationBook(book.id, {
         terms,
         glossaryTarget: settings.target,
@@ -76,11 +119,13 @@ export async function bookTerms(
       return terms;
     })
     .finally(() => {
+      entry.settled = true;
       // 旧章取消后的收尾不能删除新章刚创建的任务。
       if (glossaryTasks.get(key)?.task === task) glossaryTasks.delete(key);
     });
-  glossaryTasks.set(key, { task, signal });
-  return task;
+  const entry: GlossaryTask = { task, controller, consumers: 0, settled: false };
+  glossaryTasks.set(key, entry);
+  return joinGlossaryTask(entry, signal);
 }
 // 共享队列：划词请求与当前章/预翻译使用同一并发预算。
 let active = 0;

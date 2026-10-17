@@ -88,8 +88,21 @@ export function alreadyTarget(text: string, target: string): boolean {
   // 拉丁字母语种大量共用短词（如德语 was）；没有可靠语种检测时交给服务。
   return false;
 }
-export function normalizeTerms(input: unknown): GlossaryTerm[] {
+export function normalizeTerms(input: unknown, strict = false): GlossaryTerm[] {
   if (!Array.isArray(input)) throw new Error("Invalid glossary");
+  // AI 响应必须完整符合结构；手动编辑仍允许丢弃未填完的空行。
+  if (
+    strict &&
+    input.some((term) =>
+      !term ||
+      typeof term.source !== "string" ||
+      !term.source.trim() ||
+      typeof term.target !== "string" ||
+      !term.target.trim() ||
+      (term.note !== undefined && typeof term.note !== "string"),
+    )
+  )
+    throw new Error("Invalid glossary");
   const seen = new Set<string>();
   return input.slice(0, 200).flatMap((term) => {
     if (

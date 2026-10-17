@@ -57,4 +57,5 @@ readerx_translations_get/put/invalidate 只读写本地书库，不调用同步�
 配置含接口凭据，不进入日志/备份；备份快照清空三张翻译表并 VACUUM，确保没有空闲页凭据。
 实现 src-tauri/src/book_store/sqlite/translation.rs；约束见
 [智能翻译](../../../../docs/smart-translation.md)。运行 book_store / data_transfer Rust 回归及前端
-`node scripts/translation-test.mjs`、`node scripts/translation-storage-test.mjs`；无需修改同步协议。
+`node scripts/translation-test.mjs`、`node scripts/translation-storage-test.mjs`、
+`node scripts/glossary-test.mjs`（术语表语言标记、AI 校验与失败重试）；无需修改同步协议。
