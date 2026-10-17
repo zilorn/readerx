@@ -684,3 +684,8 @@ export function AnnotationIcon(p: SvgIconProps) {
 export function TranslateIcon(props: { size?: number; class?: string }) {
   return <svg width={props.size ?? 20} height={props.size ?? 20} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" class={props.class} aria-hidden="true"><path d="M3 5h12M9 3v2M5 5c1 5 4 8 9 10M13 5c-1 5-4 8-9 10M14 21l4-10 4 10M15.5 17h5" /></svg>;
 }
+
+/** 书籍详情 */
+export function BookInfoIcon(p: SvgIconProps) {
+  return <Icon {...p}><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" /><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" /><path d="M12 10v4" /><path d="M12 7h.01" /></Icon>;
+}
