@@ -58,6 +58,12 @@ assert.equal(
 );
 assert.equal(core.alreadyTarget("これは日本語の小説です", "zh-CN"), false);
 assert.equal(core.alreadyTarget("这是已经翻译好的中文正文", "zh-CN"), true);
+for (const text of [
+  "Das war alles, was er wusste.", "Was ist das?", "To jest dobra książka.",
+  "Il a dit: this is the end. Puis il est parti.", "これはカタカナです。",
+]) assert.equal(core.alreadyTarget(text, "en"), false, text);
+assert.equal(core.alreadyTarget("The book is on the table.", "en"), false,
+  "不可靠的拉丁语种判定交给服务，避免漏译");
 const key = core.translationKey("text", defaults, []);
 for (const patch of [
   { target: "ja" },
@@ -245,6 +251,7 @@ let active = 0,
   calls = 0,
   batchSizes = [];
 let termCalls = 0;
+let generateTerms = async () => [];
 const [readerSettings, setReaderSettings] = createSignal(defaults);
 const [bookState, setBookState] = createSignal({ terms: [] });
 const settings = {
@@ -283,13 +290,13 @@ const engine = await load("engine", {
       return true;
     },
     invalidateRemoteTranslations: async () => {
-      revision = "2";
+      revision = String(Number(revision) + 1);
     },
   },
   "./provider": {
-    generateTerms: async () => {
+    generateTerms: async (...args) => {
       termCalls++;
-      return [];
+      return generateTerms(...args);
     },
     translateBatch: async (texts, _, __, signal) => {
       calls++;
@@ -496,6 +503,119 @@ try {
 } finally {
   dispose();
 }
+
+// 旧术语表请求已取消但尚未收尾时，新章必须启动新请求；旧 finally 不得清掉它。
+setBookState({ terms: [] });
+const glossarySettings = { ...defaults, provider: "openai", model: "test", glossary: true };
+const glossaryBook = { id: "glossary-switch", chapters: [chapter] };
+const pendingTerms = [];
+generateTerms = (_samples, _settings, signal) => new Promise((resolve, reject) => {
+  pendingTerms.push({ resolve, reject, signal });
+});
+const oldController = new AbortController();
+const firstGlossary = engine.bookTerms(glossaryBook, glossarySettings, oldController.signal);
+await until(() => pendingTerms.length === 1);
+oldController.abort();
+const newController = new AbortController();
+const nextGlossary = engine.bookTerms(glossaryBook, glossarySettings, newController.signal);
+await until(() => pendingTerms.length === 2);
+pendingTerms[0].reject(new DOMException("Aborted", "AbortError"));
+await assert.rejects(firstGlossary, { name: "AbortError" });
+const sharedGlossary = engine.bookTerms(glossaryBook, glossarySettings, signal);
+await tick();
+assert.equal(pendingTerms.length, 2, "旧任务收尾后，新任务仍可共享");
+pendingTerms[1].resolve([{ source: "name", target: "译名", note: "" }]);
+assert.deepEqual(await nextGlossary, await sharedGlossary);
+assert.equal(bookState().glossaryTarget, defaults.target);
+generateTerms = async () => [];
+
+// 真实阅读调度：生成术语表期间换章，新章不需要点击重试。
+disk.clear();
+setBookState({ terms: [] });
+setReaderSettings(glossarySettings);
+const delayedTerms = [];
+generateTerms = (_samples, _settings, signal) => new Promise((resolve, reject) => {
+  delayedTerms.push({ resolve, reject, signal });
+});
+const [switchIndex, setSwitchIndex] = createSignal(0);
+let switchReader, disposeSwitch;
+createRoot(cleanup => {
+  disposeSwitch = cleanup;
+  switchReader = readerModule.createReaderTranslation({
+    bookId: () => "glossary-switch-reader", book: () => readingBook,
+    chapter: () => readingBook.chapters[switchIndex()], startUnit: () => 0,
+    beforeChange: () => {},
+  });
+});
+try {
+  await until(() => delayedTerms.length === 1);
+  setSwitchIndex(1);
+  await until(() => delayedTerms.length === 2);
+  assert.equal(delayedTerms[0].signal.aborted, true);
+  delayedTerms[0].reject(new DOMException("Aborted", "AbortError"));
+  const before = calls;
+  delayedTerms[1].resolve([]);
+  await until(() => !switchReader.busy());
+  assert.equal(calls, before + 1);
+  assert.equal(Object.keys(switchReader.translations()).length, 2);
+  assert.equal(switchReader.failure(), "");
+  const snapshot = { calls, termCalls, translations: switchReader.translations() };
+  setReaderSettings(old => ({ ...old, readingText: "translated" }));
+  await tick();
+  assert.deepEqual({ calls, termCalls, translations: switchReader.translations() }, snapshot,
+    "听书文本变化不重排或重启显示翻译");
+} finally { disposeSwitch(); generateTerms = async () => []; }
+
+// 手动重译绕过当前配置的缓存，仅请求所选章，不启动后续五章。
+disk.clear();
+setBookState({ terms: [] });
+setReaderSettings({ ...defaults, mode: "original", folded: true, pretranslate: 5 });
+const selectedChapter = readingBook.chapters[0];
+await engine.translatedTexts(readingBook.id, selectedChapter, selectedChapter.paragraphs, readerSettings(), [], signal);
+const beforeRefresh = calls;
+await engine.retranslateChapter(readingBook, selectedChapter, signal);
+assert.equal(calls, beforeRefresh + 1, "已缓存段落仍产生新的重译请求");
+await engine.translatedTexts(readingBook.id, selectedChapter, selectedChapter.paragraphs, readerSettings(), [], signal);
+assert.equal(calls, beforeRefresh + 1, "重译结果可被普通阅读复用");
+const stopRefresh = new AbortController();
+const cancelledRefresh = engine.retranslateChapter(readingBook, selectedChapter, stopRefresh.signal);
+stopRefresh.abort();
+await assert.rejects(cancelledRefresh, { name: "AbortError" });
+setReaderSettings({ ...defaults, enabled: false });
+await assert.rejects(engine.retranslateChapter(readingBook, selectedChapter, signal), /disabled/);
+assert.deepEqual(failures, []);
+
+
+// 旧配置默认原文听书；全局/本书读写分别合并，显示模式与听书文本互不改写。
+let storedGlobal = { ...defaults, mode: "translated" };
+delete storedGlobal.readingText;
+const storedBooks = new Map();
+const persistedSettings = await load("settings", {
+  "solid-js": solid, "./types": types,
+  "../backend": {
+    readTranslationSettings: async () => structuredClone(storedGlobal),
+    putTranslationSettings: async value => { storedGlobal = structuredClone(value); },
+    readTranslationBook: async id => structuredClone(storedBooks.get(id) ?? { overrides: {}, terms: [] }),
+    putTranslationBook: async (id, value) => { storedBooks.set(id, structuredClone(value)); },
+  },
+});
+await persistedSettings.ensureTranslationSettings();
+await persistedSettings.ensureTranslationBook("settings-book");
+assert.equal(persistedSettings.translationSettings().readingText, "original");
+await persistedSettings.setBookTranslationOverride("settings-book", { readingText: "translated" });
+await persistedSettings.saveTranslationSettings({ mode: "bilingual" });
+assert.equal(persistedSettings.translationSettings().readingText, "original");
+assert.equal(persistedSettings.effectiveTranslationSettings("settings-book").readingText, "translated");
+assert.equal(persistedSettings.effectiveTranslationSettings("settings-book").mode, "bilingual");
+await Promise.all([
+  persistedSettings.setBookTranslationOverride("settings-book", { mode: "original" }),
+  persistedSettings.setBookTranslationOverride("settings-book", { glossary: true }),
+  persistedSettings.saveTranslationSettings({ readingText: "translated" }),
+]);
+assert.deepEqual(storedBooks.get("settings-book").overrides, { readingText: "translated", mode: "original", glossary: true });
+assert.equal(persistedSettings.translationSettings().mode, "bilingual");
+assert.equal(persistedSettings.effectiveTranslationSettings("inherited").readingText, "translated");
+
 console.log(
   "translation regression passed: cache, leases, cancellation, batches, concurrency, protocols, response validation, secret-safe failures, sampling, folded on-demand translation and pre-translation isolation",
 );

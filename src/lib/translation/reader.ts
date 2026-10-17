@@ -47,13 +47,14 @@ export function createReaderTranslation(props: {
         .catch((error) => reportFailure(t("translation.loadFailed"), error));
     }),
   );
-  const configKey = createMemo(() =>
-    fingerprint([
-      settings(),
+  const configKey = createMemo(() => {
+    const { readingText: _, ...displaySettings } = settings();
+    return fingerprint([
+      displaySettings,
       translationBookState(props.bookId())?.terms,
       translationBookState(props.bookId())?.glossaryTarget,
-    ]),
-  );
+    ]);
+  });
   // 在线阅读窗口陆续到达正文时，只观察最多后续五章；不会扫描整本。
   const futureKey = createMemo(() => {
     const config = settings();

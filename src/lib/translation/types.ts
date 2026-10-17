@@ -14,6 +14,7 @@ export const TARGET_LANGUAGES = [
 export interface TranslationSettings {
   enabled: boolean;
   mode: TranslationMode;
+  readingText: "original" | "translated";
   folded: boolean;
   target: (typeof TARGET_LANGUAGES)[number];
   provider: TranslationProvider;
@@ -54,6 +55,7 @@ export interface ParagraphTranslation {
 export const DEFAULT_TRANSLATION_SETTINGS: TranslationSettings = {
   enabled: false,
   mode: "bilingual",
+  readingText: "original",
   folded: false,
   target: "zh-CN",
   provider: "google",

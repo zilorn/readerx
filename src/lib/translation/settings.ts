@@ -18,6 +18,8 @@ export function normalizeSettings(
   const out = { ...DEFAULT_TRANSLATION_SETTINGS, ...value };
   if (!["bilingual", "translated", "original"].includes(out.mode))
     out.mode = "bilingual";
+  if (!["original", "translated"].includes(out.readingText))
+    out.readingText = "original";
   if (!["google", "openai", "deepseek", "custom"].includes(out.provider))
     out.provider = "google";
   if (!["chat", "responses"].includes(out.protocol)) out.protocol = "chat";

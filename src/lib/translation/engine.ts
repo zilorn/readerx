@@ -34,7 +34,10 @@ export async function invalidateTranslations(
   await invalidateRemoteTranslations(bookId, cid);
   setCacheVersion((n) => n + 1);
 }
-const glossaryTasks = new Map<string, Promise<GlossaryTerm[]>>();
+const glossaryTasks = new Map<
+  string,
+  { task: Promise<GlossaryTerm[]>; signal: AbortSignal }
+>();
 export async function bookTerms(
   book: LocalBook,
   settings: TranslationSettings,
@@ -43,6 +46,7 @@ export async function bookTerms(
 ): Promise<GlossaryTerm[]> {
   if (!settings.glossary && !regenerate) return [];
   await ensureTranslationBook(book.id);
+  signal.throwIfAborted();
   const state = translationBookState(book.id)!;
   if (!regenerate && state.glossaryTarget === settings.target)
     return state.terms;
@@ -50,11 +54,14 @@ export async function bookTerms(
     book.id,
     settings.target,
     settings.provider,
+    settings.protocol,
     settings.model,
     settings.baseUrl,
+    settings.effort,
+    fingerprint(settings.apiKey),
   ]);
   const existing = glossaryTasks.get(key);
-  if (existing) return existing;
+  if (existing && !existing.signal.aborted) return existing.task;
   const task = generateTerms(
     representativeSamples(book.chapters),
     settings,
@@ -68,8 +75,11 @@ export async function bookTerms(
       });
       return terms;
     })
-    .finally(() => glossaryTasks.delete(key));
-  glossaryTasks.set(key, task);
+    .finally(() => {
+      // 旧章取消后的收尾不能删除新章刚创建的任务。
+      if (glossaryTasks.get(key)?.task === task) glossaryTasks.delete(key);
+    });
+  glossaryTasks.set(key, { task, signal });
   return task;
 }
 // 共享队列：划词请求与当前章/预翻译使用同一并发预算。
@@ -121,6 +131,7 @@ export async function translatedTexts(
   terms: GlossaryTerm[],
   signal: AbortSignal,
   onBatch?: (entries: Record<string, string>) => void,
+  refresh = false,
 ): Promise<Record<string, string>> {
   const sources = createTranslationSources(chapter);
   const cache = await readTranslationCache(bookId, chapter.cid);
@@ -133,7 +144,7 @@ export async function translatedTexts(
   for (const text of texts) {
     if (!text.trim() || alreadyTarget(text, settings.target)) continue;
     const key = translationKey(text, settings, terms);
-    if (cache.entries[key]) out[key] = cache.entries[key];
+    if (!refresh && cache.entries[key]) out[key] = cache.entries[key];
     else {
       const existing = paragraphFlight.get(leaseKey(key));
       if (existing && !existing.signal.aborted)
@@ -252,3 +263,25 @@ export const paragraphTexts = (chapter: LocalBookChapter): string[] =>
   chapterUnits(chapter).flatMap((unit) =>
     unit.kind === "p" ? [unit.text] : [],
   );
+
+/** 手动重译只处理指定章；推进租约阻止旧请求覆盖，新结果仍走原文校验。 */
+export async function retranslateChapter(
+  book: LocalBook,
+  chapter: LocalBookChapter,
+  signal: AbortSignal,
+): Promise<void> {
+  await Promise.all([ensureTranslationSettings(), ensureTranslationBook(book.id)]);
+  signal.throwIfAborted();
+  const settings = effectiveTranslationSettings(book.id);
+  if (!settings.enabled) throw new Error(t("translation.disabled"));
+  const texts = paragraphTexts(chapter);
+  if (!texts.length) throw new Error(t("translation.noSamples"));
+  const terms = await bookTerms(book, settings, signal);
+  signal.throwIfAborted();
+  await invalidateRemoteTranslations(book.id, chapter.cid);
+  try {
+    await translatedTexts(book.id, chapter, texts, settings, terms, signal, undefined, true);
+  } finally {
+    setCacheVersion((n) => n + 1);
+  }
+}

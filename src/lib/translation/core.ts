@@ -85,11 +85,7 @@ export function alreadyTarget(text: string, target: string): boolean {
         0.6
     );
   if (target === "ko") return hangul / letters > 0.6;
-  if (target === "en")
-    return (
-      /\b(the|and|is|was|with|this|that|of|to)\b/i.test(text) &&
-      !/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Hangul}]/u.test(text)
-    );
+  // 拉丁字母语种大量共用短词（如德语 was）；没有可靠语种检测时交给服务。
   return false;
 }
 export function normalizeTerms(input: unknown): GlossaryTerm[] {
