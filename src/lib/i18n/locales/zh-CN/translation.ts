@@ -1,4 +1,10 @@
 export const translation = {
+  "translation.translateMetadata": "翻译书名和简介",
+  "translation.retranslateMetadata": "重新翻译书名和简介",
+  "translation.retryMetadata": "重试翻译书名和简介",
+  "translation.showMetadataOriginal": "显示原文",
+  "translation.showMetadataTranslation": "显示译文",
+  "translation.autoMetadata": "自动翻译发现页书名和简介",
   "translation.bookTitle": "翻译书名",
   "translation.retranslateTitle": "重新翻译书名",
   "translation.bookContent": "翻译书籍正文",

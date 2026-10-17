@@ -25,7 +25,7 @@ export function normalizeSettings(
   if (!["chat", "responses"].includes(out.protocol)) out.protocol = "chat";
   if (!(TARGET_LANGUAGES as readonly string[]).includes(out.target))
     out.target = "zh-CN";
-  for (const key of ["enabled", "folded", "glossary"] as const)
+  for (const key of ["enabled", "autoTranslateMetadata", "folded", "glossary"] as const)
     out[key] = out[key] === true;
   for (const key of ["baseUrl", "model", "apiKey", "effort"] as const)
     out[key] = typeof out[key] === "string" ? out[key] : "";

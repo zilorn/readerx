@@ -127,10 +127,10 @@ export async function bookTerms(
   glossaryTasks.set(key, entry);
   return joinGlossaryTask(entry, signal);
 }
-// 共享队列：划词请求与当前章/预翻译使用同一并发预算。
+// 共享队列：书籍信息、划词请求与当前章/预翻译使用同一并发预算。
 let active = 0;
 const waiters: Array<() => void> = [];
-async function limited<T>(
+export async function limited<T>(
   limit: number,
   signal: AbortSignal,
   task: () => Promise<T>,

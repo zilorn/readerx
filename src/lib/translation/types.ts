@@ -13,6 +13,7 @@ export const TARGET_LANGUAGES = [
 ] as const;
 export interface TranslationSettings {
   enabled: boolean;
+  autoTranslateMetadata: boolean;
   mode: TranslationMode;
   readingText: "original" | "translated";
   folded: boolean;
@@ -38,6 +39,8 @@ export interface TranslationBookState {
   glossaryTarget?: string;
   titleEnabled?: boolean;
   titleTranslation?: { source: string; key: string; text: string };
+  introEnabled?: boolean;
+  introTranslation?: { source: string; key: string; text: string };
 }
 export interface TranslationCache {
   revision: string;
@@ -56,6 +59,7 @@ export interface ParagraphTranslation {
 }
 export const DEFAULT_TRANSLATION_SETTINGS: TranslationSettings = {
   enabled: false,
+  autoTranslateMetadata: false,
   mode: "bilingual",
   readingText: "original",
   folded: false,

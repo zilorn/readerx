@@ -1,5 +1,8 @@
 import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
-import { useNavigate, useSearchParams } from "@solidjs/router";
+import { useLocation, useNavigate, useSearchParams } from "@solidjs/router";
+import { createMetadataTranslation } from "../lib/translation/metadata";
+import { translationSettings } from "../lib/translation/settings";
+import { MetadataTranslationActions } from "../components/MetadataTranslationActions";
 import { PageHeader } from "../components/PageHeader";
 import {
   ChevronRightIcon,
@@ -53,52 +56,61 @@ interface ResultEntry {
 
 /** 搜索结果/发现列表共用行 */
 function ResultRow(props: { entry: ResultEntry; onClick: () => void }) {
-  const { source, item } = props.entry;
+  const location = useLocation();
+  const source = () => props.entry.source;
+  const item = () => props.entry.item;
+  const metadata = createMetadataTranslation(() => ({ title: item().bookName, intro: item().intro }), {
+    active: () => location.pathname === "/discover",
+    automatic: () => translationSettings().autoTranslateMetadata,
+  });
   // 简繁转换只作用于展示副本：书源返回的原始数据（含入架落盘的内容）不变
-  const name = () => hanText(item.bookName);
-  const author = () => (item.author ? hanText(item.author) : "");
-  const latest = () => (item.latest ? hanText(item.latest) : "");
-  const intro = () => (item.intro ? hanText(item.intro) : "");
+  const name = () => hanText(metadata.title());
+  const author = () => hanText(item().author ?? "");
+  const latest = () => hanText(item().latest ?? "");
+  const intro = () => hanText(metadata.intro());
   return (
-    <button
-      class="flex w-full items-center gap-3 px-4 py-2.5 text-left active:bg-surface-2"
-      onClick={props.onClick}
-    >
-      {/* 书源返回 cover 时展示真实封面（经书源会话下载）；无封面回退首字渐变占位 */}
-      <SourceCover
-        variant="row"
-        sourceId={source.id}
-        url={item.cover}
-        referer={item.bookUrl}
-        title={name()}
-      />
-      <span class="flex min-w-0 flex-1 flex-col gap-0.5">
-        <span class="flex items-center gap-1.5">
-          <span class="truncate text-[14.5px] font-medium">{name()}</span>
-        </span>
-        <span class="flex items-center gap-1.5 text-[11px] text-text-3">
-          {author() ? <span class="truncate">{author()}</span> : null}
-          {latest() ? (
-            <>
-              <span aria-hidden="true">·</span>
-              <span class="truncate text-accent">{latest()}</span>
-            </>
-          ) : null}
-        </span>
-        {(intro() || item.updateTime) && (
-          <span class="truncate text-[11px] text-text-3/90">
-            {item.updateTime ? `${item.updateTime} · ` : ""}
-            {intro()}
+    <div>
+      <button
+        class="flex w-full items-center gap-3 px-4 py-2.5 text-left active:bg-surface-2"
+        onClick={props.onClick}
+      >
+        {/* 书源返回 cover 时展示真实封面（经书源会话下载）；无封面回退首字渐变占位 */}
+        <SourceCover
+          variant="row"
+          sourceId={source().id}
+          url={item().cover}
+          referer={item().bookUrl}
+          title={name()}
+        />
+        <span class="flex min-w-0 flex-1 flex-col gap-0.5">
+          <span class="flex items-center gap-1.5">
+            <span class="truncate text-[14.5px] font-medium">{name()}</span>
           </span>
-        )}
-      </span>
-      <span class="flex flex-none flex-col items-end gap-0.5">
-        <i class="not-italic block max-w-[110px] truncate rounded-full bg-surface-2 px-1.5 py-0.5 text-[9.5px] font-semibold text-text-3">
-          {props.entry.candidates ? t("discover.sources.count", { count: new Set(props.entry.candidates.map((c) => c.source.id)).size }) : source.name}
-        </i>
-        <ChevronRightIcon size={16} class="text-text-3/70" />
-      </span>
-    </button>
+          <span class="flex items-center gap-1.5 text-[11px] text-text-3">
+            {author() ? <span class="truncate">{author()}</span> : null}
+            {latest() ? (
+              <>
+                <span aria-hidden="true">·</span>
+                <span class="truncate text-accent">{latest()}</span>
+              </>
+            ) : null}
+          </span>
+          {(intro() || item().updateTime) && (
+            <span class="truncate text-[11px] text-text-3/90">
+              {item().updateTime ? `${item().updateTime} · ` : ""}
+              {intro()}
+            </span>
+          )}
+        </span>
+        <span class="flex flex-none flex-col items-end gap-0.5">
+          <i class="not-italic block max-w-[110px] truncate rounded-full bg-surface-2 px-1.5 py-0.5 text-[9.5px] font-semibold text-text-3">
+            {props.entry.candidates ? t("discover.sources.count", { count: new Set(props.entry.candidates.map((c) => c.source.id)).size }) : source().name}
+          </i>
+          <ChevronRightIcon size={16} class="text-text-3/70" />
+        </span>
+      </button>
+      <div class="px-4"><MetadataTranslationActions translation={metadata} /></div>
+    </div>
   );
 }
 

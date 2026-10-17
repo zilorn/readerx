@@ -56,6 +56,10 @@ readerx_translations_get/put/invalidate 只读写本地书库，不调用同步�
 全局配置 readerx.translation 与本书 overrides 新增独立 readingText（缺省 original），不复用显示 mode。
 书名显示开关 titleEnabled 与 titleTranslation（source/key/text）为 TranslationBookState 可选字段，
 复用 translation_books.state JSON；旧数据缺省关闭，无需迁移，原始书名不变。
+简介译文使用可选 introEnabled/introTranslation（source/key/text），同样按原文与服务配置匹配；
+metadata.ts 成对保存书名/简介结果，失败或取消不覆盖成功缓存，不改原始元数据。
+全局 autoTranslateMetadata 缺省 false，存入既有 readerx.translation；发现页未入架书目只用
+有界会话缓存，不写 translation_books、不创建书库记录、不参与同步或备份。
 manual.ts 的全书手动翻译仅处理已下载文字章，复用原文关联缓存与租约，不清空有效缓存，
 不新增下载、同步或备份通道；回归 `node scripts/translation-manual-test.mjs`。
 配置含接口凭据，不进入日志/备份；备份快照清空三张翻译表并 VACUUM，确保没有空闲页凭据。

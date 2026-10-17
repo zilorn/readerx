@@ -22,7 +22,8 @@ import {
   type BookFormat,
   type BookMeta,
 } from "../lib/booksTypes";
-import { createBookTitle } from "../lib/translation/title";
+import { createMetadataTranslation } from "../lib/translation/metadata";
+import { MetadataTranslationActions } from "../components/MetadataTranslationActions";
 import { hanText, withHanMeta } from "../lib/hanDisplay";
 import { t } from "../lib/i18n";
 import { refreshOnlineBookInfo } from "../lib/online";
@@ -130,7 +131,8 @@ export default function BookDetailPage() {
 
   const bookId = () => params.id ?? "";
   const book = createMemo(() => bookMetaById(bookId()));
-  const title = createBookTitle(book);
+  const metadata = createMetadataTranslation(book);
+  const title = () => bookDisplayTitle(metadata.title());
   /** 展示用副本（简繁转换）；编辑抽屉与「重新拉取书籍信息」一律用原始记录，避免把转换结果写回书库 */
   const displayBook = createMemo(() => withHanMeta(book()));
   const [switchOpen, setSwitchOpen] = createSignal(false);
@@ -204,7 +206,7 @@ export default function BookDetailPage() {
 
   const rows = createMemo(() => {
     const current = displayBook();
-    return current ? bookMetaRows(current) : [];
+    return current ? bookMetaRows({ ...current, title: hanText(title()) }) : [];
   });
 
   return (
@@ -310,6 +312,8 @@ export default function BookDetailPage() {
               </button>
             </Show>
 
+            <MetadataTranslationActions translation={metadata} disabled={refreshing()} />
+
             {/* 标签 */}
             <section>
               <h3 class="mb-2 text-[12.5px] font-medium tracking-[0.04em] text-text-3">
@@ -338,7 +342,7 @@ export default function BookDetailPage() {
                 {t("book.field.intro")}
               </h3>
               <Show
-                when={displayBook()!.intro}
+                when={hanText(metadata.intro())}
                 fallback={
                   <div class="flex min-h-[72px] items-center justify-center rounded-[14px] border border-dashed border-border bg-surface px-4 text-center text-[12.5px] leading-[1.7] text-text-3">
                     {t("book.detail.introEmpty")}
@@ -346,7 +350,7 @@ export default function BookDetailPage() {
                 }
               >
                 <p class="whitespace-pre-wrap break-words rounded-[14px] border border-border bg-surface px-3.5 py-3 text-[12.5px] leading-[1.75] text-text-2">
-                  {displayBook()!.intro}
+                  {hanText(metadata.intro())}
                 </p>
               </Show>
             </section>

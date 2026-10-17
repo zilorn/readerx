@@ -70,6 +70,13 @@ TTS 经 `speechText` 只转换合成文字，保持原文分句坐标，两种�
 `BookTranslationActions` 通过 translation/manual.ts 显式切换书名译名与翻译全部已下载正文，
 支持取消、进度与缓存续译；translation/title.ts 的 createBookTitle 只读本地状态用于显示，
 原始书名仍用于元数据编辑与换源。回归运行 `node scripts/translation-manual-test.mjs`。
+发现页搜索/浏览行与 OnlineBookSheet、BookDetail 通过 `translation/metadata.ts` 的
+`createMetadataTranslation` 和 `MetadataTranslationActions` 翻译书名及非空简介，支持重译、取消、原文切换。
+设置页的 `autoTranslateMetadata` 默认 false，只自动处理活动发现页与已加载详情的预览；
+保活页离开必须传 active=false 取消任务，详情页始终手动。未入架译文保留有界会话缓存，
+本地书籍简介使用可选 introEnabled/introTranslation 字段，沿用既有翻译状态；原始元数据不变。
+自动失败逐项重试，手动失败走 reportFailure，书籍信息请求共用 engine.ts 的 limited 并发预算。
+回归仍运行 `node scripts/translation-manual-test.mjs`，覆盖自动开关、活动状态和迟到结果。
 本书配置开关不自动启动全书批量翻译，全书操作只由手动按钮触发。运行 `node scripts/translation-position-test.mjs`
 验证两侧恢复、后续批次与按钮保存。双语折叠模式仅在展开浮窗时翻译单段，忽略预翻译章数，
 不提前生成术语表；切回内嵌双语或仅译文后恢复已保存的预翻译配置。

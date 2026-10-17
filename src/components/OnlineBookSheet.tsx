@@ -4,6 +4,9 @@
  * 在抽屉内预览简介、目录，并可「加入书架」或「加入书架并阅读」。
  * 目录加载完成前不可加入书架（书架元数据以目录为骨架）。
  */
+import { createMetadataTranslation } from "../lib/translation/metadata";
+import { translationSettings } from "../lib/translation/settings";
+import { MetadataTranslationActions } from "./MetadataTranslationActions";
 import { Drawer } from "./Drawer";
 import { createEffect, createMemo, createSignal, For, Show, onCleanup } from "solid-js";
 import { Portal } from "solid-js/web";
@@ -65,6 +68,10 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
   const [info, setInfo] = createSignal<BookItem | null>(null);
   const [infoBusy, setInfoBusy] = createSignal(false);
   const [infoError, setInfoError] = createSignal("");
+  const metadata = createMetadataTranslation(() => props.pick && info() ? { title: info()!.bookName, intro: info()!.intro } : undefined, {
+    active: () => !!props.pick && !infoBusy(),
+    automatic: () => translationSettings().autoTranslateMetadata,
+  });
   /** 目录章节（null = 尚未取到） */
   const [chapters, setChapters] = createSignal<ChapterItem[] | null>(null);
   const [tocBusy, setTocBusy] = createSignal(false);
@@ -364,16 +371,16 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
                   sourceId={selected()?.source.id ?? ""}
                   url={coverSrc()}
                   referer={info()?.bookUrl}
-                  title={hanText(info()?.bookName ?? "")}
+                  title={hanText(metadata.title())}
                 />
                 <div class="flex min-w-0 flex-1 flex-col justify-center gap-1">
                   <h2 class="text-[17px] font-bold leading-snug">
                     <QuickSearchText
-                      text={hanText(info()?.bookName ?? "")}
+                      text={hanText(metadata.title())}
                       action={t("discover.quickSearch.title")}
                       iconSize={13}
                       iconClass="mt-[5px]"
-                      onSearch={props.onQuickSearch ? quickSearch : undefined}
+                      onSearch={props.onQuickSearch ? () => quickSearch(info()?.bookName ?? "") : undefined}
                     />
                   </h2>
                   <p class="truncate text-[12.5px] text-text-3">
@@ -422,6 +429,8 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
                 </div>
               </div>
 
+              <MetadataTranslationActions translation={metadata} disabled={infoBusy()} />
+
               {/* 简介 */}
               <section class="mt-4">
                 <h3 class="mb-2 text-[12.5px] font-medium tracking-[0.04em] text-text-3">
@@ -455,7 +464,7 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
                   }
                 >
                   <p class="whitespace-pre-wrap break-words rounded-[12px] border border-border bg-surface px-3.5 py-3 text-[12.5px] leading-[1.75] text-text-2">
-                    {hanText(info()!.intro!)}
+                    {hanText(metadata.intro())}
                   </p>
                 </Show>
               </section>

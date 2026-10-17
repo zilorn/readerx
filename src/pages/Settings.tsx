@@ -297,6 +297,11 @@ export default function SettingsPage() {
           <div class="overflow-hidden rounded-[14px] border border-border bg-surface">
             <div class="flex items-center justify-between gap-3 px-4 py-3"><span class="text-[14.5px]">{t("translation.enabled")}</span><ToggleSwitch on={translationSettings().enabled} label={t("translation.enabled")} onChange={() => { void saveTranslationSettings({ enabled: !translationSettings().enabled }).catch(error => reportFailure(t("translation.saveFailed"), error)); }} /></div>
             <Show when={translationSettings().enabled}>
+              <div class="flex items-center justify-between gap-3 border-t border-border px-4 py-3">
+                <span class="text-[14px]">{t("translation.autoMetadata")}</span>
+                <ToggleSwitch on={translationSettings().autoTranslateMetadata} label={t("translation.autoMetadata")}
+                  onChange={() => { void saveTranslationSettings({ autoTranslateMetadata: !translationSettings().autoTranslateMetadata }).catch(error => reportFailure(t("translation.saveFailed"), error)); }} />
+              </div>
               <TranslationReadingToggle readingText={translationSettings().readingText} onChange={readingText => saveTranslationSettings({ readingText })} />
               <Row label={t("translation.configure")} onClick={() => navigate("/translation")} />
             </Show>

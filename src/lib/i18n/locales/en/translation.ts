@@ -1,4 +1,10 @@
 export const translation = {
+  "translation.translateMetadata": "Translate title and description",
+  "translation.retranslateMetadata": "Retranslate title and description",
+  "translation.retryMetadata": "Retry title and description translation",
+  "translation.showMetadataOriginal": "Show original",
+  "translation.showMetadataTranslation": "Show translation",
+  "translation.autoMetadata": "Auto-translate titles and descriptions in Discovery",
   "translation.bookTitle": "Translate book title",
   "translation.retranslateTitle": "Retranslate book title",
   "translation.bookContent": "Translate book content",
