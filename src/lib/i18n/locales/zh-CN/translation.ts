@@ -1,4 +1,14 @@
 export const translation = {
+  "translation.management": "翻译管理",
+  "translation.chapterTranslations": "章节译文",
+  "translation.searchChapters": "搜索章节",
+  "translation.retranslate": "重新翻译",
+  "translation.moreChapters": "加载更多章节",
+  "translation.chapter.done": "翻译完成",
+  "translation.chapter.failed": "翻译失败，可重试",
+  "translation.chapter.cancelled": "已取消",
+  "translation.chapter.noText": "请先在阅读器中下载本章正文",
+
   "translation.title": "智能翻译",
   "translation.configure": "配置智能翻译",
   "translation.enabled": "启用智能翻译",

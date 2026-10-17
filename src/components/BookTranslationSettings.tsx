@@ -11,7 +11,9 @@ import {
 } from "../lib/translation/settings";
 import { reportFailure } from "../lib/errorReport";
 import { t } from "../lib/i18n";
-export function BookTranslationSettings(props: { bookId: string }) {
+import { A } from "@solidjs/router";
+import { ToggleSwitch } from "./ToggleSwitch";
+export function BookTranslationSettings(props: { bookId: string; showManagement?: boolean }) {
   const [ready, setReady] = createSignal(false);
   onMount(() => {
     void Promise.all([
@@ -39,6 +41,14 @@ export function BookTranslationSettings(props: { bookId: string }) {
             {t("translation.inherit")}
           </button>
         </div>
+        <Show when={props.showManagement !== false}>
+          <A
+            href={`/book/${encodeURIComponent(props.bookId)}/translation`}
+            class="mb-2 block rounded-[14px] border border-border bg-surface px-4 py-3 text-[13px] text-accent"
+          >
+            {t("translation.management")}
+          </A>
+        </Show>
         <Show
           when={translationSettings().enabled}
           fallback={
@@ -52,13 +62,26 @@ export function BookTranslationSettings(props: { bookId: string }) {
           </p>
           <div class="mb-2 overflow-hidden rounded-[14px] border border-border bg-surface">
             <TranslationReadingToggle
-              mode={effectiveTranslationSettings(props.bookId).mode}
-              onChange={mode => setBookTranslationOverride(props.bookId, { mode })}
+              readingText={effectiveTranslationSettings(props.bookId).readingText}
+              onChange={readingText => setBookTranslationOverride(props.bookId, { readingText })}
             />
+            <div class="flex items-center justify-between gap-3 border-t border-border px-4 py-3">
+              <span class="text-[13px]">{t("translation.glossary")}</span>
+              <ToggleSwitch
+                on={effectiveTranslationSettings(props.bookId).glossary}
+                label={t("translation.glossary")}
+                onChange={() => {
+                  void setBookTranslationOverride(props.bookId, {
+                    glossary: !effectiveTranslationSettings(props.bookId).glossary,
+                  }).catch(error => reportFailure(t("translation.saveFailed"), error));
+                }}
+              />
+            </div>
           </div>
           <TranslationOptions
             value={effectiveTranslationSettings(props.bookId)}
             showEnabled
+            showGlossary={false}
             onChange={(patch) => {
               void setBookTranslationOverride(props.bookId, patch).catch(
                 (error) => reportFailure(t("translation.saveFailed"), error),

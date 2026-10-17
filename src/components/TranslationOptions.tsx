@@ -20,6 +20,7 @@ export function TranslationOptions(props: {
   value: TranslationSettings;
   onChange: (patch: Partial<TranslationSettings>) => void;
   showEnabled?: boolean;
+  showGlossary?: boolean;
 }) {
   const toggle = (key: "enabled" | "folded" | "glossary", label: string) => (
     <div class="flex items-center justify-between gap-3 border-b border-border px-4 py-3">
@@ -53,7 +54,9 @@ export function TranslationOptions(props: {
           </For>
         </select>
       </Field>
-      {toggle("folded", t("translation.folded"))}
+      <Show when={props.value.mode === "bilingual"}>
+        {toggle("folded", t("translation.folded"))}
+      </Show>
       <Field label={t("translation.target")}>
         <select
           class={inputClass}
@@ -192,7 +195,9 @@ export function TranslationOptions(props: {
           </For>
         </select>
       </Field>
-      {toggle("glossary", t("translation.glossary"))}
+      <Show when={props.showGlossary !== false}>
+        {toggle("glossary", t("translation.glossary"))}
+      </Show>
     </div>
   );
 }

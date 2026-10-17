@@ -57,12 +57,17 @@
 ## 智能翻译
 
 入口为 src/lib/translation/（配置、提供商协议、采样/指纹、任务调度、阅读接线）、
-src/pages/TranslationSettings.tsx 与 BookTranslationSettings / TranslationPopup / GlossarySheet。
+src/pages/TranslationSettings.tsx、TranslationManagement.tsx 与 BookTranslationSettings / TranslationPopup / GlossarySheet。
 全局总开关默认关闭，按书覆盖项沿用未修改的全局项。译文是显示副本，保持原文单元编号；
 pagination.ts 的译文片段按源字符跨度映射进度，测量与渲染字号一致；重排前撤去翻页动画，
 沿用阅读位置恢复通道；滚动恢复须从同一次视口采样记录原文/译文节点类型，
 随恢复目标传递，不能用同段存在译文来推断。独立切换按钮为
-`TranslationReadingToggle`，阅读设置写本书覆盖项，全局设置/翻译配置页写全局默认模式。运行 `node scripts/translation-position-test.mjs`
+`TranslationReadingToggle` 只修改独立的 `readingText` 听书原译文偏好，不修改显示 `mode`；
+阅读设置写本书覆盖项，全局设置/翻译配置页写全局默认，缺省朗读原文。
+TTS 经 `speechText` 只转换合成文字，保持原文分句坐标，两种引擎及主动音频预热共用；
+配置更新调用 `refreshText` 取消旧翻译并保留位置/暂停状态。修改时运行 `node scripts/tts-replacements-test.mjs`。
+本书阅读设置直接提供术语表开关和翻译管理入口；管理页支持单章强制重译与术语表编辑/重新生成，
+不受折叠或预翻译配置触发批量翻译。运行 `node scripts/translation-position-test.mjs`
 验证两侧恢复、后续批次与按钮保存。双语折叠模式仅在展开浮窗时翻译单段，忽略预翻译章数，
 不提前生成术语表；切回内嵌双语或仅译文后恢复已保存的预翻译配置。
 折叠浮窗复用选区定位规则，翻页/换章收起。完整约束见

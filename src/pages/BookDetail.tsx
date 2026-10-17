@@ -257,6 +257,7 @@ export default function BookDetailPage() {
           }
         >
           <div class="flex flex-col gap-5 px-[18px] pb-[calc(36px+env(safe-area-inset-bottom))] pt-2">
+            <button class="w-full rounded-xl border border-border bg-surface px-4 py-3 text-left text-[14px] text-accent" onClick={() => navigate(`/book/${encodeURIComponent(bookId())}/translation`)}>{t("translation.management")}</button>
             <button class="w-full rounded-xl border border-border bg-surface px-4 py-3 text-left text-[14px] text-accent" onClick={() => setGlossaryOpen(true)}>{t("translation.glossaryTitle")}</button>
             {/* 封面 + 核心信息 */}
             <div class="flex gap-4">

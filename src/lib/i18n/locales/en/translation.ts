@@ -1,4 +1,14 @@
 export const translation = {
+  "translation.management": "Translation management",
+  "translation.chapterTranslations": "Chapter translations",
+  "translation.searchChapters": "Search chapters",
+  "translation.retranslate": "Re-translate",
+  "translation.moreChapters": "Load more chapters",
+  "translation.chapter.done": "Translation complete",
+  "translation.chapter.failed": "Translation failed. Retry.",
+  "translation.chapter.cancelled": "Cancelled",
+  "translation.chapter.noText": "Download this chapter in the reader first",
+
   "translation.title": "Smart translation",
   "translation.configure": "Configure translation",
   "translation.enabled": "Enable translation",

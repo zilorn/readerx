@@ -111,27 +111,27 @@ for (const translated of [false, true]) {
   assert.equal(captureReadingPos().translated, translated, "分页保持当前页首正文的节点类型");
 }
 
-for (const mode of ["bilingual", "translated", "original"]) {
+for (const readingText of ["translated", "original"]) {
   let busy = false;
   const writes = [];
   const toggle = load("toggleTranslationReading", {
     busy: () => busy,
     setBusy: value => { busy = value; },
-    props: { mode, onChange: async mode => { writes.push(mode); } },
+    props: { readingText, onChange: async value => { writes.push(value); } },
   });
   const first = toggle();
   const second = toggle();
   assert.equal(busy, true);
   await Promise.all([first, second]);
   assert.equal(busy, false);
-  assert.deepEqual(writes, [mode === "translated" ? "original" : "translated"],
-    "独立按钮只修改显示模式，且阻止重复提交");
+  assert.deepEqual(writes, [readingText === "translated" ? "original" : "translated"],
+    "独立按钮只修改听书文本，且阻止重复提交");
 }
 let busy = false;
 let failure;
 const toggle = load("toggleTranslationReading", {
   busy: () => busy, setBusy: value => { busy = value; },
-  props: { mode: "original", onChange: async () => { throw new Error("save failed"); } },
+  props: { readingText: "original", onChange: async () => { throw new Error("save failed"); } },
   t: key => key, reportFailure: (message, error) => { failure = [message, error.message]; },
 });
 await toggle();

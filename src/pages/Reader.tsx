@@ -1,5 +1,7 @@
 import { createReaderTranslation } from "../lib/translation/reader";
 import { selectionTranslation } from "../lib/translation/engine";
+import { translationBookState } from "../lib/translation/settings";
+import { translationKey } from "../lib/translation/core";
 import { TranslationPopup, type TranslationPopupTarget } from "../components/TranslationPopup";
 import { TranslateIcon } from "../components/icons";
 import { ChapterEditSheet } from "../components/ChapterEditSheet";
@@ -1987,6 +1989,14 @@ export default function ReaderPage() {
     navigateChapter: (idx) => goToChapter(idx),
     followEnabled,
     readingOffset: ttsReadingOffset,
+    speechText: async (text, index, signal) => {
+      const config = translation.settings();
+      if (!config.enabled || config.readingText !== "translated") return text;
+      const source = rawBook();
+      const chapter = source?.chapters[index];
+      if (!source || !chapter) throw new Error(t("translation.stale"));
+      return selectionTranslation(source, chapter, text, signal);
+    },
     pageOffsets: async (index) => {
       if (!isPaged()) return [];
       // 当前章复用阅读器的真实分页；跨章跟读等待其排版完成。
@@ -2027,6 +2037,17 @@ export default function ReaderPage() {
     // 只把「弹指南」这件事交给界面，判定与「只弹一次」的口径留在播放器里
     onDecodeFailure: () => setTtsDecodeGuideOpen(true),
   });
+  createEffect(on(
+    () => {
+      const config = translation.settings();
+      return JSON.stringify([
+        config.enabled, config.readingText,
+        translationKey("", config, translationBookState(bookId())?.terms ?? []),
+      ]);
+    },
+    () => ttsPlayer.refreshText(),
+    { defer: true },
+  ));
   const [ttsSettingsOpen, setTtsSettingsOpen] = createSignal(false);
   const [ttsDecodeGuideOpen, setTtsDecodeGuideOpen] = createSignal(false);
   const [prewarmText, setPrewarmText] = createSignal<string | null>(null);

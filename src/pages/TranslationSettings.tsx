@@ -25,7 +25,7 @@ export default function TranslationSettingsPage() {
       />
       <div class="px-4 pb-8 pt-4">
         <div class="mb-3 overflow-hidden rounded-[14px] border border-border bg-surface">
-          <TranslationReadingToggle mode={translationSettings().mode} onChange={mode => saveTranslationSettings({ mode })} />
+          <TranslationReadingToggle readingText={translationSettings().readingText} onChange={readingText => saveTranslationSettings({ readingText })} />
         </div>
         <TranslationOptions
           value={translationSettings()}
