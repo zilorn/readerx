@@ -1,3 +1,5 @@
+import { registerPageTitle, usesWindowPageTitle } from "../shell/pageTitle";
+import { ReaderDesktopSearch, ReaderDesktopTocFooter } from "../components/ReaderDesktopChrome";
 import { createReaderTranslation } from "../lib/translation/reader";
 import { selectionTranslation } from "../lib/translation/engine";
 import { translationBookState } from "../lib/translation/settings";
@@ -96,6 +98,7 @@ import { TtsSheet } from "../components/TtsSheet";
 import { createBookTitle } from "../lib/translation/title";
 import { isFallbackBookAuthor } from "../lib/bookDisplay";
 import {
+  BookInfoIcon,
   BookmarkIcon,
   BrowserIcon,
   ChevronLeftIcon,
@@ -1065,7 +1068,8 @@ export default function ReaderPage() {
   const [translationTarget, setTranslationTarget] = createSignal<TranslationPopupTarget | null>(null);
   const [chapterIdx, setChapterIdx] = createSignal(0);
   const [pageIdx, setPageIdx] = createSignal(0);
-  const [menuOpen, setMenuOpen] = createSignal(false);
+  const [menuOpen, writeMenuOpen] = createSignal(false);
+  const setMenuOpen = (open: boolean) => writeMenuOpen(open && !usesWindowPageTitle());
   const [tocOpen, setTocOpen] = createSignal(false);
   // 桌面端（鼠标贴阅读区边缘呼出，见 lib/readerEdgeHover.ts）：标记本次呼出是悬浮触发的，
   // 鼠标离开边缘与浮层后自动收起；用户点按呼出的菜单 / 目录不在此列
@@ -1633,19 +1637,21 @@ export default function ReaderPage() {
   const [area, setArea] = createSignal({ w: 0, h: 0 });
   let areaRef: HTMLDivElement | undefined;
   let frameRef: HTMLDivElement | undefined;
+  let desktopSearchRef: HTMLDivElement | undefined;
   // 桌面端贴边呼出用：顶栏 / 底栏 / 目录面板的矩形就是「鼠标还停在浮层上」的判定依据
   let headerRef: HTMLElement | undefined;
   let bottomBarRef: HTMLDivElement | undefined;
   let tocPanelRef: HTMLDivElement | undefined;
   let areaObserver: ResizeObserver | null = null;
   createEffect(() => {
+    const searchBarShown = usesWindowPageTitle() && !!searchSession();
     const ready = contentLoad() === "ready" && !!renderBook();
     const el = frameRef;
     if (!ready || !el) return;
     // 尺寸没变就不写信号：避免下游分页因一次无意义的面积更新而整章重排
     const measure = () => {
       const w = el.clientWidth;
-      const h = el.clientHeight;
+      const h = el.clientHeight - (searchBarShown ? desktopSearchRef?.offsetHeight ?? 0 : 0);
       setArea((prev) => (prev.w === w && prev.h === h ? prev : { w, h }));
     };
     if (!areaObserver) {
@@ -3981,11 +3987,11 @@ export default function ReaderPage() {
     const x = e.clientX - bounds.left;
     const inMiddle = x >= bounds.width / 3 && x <= (bounds.width * 2) / 3;
     if (!isPaged()) {
-      if (inMiddle) setMenuOpen(true);
+      if (inMiddle && !usesWindowPageTitle()) setMenuOpen(true);
       return;
     }
     if (inMiddle) {
-      setMenuOpen(true);
+      if (!usesWindowPageTitle()) setMenuOpen(true);
     } else if (!contentPending) {
       // 左右区域翻页。正文就绪（正在获取章节正文 / 分页排版中）前不翻页 ——
       // 覆盖层不再吞手势后由这里守住原门闩语义，但仍允许点中间呼出菜单
@@ -4174,6 +4180,7 @@ export default function ReaderPage() {
     enabled: () => isDesktopShell() && !autoPageEnabled() && !annotationTarget() && !chapterEditTarget(),
     frameEl: () => frameRef,
     onMenuEdge: () => {
+      if (usesWindowPageTitle()) return;
       if (menuOpen()) return; // 已经开着（点按呼出的也算）：不动它，也不接管收起
       setMenuByHover(true);
       setMenuOpen(true);
@@ -4529,7 +4536,7 @@ export default function ReaderPage() {
   // 首次进入时的操作提示（一次性）
   let hintShown = false;
   createEffect(() => {
-    if (hintShown || !book()) return;
+    if (hintShown || !book() || usesWindowPageTitle()) return;
     hintShown = true;
     showToast(t("reader.tapCenterHint"));
   });
@@ -4667,11 +4674,169 @@ export default function ReaderPage() {
     return spread;
   }
 
+  function browseAdjacentChapter(direction: -1 | 1): void {
+    if (direction < 0 ? isFirstChapter() : isLastChapter()) return;
+    if (isPaged()) {
+      // 上一章 / 下一章始终从章首读起，末页只属于回翻。
+      goToChapter(chapterIdx() + direction, true);
+    } else {
+      browseChapterPending = true;
+      setChapterIdx((index) => index + direction);
+      setViewOffset(0);
+    }
+    cancelFollowIfActive();
+    armFollowPageCheck();
+  }
+
+  const renderReaderActions = () => (
+    <div class="flex flex-none items-center gap-1">
+      <Show when={isRemoteBook()}>
+        <button
+          class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale,color] duration-150 hover:bg-surface-2 hover:text-text active:scale-[0.94] active:bg-surface-2"
+          aria-label={t("reader.downloadTitle")}
+          onClick={() => {
+            // 上一次选过的范围不带进这一次（下载进行中则保留，与进度显示一致）
+            if (!remoteDownloading()) setDownloadRange(null);
+            setRangePick(null);
+            setDownloadOpen(true);
+            setMenuOpen(false);
+          }}
+        >
+          <DownloadIcon size={21} />
+        </button>
+      </Show>
+      <button
+        class="grid h-10 w-10 flex-none place-items-center rounded-xl transition-[background-color,scale] duration-150 hover:bg-surface-2 active:scale-[0.94] active:bg-surface-2"
+        classList={{
+          "text-accent": bmPanelOpen(),
+          "text-text-2": !bmPanelOpen(),
+        }}
+        aria-label={t("reader.bookmarks")}
+        aria-pressed={bmPanelOpen()}
+        onClick={() => setBmPanelOpen((open) => !open)}
+      >
+        <BookmarkIcon
+          size={21}
+          filled={bmPanelOpen()}
+        />
+      </button>
+      <button
+        class="grid h-10 w-10 flex-none place-items-center rounded-xl transition-[background-color,scale] duration-150 hover:bg-surface-2 active:scale-[0.94] active:bg-surface-2"
+        classList={{
+          "text-accent": ttsPlayer.status() !== "stopped",
+          "text-text-2": ttsPlayer.status() === "stopped",
+        }}
+        aria-label={
+          ttsPlayer.status() === "stopped"
+            ? t("reader.ttsListen")
+            : t("reader.ttsStop")
+        }
+        aria-pressed={ttsPlayer.status() !== "stopped"}
+        onClick={() => {
+          if (ttsPlayer.status() === "stopped") {
+            setMenuOpen(false);
+            setTocOpen(false);
+            setBmPanelOpen(false);
+            ttsPlayer.start();
+          } else {
+            ttsPlayer.stop();
+          }
+        }}
+      >
+        <HeadphonesIcon size={21} />
+      </button>
+      <button
+        class="grid h-10 w-10 flex-none place-items-center rounded-xl transition-[background-color,scale] duration-150 hover:bg-surface-2 active:scale-[0.94] active:bg-surface-2"
+        classList={{
+          "text-accent": readerSettingsOpen(),
+          "text-text-2": !readerSettingsOpen(),
+        }}
+        aria-label={t("reader.readingSettings")}
+        aria-pressed={readerSettingsOpen()}
+        onClick={() => setReaderSettingsOpen(true)}
+      >
+        <SettingsIcon size={21} />
+      </button>
+    </div>
+  );
+  const renderTtsControls = () => (
+    <Show
+      when={
+        ttsPlayer.status() !== "stopped" &&
+        !tocOpen() &&
+        !bmPanelOpen() &&
+        !searchSession()
+      }
+    >
+      <div
+        class="flex items-center gap-2 px-3 pb-1.5 pt-2"
+        classList={{ "mx-auto w-full max-w-[520px]": isDesktopShell() }}
+      >
+        <Show when={!followEnabled()}>
+          <button
+            data-reader-ui
+            class="flex flex-none cursor-pointer items-center gap-1.5 rounded-full border border-accent/50 bg-accent-weak py-[7px] pl-3 pr-3.5 text-[12px] font-semibold text-accent transition-[scale] duration-100 active:scale-[0.96]"
+            aria-label={t("reader.resumeFollow")}
+            onClick={resumeFollow}
+          >
+            <FollowBackIcon size={15} />
+            {t("reader.resumeFollow")}
+          </button>
+        </Show>
+        <div class="flex min-w-0 flex-1 justify-end">
+          <TtsBubble
+            status={ttsPlayer.status}
+            rate={ttsPlayer.rate}
+            voiceLabel={() => ttsPlayer.voiceName()}
+            error={ttsPlayer.error}
+            onPrev={() => ttsPlayer.prev()}
+            onNext={() => ttsPlayer.next()}
+            onToggle={() => ttsPlayer.togglePlay()}
+            onOpenSettings={() => {
+              // 打开听书面板视同进入听书：此后按需预热
+              armTtsWarmup();
+              setTtsSettingsOpen(true);
+            }}
+          />
+        </div>
+      </div>
+    </Show>
+  );
+  registerPageTitle({
+    get title() { return translatedBookTitle(); },
+    onBack: goBack,
+    get afterTitle() {
+      return <Show when={book()}>
+        <button type="button" class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 hover:bg-surface-2" title={t("book.detail.title")} aria-label={t("book.detail.title")} onClick={toBookDetailPage}>
+          <BookInfoIcon size={21} />
+        </button>
+      </Show>;
+    },
+    get right() {
+      return <Show when={book()}>
+        {renderReaderActions()}
+        <button type="button" class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 hover:bg-surface-2" title={t("reader.toc")} aria-label={t("reader.toc")} aria-pressed={tocOpen()} onClick={() => setTocOpen(open => !open)}>
+          <ListIcon size={21} />
+        </button>
+      </Show>;
+    },
+  });
+
   return (
     <div
       ref={frameRef}
       class="relative flex h-full min-h-0 flex-col overflow-hidden bg-bg"
     >
+      <Show when={usesWindowPageTitle() && searchSession()}>
+        <div ref={desktopSearchRef} class="flex-none">
+          <ReaderDesktopSearch
+            chapter={currentSearchHit()?.chapterTitle ?? ""} term={searchSession()?.term ?? ""}
+            index={searchHitIndex()} total={searchHitTotal()}
+            onResults={returnToSearchResults} onRestore={restorePreSearch}
+            onStep={stepSearchHit} onClose={exitSearchMode}
+          />
+        </div>
+      </Show>
       {/* 门闩：进入阅读页后按需物化当前书全文（元数据不含正文）；缺失给「不存在」页 */}
       <Show
         when={book() && contentLoad() === "ready"}
@@ -5091,6 +5256,7 @@ export default function ReaderPage() {
               </div>
             </Show>
 
+            <Show when={!usesWindowPageTitle()}>
             {/* 顶部工具栏（菜单呼出后显示） */}
             <header
               ref={headerRef}
@@ -5153,75 +5319,7 @@ export default function ReaderPage() {
                     {chapter() ? `${chapter()!.cid} · ${chapter()!.title}` : ""}
                   </span>
                 </div>
-                <div class="flex flex-none items-center gap-1">
-                  <Show when={isRemoteBook()}>
-                    <button
-                      class="grid h-10 w-10 flex-none place-items-center rounded-xl text-text-2 transition-[background-color,scale,color] duration-150 hover:bg-surface-2 hover:text-text active:scale-[0.94] active:bg-surface-2"
-                      aria-label={t("reader.downloadTitle")}
-                      onClick={() => {
-                        // 上一次选过的范围不带进这一次（下载进行中则保留，与进度显示一致）
-                        if (!remoteDownloading()) setDownloadRange(null);
-                        setRangePick(null);
-                        setDownloadOpen(true);
-                        setMenuOpen(false);
-                      }}
-                    >
-                      <DownloadIcon size={21} />
-                    </button>
-                  </Show>
-                  <button
-                    class="grid h-10 w-10 flex-none place-items-center rounded-xl transition-[background-color,scale] duration-150 hover:bg-surface-2 active:scale-[0.94] active:bg-surface-2"
-                    classList={{
-                      "text-accent": bmPanelOpen(),
-                      "text-text-2": !bmPanelOpen(),
-                    }}
-                    aria-label={t("reader.bookmarks")}
-                    aria-pressed={bmPanelOpen()}
-                    onClick={() => setBmPanelOpen((open) => !open)}
-                  >
-                    <BookmarkIcon
-                      size={21}
-                      filled={bmPanelOpen()}
-                    />
-                  </button>
-                  <button
-                    class="grid h-10 w-10 flex-none place-items-center rounded-xl transition-[background-color,scale] duration-150 hover:bg-surface-2 active:scale-[0.94] active:bg-surface-2"
-                    classList={{
-                      "text-accent": ttsPlayer.status() !== "stopped",
-                      "text-text-2": ttsPlayer.status() === "stopped",
-                    }}
-                    aria-label={
-                      ttsPlayer.status() === "stopped"
-                        ? t("reader.ttsListen")
-                        : t("reader.ttsStop")
-                    }
-                    aria-pressed={ttsPlayer.status() !== "stopped"}
-                    onClick={() => {
-                      if (ttsPlayer.status() === "stopped") {
-                        setMenuOpen(false);
-                        setTocOpen(false);
-                        setBmPanelOpen(false);
-                        ttsPlayer.start();
-                      } else {
-                        ttsPlayer.stop();
-                      }
-                    }}
-                  >
-                    <HeadphonesIcon size={21} />
-                  </button>
-                  <button
-                    class="grid h-10 w-10 flex-none place-items-center rounded-xl transition-[background-color,scale] duration-150 hover:bg-surface-2 active:scale-[0.94] active:bg-surface-2"
-                    classList={{
-                      "text-accent": readerSettingsOpen(),
-                      "text-text-2": !readerSettingsOpen(),
-                    }}
-                    aria-label={t("reader.readingSettings")}
-                    aria-pressed={readerSettingsOpen()}
-                    onClick={() => setReaderSettingsOpen(true)}
-                  >
-                    <SettingsIcon size={21} />
-                  </button>
-                </div>
+                {renderReaderActions()}
                 </Show>
               </div>
 
@@ -5261,47 +5359,7 @@ export default function ReaderPage() {
               aria-hidden={!menuOpen()}
             >
               {/* 听书悬浮球 + 返回跟读：停靠在底部菜单栏上方 */}
-              <Show
-                when={
-                  ttsPlayer.status() !== "stopped" &&
-                  !tocOpen() &&
-                  !bmPanelOpen() &&
-                  !searchSession()
-                }
-              >
-                <div
-                  class="flex items-center gap-2 px-3 pb-1.5 pt-2"
-                  classList={{ "mx-auto w-full max-w-[520px]": isDesktopShell() }}
-                >
-                  <Show when={!followEnabled()}>
-                    <button
-                      data-reader-ui
-                      class="flex flex-none cursor-pointer items-center gap-1.5 rounded-full border border-accent/50 bg-accent-weak py-[7px] pl-3 pr-3.5 text-[12px] font-semibold text-accent transition-[scale] duration-100 active:scale-[0.96]"
-                      aria-label={t("reader.resumeFollow")}
-                      onClick={resumeFollow}
-                    >
-                      <FollowBackIcon size={15} />
-                      {t("reader.resumeFollow")}
-                    </button>
-                  </Show>
-                  <div class="flex min-w-0 flex-1 justify-end">
-                    <TtsBubble
-                      status={ttsPlayer.status}
-                      rate={ttsPlayer.rate}
-                      voiceLabel={() => ttsPlayer.voiceName()}
-                      error={ttsPlayer.error}
-                      onPrev={() => ttsPlayer.prev()}
-                      onNext={() => ttsPlayer.next()}
-                      onToggle={() => ttsPlayer.togglePlay()}
-                      onOpenSettings={() => {
-                        // 打开听书面板视同进入听书：此后按需预热
-                        armTtsWarmup();
-                        setTtsSettingsOpen(true);
-                      }}
-                    />
-                  </div>
-                </div>
-              </Show>
+              {renderTtsControls()}
 
               {/* 章节页进度条（左右翻页模式）：悬浮在底部菜单上方，听书悬浮球之下。
                   拖动跳转到本章指定页，拖动中显示 x/y页 提示；可随「阅读设置」关闭 */}
@@ -5384,18 +5442,7 @@ export default function ReaderPage() {
                 <button
                   class="inline-flex flex-1 items-center justify-center gap-1.5 rounded-[10px] border border-border bg-bg px-0.5 py-[9px] text-[12.5px] text-text-2 transition-colors duration-150 hover:bg-surface-2 disabled:pointer-events-none disabled:opacity-30"
                   disabled={isFirstChapter()}
-                  onClick={() => {
-                    if (isPaged()) {
-                      // 与滚动模式同一口径：从上一章开头读起（末页只属于「回翻」）
-                      if (!isFirstChapter()) goToChapter(chapterIdx() - 1, true);
-                    } else if (!isFirstChapter()) {
-                      browseChapterPending = true;
-                      setChapterIdx((c) => c - 1);
-                      setViewOffset(0);
-                    }
-                    cancelFollowIfActive();
-                    armFollowPageCheck();
-                  }}
+                  onClick={() => browseAdjacentChapter(-1)}
                 >
                   <ChevronLeftIcon size={16} />
                   {t("reader.prevChapter")}
@@ -5419,17 +5466,7 @@ export default function ReaderPage() {
                 <button
                   class="inline-flex flex-1 items-center justify-center gap-1.5 rounded-[10px] border border-border bg-bg px-0.5 py-[9px] text-[12.5px] text-text-2 transition-colors duration-150 hover:bg-surface-2 disabled:pointer-events-none disabled:opacity-30"
                   disabled={isLastChapter()}
-                  onClick={() => {
-                    if (isPaged()) {
-                      if (!isLastChapter()) goToChapter(chapterIdx() + 1, true);
-                    } else if (!isLastChapter()) {
-                      browseChapterPending = true;
-                      setChapterIdx((c) => c + 1);
-                      setViewOffset(0);
-                    }
-                    cancelFollowIfActive();
-                    armFollowPageCheck();
-                  }}
+                  onClick={() => browseAdjacentChapter(1)}
                 >
                   {t("reader.nextChapter")}
                   <ChevronRightIcon size={16} />
@@ -5438,6 +5475,11 @@ export default function ReaderPage() {
                 </div>
               </footer>
             </div>
+
+            </Show>
+            <Show when={usesWindowPageTitle()}>
+              <div class="pointer-events-none absolute bottom-8 right-3 z-30 max-w-[520px] [&>*]:pointer-events-auto">{renderTtsControls()}</div>
+            </Show>
 
             {/* 目录：手机端是自下而上的抽屉，桌面端是贴右边缘滑出的侧栏
                 （与「鼠标贴右边缘呼出目录」对应，见 lib/readerEdgeHover.ts） */}
@@ -5485,7 +5527,7 @@ export default function ReaderPage() {
                 >
                   <For each={book()!.chapters}>
                     {(item, idx) => {
-                      const active = idx() === chapterIdx();
+                      const active = () => idx() === chapterIdx();
                       // 在线书：尚未缓存正文的章节在目录标“下载”，正在拉取的标“下载中”
                       const downloading = remotePendingSet()?.has(idx()) ?? false;
                       const needsDownload =
@@ -5493,16 +5535,16 @@ export default function ReaderPage() {
                       return (
                         <button
                           class={`flex w-full items-center gap-3 px-[18px] py-[11px] text-left text-[13.5px] transition-colors hover:bg-surface-2 active:bg-surface-2 ${
-                            active
+                            active()
                               ? "bg-accent-weak font-semibold text-accent"
                               : "text-text-2"
                           }`}
-                          data-current={active ? "true" : undefined}
+                          data-current={active() ? "true" : undefined}
                           onClick={() => jumpFromToc(idx())}
                         >
                           <span
                             class={`w-12 flex-none text-[11px] tabular-nums ${
-                              active ? "text-accent" : "text-text-3"
+                              active() ? "text-accent" : "text-text-3"
                             }`}
                           >
                             {item.cid}
@@ -5519,7 +5561,7 @@ export default function ReaderPage() {
                                 {t("reader.badgeDownload")}
                               </span>
                             </Show>
-                            <Show when={active}>
+                            <Show when={active()}>
                               <span class="rounded-full bg-accent px-2 py-0.5 text-[10px] text-on-accent">
                                 {t("reader.badgeCurrent")}
                               </span>
@@ -5530,6 +5572,16 @@ export default function ReaderPage() {
                     }}
                   </For>
                 </ScrollArea>
+                <Show when={usesWindowPageTitle()}>
+                  <ReaderDesktopTocFooter
+                    progress={t("reader.menuChapterProgress", { index: chapterIdx() + 1, total: chapterCount(), count: chapterCount() }) + (isPaged() && totalPages() > 0 ? pageProgressText("reader.menuPageProgress", "reader.menuPageRange") : "")}
+                    slider={isPaged() && currentMenuSliderEnabled() && totalPages() > 1 && !searchSession()}
+                    page={pageIdx()} total={totalPages()} onSeek={seekToPage}
+                    firstChapter={isFirstChapter()} lastChapter={isLastChapter()}
+                    onPrevious={() => browseAdjacentChapter(-1)} onNext={() => browseAdjacentChapter(1)}
+                    webUrl={chapterWebUrl()} onWebview={openChapterWebview} onBrowser={openChapterInBrowser}
+                  />
+                </Show>
               </Drawer>
             </Show>
             {/* 书签面板 */}
