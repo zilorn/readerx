@@ -198,7 +198,10 @@ pub(crate) fn snapshot(db: &Connection, root: &Path) -> Result<BackupDatabase, S
     )
     .map_err(sql)?;
     let snapshot = Connection::open(&temporary.0).map_err(sql)?;
-    snapshot.execute_batch("DELETE FROM translations; DELETE FROM translation_books; DELETE FROM translation_epochs; VACUUM;").map_err(sql)?;
+    let version: i64 = snapshot.query_row("PRAGMA user_version", [], |r| r.get(0)).map_err(sql)?;
+    if version >= 3 {
+        snapshot.execute_batch("DELETE FROM translations; DELETE FROM translation_books; DELETE FROM translation_epochs; VACUUM;").map_err(sql)?;
+    }
     drop(snapshot);
     BackupDatabase::open(temporary)
 }
