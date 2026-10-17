@@ -974,6 +974,7 @@ interface ReadingPos {
   ci: number;
   cid: string;
   char: number;
+  translated?: boolean;
 }
 
 /** 「返回原进度」提示自动消失前停留的时长 */
@@ -1057,7 +1058,6 @@ export default function ReaderPage() {
    */
   const book = createMemo(() => withHanBook(withDisplayReplacements(rawBook(), bookId())));
   const [translationTarget, setTranslationTarget] = createSignal<TranslationPopupTarget | null>(null);
-  let resumeTranslation = false;
   const [chapterIdx, setChapterIdx] = createSignal(0);
   const [pageIdx, setPageIdx] = createSignal(0);
   const [menuOpen, setMenuOpen] = createSignal(false);
@@ -1111,7 +1111,7 @@ export default function ReaderPage() {
   });
 
   // 精确恢复目标：打开书时按存档的“章节 cid + 文本偏移”置位，就绪后跳到该处一次
-  const [resumeTarget, setResumeTarget] = createSignal<{ cid: string; char: number } | null>(
+  const [resumeTarget, setResumeTarget] = createSignal<{ cid: string; char: number; translated?: boolean } | null>(
     null,
   );
   let resumeTick: number | undefined;
@@ -1727,9 +1727,7 @@ export default function ReaderPage() {
     resetPageTurn();
     const pos = captureReadingPos();
     if (!pos) return;
-    const first = paged()?.pages[pageIdx()]?.find(fragment => fragment.kind === "p" || fragment.kind === "h");
-    resumeTranslation = isPaged() ? first?.kind === "p" && !!first.translated : !!scrollRef?.querySelector(`[data-translation][data-u="${unitAtGlobalOffset(mirror(),pos.char)?.unit ?? -1}"]`);
-    setResumeTarget({ cid: ch.cid, char: pos.char });
+    setResumeTarget({ cid: ch.cid, char: pos.char, translated: pos.translated });
   }
   const translation = createReaderTranslation({
     bookId, book: rawBook, chapter: rawAnnotationChapter,
@@ -2808,8 +2806,8 @@ export default function ReaderPage() {
     queueLocation(offsets[pi]);
   });
 
-  /** 视口顶部正在阅读的文本 → 镜像偏移（滚动模式，viewport 坐标采样） */
-  function visibleCharAtTop(root: HTMLElement): number | null {
+  /** 同一次视口采样同时记录原文坐标与实际命中的节点类型。 */
+  function visiblePositionAtTop(root: HTMLElement): { char: number; translated: boolean } | null {
     const mir = mirror();
     if (!mir || mir.text.length === 0) return null;
     const lay = layout();
@@ -2823,7 +2821,7 @@ export default function ReaderPage() {
         y: number,
       ) => { offsetNode: Node; offset: number } | null;
     };
-    const probe = (x: number, y: number): number | null => {
+    const probe = (x: number, y: number): { char: number; translated: boolean } | null => {
       const range = d.caretRangeFromPoint?.(x, y) ?? null;
       let node: Node | null = null;
       let off = 0;
@@ -2839,11 +2837,14 @@ export default function ReaderPage() {
       }
       if (!node) return null;
       const anchor = dataAnchorOf(node);
-      if (!anchor) return null;
+      if (!anchor || !root.contains(anchor.el)) return null;
       const base = mir.unitStart[anchor.unit] ?? -1;
       if (base < 0) return null;
       const local = charOffsetInElement(anchor.el, node, off);
-      return Math.min(mir.text.length, base + anchor.cstart + local);
+      return {
+        char: Math.min(mir.text.length, base + anchor.cstart + local),
+        translated: anchor.el.hasAttribute("data-translation"),
+      };
     };
     // 正文列在滚动容器里居中（宽窗口下正文列不再横跨整个内容区）：探针取正文列内的三点
     const flow = flowWidth() || lay.textWidth;
@@ -2863,8 +2864,13 @@ export default function ReaderPage() {
     return null;
   }
 
+  /** 视口顶部正在阅读的文本 → 原文镜像偏移。 */
+  function visibleCharAtTop(root: HTMLElement): number | null {
+    return visiblePositionAtTop(root)?.char ?? null;
+  }
+
   /** 滚动模式：把镜像偏移 targetChar 滚动到视口顶部附近（精确恢复用） */
-  function scrollToCharOffset(root: HTMLElement, targetChar: number): boolean {
+  function scrollToCharOffset(root: HTMLElement, targetChar: number, preferTranslated = false): boolean {
     const mir = mirror();
     const lay = layout();
     if (!mir || !lay || mir.text.length === 0) return false;
@@ -2879,7 +2885,7 @@ export default function ReaderPage() {
       }
       return false;
     }
-    const el = (resumeTranslation ? root.querySelector<HTMLElement>(`[data-translation][data-u="${pos.unit}"]`) : null) ?? root.querySelector<HTMLElement>(`[data-u="${pos.unit}"]`);
+    const el = (preferTranslated ? root.querySelector<HTMLElement>(`[data-translation][data-u="${pos.unit}"]`) : null) ?? root.querySelector<HTMLElement>(`[data-u="${pos.unit}"]`);
     if (!el) return false;
     const base = mir.unitStart[pos.unit] ?? -1;
     if (base < 0) return false;
@@ -2928,8 +2934,7 @@ export default function ReaderPage() {
     if (isPaged()) {
       const pg = paged();
       if (!pg) return; // 分页重排中，等下一个 tick
-      const page = pageIndexOfChar(pg.pages, mir, target.char, resumeTranslation);
-      resumeTranslation = false;
+      const page = pageIndexOfChar(pg.pages, mir, target.char, target.translated);
       const next = snapPage(page < 0 ? pg.pages.length - 1 : page);
       // 先落到目标页、再解除隐藏：正文首次可见即是恢复位置，不闪章节开头
       if (next !== pageIdx()) setPageIdx(next);
@@ -2938,7 +2943,7 @@ export default function ReaderPage() {
     }
     const root = scrollRef;
     if (!root) return; // 正文尚未挂载，等下一个 tick
-    if (scrollToCharOffset(root, target.char)) { resumeTranslation = false; setResumeTarget(null); }
+    if (scrollToCharOffset(root, target.char, target.translated)) setResumeTarget(null);
   }
 
   /** 滚动模式滚动事件：帧节流后按视口顶部文本提交位置；
@@ -3032,15 +3037,20 @@ export default function ReaderPage() {
     if (!ch) return null;
     const mir = mirror();
     let char = 0;
+    let translated = false;
     if (isPaged()) {
       const offs = pageTopOffsets();
       const pi = pageIdx();
       if (pi >= 0 && pi < offs.length) char = offs[pi];
+      const first = paged()?.pages[pi]?.find(fragment => fragment.kind === "p" || fragment.kind === "h");
+      translated = first?.kind === "p" && !!first.translated;
     } else {
-      char = visibleCharAtTop(scrollRef!) ?? viewOffset() ?? 0;
+      const position = scrollRef ? visiblePositionAtTop(scrollRef) : null;
+      char = position?.char ?? viewOffset() ?? 0;
+      translated = position?.translated ?? false;
     }
     if (mir) char = Math.max(0, Math.min(char, mir.text.length));
-    return { ci: chapterIdx(), cid: ch.cid, char };
+    return { ci: chapterIdx(), cid: ch.cid, char, translated };
   }
 
   /** 打开一条搜索结果：进入搜索模式并定位（首次进入时记录原阅读位置） */
@@ -4530,12 +4540,11 @@ export default function ReaderPage() {
         ref={surface}
         data-reader-spread={first}
         class="absolute inset-0 select-none overflow-hidden bg-bg"
-        classList={{ invisible: live() && resumeTarget() !== null }}
         aria-hidden={!live()}
-        inert={!live()}
+        inert={!live() || resumeTarget() !== null}
         style={{
           "touch-action": "none",
-          opacity: visible() ? "1" : "0",
+          opacity: visible() && !(live() && resumeTarget() !== null) ? "1" : "0",
           // 预览纸张遮住旧正文；显式层级不依赖 keyed DOM 重排后的兄弟顺序。
           "z-index": first === pagePreviewIndex() ? "1" : "0",
           "pointer-events": live() ? "auto" : "none",
@@ -4704,12 +4713,14 @@ export default function ReaderPage() {
                   </For>
                 }
               >
-                {/* 滚动模式：整章上下滚动（始终单栏；宽窗口下正文列居中限宽） */}
+                {/* 恢复期间用透明度隐藏：避免同步重挂的文字节点残留继承的 visibility:hidden。
+                    滚动模式整章上下滚动，始终单栏；宽窗口下正文列居中限宽。 */}
                 <div
                   ref={scrollRef}
                   onScroll={onScrollBody}
                   class="absolute inset-0 overflow-y-auto overscroll-contain scrollbar-none"
-                  classList={{ invisible: resumeTarget() !== null }}
+                  classList={{ "opacity-0": resumeTarget() !== null }}
+                  inert={resumeTarget() !== null}
                   style={{
                     padding: `${readerTopPad()}px ${READER_PAGE_PAD_X}px ${bottomPadScroll()}px`,
                   }}

@@ -1,4 +1,5 @@
 import { Show, onMount, createSignal } from "solid-js";
+import { TranslationReadingToggle } from "./TranslationReadingToggle";
 import { TranslationOptions } from "./TranslationOptions";
 import {
   effectiveTranslationSettings,
@@ -49,6 +50,12 @@ export function BookTranslationSettings(props: { bookId: string }) {
           <p class="mb-2 text-[12px] text-text-3">
             {t("translation.bookInherit")}
           </p>
+          <div class="mb-2 overflow-hidden rounded-[14px] border border-border bg-surface">
+            <TranslationReadingToggle
+              mode={effectiveTranslationSettings(props.bookId).mode}
+              onChange={mode => setBookTranslationOverride(props.bookId, { mode })}
+            />
+          </div>
           <TranslationOptions
             value={effectiveTranslationSettings(props.bookId)}
             showEnabled

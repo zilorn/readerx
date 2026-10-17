@@ -1,3 +1,4 @@
+import { TranslationReadingToggle } from "../components/TranslationReadingToggle";
 import { useNavigate } from "@solidjs/router";
 import { onMount } from "solid-js";
 import { PageHeader } from "../components/PageHeader";
@@ -23,6 +24,9 @@ export default function TranslationSettingsPage() {
         onBack={() => navigate(-1)}
       />
       <div class="px-4 pb-8 pt-4">
+        <div class="mb-3 overflow-hidden rounded-[14px] border border-border bg-surface">
+          <TranslationReadingToggle mode={translationSettings().mode} onChange={mode => saveTranslationSettings({ mode })} />
+        </div>
         <TranslationOptions
           value={translationSettings()}
           onChange={(patch) => {
