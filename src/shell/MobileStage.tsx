@@ -416,6 +416,7 @@ export function MobileStage(props: MobileStageProps) {
           >
             <PageBody
               component={pane.component}
+              pagePath={pane.path}
               renderChildren={pane.id === currentId()}
               contentClass={isFullHeightPath(pane.path) ? "" : "pb-4"}
               onScrollEl={(el) => {
