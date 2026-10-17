@@ -6,6 +6,36 @@ import {
   type TranslationSettings,
 } from "../lib/translation/types";
 
+// 显式保留完整 key，供类型检查与未引用文案扫描共同校验。
+const LABEL_KEYS = {
+  mode: {
+    bilingual: "translation.mode.bilingual",
+    translated: "translation.mode.translated",
+    original: "translation.mode.original",
+  },
+  lang: {
+    "zh-CN": "translation.lang.zh-CN",
+    "zh-TW": "translation.lang.zh-TW",
+    en: "translation.lang.en",
+    ja: "translation.lang.ja",
+    ko: "translation.lang.ko",
+    fr: "translation.lang.fr",
+    de: "translation.lang.de",
+    es: "translation.lang.es",
+  },
+  provider: {
+    google: "translation.provider.google",
+    openai: "translation.provider.openai",
+    deepseek: "translation.provider.deepseek",
+    custom: "translation.provider.custom",
+  },
+  field: {
+    baseUrl: "translation.baseUrl",
+    model: "translation.model",
+    apiKey: "translation.apiKey",
+  },
+} as const;
+
 function Field(props: { label: string; children: JSX.Element }) {
   return (
     <label class="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-3 last:border-0">
@@ -49,7 +79,7 @@ export function TranslationOptions(props: {
         >
           <For each={["bilingual", "translated", "original"] as const}>
             {(value) => (
-              <option value={value}>{t(`translation.mode.${value}`)}</option>
+              <option value={value}>{t(LABEL_KEYS.mode[value])}</option>
             )}
           </For>
         </select>
@@ -69,7 +99,7 @@ export function TranslationOptions(props: {
         >
           <For each={TARGET_LANGUAGES}>
             {(value) => (
-              <option value={value}>{t(`translation.lang.${value}`)}</option>
+              <option value={value}>{t(LABEL_KEYS.lang[value])}</option>
             )}
           </For>
         </select>
@@ -99,7 +129,7 @@ export function TranslationOptions(props: {
           <For each={["google", "openai", "deepseek", "custom"] as const}>
             {(value) => (
               <option value={value}>
-                {t(`translation.provider.${value}`)}
+                {t(LABEL_KEYS.provider[value])}
               </option>
             )}
           </For>
@@ -130,7 +160,7 @@ export function TranslationOptions(props: {
         </Field>
         <For each={["baseUrl", "model", "apiKey"] as const}>
           {(key) => (
-            <Field label={t(`translation.${key}`)}>
+            <Field label={t(LABEL_KEYS.field[key])}>
               <input
                 class={`${inputClass} w-full`}
                 type={key === "apiKey" ? "password" : "text"}

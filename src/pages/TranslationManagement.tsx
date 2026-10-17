@@ -11,6 +11,12 @@ import { paragraphTexts, retranslateChapter } from "../lib/translation/engine";
 import { reportFailure } from "../lib/errorReport";
 import { t } from "../lib/i18n";
 
+const STATUS_KEYS = {
+  done: "translation.chapter.done",
+  failed: "translation.chapter.failed",
+  cancelled: "translation.chapter.cancelled",
+} as const;
+
 export default function TranslationManagementPage() {
   const params = useParams();
   const navigate = useNavigate();
@@ -100,7 +106,7 @@ export default function TranslationManagementPage() {
                 {chapter => <div class="flex items-center justify-between gap-3 px-4 py-3">
                   <div class="min-w-0 flex-1">
                     <p class="break-words text-[13px]">{chapter.title}</p>
-                    <Show when={running() !== chapter.cid && status()[chapter.cid]}>{state => <p role="status" class="mt-1 text-[12px] text-text-3">{t(`translation.chapter.${state()}`)}</p>}</Show>
+                    <Show when={running() !== chapter.cid && status()[chapter.cid]}>{state => <p role="status" class="mt-1 text-[12px] text-text-3">{t(STATUS_KEYS[state()])}</p>}</Show>
                     <Show when={!paragraphTexts(chapter).length}><p class="mt-1 text-[12px] text-text-3">{t("translation.chapter.noText")}</p></Show>
                   </div>
                   <Show when={running() === chapter.cid} fallback={

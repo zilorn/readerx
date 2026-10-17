@@ -134,6 +134,24 @@ const provider = await load("provider", {
   "./core": core,
 });
 const signal = new AbortController().signal;
+// 自定义地址缺失时，翻译与术语表都必须在 HTTP 调用前拒绝，不能把密钥发给默认服务。
+for (const protocol of ["chat", "responses"]) {
+  for (const baseUrl of ["", " \t\n "]) {
+    const settings = { ...defaults, provider: "custom", protocol, baseUrl, model: "private", apiKey: "SECRET" };
+    const before = requests.length;
+    assert.throws(() => provider.providerEndpoint(settings), /invalidUrl/);
+    await assert.rejects(provider.translateBatch(["private text"], settings, [], signal), /invalidUrl/);
+    await assert.rejects(provider.generateTerms(["private sample"], settings, signal), /invalidUrl/);
+    assert.equal(requests.length, before, "无自定义地址时不能发出任何 HTTP 请求");
+  }
+  for (const [service, base] of [["openai", "https://api.openai.com/v1"], ["deepseek", "https://api.deepseek.com"]]) {
+    const suffix = protocol === "chat" ? "/chat/completions" : "/responses";
+    assert.equal(provider.providerEndpoint({ ...defaults, provider: service, protocol, baseUrl: "  " }), base + suffix);
+    for (const baseUrl of ["https://custom.invalid/v1/", `https://custom.invalid/v1${suffix}`]) {
+      assert.equal(provider.providerEndpoint({ ...defaults, provider: "custom", protocol, baseUrl }), "https://custom.invalid/v1" + suffix);
+    }
+  }
+}
 response = {
   output: [
     { type: "reasoning", content: [] },
@@ -198,6 +216,7 @@ assert.deepEqual(
   ["甲", "乙"],
 );
 assert.equal(requests.at(-1).init.headers.Authorization, "Bearer SECRET");
+assert.equal(requests.at(-1).url, "http://localhost:8000/v1/chat/completions");
 response.choices[0].message.content = JSON.stringify({
   translations: [
     { id: 0, text: "甲" },
@@ -217,7 +236,7 @@ failed = true;
 await assert.rejects(
   provider.translateBatch(
     ["secret source"],
-    { ...defaults, provider: "custom", model: "x" },
+    { ...defaults, provider: "custom", baseUrl: "https://custom.invalid/v1", model: "x" },
     [],
     signal,
   ),

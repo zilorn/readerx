@@ -8,8 +8,11 @@ export function providerEndpoint(settings: TranslationSettings): string {
     settings.baseUrl.trim() ||
     (settings.provider === "deepseek"
       ? "https://api.deepseek.com"
-      : "https://api.openai.com/v1")
+      : settings.provider === "openai"
+        ? "https://api.openai.com/v1"
+        : "")
   ).replace(/\/+$/, "");
+  if (!base) throw new Error(t("translation.invalidUrl"));
   const url = new URL(base);
   if (
     !["http:", "https:"].includes(url.protocol) ||

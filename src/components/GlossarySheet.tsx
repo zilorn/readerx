@@ -14,6 +14,7 @@ import { bookTerms } from "../lib/translation/engine";
 import { normalizeTerms } from "../lib/translation/core";
 import type { GlossaryTerm } from "../lib/translation/types";
 import { reportFailure } from "../lib/errorReport";
+import { showToast } from "../lib/toast";
 import { createAndroidBackHandler } from "../lib/androidBack";
 export function GlossarySheet(props: { bookId: string; onClose: () => void }) {
   const [terms, setTerms] = createSignal<GlossaryTerm[]>([]);
@@ -81,6 +82,7 @@ export function GlossarySheet(props: { bookId: string; onClose: () => void }) {
         terms: normalizeTerms(terms()),
         glossaryTarget,
       });
+      showToast(t("translation.saved"));
       props.onClose();
     } catch (err) {
       reportFailure(t("translation.saveFailed"), err);

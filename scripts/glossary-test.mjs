@@ -29,14 +29,17 @@ const japanese = [{ source: "Alice", target: "アリス", note: "" }];
 const book = { id: "glossary-book", chapters: [{ cid: "one", paragraphs: ["Alice entered the room."] }] };
 let storedGlobal = { ...types.DEFAULT_TRANSLATION_SETTINGS, enabled: true, glossary: true, provider: "openai", model: "test" };
 let storedBook = { overrides: {}, terms: chinese, glossaryTarget: "zh-CN" };
-let writes = 0, requests = 0, payload = { terms: japanese }, pending;
+let writes = 0, requests = 0, payload = { terms: japanese }, pending, rejectWrites = false;
 const settings = await load("lib/translation/settings.ts", {
   "solid-js": solid, "./types": types,
   "../backend": {
     readTranslationSettings: async () => structuredClone(storedGlobal),
     putTranslationSettings: async value => { storedGlobal = structuredClone(value); },
     readTranslationBook: async () => structuredClone(storedBook),
-    putTranslationBook: async (_id, value) => { writes++; storedBook = structuredClone(value); },
+    putTranslationBook: async (_id, value) => {
+      if (rejectWrites) throw new Error("write failed");
+      writes++; storedBook = structuredClone(value);
+    },
   },
 });
 const provider = await load("lib/translation/provider.ts", {
@@ -57,7 +60,7 @@ const engine = await load("lib/translation/engine.ts", {
 });
 
 // 只替换组件最外层的 JSX 返回值，执行实际初始化、草稿编辑、生成与保存函数。
-const mounts = [], cleanups = [], failures = [];
+const mounts = [], cleanups = [], failures = [], toasts = [];
 const component = await load("components/GlossarySheet.tsx", {
   "solid-js": { ...solid, onMount: fn => mounts.push(fn), onCleanup: fn => cleanups.push(fn) },
   "./Drawer": {}, "./icons": {}, "../lib/i18n": i18n,
@@ -65,6 +68,7 @@ const component = await load("components/GlossarySheet.tsx", {
   "../lib/translation/settings": settings, "../lib/translation/engine": engine,
   "../lib/translation/core": core,
   "../lib/errorReport": { reportFailure: (...args) => failures.push(args) },
+  "../lib/toast": { showToast: text => toasts.push(text) },
   "../lib/androidBack": { createAndroidBackHandler: () => {} },
 }, { before: [() => source => ts.factory.updateSourceFile(source, source.statements.map(node => {
   if (!ts.isFunctionDeclaration(node) || node.name?.text !== "GlossarySheet") return node;
@@ -96,7 +100,17 @@ try {
   let sheet = await openSheet();
   assert.deepEqual(sheet.terms(), chinese);
   sheet.change(0, "note", "edited");
+  assert.deepEqual(toasts, [], "保存前不显示成功提示");
+  rejectWrites = true;
   await sheet.save();
+  assert.equal(sheet.closed(), false, "保存失败保留抽屉供重试");
+  assert.deepEqual(toasts, [], "保存失败不能显示成功提示");
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0][0], "translation.saveFailed");
+  failures.length = 0;
+  rejectWrites = false;
+  await sheet.save();
+  assert.deepEqual(toasts, ["translation.saved"], "保存成功后显示术语表确认");
   assert.equal(sheet.closed(), true);
   assert.equal(storedBook.glossaryTarget, "zh-CN", "打开旧语言术语表后保存不能改语言标记");
   closeSheet();
