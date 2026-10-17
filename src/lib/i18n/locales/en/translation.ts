@@ -1,4 +1,10 @@
 export const translation = {
+  "translation.bookTitle": "Translate book title",
+  "translation.retranslateTitle": "Retranslate book title",
+  "translation.bookContent": "Translate book content",
+  "translation.downloadedOnly": "Translates downloaded chapters. Run again to resume or include newly downloaded text.",
+  "translation.bookProgress": "{completed} / {total} chapters",
+
   "translation.management": "Translation management",
   "translation.chapterTranslations": "Chapter translations",
   "translation.searchChapters": "Search chapters",

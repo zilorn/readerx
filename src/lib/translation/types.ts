@@ -36,6 +36,8 @@ export interface TranslationBookState {
   overrides: Partial<TranslationSettings>;
   terms: GlossaryTerm[];
   glossaryTarget?: string;
+  titleEnabled?: boolean;
+  titleTranslation?: { source: string; key: string; text: string };
 }
 export interface TranslationCache {
   revision: string;

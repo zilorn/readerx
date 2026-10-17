@@ -2,11 +2,12 @@ import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-j
 import { useNavigate, useParams } from "@solidjs/router";
 import { PageHeader } from "../components/PageHeader";
 import { BookTranslationSettings } from "../components/BookTranslationSettings";
+import { BookTranslationActions } from "../components/BookTranslationActions";
 import { GlossarySheet } from "../components/GlossarySheet";
 import { ensureLocalBookContent } from "../lib/books";
 import type { LocalBook } from "../lib/booksTypes";
-import { bookDisplayTitle } from "../lib/bookDisplay";
-import { effectiveTranslationSettings } from "../lib/translation/settings";
+import { createBookTitle } from "../lib/translation/title";
+import { effectiveTranslationSettings, ensureTranslationBook, ensureTranslationSettings } from "../lib/translation/settings";
 import { paragraphTexts, retranslateChapter } from "../lib/translation/engine";
 import { reportFailure } from "../lib/errorReport";
 import { t } from "../lib/i18n";
@@ -27,6 +28,9 @@ export default function TranslationManagementPage() {
   const [query, setQuery] = createSignal("");
   const [limit, setLimit] = createSignal(50);
   const [running, setRunning] = createSignal("");
+  const [manualBusy, setManualBusy] = createSignal(false);
+  const busy = () => !!running() || manualBusy();
+  const title = createBookTitle(book);
   const [status, setStatus] = createSignal<Record<string, "done" | "failed" | "cancelled">>({});
   let controller: AbortController | undefined;
   let disposed = false;
@@ -34,7 +38,7 @@ export default function TranslationManagementPage() {
   async function loadBook() {
     setLoadError("");
     try {
-      const current = await ensureLocalBookContent(params.id!);
+      const [current] = await Promise.all([ensureLocalBookContent(params.id!), ensureTranslationSettings(), ensureTranslationBook(params.id!)]);
       if (!disposed) { setBook(current ?? undefined); setLoaded(true); }
     } catch (error) {
       if (!disposed) {
@@ -48,7 +52,7 @@ export default function TranslationManagementPage() {
     chapter.title.toLocaleLowerCase().includes(query().trim().toLocaleLowerCase()),
   ) ?? []);
   async function translate(cid: string) {
-    if (running()) return;
+    if (busy()) return;
     const task = new AbortController();
     controller = task;
     setRunning(cid);
@@ -81,16 +85,17 @@ export default function TranslationManagementPage() {
         </Show>
         <Show when={book()} fallback={<Show when={loaded()}><p class="text-text-3">{t("book.detail.notFound")}</p></Show>}>
           {current => <>
-            <h2 class="mb-3 text-[16px] font-semibold">{bookDisplayTitle(current().title)}</h2>
+            <h2 class="mb-3 break-words text-[16px] font-semibold">{title()}</h2>
+            <BookTranslationActions bookId={params.id!} disabled={!!running()} hasContent={current().chapters.some(chapter => paragraphTexts(chapter).some(text => text.trim()))} onBusyChange={setManualBusy} />
             <details class="mb-4 rounded-[14px] border border-border bg-surface p-4">
               <summary class="cursor-pointer text-[13px] text-text-2">{t("translation.bookSettings")}</summary>
-              <fieldset disabled={!!running()}>
+              <fieldset disabled={busy()}>
                 <BookTranslationSettings bookId={params.id!} showManagement={false} />
               </fieldset>
             </details>
             <button
               class="my-4 w-full rounded-[14px] border border-border bg-surface px-4 py-3 text-left text-[14px] text-accent disabled:opacity-50"
-              disabled={!!running()}
+              disabled={busy()}
               onClick={() => setGlossaryOpen(true)}
             >{t("translation.glossaryTitle")}</button>
             <h3 class="mb-2 text-[13px] font-medium text-text-2">{t("translation.chapterTranslations")}</h3>
@@ -112,7 +117,7 @@ export default function TranslationManagementPage() {
                   <Show when={running() === chapter.cid} fallback={
                     <button
                       class="min-h-10 shrink-0 rounded-lg border border-border px-3 text-[12px] text-accent disabled:opacity-40"
-                      disabled={!!running() || !effectiveTranslationSettings(params.id!).enabled || !paragraphTexts(chapter).length}
+                      disabled={busy() || !effectiveTranslationSettings(params.id!).enabled || !paragraphTexts(chapter).length}
                       onClick={() => void translate(chapter.cid)}
                     >{t("translation.retranslate")}</button>
                   }>

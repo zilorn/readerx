@@ -54,6 +54,10 @@ readerx_translations_get/put/invalidate 只读写本地书库，不调用同步�
 单章手动重译经 engine.ts 的 retranslateChapter 推进租约并跳过缓存读取，仍走原文校验；
 失败/取消保留有效缓存，其他章及服务缓存不受影响，不新增数据库格式。
 全局配置 readerx.translation 与本书 overrides 新增独立 readingText（缺省 original），不复用显示 mode。
+书名显示开关 titleEnabled 与 titleTranslation（source/key/text）为 TranslationBookState 可选字段，
+复用 translation_books.state JSON；旧数据缺省关闭，无需迁移，原始书名不变。
+manual.ts 的全书手动翻译仅处理已下载文字章，复用原文关联缓存与租约，不清空有效缓存，
+不新增下载、同步或备份通道；回归 `node scripts/translation-manual-test.mjs`。
 配置含接口凭据，不进入日志/备份；备份快照清空三张翻译表并 VACUUM，确保没有空闲页凭据。
 实现 src-tauri/src/book_store/sqlite/translation.rs；约束见
 [智能翻译](../../../../docs/smart-translation.md)。运行 book_store / data_transfer Rust 回归及前端

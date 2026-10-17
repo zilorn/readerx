@@ -67,7 +67,10 @@ pagination.ts 的译文片段按源字符跨度映射进度，测量与渲染字
 TTS 经 `speechText` 只转换合成文字，保持原文分句坐标，两种引擎及主动音频预热共用；
 配置更新调用 `refreshText` 取消旧翻译并保留位置/暂停状态。修改时运行 `node scripts/tts-replacements-test.mjs`。
 本书阅读设置直接提供术语表开关和翻译管理入口；管理页支持单章强制重译与术语表编辑/重新生成，
-不受折叠或预翻译配置触发批量翻译。运行 `node scripts/translation-position-test.mjs`
+`BookTranslationActions` 通过 translation/manual.ts 显式切换书名译名与翻译全部已下载正文，
+支持取消、进度与缓存续译；translation/title.ts 的 createBookTitle 只读本地状态用于显示，
+原始书名仍用于元数据编辑与换源。回归运行 `node scripts/translation-manual-test.mjs`。
+本书配置开关不自动启动全书批量翻译，全书操作只由手动按钮触发。运行 `node scripts/translation-position-test.mjs`
 验证两侧恢复、后续批次与按钮保存。双语折叠模式仅在展开浮窗时翻译单段，忽略预翻译章数，
 不提前生成术语表；切回内嵌双语或仅译文后恢复已保存的预翻译配置。
 折叠浮窗复用选区定位规则，翻页/换章收起。完整约束见

@@ -93,7 +93,8 @@ import {
 import { TtsBubble } from "../components/TtsBubble";
 import { TtsDecodeGuideDialog } from "../components/TtsDecodeGuideDialog";
 import { TtsSheet } from "../components/TtsSheet";
-import { bookDisplayTitle, isFallbackBookAuthor } from "../lib/bookDisplay";
+import { createBookTitle } from "../lib/translation/title";
+import { isFallbackBookAuthor } from "../lib/bookDisplay";
 import {
   BookmarkIcon,
   BrowserIcon,
@@ -116,7 +117,7 @@ import {
   localBookById,
 } from "../lib/books";
 import { withDisplayReplacements } from "../lib/textReplacements";
-import { withHanBook } from "../lib/hanDisplay";
+import { hanText, withHanBook } from "../lib/hanDisplay";
 import { sentenceSelectionRange } from "../lib/textSelection";
 import { t, type MessageKey } from "../lib/i18n";
 import {
@@ -1051,6 +1052,8 @@ export default function ReaderPage() {
 
   /** 书架中的原书（对象身份只随书库内容更新变化） */
   const rawBook = createMemo(() => localBookById(bookId()));
+  const originalBookTitle = createBookTitle(rawBook);
+  const translatedBookTitle = () => hanText(originalBookTitle());
   /**
    * 实时显示用书：把「对本书生效」的文本替换规则应用到各章正文，再按用户的简繁转换
    * 偏好产出显示副本（都只影响阅读展示，不改动书库原文；没有生效规则 / 未开启转换、
@@ -1209,7 +1212,7 @@ export default function ReaderPage() {
     const url = chapterWebUrl();
     if (!url) return;
     setMenuOpen(false);
-    const title = chapter()?.title?.trim() || bookDisplayTitle(book()?.title ?? "");
+    const title = chapter()?.title?.trim() || translatedBookTitle();
     void openWebviewPage(url, title).catch((err) => {
       reportFailure(t("reader.chapterWebviewFailed"), err);
     });
@@ -5144,7 +5147,7 @@ export default function ReaderPage() {
                 </button>
                 <div class="flex min-w-0 flex-1 flex-col items-center gap-[1px]">
                   <span class="max-w-full truncate text-[14.5px] font-semibold" onClick={toBookDetailPage}>
-                    {bookDisplayTitle(book()!.title)}
+                    {translatedBookTitle()}
                   </span>
                   <span class="max-w-full truncate text-[10.5px] text-text-3">
                     {chapter() ? `${chapter()!.cid} · ${chapter()!.title}` : ""}
@@ -5684,7 +5687,7 @@ export default function ReaderPage() {
             <Show when={updateConflict()}>
               {(conflict) => (
                 <OnlineTocOverwriteDialog
-                  bookTitle={bookDisplayTitle(book()?.title)}
+                  bookTitle={translatedBookTitle()}
                   oldCount={conflict().oldCount}
                   newCount={conflict().newCount}
                   busy={overwriteBusy()}
@@ -5700,7 +5703,7 @@ export default function ReaderPage() {
               <ReplaceRulesSheet
                 open
                 bookId={bookId()}
-                bookTitle={bookDisplayTitle(book()?.title)}
+                bookTitle={translatedBookTitle()}
                 seedFind={replaceSeed()}
                 onClose={() => {
                   setReplaceSheetOpen(false);

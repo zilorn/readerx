@@ -1,4 +1,10 @@
 export const translation = {
+  "translation.bookTitle": "翻译书名",
+  "translation.retranslateTitle": "重新翻译书名",
+  "translation.bookContent": "翻译书籍正文",
+  "translation.downloadedOnly": "翻译已下载的章节；再次点击可继续或翻译新下载的正文。",
+  "translation.bookProgress": "{completed} / {total} 章",
+
   "translation.management": "翻译管理",
   "translation.chapterTranslations": "章节译文",
   "translation.searchChapters": "搜索章节",

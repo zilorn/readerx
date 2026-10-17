@@ -22,7 +22,8 @@ import {
   type BookFormat,
   type BookMeta,
 } from "../lib/booksTypes";
-import { withHanMeta } from "../lib/hanDisplay";
+import { createBookTitle } from "../lib/translation/title";
+import { hanText, withHanMeta } from "../lib/hanDisplay";
 import { t } from "../lib/i18n";
 import { refreshOnlineBookInfo } from "../lib/online";
 import { showToast } from "../lib/toast";
@@ -129,6 +130,7 @@ export default function BookDetailPage() {
 
   const bookId = () => params.id ?? "";
   const book = createMemo(() => bookMetaById(bookId()));
+  const title = createBookTitle(book);
   /** 展示用副本（简繁转换）；编辑抽屉与「重新拉取书籍信息」一律用原始记录，避免把转换结果写回书库 */
   const displayBook = createMemo(() => withHanMeta(book()));
   const [switchOpen, setSwitchOpen] = createSignal(false);
@@ -267,11 +269,11 @@ export default function BookDetailPage() {
               <div class="flex min-w-0 flex-1 flex-col justify-center gap-2">
                 <h2 class="text-[18px] font-bold leading-snug">
                   <QuickSearchText
-                    text={displayBook()!.title}
+                    text={hanText(title())}
                     action={t("book.detail.searchTitle")}
                     iconSize={14}
                     iconClass="mt-[5px]"
-                    onSearch={quickSearch}
+                    onSearch={() => quickSearch(book()!.title)}
                   />
                 </h2>
                 <p class="text-[13px] leading-snug text-text-3">

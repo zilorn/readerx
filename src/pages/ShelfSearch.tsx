@@ -21,7 +21,8 @@ import {
 import { t } from "../lib/i18n";
 import { metaCardStatus } from "../lib/progress";
 import { shelfOrder, type ShelfEntry } from "../lib/store";
-import { bookDisplayAuthor, bookDisplayTitle } from "../lib/bookDisplay";
+import { createBookTitle, translatedBookTitle } from "../lib/translation/title";
+import { bookDisplayAuthor } from "../lib/bookDisplay";
 
 interface ShelfItem {
   entry: ShelfEntry;
@@ -54,6 +55,8 @@ function scoreItem(rawQuery: string, item: ShelfItem): ScoredItem | null {
     { field: 3, text: groupName(book.groupId) },
   ];
   const titleHan = hanText(book.title);
+  const translated = translatedBookTitle(book);
+  if (translated) candidates.push({ field: 0, text: translated }, { field: 0, text: hanText(translated) });
   const authorHan = hanText(book.author);
   if (titleHan !== book.title) candidates.push({ field: 0, text: titleHan });
   if (authorHan !== book.author) candidates.push({ field: 1, text: authorHan });
@@ -189,7 +192,8 @@ export default function ShelfSearchPage() {
                   {(result) => {
                     const { entry, book } = result.item;
                     const summary = readSummary(entry, book);
-                    const title = hanText(bookDisplayTitle(book.title));
+                    const translatedTitle = createBookTitle(() => book);
+                    const title = () => hanText(translatedTitle());
                     // 展示与搜索都用同一套字形：书名/作者按用户偏好转换后显示
                     const author = hanText(bookDisplayAuthor(book.author));
                     return (
@@ -197,7 +201,7 @@ export default function ShelfSearchPage() {
                         role="button"
                         tabindex={0}
                         class="flex w-full items-center gap-3.5 px-3.5 py-3 text-left transition-colors active:bg-surface-2"
-                        aria-label={t("shelf.openAria", { title })}
+                        aria-label={t("shelf.openAria", { title: title() })}
                         onClick={() => openBook(book.id)}
                         onKeyDown={(e) => {
                           if (e.key !== "Enter" && e.key !== " ") return;
@@ -208,7 +212,7 @@ export default function ShelfSearchPage() {
                         <BookCover bookId={book.id} variant="row" />
                         <span class="flex min-w-0 flex-1 flex-col gap-[3px]">
                           <span class="truncate text-[14.5px] font-semibold">
-                            {title}
+                            {title()}
                           </span>
                           <span class="truncate text-[12px] text-text-3">
                             {author}

@@ -2,7 +2,7 @@ import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-j
 import { readingTimeStats } from "../lib/store";
 import { formatReadingDuration, readingDay } from "../lib/readingTime";
 import { bookMetaById, ensureLocalBooksLoaded } from "../lib/books";
-import { bookDisplayTitle } from "../lib/bookDisplay";
+import { createBookTitle } from "../lib/translation/title";
 import { isHiddenGroupId } from "../lib/groups";
 import { currentLocale, t } from "../lib/i18n";
 import { useNavigate } from "@solidjs/router";
@@ -19,9 +19,7 @@ interface RankedEntry {
 /** 排行条目标题；已移出书库的书籍取不到元信息，用汇总标题 */
 function entryTitle(entry: RankedEntry): string {
   if (entry.kind === "hidden") return t("settings.readingTime.hiddenBooks");
-  if (entry.kind === "removed") return t("settings.readingTime.removedBooks");
-  const meta = entry.id ? bookMetaById(entry.id) : undefined;
-  return meta ? bookDisplayTitle(meta.title) : t("settings.readingTime.removedBooks");
+  return t("settings.readingTime.removedBooks");
 }
 
 export default function ReadingTimePage() {
@@ -122,18 +120,20 @@ export default function ReadingTimePage() {
           <h2 class="mb-3 text-[13px] font-medium">{t("settings.readingTime.bookRanking")}</h2>
           <Show when={rankedBooks().length > 0} fallback={<p class="text-[12px] text-text-3">{t("settings.readingTime.emptyBooks")}</p>}>
             <ol class="space-y-3">
-              <For each={allBooks() ? rankedBooks() : rankedBooks().slice(0, 5)}>{(entry, index) => (
-                <li class="flex gap-3">
-                  <span class="w-4 shrink-0 text-[12px] tabular-nums text-text-3">{index() + 1}</span>
-                  <div class="min-w-0 flex-1">
-                    <div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 text-[12px]">
-                      <span class="min-w-0 break-words">{entryTitle(entry)}</span>
-                      <span class="shrink-0 tabular-nums text-text-2">{formatReadingDuration(entry.milliseconds)} · {Math.round(entry.milliseconds / bookTotal() * 100)}%</span>
+              <For each={allBooks() ? rankedBooks() : rankedBooks().slice(0, 5)}>{(entry, index) => {
+                const title = createBookTitle(() => entry.id ? bookMetaById(entry.id) : undefined);
+                return (
+                  <li class="flex gap-3">
+                    <span class="w-4 shrink-0 text-[12px] tabular-nums text-text-3">{index() + 1}</span>
+                    <div class="min-w-0 flex-1">
+                      <div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 text-[12px]">
+                        <span class="min-w-0 break-words">{entry.kind === "book" && entry.id && bookMetaById(entry.id) ? title() : entryTitle(entry)}</span>
+                        <span class="shrink-0 tabular-nums text-text-2">{formatReadingDuration(entry.milliseconds)} · {Math.round(entry.milliseconds / bookTotal() * 100)}%</span>
+                      </div>
+                      <div class="mt-2 h-1 overflow-hidden rounded-full bg-border" aria-hidden="true"><div class="h-full rounded-full bg-accent" style={{ width: `${entry.milliseconds / bookTotal() * 100}%` }} /></div>
                     </div>
-                    <div class="mt-2 h-1 overflow-hidden rounded-full bg-border" aria-hidden="true"><div class="h-full rounded-full bg-accent" style={{ width: `${entry.milliseconds / bookTotal() * 100}%` }} /></div>
-                  </div>
-                </li>
-              )}</For>
+                  </li>
+              ); }}</For>
             </ol>
             <Show when={rankedBooks().length > 5}><button type="button" class="mt-3 min-h-10 w-full text-[12px] text-accent" aria-expanded={allBooks()} onClick={() => setAllBooks(!allBooks())}>{t(allBooks() ? "settings.readingTime.showLess" : "settings.readingTime.showAll", { count: rankedBooks().length })}</button></Show>
           </Show>

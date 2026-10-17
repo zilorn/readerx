@@ -35,7 +35,7 @@ import {
   type BookMeta,
   type BookSource,
 } from "../lib/booksTypes";
-import { withHanMeta } from "../lib/hanDisplay";
+import { hanText, withHanMeta } from "../lib/hanDisplay";
 import {
   groupDisplayName,
   groupList,
@@ -53,7 +53,7 @@ import {
   shelfSourceFilterEnabled,
   type ShelfEntry,
 } from "../lib/store";
-import { bookDisplayTitle } from "../lib/bookDisplay";
+import { createBookTitle } from "../lib/translation/title";
 
 interface ShelfItem {
   entry: ShelfEntry;
@@ -122,8 +122,8 @@ function BookCard(props: {
 }) {
   const { entry, book } = props.item;
   const { hasRead, finished, percent } = cardProgress(entry, book);
-  /** 兜底书名只在显示时翻译（书库里的默认书名是持久化值，见 lib/bookDisplay.ts） */
-  const title = () => bookDisplayTitle(book.title);
+  const translatedTitle = createBookTitle(() => bookMetaById(book.id) ?? book);
+  const title = () => hanText(translatedTitle());
 
   let longPressTimer: number | undefined;
   let longPressFired = false;
