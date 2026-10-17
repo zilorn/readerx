@@ -1,3 +1,4 @@
+import { GlossarySheet } from "../components/GlossarySheet";
 import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
 import { useNavigate, useParams } from "@solidjs/router";
 import { LoadingScreen } from "../components/LoadingScreen";
@@ -21,7 +22,9 @@ import {
   type BookFormat,
   type BookMeta,
 } from "../lib/booksTypes";
-import { withHanMeta } from "../lib/hanDisplay";
+import { createMetadataTranslation } from "../lib/translation/metadata";
+import { MetadataTranslationActions } from "../components/MetadataTranslationActions";
+import { hanText, withHanMeta } from "../lib/hanDisplay";
 import { t } from "../lib/i18n";
 import { refreshOnlineBookInfo } from "../lib/online";
 import { showToast } from "../lib/toast";
@@ -123,10 +126,13 @@ function MetaRowItem(props: { row: MetaRow }) {
 
 export default function BookDetailPage() {
   const navigate = useNavigate();
+  const [glossaryOpen, setGlossaryOpen] = createSignal(false);
   const params = useParams();
 
   const bookId = () => params.id ?? "";
   const book = createMemo(() => bookMetaById(bookId()));
+  const metadata = createMetadataTranslation(book);
+  const title = () => bookDisplayTitle(metadata.title());
   /** 展示用副本（简繁转换）；编辑抽屉与「重新拉取书籍信息」一律用原始记录，避免把转换结果写回书库 */
   const displayBook = createMemo(() => withHanMeta(book()));
   const [switchOpen, setSwitchOpen] = createSignal(false);
@@ -200,11 +206,12 @@ export default function BookDetailPage() {
 
   const rows = createMemo(() => {
     const current = displayBook();
-    return current ? bookMetaRows(current) : [];
+    return current ? bookMetaRows({ ...current, title: hanText(title()) }) : [];
   });
 
   return (
     <div class="page">
+      <Show when={glossaryOpen()}><GlossarySheet bookId={params.id!} onClose={() => setGlossaryOpen(false)} /></Show>
       <PageHeader
         title={t("book.detail.title")}
         onBack={goBack}
@@ -254,6 +261,8 @@ export default function BookDetailPage() {
           }
         >
           <div class="flex flex-col gap-5 px-[18px] pb-[calc(36px+env(safe-area-inset-bottom))] pt-2">
+            <button class="w-full rounded-xl border border-border bg-surface px-4 py-3 text-left text-[14px] text-accent" onClick={() => navigate(`/book/${encodeURIComponent(bookId())}/translation`)}>{t("translation.management")}</button>
+            <button class="w-full rounded-xl border border-border bg-surface px-4 py-3 text-left text-[14px] text-accent" onClick={() => setGlossaryOpen(true)}>{t("translation.glossaryTitle")}</button>
             {/* 封面 + 核心信息 */}
             <div class="flex gap-4">
               <div class="w-[112px] flex-none">
@@ -262,11 +271,11 @@ export default function BookDetailPage() {
               <div class="flex min-w-0 flex-1 flex-col justify-center gap-2">
                 <h2 class="text-[18px] font-bold leading-snug">
                   <QuickSearchText
-                    text={displayBook()!.title}
+                    text={hanText(title())}
                     action={t("book.detail.searchTitle")}
                     iconSize={14}
                     iconClass="mt-[5px]"
-                    onSearch={quickSearch}
+                    onSearch={() => quickSearch(book()!.title)}
                   />
                 </h2>
                 <p class="text-[13px] leading-snug text-text-3">
@@ -303,6 +312,8 @@ export default function BookDetailPage() {
               </button>
             </Show>
 
+            <MetadataTranslationActions translation={metadata} disabled={refreshing()} />
+
             {/* 标签 */}
             <section>
               <h3 class="mb-2 text-[12.5px] font-medium tracking-[0.04em] text-text-3">
@@ -331,7 +342,7 @@ export default function BookDetailPage() {
                 {t("book.field.intro")}
               </h3>
               <Show
-                when={displayBook()!.intro}
+                when={hanText(metadata.intro())}
                 fallback={
                   <div class="flex min-h-[72px] items-center justify-center rounded-[14px] border border-dashed border-border bg-surface px-4 text-center text-[12.5px] leading-[1.7] text-text-3">
                     {t("book.detail.introEmpty")}
@@ -339,7 +350,7 @@ export default function BookDetailPage() {
                 }
               >
                 <p class="whitespace-pre-wrap break-words rounded-[14px] border border-border bg-surface px-3.5 py-3 text-[12.5px] leading-[1.75] text-text-2">
-                  {displayBook()!.intro}
+                  {hanText(metadata.intro())}
                 </p>
               </Show>
             </section>

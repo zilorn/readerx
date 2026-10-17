@@ -1,3 +1,4 @@
+import { reportFailure } from "./errorReport";
 /**
  * 本地书籍仓库（两级加载）：
  * - 书库「元数据」由 Rust 后端按 id 存为 JSON 文件；书籍正文同样在文件里，
@@ -724,6 +725,15 @@ export async function persistBookDraft(
   await saveRemoteBook(book);
   upsertMetaFromFull(book);
   upsertFull(book);
+  try {
+    const { ensureTranslationSettings, translationSettings, setBookTranslationOverride } = await import("./translation/settings");
+    const { foreignBook } = await import("./translation/core");
+    await ensureTranslationSettings();
+    await setBookTranslationOverride(book.id, { enabled: translationSettings().enabled && foreignBook(book.chapters) });
+  } catch (error) {
+    // 书籍已经落库：翻译设置失败不能把导入报告成失败或产生重复书。
+    reportFailure(t("translation.saveFailed"), error);
+  }
   const size = draftSize(draft);
   log.info(
     "导入完成",

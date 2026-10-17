@@ -52,3 +52,36 @@
 ## 跨功能验证
 
 前端检查按 SKILL.md 执行。按改动选择实际交互：窄屏/宽屏与单双页切换后的阅读位置、重复文本及跨段书签、含图或纯图章节、目录覆盖期间取消下载、两种听书引擎暂停与取消跟读。统计计时和同步/恢复后的缓存重载使用 [数据技能](../../readerx-data/SKILL.md)，无需为无关功能重复全量实测。
+
+
+## 智能翻译
+
+入口为 src/lib/translation/（配置、提供商协议、采样/指纹、任务调度、阅读接线）、
+src/pages/TranslationSettings.tsx、TranslationManagement.tsx 与 BookTranslationSettings / TranslationPopup / GlossarySheet。
+全局总开关默认关闭，按书覆盖项沿用未修改的全局项。译文是显示副本，保持原文单元编号；
+pagination.ts 的译文片段按源字符跨度映射进度，测量与渲染字号一致；重排前撤去翻页动画，
+沿用阅读位置恢复通道；滚动恢复须从同一次视口采样记录原文/译文节点类型，
+随恢复目标传递，不能用同段存在译文来推断。独立切换按钮为
+`TranslationReadingToggle` 只修改独立的 `readingText` 听书原译文偏好，不修改显示 `mode`；
+阅读设置写本书覆盖项，全局设置/翻译配置页写全局默认，缺省朗读原文。
+TTS 经 `speechText` 只转换合成文字，保持原文分句坐标，两种引擎及主动音频预热共用；
+配置更新调用 `refreshText` 取消旧翻译并保留位置/暂停状态。修改时运行 `node scripts/tts-replacements-test.mjs`。
+本书阅读设置直接提供术语表开关和翻译管理入口；管理页支持单章强制重译与术语表编辑/重新生成，
+`BookTranslationActions` 通过 translation/manual.ts 显式切换书名译名与翻译全部已下载正文，
+支持取消、进度与缓存续译；translation/title.ts 的 createBookTitle 只读本地状态用于显示，
+原始书名仍用于元数据编辑与换源。回归运行 `node scripts/translation-manual-test.mjs`。
+发现页搜索/浏览行与 OnlineBookSheet、BookDetail 通过 `translation/metadata.ts` 的
+`createMetadataTranslation` 和 `MetadataTranslationActions` 翻译书名及非空简介，支持重译、取消、原文切换。
+设置页的 `autoTranslateMetadata` 默认 false，只自动处理活动发现页与已加载详情的预览；
+保活页离开必须传 active=false 取消任务，详情页始终手动。未入架译文保留有界会话缓存，
+本地书籍简介使用可选 introEnabled/introTranslation 字段，沿用既有翻译状态；原始元数据不变。
+自动失败逐项重试，手动失败走 reportFailure，书籍信息请求共用 engine.ts 的 limited 并发预算。
+回归仍运行 `node scripts/translation-manual-test.mjs`，覆盖自动开关、活动状态和迟到结果。
+本书配置开关不自动启动全书批量翻译，全书操作只由手动按钮触发。运行 `node scripts/translation-position-test.mjs`
+验证两侧恢复、后续批次与按钮保存。双语折叠模式仅在展开浮窗时翻译单段，忽略预翻译章数，
+不提前生成术语表；切回内嵌双语或仅译文后恢复已保存的预翻译配置。
+折叠浮窗复用选区定位规则，翻页/换章收起。完整约束见
+[智能翻译](../../../../docs/smart-translation.md)。回归：`node scripts/translation-test.mjs`，
+术语表草稿语言与 AI 畸形响应回归：`node scripts/glossary-test.mjs`；
+原文匹配与浏览器缓存回归：`node scripts/translation-storage-test.mjs`；SQLite 逐原文清理契约见数据技能。
+追加既有阅读位置、翻页、选区、注释和章节编辑检查；真实服务与原生平台单独实测。

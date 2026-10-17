@@ -39,6 +39,8 @@ pub(super) fn export_to<R: tauri::Runtime>(
     let book_count = books.ids()?.len() as u64;
     let mut state = Vec::new();
     walk(&root.join(STATE_DIR), STATE_DIR, &is_state_file, &mut state)?;
+    // 翻译设置含用户提供的 API 密钥，不参与备份。
+    state.retain(|entry| entry.name != "state/readerx.translation.json");
     let mut images = Vec::new();
     walk(
         &root.join(IMAGES_DIR),

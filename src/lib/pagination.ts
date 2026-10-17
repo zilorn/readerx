@@ -36,7 +36,7 @@ export type ReaderInlineImage = ReaderImageRef & { at: number };
 
 /** 章内内容单元（TXT 的 paragraphs 也会归一化成该结构） */
 export type ReaderBlock =
-  | { kind: "p"; text: string; imgs?: ReaderInlineImage[] }
+  | { kind: "p"; text: string; imgs?: ReaderInlineImage[]; translation?: { text: string; only: boolean } }
   | { kind: "h"; level: number; text: string }
   | ({ kind: "img" } & ReaderImageRef);
 
@@ -100,6 +100,9 @@ export type PageFragment =
   | {
       kind: "p";
       text: string;
+      translated?: boolean;
+      translationOnly?: boolean;
+      sourceLength?: number;
       indent: boolean;
       end: boolean;
       /** 所属正文单元在 chapterUnits 中的序号（书签/定位用） */
@@ -167,6 +170,7 @@ export function chapterUnits(chapter: LocalBookChapter): ReaderBlock[] {
       return {
         kind: "p",
         text: block.text,
+        ...(block.translation ? { translation: block.translation } : {}),
         ...(imgs && imgs.length > 0 ? { imgs } : {}),
       };
     });
@@ -554,7 +558,9 @@ export function* paginateChapterSteps(
     }
   }
 
-  const measurer = buildMeasurer(layout);
+  const originalMeasurer = buildMeasurer(layout);
+  const translatedMeasurer = buildMeasurer({ ...layout, fontSize: layout.fontSize * 0.88 });
+  let measurer = originalMeasurer;
   try {
     const pages: PageFragment[][] = [];
     let current: PageFragment[] = [];
@@ -626,7 +632,12 @@ export function* paginateChapterSteps(
       imgs: readonly SizedInlineImage[],
       marginPx: number,
       unitIdx: number,
+      translated = false,
+      sourceChars = text.length,
+      smaller = false,
     ): Generator<void, void, void> {
+      measurer = smaller ? translatedMeasurer : originalMeasurer;
+      const sourceOffset = (at: number) => text.length ? Math.floor(at * sourceChars / text.length) : 0;
       let rest = text;
       let restImgs = imgs;
       let first = true; // 是否源段落的第一段（决定首行缩进）
@@ -643,7 +654,8 @@ export function* paginateChapterSteps(
             indent: first,
             end: true,
             unit: unitIdx,
-            cstart,
+            cstart: translated ? sourceOffset(cstart) : cstart,
+            ...(translated ? { translated: true, translationOnly: !smaller, sourceLength: sourceOffset(cstart + rest.length) - sourceOffset(cstart) } : {}),
             ...(restImgs.length > 0 ? { imgs: restImgs } : {}),
           });
           used = pageHeight;
@@ -658,7 +670,8 @@ export function* paginateChapterSteps(
             indent: first,
             end: true,
             unit: unitIdx,
-            cstart,
+            cstart: translated ? sourceOffset(cstart) : cstart,
+            ...(translated ? { translated: true, translationOnly: !smaller, sourceLength: sourceOffset(cstart + rest.length) - sourceOffset(cstart) } : {}),
             ...(restImgs.length > 0 ? { imgs: restImgs } : {}),
           });
           used += fullHeight + marginPx;
@@ -687,7 +700,8 @@ export function* paginateChapterSteps(
             indent: first,
             end: true,
             unit: unitIdx,
-            cstart,
+            cstart: translated ? sourceOffset(cstart) : cstart,
+            ...(translated ? { translated: true, translationOnly: !smaller, sourceLength: sourceOffset(cstart + rest.length) - sourceOffset(cstart) } : {}),
             ...(restImgs.length > 0 ? { imgs: restImgs } : {}),
           });
           used += measurer.heightParagraph(rest, restImgs, first) + marginPx;
@@ -703,7 +717,8 @@ export function* paginateChapterSteps(
           indent: first,
           end: false,
           unit: unitIdx,
-          cstart,
+          cstart: translated ? sourceOffset(cstart) : cstart,
+          ...(translated ? { translated: true, translationOnly: !smaller, sourceLength: sourceOffset(cstart + prefix.length) - sourceOffset(cstart) } : {}),
           ...(headImgs.length > 0 ? { imgs: headImgs } : {}),
         });
         used += measurer.heightParagraph(prefix, headImgs, first);
@@ -732,7 +747,13 @@ export function* paginateChapterSteps(
       const unit = units[idx];
       if (unit.kind === "p") {
         const imgs = sizedInlineImages(layout, unit.text, unit.imgs, imageSizes);
-        yield* pushParagraph(unit.text, imgs, paraMarginPx, idx);
+        if (!unit.translation?.only) yield* pushParagraph(unit.text, imgs, paraMarginPx, idx);
+        if (unit.translation) {
+          // 仅译文模式保留所有段内图，按比例映射到译文；双语原文已展示图片。
+          const translatedImgs = unit.translation.only ? imgs.map(img => ({ ...img, at: unit.text.length ? Math.floor(img.at * unit.translation!.text.length / unit.text.length) : 0 })) : [];
+          yield* pushParagraph(unit.translation.text, translatedImgs, paraMarginPx, idx, true, unit.text.length, !unit.translation.only);
+        }
+        measurer = originalMeasurer;
         continue;
       }
       if (unit.kind === "h") {
@@ -782,7 +803,8 @@ export function* paginateChapterSteps(
     if (pages.length === 0) pages.push(current);
     return { pages };
   } finally {
-    measurer.dispose();
+    originalMeasurer.dispose();
+    translatedMeasurer.dispose();
   }
 }
 

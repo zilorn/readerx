@@ -933,3 +933,16 @@ mod tests {
         assert_eq!(value["dataBase64"], "Zm9v", "IPC 字段名必须是 dataBase64");
     }
 }
+
+#[tauri::command]
+pub async fn readerx_translations_get(app: AppHandle, book_id: String, cid: Option<String>) -> Result<Value,String> {
+    blocking("翻译读取",move || book_store::translation_data(&app,&book_id,cid.as_deref())).await
+}
+#[tauri::command]
+pub async fn readerx_translations_put(app: AppHandle, book_id: String, cid: Option<String>, revision: String, value: Value) -> Result<bool,String> {
+    blocking("翻译写入",move || book_store::translation_write(&app,&book_id,cid.as_deref(),&revision,&value)).await
+}
+#[tauri::command]
+pub async fn readerx_translations_invalidate(app: AppHandle, book_id: String, cid: String) -> Result<(),String> {
+    blocking("译文失效",move || book_store::translation_invalidate(&app,&book_id,&cid)).await
+}

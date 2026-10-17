@@ -1,3 +1,4 @@
+import { BookTranslationSettings } from "./BookTranslationSettings";
 /**
  * 阅读设置底部抽屉（入口：阅读菜单顶栏的齿轮按钮）：
  * - 顶部为与「设置」页共用的阅读设置（正文字号 / 段落间距），
@@ -33,6 +34,7 @@ import { ToggleSwitch } from "./ToggleSwitch";
 import { ScrollArea } from "./ScrollArea";
 
 export interface ReaderSettingsSheetProps {
+  bookId: string;
   open: boolean;
   onClose: () => void;
   autoPageEnabled: boolean;
@@ -131,6 +133,7 @@ export function ReaderSettingsSheet(props: ReaderSettingsSheetProps) {
           <Card>
             <ReadingSettingsRows group="adjustments" />
           </Card>
+          <BookTranslationSettings bookId={props.bookId} />
 
           <div class="mt-3">
             <Card>

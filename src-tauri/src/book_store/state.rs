@@ -397,7 +397,10 @@ mod tests {
     fn database_v1_upgrade_and_snapshot_include_collections_and_progress() {
         let root = setup();
         let db = sqlite::open(&root).unwrap();
-        db.execute_batch("DROP TABLE groups; DROP TABLE rules; DROP TABLE collections; DROP TABLE migrated_states; PRAGMA user_version=1;").unwrap();
+        // 还原真实 v1 结构，而非仅降低版本号后留下新版本的翻译表。
+        db.execute_batch("DROP TABLE groups; DROP TABLE rules; DROP TABLE collections; DROP TABLE migrated_states;
+            DROP TABLE translations; DROP TABLE translation_books; DROP TABLE translation_epochs;
+            PRAGMA user_version=1;").unwrap();
         let old_snapshot = sqlite::snapshot(&db, &root).unwrap();
         assert_eq!(old_snapshot.ids().unwrap(), vec!["b1", "b2"]);
         assert!(old_snapshot.state_keys().unwrap().is_empty());

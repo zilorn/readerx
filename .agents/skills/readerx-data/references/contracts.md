@@ -41,3 +41,29 @@
 - reading_time.rs 串行累加并原子替换状态；contributions 是来源累计值，顶层 days/books 是显示视图。同步对同一来源、同一统计项取最大值，再对来源求和，不能把远端累计值再次作为增量相加。
 - sync/reading_time.rs 发布不可变累计快照，身份含来源、统计项与累计值；保留乱序、重复、第三设备转发和旧备份重发的幂等性。来源标识 reading-time-origin 留在设备本地，书籍删除/进度重置不清历史统计。
 - 旧 v1 数据迁移一次后保存；浏览器开发模式仅内存保存。统计改动检查恢复后新增来源与同步落地重载，不只检查本机计数。
+
+
+## 智能翻译数据
+
+SQLite user_version=4，translations 保存 source/kind/text，另有 translation_books、translation_epochs；
+版本 1/2 自动迁移，版本 3 仅重建无法回溯原文的旧译文缓存，保留书籍、局部配置和术语表。
+readerx_translations_get/put/invalidate 只读写本地书库，不调用同步钩子。每批追加最多 15 条，
+事务中校验正文摘要、版本租约与原文；save_chapter 按稳定 cid 在正文事务内只删原文已变或移除的译文。
+完整段落精确匹配，选区按原文片段匹配；blocks 优先，图片更新、段落/章节重排保留有效缓存。
+重取开始只推进租约，失败/取消/相同正文不清缓存；旧响应拒绝回填，删除章节清理对应 cid。
+单章手动重译经 engine.ts 的 retranslateChapter 推进租约并跳过缓存读取，仍走原文校验；
+失败/取消保留有效缓存，其他章及服务缓存不受影响，不新增数据库格式。
+全局配置 readerx.translation 与本书 overrides 新增独立 readingText（缺省 original），不复用显示 mode。
+书名显示开关 titleEnabled 与 titleTranslation（source/key/text）为 TranslationBookState 可选字段，
+复用 translation_books.state JSON；旧数据缺省关闭，无需迁移，原始书名不变。
+简介译文使用可选 introEnabled/introTranslation（source/key/text），同样按原文与服务配置匹配；
+metadata.ts 成对保存书名/简介结果，失败或取消不覆盖成功缓存，不改原始元数据。
+全局 autoTranslateMetadata 缺省 false，存入既有 readerx.translation；发现页未入架书目只用
+有界会话缓存，不写 translation_books、不创建书库记录、不参与同步或备份。
+manual.ts 的全书手动翻译仅处理已下载文字章，复用原文关联缓存与租约，不清空有效缓存，
+不新增下载、同步或备份通道；回归 `node scripts/translation-manual-test.mjs`。
+配置含接口凭据，不进入日志/备份；备份快照清空三张翻译表并 VACUUM，确保没有空闲页凭据。
+实现 src-tauri/src/book_store/sqlite/translation.rs；约束见
+[智能翻译](../../../../docs/smart-translation.md)。运行 book_store / data_transfer Rust 回归及前端
+`node scripts/translation-test.mjs`、`node scripts/translation-storage-test.mjs`、
+`node scripts/glossary-test.mjs`（术语表语言标记、AI 校验与失败重试）；无需修改同步协议。

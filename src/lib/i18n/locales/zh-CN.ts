@@ -1,3 +1,4 @@
+import { translation } from "./zh-CN/translation";
 /**
  * 简体中文词典（源语言）。
  *
@@ -28,6 +29,7 @@ import { sync } from "./zh-CN/sync";
 import { backup } from "./zh-CN/backup";
 
 export const zhCN = {
+  ...translation,
   ...common,
   ...shell,
   ...settings,

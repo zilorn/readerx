@@ -17,7 +17,7 @@ import {
   TTS_CACHE_LIMIT_PRESETS,
   TTS_CACHE_LIMIT_UNLIMITED,
 } from "../lib/store";
-import { bookDisplayTitle } from "../lib/bookDisplay";
+import { createBookTitle } from "../lib/translation/title";
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -102,11 +102,6 @@ export default function TtsCachePage() {
       .finally(() => setCacheBusy(false));
   }
 
-  const bookTitle = (id: string) => {
-    const meta = bookMetaById(id);
-    return meta ? hanText(bookDisplayTitle(meta.title)) : id;
-  };
-
   return (
     <div class="page">
       <PageHeader
@@ -165,38 +160,40 @@ export default function TtsCachePage() {
               }
             >
               <For each={overview()?.books ?? []}>
-                {(cache) => (
-                  <button
-                    class="flex w-full items-center gap-3 px-4 py-[13px] text-left transition-colors duration-150 active:bg-surface-2 disabled:opacity-40"
-                    disabled={cacheBusy()}
-                    onClick={() => void clearOneBook(cache.bookId)}
-                  >
-                    <span
-                      class="grid h-[34px] w-[34px] flex-none place-items-center rounded-[10px] bg-surface-2 text-text-2"
-                      aria-hidden="true"
+                {(cache) => {
+                  const title = createBookTitle(() => bookMetaById(cache.bookId));
+                  return (
+                    <button
+                      class="flex w-full items-center gap-3 px-4 py-[13px] text-left transition-colors duration-150 active:bg-surface-2 disabled:opacity-40"
+                      disabled={cacheBusy()}
+                      onClick={() => void clearOneBook(cache.bookId)}
                     >
-                      <HeadphonesIcon size={18} />
-                    </span>
-                    <span class="flex min-w-0 flex-1 flex-col gap-0.5">
-                      <span class="truncate text-[14px] font-medium">
-                        {bookTitle(cache.bookId)}
+                      <span
+                        class="grid h-[34px] w-[34px] flex-none place-items-center rounded-[10px] bg-surface-2 text-text-2"
+                        aria-hidden="true"
+                      >
+                        <HeadphonesIcon size={18} />
                       </span>
-                      <span class="text-[11.5px] text-text-3">
-                        {currentTtsCacheLimit() === TTS_CACHE_LIMIT_UNLIMITED
-                          ? t("settings.ttsCache.bookUsage", {
-                              count: cache.files,
-                              size: formatBytes(cache.bytes),
-                            })
-                          : t("settings.ttsCache.bookUsageLimited", {
-                              used: cache.files,
-                              limit: currentTtsCacheLimit(),
-                              size: formatBytes(cache.bytes),
-                            })}
+                      <span class="flex min-w-0 flex-1 flex-col gap-0.5">
+                        <span class="truncate text-[14px] font-medium">
+                          {bookMetaById(cache.bookId) ? hanText(title()) : cache.bookId}
+                        </span>
+                        <span class="text-[11.5px] text-text-3">
+                          {currentTtsCacheLimit() === TTS_CACHE_LIMIT_UNLIMITED
+                            ? t("settings.ttsCache.bookUsage", {
+                                count: cache.files,
+                                size: formatBytes(cache.bytes),
+                              })
+                            : t("settings.ttsCache.bookUsageLimited", {
+                                used: cache.files,
+                                limit: currentTtsCacheLimit(),
+                                size: formatBytes(cache.bytes),
+                              })}
+                        </span>
                       </span>
-                    </span>
-                    <span class="flex-none text-danger">{t("settings.ttsCache.clear")}</span>
-                  </button>
-                )}
+                      <span class="flex-none text-danger">{t("settings.ttsCache.clear")}</span>
+                    </button>
+                ); }}
               </For>
             </Show>
             <button

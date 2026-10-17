@@ -1,8 +1,9 @@
 import { Show, createEffect, createMemo, createSignal } from "solid-js";
 import { bookMetaById } from "../lib/books";
 import { hanText } from "../lib/hanDisplay";
+import { createBookTitle } from "../lib/translation/title";
 import { t } from "../lib/i18n";
-import { bookDisplayAuthor, bookDisplayTitle } from "../lib/bookDisplay";
+import { bookDisplayAuthor } from "../lib/bookDisplay";
 
 type CoverVariant = "grid" | "thumb" | "row";
 
@@ -41,7 +42,8 @@ export function BookCover(props: BookCoverProps) {
   const background = () =>
     `linear-gradient(165deg, hsl(${hue()} 58% 52%), hsl(${(hue() + 24) % 360} 62% 34%))`;
   // 兜底封面上的书名 / 作者走简繁转换显示副本（书库原文不变）
-  const title = () => hanText(bookDisplayTitle(book()?.title));
+  const translatedTitle = createBookTitle(book);
+  const title = () => hanText(translatedTitle());
   const author = () => hanText(bookDisplayAuthor(book()?.author));
   const variantClass =
     variant === "grid"

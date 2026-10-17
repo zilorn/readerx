@@ -1,3 +1,6 @@
+import { TranslationReadingToggle } from "../components/TranslationReadingToggle";
+import { reportFailure } from "../lib/errorReport";
+import { ensureTranslationSettings, saveTranslationSettings, translationSettings } from "../lib/translation/settings";
 import { For } from "solid-js";
 import { checkAppUpdate, downloadAppUpdate } from "../lib/appUpdates";
 import { availableAppUpdate, appUpdateChecking, autoAppUpdate, setAutoAppUpdateEnabled } from "../lib/store";
@@ -95,6 +98,7 @@ function Row(props: {
 
 export default function SettingsPage() {
   const navigate = useNavigate();
+  void ensureTranslationSettings().catch(error => reportFailure(t("translation.loadFailed"), error));
   const [resetConfirming, setResetConfirming] = createSignal(false);
   const [licenseOpen, setLicenseOpen] = createSignal(false);
   const [noticesOpen, setNoticesOpen] = createSignal(false);
@@ -285,6 +289,22 @@ export default function SettingsPage() {
                 }
               />
             </div>
+          </div>
+        </section>
+
+        <section class="mb-6">
+          <h2 class="mx-1 mb-2 text-[12.5px] font-medium text-text-3">{t("translation.title")}</h2>
+          <div class="overflow-hidden rounded-[14px] border border-border bg-surface">
+            <div class="flex items-center justify-between gap-3 px-4 py-3"><span class="text-[14.5px]">{t("translation.enabled")}</span><ToggleSwitch on={translationSettings().enabled} label={t("translation.enabled")} onChange={() => { void saveTranslationSettings({ enabled: !translationSettings().enabled }).catch(error => reportFailure(t("translation.saveFailed"), error)); }} /></div>
+            <Show when={translationSettings().enabled}>
+              <div class="flex items-center justify-between gap-3 border-t border-border px-4 py-3">
+                <span class="text-[14px]">{t("translation.autoMetadata")}</span>
+                <ToggleSwitch on={translationSettings().autoTranslateMetadata} label={t("translation.autoMetadata")}
+                  onChange={() => { void saveTranslationSettings({ autoTranslateMetadata: !translationSettings().autoTranslateMetadata }).catch(error => reportFailure(t("translation.saveFailed"), error)); }} />
+              </div>
+              <TranslationReadingToggle readingText={translationSettings().readingText} onChange={readingText => saveTranslationSettings({ readingText })} />
+              <Row label={t("translation.configure")} onClick={() => navigate("/translation")} />
+            </Show>
           </div>
         </section>
 

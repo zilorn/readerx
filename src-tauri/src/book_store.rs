@@ -1911,3 +1911,25 @@ mod tests {
     }
 
 }
+
+/// 翻译数据不发布到同步引擎；沿用书库锁保证并发写入与正文事务一致。
+pub(crate) fn translation_data<R: tauri::Runtime>(app: &AppHandle<R>, id: &str, cid: Option<&str>) -> Result<Value,String> {
+    let _transaction = library_transaction();
+    let db = sqlite::open(&crate::storage::data_root(app)?)?;
+    match cid { Some(cid) => sqlite::translation::translation_cache(&db,id,cid), None => sqlite::translation::translation_book(&db,id) }
+}
+pub(crate) fn translation_write<R: tauri::Runtime>(app: &AppHandle<R>, id: &str, cid: Option<&str>, revision: &str, value: &Value) -> Result<bool,String> {
+    let _transaction = library_transaction();
+    let mut db = sqlite::open(&crate::storage::data_root(app)?)?;
+    match cid {
+        Some(cid) => sqlite::translation::put_translation_cache(&mut db,id,cid,revision,value.as_object().ok_or("译文无效")?),
+        None => { sqlite::translation::put_translation_book(&db,id,value)?; Ok(true) }
+    }
+}
+pub(crate) fn translation_invalidate<R: tauri::Runtime>(app: &AppHandle<R>, id: &str, cid: &str) -> Result<(),String> {
+    let _transaction = library_transaction();
+    let mut db = sqlite::open(&crate::storage::data_root(app)?)?;
+    let tx = db.transaction().map_err(|e|e.to_string())?;
+    sqlite::translation::invalidate_translations(&tx,id,cid)?;
+    tx.commit().map_err(|e|e.to_string())
+}

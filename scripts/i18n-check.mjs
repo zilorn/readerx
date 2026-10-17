@@ -14,7 +14,7 @@
  * 因此本脚本没有任何依赖，也不需要先跑构建。
  */
 import { readFileSync, readdirSync, statSync } from "node:fs";
-import { join, relative } from "node:path";
+import { join, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -129,6 +129,11 @@ function walk(dir, out = []) {
   return out;
 }
 
+/** 词典定义不算引用；汇总文件与各语言模块都排除。 */
+function applicationFiles() {
+  return walk(SRC_DIR).filter((path) => !path.startsWith(LOCALES_DIR + sep));
+}
+
 /**
  * 硬编码中文扫描：只认「真正会渲染出去」的中文 ——
  * 用行内分词器把字符串字面量、正则字面量、注释（含 JSX 注释块）分开：
@@ -218,9 +223,7 @@ function scanLine(line, state) {
 }
 
 function checkHardcodedCjk() {
-  const files = walk(SRC_DIR).filter(
-    (path) => !path.includes(`${join("src", "lib", "i18n", "locales")}`),
-  );
+  const files = applicationFiles();
   const jsxHits = [];
   const stringHits = [];
   for (const path of files) {
@@ -317,7 +320,7 @@ async function main() {
   checkPluralCoverage(zh, en);
   checkUntranslatedEn(zh, en);
 
-  const sources = new Map(walk(SRC_DIR).map((path) => [path, readFileSync(path, "utf8")]));
+  const sources = new Map(applicationFiles().map((path) => [path, readFileSync(path, "utf8")]));
   const used = usedKeys(sources);
   const unused = [...zh.keys()].filter((key) => !used.has(key));
   for (const key of unused) warn(`未被引用的 key：${key}`);

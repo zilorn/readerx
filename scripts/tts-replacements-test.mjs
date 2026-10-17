@@ -8,6 +8,7 @@ let storedRules = [];
 const requests = [];
 const disk = new Map();
 const logs = [];
+const spoken = [];
 let failRequests = false;
 globalThis.window = globalThis;
 globalThis.fetch = async (url) => {
@@ -42,7 +43,13 @@ const mocks = {
       disk.set(`${bookId}:${key}`, { data, mime });
     },
   },
-  "./ttsEngine": { stopNativeSpeech: async () => {} },
+  "./ttsEngine": {
+    stopNativeSpeech: async () => {}, isNativeTtsAvailable: () => true,
+    subscribeNativeSpeechEvents: async () => () => {},
+    ensureNativeVoiceSelected: async () => "test-voice",
+    speakNativeSentence: async text => { spoken.push(text); },
+    nativeVoiceName: () => "test-voice", describeNativeError: String,
+  },
   "./ttsDecodeGuide": { isLinuxDesktop: () => false },
   "./webAudio": {
     decodeAudio: async (bytes) => bytes,
@@ -199,6 +206,92 @@ const logStart = logs.length;
 failedWarmup.warmup();
 await settle(() => logs.slice(logStart).some((args) => args[0] === "章节窗口预热结束"));
 failedWarmup.dispose();
+
+
+// Reader 的实际接线：显示模式不影响听书文本；两种引擎都只转换合成文本。
+failRequests = false;
+await setRules([]);
+let readingConfig = { enabled: true, mode: "bilingual", readingText: "translated" };
+const translationCalls = [];
+const readerSpeechText = evaluate(property("speechText"), {
+  translation: { settings: () => readingConfig }, rawBook: () => raw,
+  selectionTranslation: async (book, chapter, text, signal) => {
+    signal.throwIfAborted();
+    translationCalls.push({ book: book.id, cid: chapter.cid, text });
+    return "译文：" + text;
+  }, t: key => key,
+});
+for (const mode of ["bilingual", "translated", "original"]) {
+  readingConfig = { ...readingConfig, mode, readingText: "translated" };
+  const text = await readerSpeechText("sentence", 1, new AbortController().signal);
+  assert.equal(text, "译文：sentence");
+  assert.equal(translationCalls.at(-1).cid, "two", "按播放章翻译，不使用视图章");
+}
+const translatedPlayer = createTtsPlayer({
+  bookId: () => raw.id, chapterIndex: () => 0, chapterAt, chapterCount,
+  navigateChapter: () => {}, readingOffset: () => 0, speechText: readerSpeechText,
+});
+requests.length = 0;
+disk.clear();
+translatedPlayer.warmup();
+await settle(() => requests.length === 2);
+assert.deepEqual(requests, ["译文：錯字。", "译文：末句。"]);
+assert.equal(await translatedPlayer.warmBook(), 5);
+assert.ok(requests.includes("译文：编号12。"), "整本音频预热使用所选文本");
+translatedPlayer.start();
+await settle(() => translatedPlayer.status() === "playing");
+assert.equal(translatedPlayer.focus().item.text, "錯字。", "译文听书保留原文分句坐标");
+const originalPosition = translatedPlayer.focus().item.start;
+readingConfig = { ...readingConfig, readingText: "original" };
+translatedPlayer.refreshText();
+await settle(() => requests.includes("錯字。") && translatedPlayer.status() === "playing");
+assert.equal(translatedPlayer.focus().item.start, originalPosition);
+translatedPlayer.togglePlay();
+readingConfig = { ...readingConfig, readingText: "translated" };
+translatedPlayer.refreshText();
+await settle(() => translatedPlayer.status() === "paused");
+assert.equal(translatedPlayer.focus().item.start, originalPosition, "切换听书文本保持暂停与位置");
+translatedPlayer.dispose();
+
+load("./ttsSettings").setTtsEngine("native");
+const native = createTtsPlayer({
+  bookId: () => raw.id, chapterIndex: () => 0, chapterAt, chapterCount,
+  navigateChapter: () => {}, readingOffset: () => 0, speechText: readerSpeechText,
+});
+native.start();
+await settle(() => spoken.length === 1);
+assert.equal(spoken[0], "译文：錯字。");
+readingConfig = { ...readingConfig, readingText: "original" };
+native.refreshText();
+await settle(() => spoken.length === 2);
+assert.equal(spoken[1], "錯字。");
+assert.equal(native.focus().item.start, originalPosition);
+native.dispose();
+
+// 停止/切换后，延迟译文不能继续出声（原生与 HTTP 共用取消通道）。
+for (const engine of ["native", "http"]) {
+  load("./ttsSettings").setTtsEngine(engine);
+  let resolve;
+  let cancelledSignal;
+  const delayed = createTtsPlayer({
+    bookId: () => raw.id, chapterIndex: () => 0, chapterAt, chapterCount,
+    navigateChapter: () => {}, readingOffset: () => 0,
+    speechText: (_text, _chapter, signal) => {
+      cancelledSignal = signal;
+      return new Promise(done => { resolve = done; });
+    },
+  });
+  delayed.start();
+  await settle(() => !!resolve);
+  const baseline = { spoken: spoken.length, requests: requests.length };
+  delayed.stop();
+  assert.equal(cancelledSignal.aborted, true);
+  resolve("过期译文");
+  await new Promise(done => setTimeout(done, 20));
+  assert.deepEqual({ spoken: spoken.length, requests: requests.length }, baseline);
+  assert.equal(delayed.status(), "stopped");
+  delayed.dispose();
+}
 
 assert.equal(JSON.stringify(raw), original, "显示与听书都不能改写原书");
 assert.ok(!JSON.stringify(logs).includes("正字") && !JSON.stringify(logs).includes("新字"),

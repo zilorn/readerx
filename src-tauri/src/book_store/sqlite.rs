@@ -3,7 +3,9 @@ use super::*;
 use rusqlite::{params, Connection, OptionalExtension};
 
 pub(super) const DATABASE: &str = "books.sqlite3";
-const DATABASE_VERSION: i64 = 2;
+#[path = "sqlite/translation.rs"]
+pub(super) mod translation;
+const DATABASE_VERSION: i64 = 4;
 // 首次导入旧目录时仍需归档既有缓存；新指纹存于 chapters 行。
 const LEGACY_DIGEST_FILE: &str = "digest.json";
 
@@ -68,6 +70,26 @@ pub(super) fn connect(root: &Path) -> Result<Connection, String> {
              PRAGMA user_version=2;",
         )
         .map_err(sql)?;
+        tx.commit().map_err(sql)?;
+    }
+    if version < 3 {
+        db.execute_batch("BEGIN;
+            CREATE TABLE translations(book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE ON UPDATE CASCADE,
+                cid TEXT NOT NULL, key TEXT NOT NULL, text TEXT NOT NULL, PRIMARY KEY(book_id,cid,key));
+            CREATE TABLE translation_books(book_id TEXT PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE ON UPDATE CASCADE, state TEXT NOT NULL);
+            CREATE TABLE translation_epochs(book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE ON UPDATE CASCADE,
+                cid TEXT NOT NULL, epoch INTEGER NOT NULL, PRIMARY KEY(book_id,cid));
+            PRAGMA user_version=3; COMMIT;").map_err(sql)?;
+    }
+    if version < 4 {
+        // v3 只有不可逆请求指纹，没有原文，不能安全推导逐段归属；仅重建译文缓存。
+        let tx = db.transaction().map_err(sql)?;
+        tx.execute_batch("DROP TABLE translations;
+            CREATE TABLE translations(book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE ON UPDATE CASCADE,
+                cid TEXT NOT NULL, key TEXT NOT NULL, source TEXT NOT NULL,
+                kind TEXT NOT NULL CHECK(kind IN ('paragraph','selection')), text TEXT NOT NULL,
+                PRIMARY KEY(book_id,cid,key));
+            PRAGMA user_version=4;").map_err(sql)?;
         tx.commit().map_err(sql)?;
     }
     Ok(db)
@@ -338,19 +360,32 @@ pub(super) fn save_chapter(
     position: usize,
     chapter: &LocalBookChapter,
 ) -> Result<(), String> {
+    // 按稳定 cid 比较，目录/章节重排不能使另一章的译文失效。
+    let old: Option<String> = db.query_row("SELECT digest FROM chapters WHERE book_id=?1 AND cid=?2",
+        params![id,chapter.cid], |r| r.get(0)).optional().map_err(sql)?;
+    let digest = encode(&chapter_digest(chapter))?;
     db.execute("INSERT INTO chapters(book_id,position,cid,chapter,head,digest,assets) VALUES(?1,?2,?3,?4,?5,?6,?7)
         ON CONFLICT(book_id,position) DO UPDATE SET cid=excluded.cid,chapter=excluded.chapter,head=excluded.head,digest=excluded.digest,assets=excluded.assets",
-        params![id, position as i64, chapter.cid, encode(chapter)?, encode(&head(chapter)?)?, encode(&chapter_digest(chapter))?, encode(&chapter_asset_locals(chapter))?]).map_err(sql)?;
+        params![id, position as i64, chapter.cid, encode(chapter)?, encode(&head(chapter)?)?, digest, encode(&chapter_asset_locals(chapter))?]).map_err(sql)?;
+    if old.as_ref() != Some(&digest) {
+        translation::invalidate_translations(db, id, &chapter.cid)?;
+    }
     Ok(())
 }
 pub(super) fn put(db: &Connection, book: &LocalBook) -> Result<(), String> {
+    let previous = strings(db, "SELECT cid FROM chapters WHERE book_id=?1", [&book.id])?;
     let mut next = BookDetail::from_book(book);
     next.progress = detail(db, &book.id)?.and_then(|d| d.progress);
     save_detail(db, &next)?;
-    db.execute("DELETE FROM chapters WHERE book_id=?1", [&book.id])
-        .map_err(sql)?;
     for (position, chapter) in book.chapters.iter().enumerate() {
         save_chapter(db, &book.id, position, chapter)?;
+    }
+    db.execute("DELETE FROM chapters WHERE book_id=?1 AND position>=?2",params![book.id,book.chapters.len() as i64]).map_err(sql)?;
+    let retained: std::collections::HashSet<_> = book.chapters.iter().map(|chapter| chapter.cid.as_str()).collect();
+    for cid in previous {
+        if !retained.contains(cid.as_str()) {
+            translation::invalidate_translations(db, &book.id, &cid)?;
+        }
     }
     Ok(())
 }
