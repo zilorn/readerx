@@ -2,7 +2,9 @@
  * pdf.js 的加载与 worker 配置（PDF 导入的唯一入口）。
  *
  * 库本身与 worker 都很大（pdf.js 主包 + worker 共 1 MB 以上），因此：
- * - `pdfjs-dist` 只做成**动态 import**（`src/lib/pdf.ts` 里按需载入），不进首屏；
+ * - 主包与 worker 都使用 `legacy/build`，补齐旧 Android WebView 缺少的
+ *   Iterator、Promise.try 等 API；只切换主包无法覆盖 worker 的独立运行环境；
+ * - 主包只做成**动态 import**（`src/lib/pdf.ts` 里按需载入），不进首屏；
  * - worker 由 Vite 打包成独立 chunk，地址经 `new URL(..., import.meta.url)` 交给
  *   pdf.js（Tauri 的 WebView 里就是应用自身的地址，不依赖 CDN）；
  * - worker 起不来（Android 老 WebView 不支持 module worker 等）时 pdf.js 会自行
@@ -64,7 +66,7 @@ export function configurePdfWorker(pdfjs: PdfJsModule): void {
   workerReady = true;
   try {
     pdfjs.GlobalWorkerOptions.workerSrc = new URL(
-      "pdfjs-dist/build/pdf.worker.min.mjs",
+      "pdfjs-dist/legacy/build/pdf.worker.min.mjs",
       import.meta.url,
     ).href;
   } catch {
@@ -77,9 +79,9 @@ let modulePromise: Promise<PdfJsModule> | null = null;
 /** 载入 pdf.js（含 worker 配置）。同一会话只加载一次 */
 export function loadPdfJs(): Promise<PdfJsModule> {
   if (!modulePromise) {
-    modulePromise = import("pdfjs-dist")
+    modulePromise = import("pdfjs-dist/legacy/build/pdf.mjs")
       .then((mod) => {
-        const pdfjs = (mod.default ?? mod) as unknown as PdfJsModule;
+        const pdfjs = mod as unknown as PdfJsModule;
         configurePdfWorker(pdfjs);
         return pdfjs;
       })
