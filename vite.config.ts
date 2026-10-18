@@ -32,6 +32,15 @@ function hanDict(): Plugin {
 export default defineConfig(() => ({
   plugins: [hanDict(), solid(), tailwindcss()],
 
+  worker: {
+    format: "es",
+    // Vite 默认删除 worker 入口导出；PDF.js 的主线程回退需要 WorkerMessageHandler。
+    plugins: () => [{
+      name: "readerx:worker-exports",
+      options: (options) => ({ ...options, preserveEntrySignatures: "strict" }),
+    }],
+  },
+
   // 注入构建期版本号，前端通过 src/lib/version.ts 读取（Tauri 内运行时覆盖为真实打包版本）
   define: {
     __APP_VERSION__: JSON.stringify(pkg.version),

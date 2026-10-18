@@ -1,0 +1,3 @@
+allowBuilds:
+  # 仅输出维护信息的 postinstall，无需执行构建。
+  core-js: false

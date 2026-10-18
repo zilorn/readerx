@@ -5,11 +5,15 @@
  * - 主包与 worker 都使用 `legacy/build`，补齐旧 Android WebView 缺少的
  *   Iterator、Promise.try 等 API；只切换主包无法覆盖 worker 的独立运行环境；
  * - 主包只做成**动态 import**（`src/lib/pdf.ts` 里按需载入），不进首屏；
- * - worker 由 Vite 打包成独立 chunk，地址经 `new URL(..., import.meta.url)` 交给
- *   pdf.js（Tauri 的 WebView 里就是应用自身的地址，不依赖 CDN）；
+ * - 主线程与 pdf.worker.mjs 各自先补齐 legacy 包仍依赖的 Promise.withResolvers；
+ * - worker 由 Vite 连同兼容补丁打包，地址经 `?worker&url` 交给 pdf.js
+ *   （Tauri 的 WebView 里就是应用自身的地址，不依赖 CDN）；
  * - worker 起不来（Android 老 WebView 不支持 module worker 等）时 pdf.js 会自行
- *   退回主线程执行同一份 worker 代码，功能不受影响，因此这里不额外兜底。
+ *   退回主线程动态载入同一份入口，兼容补丁与具名导出都要保留。
  */
+
+import "core-js/actual/promise/with-resolvers.js";
+import workerSrc from "./pdf.worker.mjs?worker&url";
 
 /** pdf.js 的模块形状（只声明本项目用到的部分，避免把 pdfjs-dist 的类型拖进首屏） */
 export interface PdfJsModule {
@@ -60,18 +64,11 @@ export interface PdfOutlineNode {
 
 let workerReady = false;
 
-/** 配置 pdf.js 的 worker 地址（幂等；每个 PDF 文档共用一个 worker 池） */
+/** 配置 pdf.js 的 worker 入口（幂等） */
 export function configurePdfWorker(pdfjs: PdfJsModule): void {
   if (workerReady) return;
+  pdfjs.GlobalWorkerOptions.workerSrc = workerSrc;
   workerReady = true;
-  try {
-    pdfjs.GlobalWorkerOptions.workerSrc = new URL(
-      "pdfjs-dist/legacy/build/pdf.worker.min.mjs",
-      import.meta.url,
-    ).href;
-  } catch {
-    // 打包器没能解析出 worker 资源：pdf.js 会退回主线程，宁可慢也不要打不开
-  }
 }
 
 let modulePromise: Promise<PdfJsModule> | null = null;
