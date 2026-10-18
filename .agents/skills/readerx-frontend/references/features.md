@@ -6,7 +6,8 @@
 
 - src/lib/books.ts 维护元数据与已物化正文两级缓存；书架、搜索、详情优先读元数据，阅读等需要正文时才 ensureLocalBookContent。元信息编辑走 patchRemoteBookMeta，不把整本正文经 IPC 往返。
 - 类型与结构化块在 src/lib/booksTypes.ts；EPUB/MOBI 的 HTML 转换共用 src/lib/ebookHtml.ts。导入图片沿用 images/ 文件与 readerx-img 协议，不把新图片字节塞入书籍 JSON。
-- PDF 入口 src/lib/pdf.ts，子模块在 src/lib/pdf/；pdf.js 与 worker 按需加载，两端统一使用 `pdfjs-dist/legacy/build` 补齐 Iterator 等 API。legacy 包仍依赖 Promise.withResolvers，`pdfjs.ts` 和 `pdf.worker.mjs` 必须各自先载入 core-js 对应补丁；不能只补主线程而遗漏 worker 的独立环境。worker 入口经 `?worker&url` 打包，Vite 配置保留 ES 模块具名导出 WorkerMessageHandler，供主线程回退使用。运行 `node scripts/pdf-compatibility-test.mjs`，构建后再加 `--built`，验证同时缺失 Iterator / Promise.withResolvers 时的独立线程与主线程回退解析、重复导入；Android 实机另验。保留文字层优先、扫描页图片兜底和两遍解析，避免整本中间数据常驻内存；解析前分配 bookId，页面图命名与最终书籍 ID 一致。
+- PDF 入口 src/lib/pdf.ts，子模块在 src/lib/pdf/；pdf.js 与 worker 按需加载，两端统一使用 `pdfjs-dist/legacy/build` 补齐 Iterator 等 API。`pdfjs.ts` 和 `pdf.worker.mjs` 各自先载入 `compat.mjs`，补齐 legacy 未覆盖的 Promise.withResolvers 与 ReadableStream 异步迭代；只补缺失接口，保留原生流以及正常读完、提前退出、异常时的锁释放与取消语义。worker 入口经 `?worker&url` 打包，Vite 配置保留 ES 模块具名导出 WorkerMessageHandler，供主线程回退使用。保留文字层优先、扫描页图片兜底和两遍解析，避免整本中间数据常驻内存；解析前分配 bookId，页面图命名与最终书籍 ID 一致。
+- PDF 兼容回归：运行 `node scripts/pdf-stream-compatibility-test.mjs` 验证原生接口保留、迭代/取消/解压流语义；运行 `node scripts/pdf-compatibility-test.mjs`，构建后再加 `--built`，验证同时缺失 Iterator / Promise.withResolvers / 流异步迭代时，独立线程与主线程回退都能解析普通/压缩内容流并重复导入。Android 实机与实际文件另验。
 - MOBI 的 Rust 解析与前端转换边界、支持格式及测试见 [MOBI 文档](../../../../docs/mobi.md)。离屏读取书内 HTML，不执行脚本、不加载外部图片；没有 Rust 宿主时明确提示不可用。
 - 本地文件导入与 WebDAV 使用相同格式支持和落库语义；新增格式检查 src/components/ImportButton.tsx、src/lib/webdav.ts 及重新导入路径。
 
