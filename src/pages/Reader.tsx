@@ -1123,6 +1123,9 @@ export default function ReaderPage() {
   const [resumeTarget, setResumeTarget] = createSignal<{ cid: string; char: number; translated?: boolean } | null>(
     null,
   );
+  // 章首页回翻的目标必须优先于正文/译文重排时采样的临时章首位置。
+  // 只按目标 cid 落地；目录或工具栏改跳其它章节时作废。
+  let wantLastPageCid: string | null = null;
   let resumeTick: number | undefined;
   // 阅读位置提交（章节 + 章节正文镜像文本内偏移），去抖合并
   let locationTimer: number | undefined;
@@ -1734,7 +1737,7 @@ export default function ReaderPage() {
   });
   function preserveTranslationPosition(): void {
     const ch = chapter();
-    if (!ch || resumeTarget()?.cid === ch.cid) return;
+    if (!ch || wantLastPageCid === ch.cid || resumeTarget()?.cid === ch.cid) return;
     resetPageTurn();
     const pos = captureReadingPos();
     if (!pos) return;
@@ -2712,9 +2715,6 @@ export default function ReaderPage() {
     return pct === null ? null : Math.min(100, Math.max(0, Math.round(pct)));
   });
 
-  // 回翻跨章（在章首页继续往回翻）时记下目标章 cid：该章分页完成后落到末页。
-  // 工具栏「上一章」与目录跳章都是从章首读起，不置位；目标章中途被换掉则请求作废。
-  let wantLastPageCid: string | null = null;
   /** 本次切章是否由“翻页跨章浏览”触发（浏览不应打断听书语音） */
   let browseChapterPending = false;
 
@@ -3042,6 +3042,7 @@ export default function ReaderPage() {
     if (!current) return;
     const clamped = Math.max(0, Math.min(idx, current.chapters.length - 1));
     if (clamped === chapterIdx()) return;
+    if (wantLastPageCid !== current.chapters[clamped]?.cid) wantLastPageCid = null;
     if (browse) browseChapterPending = true;
     setChapterIdx(clamped);
     setPageIdx(0);

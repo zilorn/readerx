@@ -66,6 +66,7 @@ for (const caretAPI of ["caretRangeFromPoint", "caretPositionFromPoint"]) {
     let pending = null;
     let resets = 0;
     const preserve = load("preserveTranslationPosition", {
+      wantLastPageCid: null,
       chapter: () => ({ cid: "chapter" }), resumeTarget: () => pending,
       resetPageTurn: () => resets++, captureReadingPos,
       setResumeTarget: target => { pending = target; },
