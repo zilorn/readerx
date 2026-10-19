@@ -2,7 +2,7 @@ import { createEffect, createMemo, createSignal, on, onCleanup, type Accessor } 
 import { reportFailure } from "../errorReport";
 import { t } from "../i18n";
 import { createLogger } from "../logger";
-import { translationKey } from "./core";
+import { alreadyTarget, translationKey } from "./core";
 import { limited } from "./engine";
 import { translateBatch } from "./provider";
 import { effectiveTranslationSettings, ensureTranslationBook, ensureTranslationSettings, saveTranslationBook, translationBookState, translationSettings } from "./settings";
@@ -15,6 +15,10 @@ const log = createLogger("translation-metadata");
 // 未入架书目只保留有界会话缓存，不创建书库记录。
 const cache = new Map<string, CachedText>();
 const [cacheVersion, setCacheVersion] = createSignal(0);
+
+function needsTranslation(text: string, target: string): boolean {
+  return !!text.trim() && !alreadyTarget(text, target);
+}
 
 function matching(source: string, settings: TranslationSettings, cached?: CachedText): CachedText | undefined {
   return cached?.source === source && cached.key === translationKey(source, settings, []) ? cached : undefined;
@@ -34,6 +38,7 @@ export function metadataTranslations(book: MetadataBook, settings: TranslationSe
 /** 手动重译绕过缓存；整批成功后才更新显示，失败/取消保留上次结果。 */
 export async function translateBookMetadata(book: MetadataBook, settings: TranslationSettings, signal: AbortSignal, refresh = false): Promise<void> {
   if (!settings.enabled) throw new Error(t("translation.disabled"));
+  if (!needsTranslation(book.title, settings.target) && !needsTranslation(book.intro ?? "", settings.target)) return;
   if (book.id) await ensureTranslationBook(book.id);
   signal.throwIfAborted();
   const state = book.id ? translationBookState(book.id) : undefined;
@@ -44,7 +49,7 @@ export async function translateBookMetadata(book: MetadataBook, settings: Transl
   const result: Partial<Record<"title" | "intro", CachedText>> = {};
   await limited(settings.parallel, signal, async () => {
     const missing = fields.filter(({ field, source, saved }) => {
-      if (!source.trim()) return false;
+      if (!needsTranslation(source, settings.target)) return false;
       const key = translationKey(source, settings, []);
       const cached = !refresh && matching(source, settings, book.id ? saved : cache.get(key));
       if (cached) result[field] = cached;
@@ -77,6 +82,11 @@ export function createMetadataTranslation(book: Accessor<MetadataBook | undefine
   const [failed, setFailed] = createSignal(false);
   const [original, setOriginal] = createSignal(false);
   const settings = () => book()?.id ? effectiveTranslationSettings(book()!.id!) : translationSettings();
+  const required = createMemo(() => ({
+    title: needsTranslation(book()?.title ?? "", settings().target),
+    intro: needsTranslation(book()?.intro ?? "", settings().target),
+  }));
+  const needsAnyTranslation = () => required().title || required().intro;
   let controller: AbortController | undefined;
 
   createEffect(on(() => book()?.id, id => {
@@ -90,7 +100,7 @@ export function createMetadataTranslation(book: Accessor<MetadataBook | undefine
 
   async function run(refresh = false, automatic = false) {
     const current = book();
-    if (!current || !ready() || !settings().enabled || controller || options.active?.() === false) return;
+    if (!current || !ready() || !settings().enabled || !needsAnyTranslation() || controller || options.active?.() === false) return;
     const task = new AbortController();
     controller = task;
     setRunning(true);
@@ -121,7 +131,7 @@ export function createMetadataTranslation(book: Accessor<MetadataBook | undefine
     setRunning(false);
     setFailed(false);
     setOriginal(false);
-    if (options.automatic?.()) void run(false, true);
+    if (options.automatic?.() && needsAnyTranslation()) void run(false, true);
   }));
   onCleanup(() => controller?.abort());
   const translated = createMemo<{ title?: string; intro?: string }>(() => {
@@ -130,11 +140,12 @@ export function createMetadataTranslation(book: Accessor<MetadataBook | undefine
   });
   return {
     enabled: () => ready() && settings().enabled,
+    needsTranslation: needsAnyTranslation,
     running, failed, original,
     hasTranslation: () => !!(translated().title || translated().intro),
     complete: () => !!book() && !!(book()!.title.trim() || book()!.intro?.trim())
-      && (!book()!.title.trim() || !!translated().title)
-      && (!book()!.intro?.trim() || !!translated().intro),
+      && (!required().title || !!translated().title)
+      && (!required().intro || !!translated().intro),
     title: () => (!original() && translated().title) || book()?.title || "",
     intro: () => (!original() && translated().intro) || book()?.intro || "",
     run,
