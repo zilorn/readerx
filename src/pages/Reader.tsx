@@ -5651,11 +5651,13 @@ export default function ReaderPage() {
               voiceId={ttsPlayer.voice}
               timerMode={ttsPlayer.timerMode}
               timerMinutes={ttsPlayer.timerMinutes}
+              timerFinishChapter={ttsPlayer.timerFinishChapter}
               timerRemainSec={ttsPlayer.timerRemainSec}
               onEngine={(engine) => ttsPlayer.setEngine(engine)}
               onRate={(rate) => ttsPlayer.setRate(rate)}
               onVoice={(voiceId) => ttsPlayer.setVoice(voiceId)}
               onTimer={(mode, minutes) => ttsPlayer.setTimer(mode, minutes)}
+              onTimerFinishChapter={ttsPlayer.setTimerFinishChapter}
               prewarmText={prewarmText}
               onPrewarmBook={() => void runPrewarmBook()}
               onStop={() => ttsPlayer.stop()}

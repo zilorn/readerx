@@ -68,7 +68,7 @@ import { createLogger } from "./logger";
 const log = createLogger("tts");
 
 export type TtsStatus = "stopped" | "loading" | "playing" | "paused" | "error";
-export type TtsTimerMode = "off" | "minutes" | "minutesChapter" | "chapter";
+export type TtsTimerMode = "off" | "minutes" | "chapter";
 
 /** 当前正在朗读的位置信息（供高亮/悬浮球展示） */
 export interface TtsFocus {
@@ -116,6 +116,7 @@ export interface TtsPlayer {
   focus: () => TtsFocus | null;
   timerMode: () => TtsTimerMode;
   timerMinutes: () => number;
+  timerFinishChapter: () => boolean;
   timerRemainSec: () => number | null;
   engine: () => TtsEngine;
   rate: () => number;
@@ -140,6 +141,8 @@ export interface TtsPlayer {
   setEngine: (engine: TtsEngine) => void;
   /** 设定定时停止（"off" 关闭）；定时不随停止朗读清除（分钟倒计时在停止期间冻结） */
   setTimer: (mode: TtsTimerMode, minutes?: number) => void;
+  /** 仅分钟定时可用；修改收尾开关不重启倒计时。 */
+  setTimerFinishChapter: (enabled: boolean) => void;
   /**
    * 视图章节变化时调用（阅读页 createEffect(chapterIdx)）。
    * browse=true 表示用户翻页浏览到了其它章节：语音不被中断，继续读当前章。
@@ -190,6 +193,7 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
   const [error, setError] = createSignal<string | null>(null);
   const [timerMode, setTimerMode] = createSignal<TtsTimerMode>("off");
   const [timerMinutes, setTimerMinutes] = createSignal<number>(0);
+  const [timerFinishChapter, setTimerFinishChapterEnabled] = createSignal(false);
   const [timerRemainSec, setTimerRemainSec] = createSignal<number | null>(null);
 
   // ---- 内部可变状态（不走响应式） ----
@@ -953,9 +957,10 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
       setTimerRemainSec(Math.round(left / 1000));
       if (left <= 0) {
         clearTimerHandle();
-        const finishChapter = timerMode() === "minutesChapter";
+        const finishChapter = timerFinishChapter();
         setTimerMode("off");
         setTimerMinutes(0);
+        setTimerFinishChapterEnabled(false);
         setTimerRemainSec(null);
         if (finishChapter && status() !== "stopped") {
           finishChapterAfterTimer = true;
@@ -980,6 +985,7 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
       timerFrozenMs = 0;
       setTimerMode("off");
       setTimerMinutes(0);
+      setTimerFinishChapterEnabled(false);
       setTimerRemainSec(null);
       return;
     }
@@ -989,7 +995,7 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
 
   /** 重新起播：接着走上次停止时冻结的剩余时间 */
   function resumeMinuteTimer(): void {
-    if ((timerMode() !== "minutes" && timerMode() !== "minutesChapter") || timerHandle !== undefined) return;
+    if (timerMode() !== "minutes" || timerHandle !== undefined) return;
     if (timerFrozenMs <= 0) return;
     armMinuteTimer(timerFrozenMs);
   }
@@ -998,13 +1004,19 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
     clearTimerHandle();
     timerFrozenMs = 0;
     finishChapterAfterTimer = false;
-    setTimerMode(mode);
-    setTimerMinutes(minutes);
-    if ((mode === "minutes" || mode === "minutesChapter") && minutes > 0) {
+    const minuteTimer = mode === "minutes" && Number.isFinite(minutes) && minutes > 0;
+    setTimerMode(mode === "minutes" && !minuteTimer ? "off" : mode);
+    setTimerMinutes(minuteTimer ? minutes : 0);
+    if (!minuteTimer) setTimerFinishChapterEnabled(false);
+    if (minuteTimer) {
       armMinuteTimer(minutes * 60_000);
     } else {
       setTimerRemainSec(null);
     }
+  }
+
+  function setTimerFinishChapter(enabled: boolean): void {
+    setTimerFinishChapterEnabled(timerMode() === "minutes" && enabled);
   }
 
   // ------------------------------------------------------------------
@@ -1157,6 +1169,7 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
     focus,
     timerMode,
     timerMinutes,
+    timerFinishChapter,
     timerRemainSec,
     engine: currentTtsEngine,
     rate: currentTtsRate,
@@ -1173,6 +1186,7 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
     setVoice,
     setEngine,
     setTimer,
+    setTimerFinishChapter,
     noteViewChapter,
     warmup,
     warmBook,

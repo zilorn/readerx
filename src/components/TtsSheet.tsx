@@ -39,11 +39,13 @@ export interface TtsSheetProps {
   voiceId: () => string;
   timerMode: () => TtsTimerMode;
   timerMinutes: () => number;
+  timerFinishChapter: () => boolean;
   timerRemainSec: () => number | null;
   onEngine: (engine: TtsEngine) => void;
   onRate: (rate: number) => void;
   onVoice: (voiceId: string) => void;
   onTimer: (mode: TtsTimerMode, minutes?: number) => void;
+  onTimerFinishChapter: (enabled: boolean) => void;
   /** 批量预热状态文案（预热中显示进度；null 表示空闲） */
   prewarmText: () => string | null;
   onPrewarmBook: () => void;
@@ -52,10 +54,6 @@ export interface TtsSheetProps {
 }
 
 const MINUTE_OPTIONS = [10, 20, 30, 60] as const;
-
-function isMinuteMode(mode: TtsTimerMode): boolean {
-  return mode === "minutes" || mode === "minutesChapter";
-}
 
 const ENGINES: Array<{ id: TtsEngine; labelKey: MessageKey; descKey: MessageKey }> = [
   { id: "native", labelKey: "tts.engine.native", descKey: "tts.engine.nativeDesc" },
@@ -387,21 +385,6 @@ export function TtsSheet(props: TtsSheetProps) {
               class="cursor-pointer rounded-lg border px-2.5 py-[7px] text-[12.5px] transition-colors"
               classList={{
                 "border-accent bg-accent-weak font-semibold text-accent":
-                  props.timerMode() === "minutesChapter",
-                "border-border text-text-2": props.timerMode() !== "minutesChapter",
-              }}
-              aria-pressed={props.timerMode() === "minutesChapter"}
-              onClick={() => {
-                const minutes = props.timerMinutes() > 0 ? props.timerMinutes() : 30;
-                props.onTimer("minutesChapter", minutes);
-              }}
-            >
-              {t("tts.timer.finishChapter")}
-            </button>
-            <button
-              class="cursor-pointer rounded-lg border px-2.5 py-[7px] text-[12.5px] transition-colors"
-              classList={{
-                "border-accent bg-accent-weak font-semibold text-accent":
                   props.timerMode() === "chapter",
                 "border-border text-text-2": props.timerMode() !== "chapter",
               }}
@@ -412,11 +395,27 @@ export function TtsSheet(props: TtsSheetProps) {
             </button>
           </div>
 
+          <div class="px-3 pb-3">
+            <button
+              type="button"
+              class="cursor-pointer rounded-lg border px-2.5 py-[7px] text-[12.5px] transition-colors disabled:cursor-default disabled:opacity-40"
+              classList={{
+                "border-accent bg-accent-weak font-semibold text-accent": props.timerFinishChapter(),
+                "border-border text-text-2": !props.timerFinishChapter(),
+              }}
+              disabled={props.timerMode() !== "minutes"}
+              aria-pressed={props.timerFinishChapter()}
+              onClick={() => props.onTimerFinishChapter(!props.timerFinishChapter())}
+            >
+              {t("tts.timer.finishChapter")}
+            </button>
+          </div>
+
           <div class="flex items-center gap-1.5 px-3 text-[12px] text-text-3">
-            <Show when={isMinuteMode(props.timerMode()) && props.timerRemainSec() !== null}>
+            <Show when={props.timerMode() === "minutes" && props.timerRemainSec() !== null}>
               <TimerIcon size={14} />
               <span>
-                {t(props.timerMode() === "minutesChapter" ? "tts.timer.remainingFinishChapter" : "tts.timer.remaining", { time: formatRemain(props.timerRemainSec() ?? 0) })}
+                {t(props.timerFinishChapter() ? "tts.timer.remainingFinishChapter" : "tts.timer.remaining", { time: formatRemain(props.timerRemainSec() ?? 0) })}
               </span>
             </Show>
             <Show when={props.timerMode() === "chapter"}>
