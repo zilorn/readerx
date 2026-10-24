@@ -2,7 +2,6 @@ import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
 import { useLocation, useNavigate, useSearchParams } from "@solidjs/router";
 import { createMetadataTranslation } from "../lib/translation/metadata";
 import { translationSettings } from "../lib/translation/settings";
-import { MetadataTranslationActions } from "../components/MetadataTranslationActions";
 import { PageHeader } from "../components/PageHeader";
 import {
   ChevronRightIcon,
@@ -109,7 +108,6 @@ function ResultRow(props: { entry: ResultEntry; onClick: () => void }) {
           <ChevronRightIcon size={16} class="text-text-3/70" />
         </span>
       </button>
-      <div class="px-4"><MetadataTranslationActions translation={metadata} /></div>
     </div>
   );
 }
