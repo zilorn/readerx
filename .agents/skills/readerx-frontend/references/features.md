@@ -75,6 +75,8 @@ TTS 经 `speechText` 只转换合成文字，保持原文分句坐标，两种�
 原始书名仍用于元数据编辑与换源。回归运行 `node scripts/translation-manual-test.mjs`。
 发现页搜索/浏览行与 OnlineBookSheet、BookDetail 通过 `translation/metadata.ts` 的
 `createMetadataTranslation` 和 `MetadataTranslationActions` 翻译书名及非空简介，支持重译、取消、原文切换。
+逐字段复用 `core.ts` 的 `alreadyTarget`：空值/目标语言字段不请求，全部无需翻译时不渲染操作容器，
+已有译文仍保留原文切换；混合语言按需请求，已是目标语言的字段计为完成。手动及自动入口共用此规则。
 设置页的 `autoTranslateMetadata` 默认 false，只自动处理活动发现页与已加载详情的预览；
 保活页离开必须传 active=false 取消任务，详情页始终手动。未入架译文保留有界会话缓存，
 本地书籍简介使用可选 introEnabled/introTranslation 字段，沿用既有翻译状态；原始元数据不变。

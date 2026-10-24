@@ -245,6 +245,139 @@ await settings.saveTranslationSettings({ enabled: false });
 assert.equal(ui.title(), "Old discovery", "global disable restores original metadata");
 dispose();
 
+// Target-language metadata uses the same conservative detector as chapter text.
+await settings.saveTranslationSettings({ enabled: true, target: "zh-CN" });
+requests = [];
+for (const current of [
+  { title: "中文书名", intro: "这是中文简介。" },
+  { title: "繁體書名", intro: "這是繁體簡介。" },
+  { title: "中文书名" }, { title: "", intro: "这是中文简介。" },
+  { title: "  ", intro: "\n" }, { title: "123", intro: "…!?" },
+]) {
+  await metadata.translateBookMetadata(current, settings.translationSettings(), signal, true);
+}
+assert.deepEqual(requests, [], "empty, punctuation and Chinese metadata never request even on force refresh");
+for (const target of ["zh-TW", "ja", "ko"]) {
+  const current = target === "ja" ? { title: "日本の物語", intro: "これは日本語の紹介です。" }
+    : target === "ko" ? { title: "한국 이야기", intro: "한국어 소개입니다." }
+    : { title: "简体书名", intro: "这是简体简介。" };
+  await metadata.translateBookMetadata(current, { ...settings.translationSettings(), target }, signal);
+}
+assert.deepEqual(requests, [], "traditional Chinese, Japanese and Korean reuse the core detector");
+for (const target of ["en", "fr", "de", "es"]) {
+  await metadata.translateBookMetadata({ title: "A Latin title", intro: "Das war alles, was er wusste." },
+    { ...settings.translationSettings(), target }, signal, true);
+  assert.deepEqual(requests.at(-1), ["A Latin title", "Das war alles, was er wusste."], "Latin targets remain conservative");
+}
+
+let targetUI, stopTargetUI, updateTargetBook, updateTargetAutomatic;
+solid.createRoot(stop => {
+  stopTargetUI = stop;
+  const [current, updateCurrent] = solid.createSignal({ title: "中文自动书名", intro: "中文自动简介。" });
+  const [automatic, updateAutomatic] = solid.createSignal(true);
+  updateTargetBook = updateCurrent; updateTargetAutomatic = updateAutomatic;
+  targetUI = metadata.createMetadataTranslation(current, { automatic });
+});
+await tick(); await tick();
+const skippedCount = requests.length;
+assert.equal(targetUI.needsTranslation(), false);
+assert.equal(targetUI.complete(), true, "target-language fields are already complete");
+await targetUI.run(true);
+assert.equal(requests.length, skippedCount, "automatic effect and manual run both skip target-language books");
+assert.equal(targetUI.running(), false);
+assert.equal(targetUI.failed(), false);
+
+updateTargetBook({ title: "中文自动书名", intro: "A mixed-language description." });
+for (let i = 0; i < 30 && !targetUI.hasTranslation(); i++) await tick();
+assert.equal(targetUI.needsTranslation(), true);
+assert.deepEqual(requests.at(-1), ["A mixed-language description."]);
+assert.equal(targetUI.complete(), true, "a Chinese title does not prevent completed introduction retranslation");
+assert.equal(targetUI.title(), "中文自动书名");
+await targetUI.run(targetUI.complete());
+assert.deepEqual(requests.at(-1), ["A mixed-language description."], "force refresh also skips target-language fields");
+updateTargetAutomatic(false);
+updateTargetBook({ title: "Foreign title with Chinese intro", intro: "只翻译书名。" });
+await tick();
+assert.equal(targetUI.complete(), false);
+await targetUI.run();
+assert.deepEqual(requests.at(-1), ["Foreign title with Chinese intro"]);
+assert.equal(targetUI.complete(), true);
+updateTargetBook({ title: "", intro: "Only a foreign introduction." });
+await tick(); await targetUI.run();
+assert.deepEqual(requests.at(-1), ["Only a foreign introduction."]);
+assert.equal(targetUI.complete(), true);
+
+// Existing successful target-language translations still offer original/translation display.
+const existingTarget = { ...book, id: "target-metadata-book", title: "旧中文书名", intro: "旧中文简介。" };
+await backend.saveRemoteBook(existingTarget);
+await settings.ensureTranslationBook(existingTarget.id);
+await settings.saveTranslationBook(existingTarget.id, {
+  titleEnabled: true, titleTranslation: { source: existingTarget.title,
+    key: core.translationKey(existingTarget.title, settings.translationSettings(), []), text: "已有书名译文" },
+});
+updateTargetBook(existingTarget);
+await tick(); await tick();
+assert.equal(targetUI.needsTranslation(), false);
+assert.equal(targetUI.hasTranslation(), true, "skipping requests must not hide valid cached translations");
+assert.equal(targetUI.title(), "已有书名译文");
+targetUI.toggleOriginal();
+assert.equal(targetUI.title(), existingTarget.title);
+targetUI.toggleOriginal();
+assert.equal(targetUI.title(), "已有书名译文");
+
+// Changing the target or provider cancels work before re-evaluating the same source.
+updateTargetBook({ title: "动态中文书名", intro: "动态中文简介。" });
+updateTargetAutomatic(true);
+await tick();
+resolve = undefined;
+pending = () => new Promise(done => { resolve = done; });
+await settings.saveTranslationSettings({ target: "en" });
+for (let i = 0; i < 30 && !resolve; i++) await tick();
+assert.ok(resolve, "switching away from Chinese starts automatic translation");
+assert.equal(targetUI.running(), true);
+const releaseTarget = resolve;
+await settings.saveTranslationSettings({ target: "zh-CN" });
+releaseTarget(); await tick(); await tick();
+assert.equal(targetUI.running(), false);
+assert.equal(targetUI.needsTranslation(), false);
+assert.equal(targetUI.hasTranslation(), false, "cancelled old target results are discarded");
+pending = undefined;
+
+resolve = undefined;
+pending = () => new Promise(done => { resolve = done; });
+updateTargetBook({ title: "Provider cancellation", intro: "中文简介。" });
+for (let i = 0; i < 30 && !resolve; i++) await tick();
+assert.ok(resolve);
+const releaseProvider = resolve;
+await settings.saveTranslationSettings({ model: "metadata-updated-model" });
+releaseProvider();
+for (let i = 0; i < 30 && resolve === releaseProvider; i++) await tick();
+assert.notEqual(resolve, releaseProvider, "provider changes restart pending automatic work");
+updateTargetBook({ title: "更新后的中文书名", intro: "更新后的中文简介。" });
+resolve(); await tick(); await tick();
+assert.equal(targetUI.needsTranslation(), false);
+assert.equal(targetUI.hasTranslation(), false, "updated Chinese source cannot receive late foreign metadata");
+assert.equal(targetUI.running(), false);
+pending = undefined;
+
+fail = true;
+updateTargetBook({ title: "Automatic failure", intro: "中文简介。" });
+for (let i = 0; i < 30 && !targetUI.failed(); i++) await tick();
+assert.equal(targetUI.failed(), true);
+assert.equal(targetUI.needsTranslation(), true, "failed foreign rows keep their retry action");
+fail = false;
+await targetUI.run();
+assert.equal(targetUI.failed(), false);
+assert.equal(targetUI.complete(), true);
+updateTargetBook({ title: "失败后更新为中文", intro: "不再重试。" });
+await tick();
+assert.equal(targetUI.needsTranslation(), false);
+assert.equal(targetUI.failed(), false);
+await settings.saveTranslationSettings({ enabled: false });
+assert.equal(targetUI.enabled(), false);
+stopTargetUI();
+console.log("target-language metadata regression passed: per-field filtering, completion, all targets, existing translations, reactive target/provider/source changes, cancellation and retry");
+
 // Metadata requests share the engine concurrency budget, including queued cancellation.
 await settings.saveTranslationSettings({ enabled: true });
 const releases = [];
