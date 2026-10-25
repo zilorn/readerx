@@ -19,7 +19,7 @@
 - 归档入口按 data_transfer/archive.rs 分类与校验条目名，拒绝越界路径；不绕过 is_safe_entry 直接解压。plan.rs 只读规划，import.rs 写盘；书籍导入先经 import_book_json 在事务内写元信息和正文，再处理书签/注释；导出 readerx-backup/2，在书库锁内用 VACUUM INTO 生成一致的 books.sqlite3 快照并流式写 ZIP，书源仍导出 JSON，分组、规则与进度只在数据库快照中导出，事务日志不进归档；导入先只读校验数据库，再逐书复用身份规划与合并入口，不整库替换或导入迁移回执；兼容 readerx-backup/1 JSON，图片流式处理。
 - 合并与覆盖语义不同：合并保留本机额外数据并按身份映射引用，偏好已有值保留；覆盖先写后删并清空归档缺失的内容类状态。新增 state 键时明确分类、合并规则、缺失语义与 ID 换算，不能直接全量 JSON 覆盖。
 - 书源会话与 WebDAV 密码默认过滤，显式包含才导出；sync/、tts-audio/、logs/ 和本机 reading-time-origin 不作为换机数据搬走。阅读时长 contributions 应保留，恢复后本机新增时间使用独立来源。
-- 覆盖删除书或书源前先调用同步删除钩子（定位身份仍需要旧数据），批量导入后调用 on_data_imported 全量对账。前端 import 完成后按 backup.ts 依赖顺序失效书签并重载分组、书库、进度、统计、规则、书源。
+- 覆盖删除书或书源前先调用同步删除钩子（定位身份仍需要旧数据），批量导入后调用 on_data_imported 全量对账。前端 import 完成后按 backup.ts 依赖顺序失效书签并重载分组、书库、进度、统计、规则、书源与 WebDAV；reloadWebDav 隔离在飞旧读取并清理无效激活项，回归 `node scripts/backup-webdav-test.mjs`。
 - Android SAF content:// 经 tauri-plugin-fs 打开，不能交给 std::fs 当普通路径。原生对话框在主线程弹，耗时归档 I/O 在工作线程。
 
 ## 局域网同步
@@ -39,6 +39,7 @@
 
 - readingTime.ts 仅在正文就绪、窗口可见且聚焦时计时，使用单调时钟，挂起间隔排除，跨本地午夜拆分；离页/失焦保存并清理监听。后台听书不计入。
 - reading_time.rs 串行累加并原子替换状态；contributions 是来源累计值，顶层 days/books 是显示视图。同步对同一来源、同一统计项取最大值，再对来源求和，不能把远端累计值再次作为增量相加。
+- 备份导入通过 reading_time::import_backup 与累加共用锁，不走偏好状态合并。v2 来源原样保留并取最大值；v1 归档统计派生固定来源以保证重复导入幂等，书籍 id 按归档身份映射。覆盖恢复采用归档统计；不能由顶层 days/books 覆盖 contributions。旧版独立迁移历史的去重限制见阅读时长文档。
 - sync/reading_time.rs 发布不可变累计快照，身份含来源、统计项与累计值；保留乱序、重复、第三设备转发和旧备份重发的幂等性。来源标识 reading-time-origin 留在设备本地，书籍删除/进度重置不清历史统计。
 - 旧 v1 数据迁移一次后保存；浏览器开发模式仅内存保存。统计改动检查恢复后新增来源与同步落地重载，不只检查本机计数。
 

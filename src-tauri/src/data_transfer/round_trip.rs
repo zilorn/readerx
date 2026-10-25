@@ -242,6 +242,111 @@ fn import(
 }
 
 #[test]
+fn reading_time_backup_merges_sources_idempotently_and_replace_uses_archive() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let (app, root) = setup();
+    let shared = readerx_sync::new_id();
+    let archive_only = readerx_sync::new_id();
+    let local_only = readerx_sync::new_id();
+    let incoming = json!({
+        "schemaVersion": 2,
+        "days": {"2026-10-25": 999}, "books": {"b-time": 999},
+        "contributions": {
+            (shared.clone()): {"days": {"2026-10-25": 60_000}, "books": {"b-time": 60_000}},
+            (archive_only.clone()): {"days": {"2026-10-25": 120_000}, "books": {"b-time": 120_000}}
+        }
+    });
+    seed_state(&root, "readerx.readingTime", &incoming);
+    let backup = export(&app, &root, "reading-time", false);
+    seed_state(
+        &root,
+        "readerx.readingTime",
+        &json!({
+            "schemaVersion": 2,
+            "contributions": {
+                (shared.clone()): {"days": {"2026-10-25": 90_000}, "books": {"b-time": 90_000}},
+                (local_only.clone()): {"days": {"2026-10-25": 30_000, "2026-10-26": 15_000}, "books": {"b-time": 45_000}}
+            }
+        }),
+    );
+    let origin = readerx_sync::new_id();
+    fs::write(root.join("reading-time-origin"), &origin).unwrap();
+    let first = import(&app, &backup, ImportMode::Merge);
+    assert!(first
+        .state_keys
+        .iter()
+        .any(|key| key == "readerx.readingTime"));
+    let state_path = root.join("state/readerx.readingTime.json");
+    let merged = read_json(&state_path);
+    assert_eq!(merged["days"]["2026-10-25"], 240_000);
+    assert_eq!(merged["days"]["2026-10-26"], 15_000);
+    assert_eq!(merged["books"]["b-time"], 255_000);
+    assert_eq!(merged["contributions"].as_object().unwrap().len(), 3);
+    let again = import(&app, &backup, ImportMode::Merge);
+    assert!(!again
+        .state_keys
+        .iter()
+        .any(|key| key == "readerx.readingTime"));
+    assert_eq!(
+        read_json(&state_path),
+        merged,
+        "旧备份重导不重复累计也不降低新值"
+    );
+    import(&app, &backup, ImportMode::Replace);
+    let replaced = read_json(&state_path);
+    assert_eq!(replaced["days"]["2026-10-25"], 180_000);
+    assert!(replaced["days"].get("2026-10-26").is_none());
+    assert_eq!(replaced["books"]["b-time"], 180_000);
+    assert_eq!(
+        fs::read_to_string(root.join("reading-time-origin")).unwrap(),
+        origin
+    );
+}
+
+#[test]
+fn legacy_reading_time_backup_has_repeatable_source_and_remaps_book_ids() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let (app, root) = setup();
+    seed_book(&root, "local-time", "计时书", "time.epub", 100, None);
+    seed_state(
+        &root,
+        "readerx.readingTime",
+        &json!({
+            "days": {"2026-10-25": 60_000}, "books": {"local-time": 60_000}
+        }),
+    );
+    let backup = export(&app, &root, "legacy-reading-time", false);
+    let uid = crate::sync::identity::book_uid(&crate::sync::identity::BookKey {
+        file_name: "time.epub",
+        size: 100,
+        ..Default::default()
+    });
+    let local_source = readerx_sync::new_id();
+    seed_state(
+        &root,
+        "readerx.readingTime",
+        &json!({
+            "schemaVersion": 2, "contributions": {
+                (local_source): {"days": {"2026-10-25": 30_000}, "books": {(uid.clone()): 30_000}}
+            }
+        }),
+    );
+    import(&app, &backup, ImportMode::Merge);
+    let state_path = root.join("state/readerx.readingTime.json");
+    let merged = read_json(&state_path);
+    assert_eq!(merged["schemaVersion"], 2);
+    assert_eq!(merged["days"]["2026-10-25"], 90_000);
+    assert_eq!(merged["books"][&uid], 90_000);
+    assert!(merged["books"].get("local-time").is_none());
+    assert_eq!(merged["contributions"].as_object().unwrap().len(), 2);
+    for source in merged["contributions"].as_object().unwrap().keys() {
+        assert!(source.parse::<readerx_sync::Ulid>().is_ok());
+    }
+    import(&app, &backup, ImportMode::Merge);
+    assert_eq!(read_json(&state_path), merged);
+}
+
+#[test]
 fn export_migrates_global_bookmarks_before_state_scan_and_rejects_unreadable_books() {
     let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let (app, root) = setup();
