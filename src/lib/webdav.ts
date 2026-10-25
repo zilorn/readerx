@@ -89,27 +89,34 @@ export function davServerById(id: string): DavServer | undefined {
  */
 export function ensureWebDavLoaded(): Promise<void> {
   if (loadedSignal()) return Promise.resolve();
-  loadingPromise ??= (async () => {
-    const [stored, storedActive] = await Promise.all([
-      readState<DavServer[]>(SERVERS_KEY),
-      readState<string>(ACTIVE_KEY),
-    ]);
-    if (Array.isArray(stored)) {
-      setServersSignal(
-        stored
-          .filter((s) => s && typeof s.id === "string" && typeof s.url === "string")
-          .sort((a, b) => a.createdAt - b.createdAt),
-      );
-    }
-    if (
-      typeof storedActive === "string" &&
-      servers().some((s) => s.id === storedActive)
-    ) {
-      setActiveIdSignal(storedActive);
-    }
+  return loadingPromise ?? loadWebDav();
+}
+
+/** 备份导入后强制重读；旧的在飞读取不能覆盖恢复结果。 */
+export function reloadWebDav(): Promise<void> {
+  setLoaded(false);
+  return loadWebDav();
+}
+
+function loadWebDav(): Promise<void> {
+  const task = Promise.all([
+    readState<DavServer[]>(SERVERS_KEY),
+    readState<string>(ACTIVE_KEY),
+  ]).then(([stored, storedActive]) => {
+    if (loadingPromise !== task) return;
+    const list = Array.isArray(stored)
+      ? stored.filter((s) => s && typeof s.id === "string" && typeof s.url === "string")
+          .sort((a, b) => a.createdAt - b.createdAt)
+      : [];
+    setServersSignal(list);
+    setActiveIdSignal(typeof storedActive === "string" && list.some((s) => s.id === storedActive)
+      ? storedActive : null);
     setLoaded(true);
-  })();
-  return loadingPromise;
+  }).finally(() => {
+    if (loadingPromise === task) loadingPromise = null;
+  });
+  loadingPromise = task;
+  return task;
 }
 
 function persistServers(): void {

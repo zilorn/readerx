@@ -20,6 +20,7 @@ import { loadReadingTime } from "./readingTime";
 import { reloadReadingProgress } from "./store";
 import { reloadSourceGroups } from "./sourceGroups";
 import { reloadTextReplacements } from "./textReplacements";
+import { reloadWebDav } from "./webdav";
 import { t } from "./i18n";
 
 /** 归档清单的摘要（导出完成后 / 导入前的预览都用它） */
@@ -160,4 +161,5 @@ async function reloadAfterImport(): Promise<void> {
   await reloadTextReplacements();
   await reloadChapterRules();
   await refreshBookSources();
+  await reloadWebDav();
 }
