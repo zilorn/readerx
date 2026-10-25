@@ -36,8 +36,9 @@ import { createLogger } from "./logger";
 /** 自定义源合成细节用 debug 记（失败原因由调用方 ttsPlayer 带书 / 章 / 句序号记 warn） */
 const log = createLogger("httpTts");
 
-const MARKER = /\{\$TEXT(?:\?\s*URLencoding=(\d+))?\}/g;
-const RATE_MARKER = /\{\$RATE(?:\?\s*URLencoding=(\d+))?\}/g;
+const MARKER = /\{\$(TEXT|RATE)(?:\?\s*URLencoding=(\d+))?\}/g;
+// 先识别完整 JSON 字符串，避免把插入的原文当成 JSON 结构或新的占位符。
+const JSON_TOKEN = /"(?:\\.|[^"\\])*"|\{\$(TEXT|RATE)(?:\?\s*URLencoding=(\d+))?\}/g;
 /** 非全局副本用于探测占位是否存在（避免 /g 的 lastIndex 状态） */
 const HAS_RATE = /\{\$RATE(?:\?\s*URLencoding=\d+)?\}/;
 
@@ -65,16 +66,29 @@ function encodeText(text: string, times: number | undefined): string {
 
 /** 在 url / body 中逐个替换 {$TEXT...} 与 {$RATE...} 占位 */
 function applyPlaceholders(template: string, text: string, rate: number): string {
-  let out = template.replace(MARKER, (_full, timesRaw?: string) => {
+  return template.replace(MARKER, (_full, kind: string, timesRaw?: string) => {
     const times = timesRaw === undefined ? undefined : Number(timesRaw);
-    return encodeText(text, times);
+    return encodeText(kind === "TEXT" ? text : String(rate), times);
   });
-  out = out.replace(RATE_MARKER, (_full, timesRaw?: string) => {
-    const times = timesRaw === undefined ? undefined : Number(timesRaw);
-    // 倍速交给服务端处理（变速不变调）；数值本身无需编码，带参时按规则处理
-    return encodeText(String(rate), times);
-  });
-  return out;
+}
+
+function applyJsonPlaceholders(template: string, text: string, rate: number): string {
+  try {
+    const body = template.replace(JSON_TOKEN, (token, kind?: string, timesRaw?: string) => {
+      if (token.startsWith('"')) {
+        return JSON.stringify(applyPlaceholders(JSON.parse(token), text, rate));
+      }
+      const times = timesRaw === undefined ? undefined : Number(timesRaw);
+      const value = encodeText(kind === "TEXT" ? text : String(rate), times);
+      // JSON 字符串经序列化转义；未加引号的倍速保留数字类型。
+      return kind === "TEXT" ? JSON.stringify(value) : value;
+    });
+    JSON.parse(body);
+    return body;
+  } catch {
+    // JSON.parse 的原始错误可能含正文或接口凭据，只返回固定文案。
+    throw new Error(t("tts.error.invalidJsonBody"));
+  }
 }
 
 /** POST body 的内容类型：JSON 模板与表单模板都能工作 */
@@ -174,7 +188,10 @@ export async function synthesizeHttpAudio(text: string, bookId?: string): Promis
   const rate = currentTtsRate();
   const url = applyPlaceholders(urlTemplate, text, rate);
   const bodyTemplate = httpTtsBody();
-  const body = applyPlaceholders(bodyTemplate, text, rate);
+  const contentType = guessContentType(bodyTemplate);
+  const body = method === "POST" && contentType.startsWith("application/json")
+    ? applyJsonPlaceholders(bodyTemplate, text, rate)
+    : applyPlaceholders(bodyTemplate, text, rate);
 
   let res: Response;
   try {
@@ -183,7 +200,7 @@ export async function synthesizeHttpAudio(text: string, bookId?: string): Promis
     try {
       const init: RequestInit = { method, signal: controller.signal };
       if (method === "POST" && bodyTemplate.length > 0) {
-        init.headers = { "Content-Type": guessContentType(bodyTemplate) };
+        init.headers = { "Content-Type": contentType };
         init.body = body;
       }
       res = await httpFetch(url, init);

@@ -88,6 +88,7 @@ export const tts = {
   "tts.error.decodeFailedHttp": "音频解码失败：自定义源需返回可解码的音频（mp3 / wav / ogg）",
   "tts.error.noUrl": "请先填写自定义源地址（听书设置 → 自定义源）",
   "tts.error.noText": "没有可朗读的文本",
+  "tts.error.invalidJsonBody": "自定义听书源的 JSON 请求模板无效",
   "tts.error.timeout": "自定义源请求超时（45 秒），请检查地址与网络",
   "tts.error.requestFailed": "自定义源请求失败：{reason}",
   "tts.error.httpStatus": "自定义源返回错误：HTTP {status}",
