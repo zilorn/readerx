@@ -37,7 +37,7 @@ export const chapterRules = {
   "chapterRules.builtin.zhChapter": "中文章节（第X章 / 回 / 节）",
   "chapterRules.builtin.zhFront": "序章 / 楔子 / 尾声 / 番外",
   "chapterRules.builtin.enChapter": "英文 Chapter / CHAPTER",
-  "chapterRules.builtin.zhVolume": "卷 / 部 / 集 分卷",
+  "chapterRules.builtin.zhVolume": "中英文分卷标题",
 
   // 分章方式说明（回退按字数分章时显示）
   /** 导入时生成的分章标题（原文没有可用标题时用；落库值随当时的界面语言） */

@@ -119,6 +119,9 @@ function createChapterView(chapter: LocalBookChapter): LocalBookChapter {
   return {
     cid: chapter.cid,
     url: chapter.url,
+    get volume(): string | undefined {
+      return chapter.volume === undefined ? undefined : hanText(chapter.volume);
+    },
     get title(): string {
       return (title ??= hanText(chapter.title));
     },

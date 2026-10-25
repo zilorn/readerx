@@ -968,8 +968,8 @@ fn book_structure_lands_and_keeps_chapter_bodies() {
                 &structure_id,
                 "chapters",
                 json!([
-                    { "cid": "c0001", "title": "第一章（对端改名）", "url": "https://example.com/c1" },
-                    { "cid": "c0002", "title": "新增章" },
+                    { "cid": "c0001", "title": "第一章（对端改名）", "volume": "第一卷", "url": "https://example.com/c1" },
+                    { "cid": "c0002", "title": "新增章", "volume": "第二卷" },
                 ]),
             )
             .unwrap();
@@ -986,6 +986,8 @@ fn book_structure_lands_and_keeps_chapter_bodies() {
     assert_eq!(chapters.len(), 2, "目录以同步结果为准：{content}");
     assert_eq!(chapters[0]["cid"], json!("c0001"));
     assert_eq!(chapters[0]["title"], json!("第一章（对端改名）"));
+    assert_eq!(chapters[0]["volume"], json!("第一卷"));
+    assert_eq!(chapters[1]["volume"], json!("第二卷"));
     assert_eq!(chapters[0]["url"], json!("https://example.com/c1"));
     assert_eq!(chapters[0]["paragraphs"][0], json!("正文"), "已有正文按 cid 留用");
     assert_eq!(chapters[1]["cid"], json!("c0002"));

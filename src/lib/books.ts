@@ -138,6 +138,7 @@ function sameChapterHeads(a: readonly ChapterHead[], b: readonly ChapterHead[]):
     if (x === y) continue;
     if (x.cid !== y.cid || x.title !== y.title || x.chars !== y.chars) return false;
     if ((x.url ?? "") !== (y.url ?? "")) return false;
+    if (x.volume !== y.volume) return false;
   }
   return true;
 }
@@ -560,6 +561,7 @@ export async function parseTxtFile(
   const localChapters: LocalBookChapter[] = result.chapters.map((chapter, index) => ({
     cid: chapterCid(index),
     title: chapter.title,
+    ...(chapter.volume ? { volume: chapter.volume } : {}),
     paragraphs: chapter.paragraphs,
   }));
 

@@ -183,6 +183,8 @@ export interface LocalBookChapter {
   /** 章节稳定 id，如 c0001、c0002 …（旧数据可能在载入时回填） */
   cid: string;
   title: string;
+  /** 所属卷标题；缺失时沿用平面目录。卷不占章节下标。 */
+  volume?: string;
   /** 兼容字段：正文纯文本段落（新解析也会填充，便于字数等统计） */
   paragraphs: string[];
   /** 结构化正文块。TXT 或旧数据缺失时 Reader 退回 paragraphs */
@@ -192,7 +194,7 @@ export interface LocalBookChapter {
 }
 
 /** 章节稳定 id，如 c0001、c0002 …（旧数据可能在载入时回填） */
-export type ChapterHead = Pick<LocalBookChapter, "cid" | "title" | "url"> & {
+export type ChapterHead = Pick<LocalBookChapter, "cid" | "title" | "url" | "volume"> & {
   /** 章节正文镜像文本的字符数（UTF-16；仅 p/h 文本，图片不计）。书架进度/详情字数以它为口径 */
   chars: number;
 };
@@ -246,6 +248,7 @@ export function chapterHeadOf(chapter: LocalBookChapter): ChapterHead {
   const head: ChapterHead = {
     cid: chapter.cid,
     title: chapter.title,
+    ...(chapter.volume ? { volume: chapter.volume } : {}),
     ...(chapter.url ? { url: chapter.url } : {}),
     chars: chapterMirrorCharsOf(chapter),
   };

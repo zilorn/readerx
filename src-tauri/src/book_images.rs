@@ -939,6 +939,7 @@ mod tests {
             split_desc: "在线书".to_string(),
             cover: None,
             chapters: vec![LocalBookChapter {
+                volume: None,
                 cid: "c0001".to_string(),
                 title: "第一章".to_string(),
                 paragraphs: vec![],

@@ -5534,41 +5534,48 @@ export default function ReaderPage() {
                       const needsDownload =
                         isRemoteBook() && !downloading && !chapterHasContent(item);
                       return (
-                        <button
-                          class={`flex w-full items-center gap-3 px-[18px] py-[11px] text-left text-[13.5px] transition-colors hover:bg-surface-2 active:bg-surface-2 ${
-                            active()
-                              ? "bg-accent-weak font-semibold text-accent"
-                              : "text-text-2"
-                          }`}
-                          data-current={active() ? "true" : undefined}
-                          onClick={() => jumpFromToc(idx())}
-                        >
-                          <span
-                            class={`w-12 flex-none text-[11px] tabular-nums ${
-                              active() ? "text-accent" : "text-text-3"
+                        <>
+                          <Show when={item.volume && item.volume !== book()!.chapters[idx() - 1]?.volume}>
+                            <div class="bg-surface-2 px-[18px] py-3 text-[13px] font-semibold text-text" role="heading" aria-level="3">
+                              {item.volume}
+                            </div>
+                          </Show>
+                          <button
+                            class={`flex w-full items-center gap-3 px-[18px] py-[11px] text-left text-[13.5px] transition-colors hover:bg-surface-2 active:bg-surface-2 ${
+                              active()
+                                ? "bg-accent-weak font-semibold text-accent"
+                                : "text-text-2"
                             }`}
+                            data-current={active() ? "true" : undefined}
+                            onClick={() => jumpFromToc(idx())}
                           >
-                            {item.cid}
-                          </span>
-                          <span class="min-w-0 flex-1 truncate">{item.title}</span>
-                          <span class="flex flex-none items-center gap-1.5">
-                            <Show when={downloading}>
-                              <span class="flex-none rounded-full border border-accent/50 px-2 py-0.5 text-[10px] text-accent">
-                                {t("reader.badgeDownloading")}
-                              </span>
-                            </Show>
-                            <Show when={needsDownload}>
-                              <span class="flex-none rounded-full bg-surface-2 px-2 py-0.5 text-[10px] text-text-3">
-                                {t("reader.badgeDownload")}
-                              </span>
-                            </Show>
-                            <Show when={active()}>
-                              <span class="rounded-full bg-accent px-2 py-0.5 text-[10px] text-on-accent">
-                                {t("reader.badgeCurrent")}
-                              </span>
-                            </Show>
-                          </span>
-                        </button>
+                            <span
+                              class={`w-12 flex-none text-[11px] tabular-nums ${
+                                active() ? "text-accent" : "text-text-3"
+                              }`}
+                            >
+                              {item.cid}
+                            </span>
+                            <span class="min-w-0 flex-1 truncate">{item.title}</span>
+                            <span class="flex flex-none items-center gap-1.5">
+                              <Show when={downloading}>
+                                <span class="flex-none rounded-full border border-accent/50 px-2 py-0.5 text-[10px] text-accent">
+                                  {t("reader.badgeDownloading")}
+                                </span>
+                              </Show>
+                              <Show when={needsDownload}>
+                                <span class="flex-none rounded-full bg-surface-2 px-2 py-0.5 text-[10px] text-text-3">
+                                  {t("reader.badgeDownload")}
+                                </span>
+                              </Show>
+                              <Show when={active()}>
+                                <span class="rounded-full bg-accent px-2 py-0.5 text-[10px] text-on-accent">
+                                  {t("reader.badgeCurrent")}
+                                </span>
+                              </Show>
+                            </span>
+                          </button>
+                        </>
                       );
                     }}
                   </For>

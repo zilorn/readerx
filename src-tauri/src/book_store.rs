@@ -229,6 +229,8 @@ struct ChapterScan {
     #[serde(default)]
     title: String,
     #[serde(default)]
+    volume: Option<String>,
+    #[serde(default)]
     url: Option<String>,
     #[serde(default)]
     paragraphs: Vec<String>,
@@ -318,6 +320,7 @@ fn scan_chapter_head(chapter: ChapterScan) -> ChapterHead {
     ChapterHead {
         cid: chapter.cid,
         title: chapter.title,
+        volume: chapter.volume,
         url: chapter.url,
         chars,
     }
@@ -1105,6 +1108,8 @@ pub struct ChapterRef {
     #[serde(default)]
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
 }
 
@@ -1115,6 +1120,7 @@ pub(crate) fn chapter_refs(chapters: &[LocalBookChapter]) -> Vec<ChapterRef> {
         .map(|chapter| ChapterRef {
             cid: chapter.cid.clone(),
             title: chapter.title.clone(),
+            volume: chapter.volume.clone(),
             url: chapter.url.clone(),
         })
         .collect()
@@ -1150,6 +1156,7 @@ pub(crate) fn list_sync_structures<R: tauri::Runtime>(
                         .map(|h| ChapterRef {
                             cid: h.cid,
                             title: h.title,
+                            volume: h.volume,
                             url: h.url,
                         })
                         .collect(),
@@ -1193,6 +1200,7 @@ pub(crate) fn apply_sync_structure<R: tauri::Runtime>(
         .iter()
         .map(|entry| {
             let mut chapter = by_cid.remove(&entry.cid).unwrap_or(LocalBookChapter {
+                volume: None,
                 cid: entry.cid.clone(),
                 title: String::new(),
                 url: None,
@@ -1200,6 +1208,7 @@ pub(crate) fn apply_sync_structure<R: tauri::Runtime>(
                 blocks: None,
             });
             chapter.title = entry.title.clone();
+            chapter.volume = entry.volume.clone();
             chapter.url = entry.url.clone();
             chapter
         })
@@ -1398,6 +1407,7 @@ pub(crate) fn apply_sync_chapters<R: tauri::Runtime>(
             (
                 p,
                 LocalBookChapter {
+                    volume: None,
                     cid: body.cid.clone(),
                     title: body.title.clone(),
                     url: body.url.clone(),
@@ -1656,6 +1666,7 @@ mod tests {
 
     fn sample_chapter(cid: &str, title: &str, text: &str) -> LocalBookChapter {
         LocalBookChapter {
+            volume: None,
             cid: cid.to_string(),
             title: title.to_string(),
             paragraphs: vec![text.to_string()],

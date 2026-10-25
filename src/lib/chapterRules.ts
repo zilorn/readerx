@@ -33,6 +33,7 @@ export interface ChapterRule {
 export interface SplitChapter {
   title: string;
   paragraphs: string[];
+  volume?: string;
 }
 
 export interface TextSplitResult {
@@ -50,6 +51,9 @@ const RULES_KEY = "readerx.chapterRules";
 
 /** 中文章节标题正则（第X章 / 回 / 节），被普通规则与“简介在前”规则共用 */
 const ZH_CHAPTER_PATTERN = String.raw`^\s*第\s*[0-9０-９一二三四五六七八九十百千万零〇两]+\s*[章回节][^\n]{0,60}`;
+
+/** 卷标题独占一行；只允许行内空白，避免跨行吞掉正文。 */
+const VOLUME_PATTERN = String.raw`^[\t \u3000]*(?:第[\t \u3000]*[0-9０-９一二三四五六七八九十百千万零〇两]+[\t \u3000]*[卷部集]|[上中下]卷|[一二三四五六七八九十]+卷|(?:volume|book|part)[\t ]+(?:[0-9]+|[ivxlcdm]+)\b)[^\n]{0,70}$`;
 
 /** 内置规则：顺序即自动匹配时的尝试顺序 */
 const BUILTIN_RULES: ChapterRule[] = [
@@ -82,8 +86,8 @@ const BUILTIN_RULES: ChapterRule[] = [
   },
   {
     id: "builtin-zh-volume",
-    name: "卷 / 部 / 集 分卷",
-    pattern: String.raw`^\s*(?:第\s*[0-9０-９一二三四五六七八九十百千万零〇两]+\s*[卷部集]|[上中下]卷|[一二三四五六七八九十]+卷)[^\n]{0,70}`,
+    name: "中英文分卷标题",
+    pattern: VOLUME_PATTERN,
     builtin: true,
   },
 ];
@@ -299,6 +303,59 @@ function splitLongParagraph(paragraph: string, limit: number): string[] {
 interface RawSplitChapter {
   title: string;
   body: string;
+  volume?: string;
+}
+
+/** 卷只组织目录，不占章节下标；卷首文字作为该卷的开篇保留。 */
+function trySplitVolumes(
+  text: string,
+  rules: ChapterRule[],
+): { rule: ChapterRule; chapters: RawSplitChapter[] } | null {
+  const volumes = Array.from(text.matchAll(new RegExp(VOLUME_PATTERN, "gim")));
+  if (volumes.length === 0) return null;
+  for (const rule of rules) {
+    if (rule.id === "builtin-zh-volume") continue;
+    let matches: RegExpMatchArray[];
+    try {
+      matches = Array.from(text.matchAll(new RegExp(rule.pattern, "gim")))
+        .filter((match) => match[0].trim() && !volumes.some((volume) =>
+          match.index! < volume.index! + volume[0].length &&
+          volume.index! < match.index! + match[0].length,
+        ));
+    } catch {
+      continue;
+    }
+    if (matches.length === 0) continue;
+    const headings = [
+      ...volumes.map((match) => ({ match, volume: true })),
+      ...matches.map((match) => ({ match, volume: false })),
+    ].sort((a, b) => a.match.index! - b.match.index!);
+    const chapters: RawSplitChapter[] = [];
+    const front = text.slice(0, headings[0].match.index).trim();
+    if (front && !looksLikeTitleBlock(front)) chapters.push(splitFrontIntro(front));
+    let volume: string | undefined;
+    let nonemptyChapters = 0;
+    for (let i = 0; i < headings.length; i++) {
+      const heading = headings[i];
+      const title = heading.match[0].trim();
+      const body = text.slice(
+        heading.match.index! + heading.match[0].length,
+        headings[i + 1]?.match.index ?? text.length,
+      ).trim();
+      if (heading.volume) volume = title;
+      if (!body) continue;
+      if (!heading.volume) nonemptyChapters++;
+      chapters.push({
+        title: heading.volume ? t("chapterRules.generated.frontMatter") : title,
+        body,
+        ...(volume ? { volume } : {}),
+      });
+    }
+    // 目录列表往往只有标题没有正文，不能据此创建大量空章。
+    if (nonemptyChapters / matches.length < 0.4) continue;
+    return { rule, chapters };
+  }
+  return null;
 }
 
 /** 章节标题前的短行通常只是书名/作者/来源，属于噪音而非正文 */
@@ -481,6 +538,17 @@ export function splitText(
   charsPerChapter = DEFAULT_CHARS_PER_CHAPTER,
 ): TextSplitResult {
   const normalized = normalizeLineEndings(text);
+  const volumes = trySplitVolumes(normalized, rules);
+  if (volumes) {
+    return {
+      mode: "regex",
+      rule: volumes.rule,
+      ruleName: chapterRuleDisplayName(volumes.rule),
+      chapters: volumes.chapters.map(({ body, ...head }) => ({
+        ...head, paragraphs: paragraphsFromText(body),
+      })),
+    };
+  }
   for (const rule of rules) {
     const raw = rule.frontIntro
       ? trySplitFrontIntro(normalized, rule.pattern)

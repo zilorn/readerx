@@ -461,6 +461,7 @@ pub(super) fn refs(db: &Connection, id: &str) -> Result<Vec<ChapterRef>, String>
         Ok(ChapterRef {
             cid: head.cid,
             title: head.title,
+            volume: head.volume,
             url: head.url,
         })
     })
@@ -630,7 +631,9 @@ mod tests {
     fn sqlite_round_trip_preserves_fields_records_and_derived_data() {
         let root = root("roundtrip");
         let mut db = open(&root).unwrap();
-        let book = book("b1");
+        let mut book = book("b1");
+        book.chapters[0].volume = Some("第一卷".into());
+        book.chapters[1].volume = Some("第二卷".into());
         let tx = transaction(&mut db).unwrap();
         put(&tx, &book).unwrap();
         commit(tx).unwrap();
@@ -642,6 +645,8 @@ mod tests {
             serde_json::to_value(&book).unwrap()
         );
         assert_eq!(metas(&db).unwrap()[0].chapters[0].chars, 4);
+        assert_eq!(metas(&db).unwrap()[0].chapters[0].volume.as_deref(), Some("第一卷"));
+        assert_eq!(refs(&db, "b1").unwrap(), chapter_refs(&book.chapters));
         assert_eq!(records, super::records(&db, "bookmarks", "b1").unwrap());
         assert_eq!(
             digests(&db, "b1").unwrap()[0].hash,
@@ -665,6 +670,7 @@ mod tests {
             .unwrap();
         let mut changed = book("b1").chapters.remove(0);
         changed.title = "过期标题".into();
+        changed.volume = Some("过期卷名".into());
         changed.paragraphs = vec!["新正文".into()];
         let update = BookChapterPatch {
             index: 1,
@@ -687,6 +693,7 @@ mod tests {
             .unwrap();
         assert_eq!(before, after);
         assert_eq!(get(&db, "b1").unwrap().unwrap().chapters[0].title, "标题");
+        assert!(get(&db, "b1").unwrap().unwrap().chapters[0].volume.is_none());
         assert_eq!(picked(&db, "b1", &["c1".into()]).unwrap().len(), 1);
         drop(db);
         fs::remove_dir_all(root).unwrap();

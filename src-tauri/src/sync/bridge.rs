@@ -1317,6 +1317,7 @@ fn merge_structure_with_bodies(
     let mut chapters: Vec<crate::models::LocalBookChapter> = structure
         .iter()
         .map(|entry| crate::models::LocalBookChapter {
+            volume: entry.volume.clone(),
             cid: entry.cid.clone(),
             title: entry.title.clone(),
             paragraphs: Vec::new(),
@@ -1341,6 +1342,7 @@ fn merge_structure_with_bodies(
                 }
             }
             None => chapters.push(crate::models::LocalBookChapter {
+                volume: None,
                 cid: body.cid.clone(),
                 title: body.title.clone(),
                 paragraphs: body.paragraphs.clone(),
@@ -2525,14 +2527,15 @@ mod tests {
     #[test]
     fn online_directory_without_bodies_preserves_fetch_urls() {
         let structure = vec![
-            ChapterRef { cid: "c1".into(), title: "第一章".into(), url: Some("https://example.com/1".into()) },
-            ChapterRef { cid: "c2".into(), title: "第二章".into(), url: Some("https://example.com/2".into()) },
+            ChapterRef { volume: Some("第一卷".into()), cid: "c1".into(), title: "第一章".into(), url: Some("https://example.com/1".into()) },
+            ChapterRef { volume: None, cid: "c2".into(), title: "第二章".into(), url: Some("https://example.com/2".into()) },
         ];
         let chapters = merge_structure_with_bodies(&structure, &[]);
         assert_eq!(chapters.len(), 2);
         for (chapter, entry) in chapters.iter().zip(&structure) {
             assert_eq!(chapter.cid, entry.cid);
             assert_eq!(chapter.title, entry.title);
+            assert_eq!(chapter.volume, entry.volume);
             assert_eq!(chapter.url, entry.url);
             assert!(chapter.paragraphs.is_empty());
             assert!(chapter.blocks.is_none());

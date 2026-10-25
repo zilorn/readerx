@@ -9,6 +9,7 @@
 - PDF 入口 src/lib/pdf.ts，子模块在 src/lib/pdf/；pdf.js 与 worker 按需加载，两端统一使用 `pdfjs-dist/legacy/build` 补齐 Iterator 等 API。`pdfjs.ts` 和 `pdf.worker.mjs` 各自先载入 `compat.mjs`，补齐 legacy 未覆盖的 Promise.withResolvers 与 ReadableStream 异步迭代；只补缺失接口，保留原生流以及正常读完、提前退出、异常时的锁释放与取消语义。worker 入口经 `?worker&url` 打包，Vite 配置保留 ES 模块具名导出 WorkerMessageHandler，供主线程回退使用。保留文字层优先、扫描页图片兜底和两遍解析，避免整本中间数据常驻内存；解析前分配 bookId，页面图命名与最终书籍 ID 一致。
 - PDF 兼容回归：运行 `node scripts/pdf-stream-compatibility-test.mjs` 验证原生接口保留、迭代/取消/解压流语义；运行 `node scripts/pdf-compatibility-test.mjs`，构建后再加 `--built`，验证同时缺失 Iterator / Promise.withResolvers / 流异步迭代时，独立线程与主线程回退都能解析普通/压缩内容流并重复导入。Android 实机与实际文件另验。
 - MOBI 的 Rust 解析与前端转换边界、支持格式及测试见 [MOBI 文档](../../../../docs/mobi.md)。离屏读取书内 HTML，不执行脚本、不加载外部图片；没有 Rust 宿主时明确提示不可用。
+- TXT 分章在 `src/lib/chapterRules.ts`，识别章标题时同时按中文卷 / 部 / 集和英文 Volume / Book / Part 独行标题划分卷；章节的可选 `volume` 仅组织目录，卷首文字独立保留，不创建空卷章或改变进度坐标。`parseTxtFile`、轻量头和简繁显示副本保留卷信息，`Reader.tsx` 手机抽屉与桌面侧栏共用卷分组；旧平面目录与显式按字数分章保持原语义。回归运行 `node scripts/txt-volumes-test.mjs`，数据契约见 [书籍存储](../../../../docs/book-storage.md)。
 - 本地文件导入与 WebDAV 使用相同格式支持和落库语义；新增格式检查 src/components/ImportButton.tsx、src/lib/webdav.ts 及重新导入路径。
 
 ## 阅读排版与位置

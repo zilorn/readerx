@@ -5,6 +5,7 @@
 ## 书库与稳定身份
 
 - book_store.rs / book_store/sqlite.rs / book_store/backup.rs 将书籍数据存入 data_root 下的 books.sqlite3（books、chapters、bookmarks、annotations、groups、rules；进度直接在 books.detail.progress）；正文按章增量更新，章节头、指纹和图片引用同事务提交。TTS、书源、其他状态 JSON 和图片字节不入库。数据库 user_version 与旧 JSON schemaVersion 分别维护，新增字段核对 models.rs、BookDetail 与前端 booksTypes.ts。见 [书籍存储](../../../../docs/book-storage.md)。
+- 章节 / 轻量头 / `ChapterRef` 的可选 `volume` 为卷标题，缺省平面目录，不占 cid / 进度下标，不参与正文指纹。沿用现有 JSON 列与目录同步载荷，无需数据库或协议版本升级；正文补丁保留当前卷名，备份随快照保留。检查 book_store 往返与 sync_bridge 目录落地。
 - 注释走 readerx_annotations_get/put，与正文/书签独立存表，旧 JSON 信封 schemaVersion=1，记录按段落聚合 notes；只在读取及写入成功后发布内存变化，读失败不得作为空数组覆盖。锚点不含 bookId，身份迁移由外键级联更新归属；删除/恢复失效缓存并阻止在飞读取回填。备份包含注释表并在同段合并 note id，覆盖旧备份的缺失文件清空该书注释；导出/导入/删除前等待注释写队列。同步按 note 独立实体，保存只发布差集且与落库串行；同段新增聚合、正文并发进冲突、删书级联，启动只补缺失实体并恢复引擎已有值。备份导入显式发布改写/删除/恢复，落库通过 AppliedChanges.annotations 按书刷新。契约见 [阅读注释](../../../../docs/annotations.md)，检查为 book_store、data_transfer、readerx-sync 与 sync_bridge 测试。
 - book_store 的读写入口在进程级书库事务锁内完成迁移、读取、修改、落盘及指纹更新；持锁时不调用同步引擎。单章补丁以 chapter.cid 定位，index 仅兼容旧载荷；先验证整批 cid 存在且唯一，再只改正文，保留当前目录标题/地址。
 - 分组 / 书源分组 / 文本替换 / 分章规则经 book_store/state.rs 存库，书架 API 是 books.detail.progress 的视图；整书及元信息补丁不得清除进度。这些状态与书库共用事务锁，旧 JSON 和回执同事务迁入，成功才归档；数据库 user_version=2，恢复兼容 v1。其他普通状态写入使用同目录临时文件，先 sync_all 再重命名替换，Unix（含 Android）随后同步父目录；提交前失败保留旧文件并清理临时文件，目录同步失败返回“已替换”错误（不可假定已回滚）。Windows 仅同步文件并替换，不承诺断电后的目录持久性。普通状态读写/删除与 update_state 共用事务锁；读改写必须使用 update_state 闭包，闭包内不重入状态存储或同步引擎。阅读进度经 readerx_shelf_patch 按书提交增量，ensure 仅补缺失项，reset 在后端重置当前全部记录；不要恢复成前端整份旧书架快照覆盖。

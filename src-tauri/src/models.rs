@@ -82,6 +82,9 @@ pub struct LocalBookChapter {
     #[serde(default)]
     pub cid: String,
     pub title: String,
+    /// 所属卷标题；旧数据缺失时使用平面目录。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume: Option<String>,
     pub paragraphs: Vec<String>,
     /// 结构化正文块（EPUB 含标题/图片）；旧数据缺失时前端退回 paragraphs
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -168,6 +171,8 @@ pub struct LocalBook {
 pub struct ChapterHead {
     pub cid: String,
     pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     pub chars: u64,

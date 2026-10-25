@@ -37,7 +37,7 @@ export const chapterRules = {
   "chapterRules.builtin.zhChapter": "Chinese chapters (第X章 / 回 / 节)",
   "chapterRules.builtin.zhFront": "Chinese prologue / epilogue / extras",
   "chapterRules.builtin.enChapter": "English Chapter / CHAPTER",
-  "chapterRules.builtin.zhVolume": "Chinese volumes (卷 / 部 / 集)",
+  "chapterRules.builtin.zhVolume": "Chinese / English volume headings",
 
   // Split method description (shown when falling back to a character count)
   /** Chapter titles generated at import time (used when the source has no usable heading) */
