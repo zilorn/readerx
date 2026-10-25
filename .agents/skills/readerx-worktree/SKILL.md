@@ -12,7 +12,7 @@ description: "在 ReaderX 中按用户指定的 wt 名称创建隔离 worktree�
 - 查看 `git status --short`、`git worktree list` 和当前分支，确认 main 与任务起点，保留已有修改。
 - 使用用户指定的 XXX 创建 `.worktree/XXX`，分支默认 `codex/XXX`；先检查同名路径与分支，不覆盖已有工作。默认从 main 开始，用户明确指定起点时尊重该选择。
 - 在 worktree 中完成任务并运行对应检查；不要另起占用 1420 端口的开发服务器。
-- 仅提交任务文件，使用中文 `feat/fix/docs: 内容` 提交信息。
+- 仅提交任务文件，提交信息遵循 Conventional Commits（`type(scope): 中文摘要`，scope 可省略）。
 
 ## 整合与清理
 

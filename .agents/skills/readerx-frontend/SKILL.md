@@ -31,4 +31,4 @@ description: 开发或修改 ReaderX 的 SolidJS 页面、路由、共享状态�
 
 按 [技能维护规则](../../skills.md#技能维护) 同步本次改变的实现入口与约束。
 
-运行 `pnpm exec tsc --noEmit`、`pnpm run i18n:check`、`pnpm build`。检查涉及交互的手机与 ≥900px 桌面布局；保活页检查切换后的状态、滚动和弹层，无法实测如实说明。仅提交任务文件，使用中文提交信息；普通前端任务不修改版本、CHANGELOG 或 AGENTS.md；用户明确要求时按任务范围执行。组件 props 显式声明类型，非页面组件具名导出。
+运行 `pnpm exec tsc --noEmit`、`pnpm run i18n:check`、`pnpm build`。检查涉及交互的手机与 ≥900px 桌面布局；保活页检查切换后的状态、滚动和弹层，无法实测如实说明。仅提交任务文件，提交信息遵循 Conventional Commits（`type(scope): 中文摘要`，scope 可省略）；普通前端任务不修改版本、CHANGELOG 或 AGENTS.md；用户明确要求时按任务范围执行。组件 props 显式声明类型，非页面组件具名导出。

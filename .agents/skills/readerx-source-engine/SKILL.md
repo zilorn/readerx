@@ -33,4 +33,4 @@ description: 修改 ReaderX 书源引擎、Boa 宿主 API、浏览器认证后�
 - 在 src-tauri 运行 `cargo test -p readerx-source`；CLI 改动追加 `cargo build -p readerx-source --features cli`；CDP 改动追加 `cargo test -p readerx-source --features cli` 以覆盖可选后端，CLI WebKit 改动追加 `cargo build -p readerx-source --features "cli webkit"`。需要系统库时告诉用户；缓存写入被沙箱阻拦时提权，不换缓存目录。
 - 桌面登录插件改动追加 `cargo test -p tauri-plugin-webview-login`，覆盖无 Cookie 的存储采集收尾与探针等待标记判断；真实 WebView 的平台能力另行实测。
 - 按改动验证宿主契约、错误路径或旧数据迁移；前端桥接改动同时检查类型与 i18n，提交前运行 pnpm build。
-- 仅提交任务代码与文档，使用中文提交信息，报告检查结果和未验证的平台。
+- 仅提交任务代码与文档，提交信息遵循 Conventional Commits（`type(scope): 中文摘要`，scope 可省略），报告检查结果和未验证的平台。

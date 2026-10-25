@@ -27,4 +27,4 @@ description: 修改 ReaderX 本地书库存储、稳定身份与旧数据迁移�
 - 同步核心：`cargo test -p readerx-sync`；CLI 改动追加 `cargo build -p readerx-sync --features cli`。App 接线改动运行 `cargo test -p readerx --test sync_bridge`，按需追加 `cargo test -p readerx --lib sync`。
 - 阅读时长：`cargo test -p readerx --lib reading_time`，同步逻辑变动追加 sync_bridge；计时前端验证可见/聚焦、离页、挂起和跨日场景。
 - 前端桥接同时运行类型、i18n 与构建检查。纯技能/文档变动仅核对链接、代码入口和格式；无法验证的 Android 文件选择、真实双设备网络或原生生命周期如实报告，不以单测代替平台实测。
-- 按 [技能维护规则](../../skills.md#技能维护) 同步受影响的契约和 docs；仅提交任务文件，中文提交信息，报告提交与验证范围。
+- 按 [技能维护规则](../../skills.md#技能维护) 同步受影响的契约和 docs；仅提交任务文件，提交信息遵循 Conventional Commits（`type(scope): 中文摘要`，scope 可省略），报告提交与验证范围。
