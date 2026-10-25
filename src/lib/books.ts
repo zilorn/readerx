@@ -795,14 +795,17 @@ function enqueueBookWrite<T>(bookId: string, task: () => Promise<T>): Promise<T>
   return run;
 }
 
-/** 按补丁原位替换若干章节（其余章节对象原样复用，不做整本深拷贝） */
+/** 只合并正文，目录信息取最新值；其余章节对象原样复用。 */
 function withPatchedChapters(
   book: LocalBook,
   updates: Array<{ index: number; chapter: LocalBookChapter }>,
 ): LocalBook {
   const byIndex = new Map<number, LocalBookChapter>();
   for (const update of updates) byIndex.set(update.index, update.chapter);
-  return { ...book, chapters: book.chapters.map((ch, i) => byIndex.get(i) ?? ch) };
+  return { ...book, chapters: book.chapters.map((ch, i) => {
+    const patch = byIndex.get(i);
+    return patch ? { ...ch, paragraphs: patch.paragraphs, blocks: patch.blocks } : ch;
+  }) };
 }
 
 /**

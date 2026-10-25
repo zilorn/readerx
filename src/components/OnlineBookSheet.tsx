@@ -532,14 +532,21 @@ export function OnlineBookSheet(props: OnlineBookSheetProps) {
                   <div class="divide-y divide-border overflow-hidden rounded-[12px] border border-border bg-surface">
                     <For each={visibleChapters()}>
                       {(ch, index) => (
-                        <button class="flex w-full items-center gap-2.5 px-3 py-[9px] text-left active:bg-surface-2" disabled={adding()} onClick={() => void previewContent(ch)}>
-                          <span class="w-9 flex-none text-right text-[11px] tabular-nums text-text-3">
-                            {index() + 1}
-                          </span>
-                          <span class="min-w-0 flex-1 truncate text-[12.5px] text-text">
-                            {hanText(ch.chapterName)}
-                          </span>
-                        </button>
+                        <>
+                          <Show when={ch.volume && ch.volume !== visibleChapters()[index() - 1]?.volume}>
+                            <h4 class="bg-surface-2 px-3 py-2.5 text-[12.5px] font-semibold text-text">
+                              {hanText(ch.volume!)}
+                            </h4>
+                          </Show>
+                          <button class="flex w-full items-center gap-2.5 px-3 py-[9px] text-left active:bg-surface-2" disabled={adding()} onClick={() => void previewContent(ch)}>
+                            <span class="w-9 flex-none text-right text-[11px] tabular-nums text-text-3">
+                              {index() + 1}
+                            </span>
+                            <span class="min-w-0 flex-1 truncate text-[12.5px] text-text">
+                              {hanText(ch.chapterName)}
+                            </span>
+                          </button>
+                        </>
                       )}
                     </For>
                   </div>

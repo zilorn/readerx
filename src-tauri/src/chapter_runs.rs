@@ -93,6 +93,7 @@ mod tests {
             .map(|(index, name)| ChapterTaskItem {
                 index,
                 chapter: ChapterItem {
+                    volume: None,
                     chapter_name: (*name).to_string(),
                     chapter_url: format!("https://example.com/{name}"),
                 },

@@ -192,6 +192,7 @@ async function bookToc(book) {
   const resp = await http.get(book.bookUrl);
   const items = html.queryAll(resp.body, "div.catalog a");
   return items.map(function (el) {
+    // 分卷目录可在每章附带 volume: "第一卷"；不填则为平面目录。
     return { chapterName: el.text, chapterUrl: util.urlJoin(book.bookUrl, el.attrs.href) };
   });
 }

@@ -104,6 +104,7 @@ export const reader = {
   "reader.reloadFailedBackToProgress": "重新加载失败，已回到原进度：{error}",
   "reader.reloadedChapter": "已重新加载「{title}」",
   "reader.tocUpToDate": "目录已是最新，暂无更新",
+  "reader.tocMetadataUpdated": "已更新章节标题与分卷",
   "reader.tocAppended": "已更新 {count} 个章节",
   "reader.updateCheckFailed": "检查更新失败：{error}",
   "reader.tocOverwritten": "目录已覆盖更新，共 {count} 章",

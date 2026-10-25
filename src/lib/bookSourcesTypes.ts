@@ -78,6 +78,8 @@ export interface BookItem {
 export interface ChapterItem {
   chapterName: string;
   chapterUrl: string;
+  /** 所属卷标题；省略时使用平面目录。 */
+  volume?: string;
 }
 
 /** 批量拉正文的单章结果 */

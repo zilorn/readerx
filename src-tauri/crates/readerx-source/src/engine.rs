@@ -1620,6 +1620,36 @@ mod tests {
         assert!(error.contains("递归过深"), "{error}");
     }
 
+    #[test]
+    fn chapter_volumes_round_trip_from_toc_to_content() {
+        let js = r#"
+        function bookToc() {
+          return [
+            { chapterName: "第一章", chapterUrl: "https://example.com/1", volume: "第一卷" },
+            { chapterName: "第一章", chapterUrl: "https://example.com/2", volume: "第二卷" },
+            { chapterName: "旧章节", chapterUrl: "https://example.com/3" }
+          ];
+        }
+        function bookContent(chapter) {
+          return (chapter.volume || "无卷") + ":" + chapter.chapterName;
+        }
+        "#;
+        let book: BookItem = serde_json::from_value(json!({
+            "bookName": "分卷书", "bookUrl": "https://example.com/book"
+        })).unwrap();
+        let result = call_source_function("volumes", js, "bookToc", &json!([&book]), 5_000).unwrap();
+        assert!(result.ok, "{:?}", result.error);
+        let chapters: Vec<ChapterItem> = serde_json::from_value(result.value.unwrap()).unwrap();
+        assert_eq!(chapters[0].volume.as_deref(), Some("第一卷"));
+        assert!(chapters[2].volume.is_none());
+        assert!(serde_json::to_value(&chapters[2]).unwrap().get("volume").is_none());
+        let results = fetch_chapter_contents("volumes", js, &book, &chapters, 2, 5_000).unwrap();
+        assert!(results.iter().all(|result| result.ok));
+        assert_eq!(results[0].text, "第一卷:第一章");
+        assert_eq!(results[1].text, "第二卷:第一章");
+        assert_eq!(results[2].text, "无卷:旧章节");
+    }
+
     /// 批量拉正文：单章失败不拖垮整批，结果仍按章节下标一一对应。
     #[test]
     fn fetch_contents_keeps_per_chapter_results() {
@@ -1636,14 +1666,17 @@ mod tests {
         .unwrap();
         let chapters = vec![
             ChapterItem {
+                volume: None,
                 chapter_name: "好章".to_string(),
                 chapter_url: "https://example.com/1".to_string(),
             },
             ChapterItem {
+                volume: None,
                 chapter_name: "坏章".to_string(),
                 chapter_url: "https://example.com/2".to_string(),
             },
             ChapterItem {
+                volume: None,
                 chapter_name: "好章2".to_string(),
                 chapter_url: "https://example.com/3".to_string(),
             },
@@ -1683,6 +1716,7 @@ mod tests {
             .map(|(index, name)| ChapterTaskItem {
                 index: index * 10,
                 chapter: ChapterItem {
+                    volume: None,
                     chapter_name: (*name).to_string(),
                     chapter_url: format!("https://example.com/{index}"),
                 },
@@ -1721,6 +1755,7 @@ mod tests {
             .map(|index| ChapterTaskItem {
                 index,
                 chapter: ChapterItem {
+                    volume: None,
                     chapter_name: format!("第{index}章"),
                     chapter_url: format!("https://example.com/{index}"),
                 },
@@ -1767,6 +1802,7 @@ mod tests {
                 .map(|index| ChapterTaskItem {
                     index,
                     chapter: ChapterItem {
+                        volume: None,
                         chapter_name: format!("第{index}章"),
                         chapter_url: format!("https://example.com/{index}"),
                     },
@@ -1809,6 +1845,7 @@ mod tests {
             .map(|index| ChapterTaskItem {
                 index,
                 chapter: ChapterItem {
+                    volume: None,
                     chapter_name: format!("第{index}章"),
                     chapter_url: format!("https://example.com/{index}"),
                 },
@@ -1829,6 +1866,7 @@ mod tests {
             .map(|index| ChapterTaskItem {
                 index,
                 chapter: ChapterItem {
+                    volume: None,
                     chapter_name: format!("第{index}章"),
                     chapter_url: format!("https://example.com/{index}"),
                 },

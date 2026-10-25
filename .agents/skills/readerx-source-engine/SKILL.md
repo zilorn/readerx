@@ -11,6 +11,7 @@ description: 修改 ReaderX 书源引擎、Boa 宿主 API、浏览器认证后�
 
 - 核心引擎和持久化位于 src-tauri/crates/readerx-source，不依赖 Tauri/GUI；App 与 CLI 共用，不在主 crate 重写引擎或存储。
 - 修改字段、规则或宿主 API 时按范围读取 [规范](../../../docs/book-source-spec.md)、[API](../../../docs/book-source-api.md) 或 [使用指南](../../../docs/book-source-guide.md)，不默认加载全部文档。
+- `ChapterItem` 的可选 `volume` 为所属卷标题，`bookToc` 每章返回、`bookContent` 原样接收；缺省保持平面目录，不用无地址的卷标题项占章号。前端 `online.ts` 归一化并贯穿入架、目录更新和换源；回归 `node scripts/online-volumes-test.mjs` 及引擎 `chapter_volumes_round_trip_from_toc_to_content`，完整契约见书源规范。
 - CLI 与认证任务读 [CLI 文档](../../../docs/book-source-cli.md)；Cloudflare 任务再读 [Cloudflare 文档](../../../docs/cloudflare.md)。
 - 含图正文读 [图片文档](../../../docs/book-source-image.md)，前端转换查看 src/lib/sourceContent.ts、src/lib/booksTypes.ts 与 src/lib/chapterImages.ts；段内图片使用字符锚点，保留远端身份与本地文件引用，图片失败不应让已取回正文失效。
 - 日志任务读 [日志文档](../../../docs/logging.md)。使用 log 门面；URL 通过 readerx_log::redact::url，错误地址通过 redact::urls_in_text 脱敏。不输出 Cookie、token、请求头值、存储快照、正文。循环仅 debug，用户可见失败走 reportFailure，不重复记错。

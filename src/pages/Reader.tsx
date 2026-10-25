@@ -1413,15 +1413,15 @@ export default function ReaderPage() {
         showToast(t("reader.tocUpToDate"));
         return;
       }
-      if (diff.kind === "append") {
-        const added = await applyOnlineTocAppend(current.id, diff.added);
+      if (diff.kind === "append" || diff.kind === "metadata") {
+        const added = await applyOnlineTocAppend(current.id, diff.kind === "append" ? diff.added : [], diff.prefix);
         // 收掉设置面板，让用户直接看到更新后的目录/正文
         setReaderSettingsOpen(false);
         setMenuOpen(false);
         showToast(
           added > 0
             ? t("reader.tocAppended", { count: added })
-            : t("reader.tocUpToDate"),
+            : t("reader.tocMetadataUpdated"),
         );
         return;
       }

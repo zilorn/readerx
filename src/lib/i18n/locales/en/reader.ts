@@ -126,6 +126,7 @@ export const reader = {
     "Reload failed, back to your previous position: {error}",
   "reader.reloadedChapter": "Reloaded \"{title}\"",
   "reader.tocUpToDate": "Contents are up to date",
+  "reader.tocMetadataUpdated": "Updated chapter titles and volumes",
   "reader.tocAppended": "Added {count} chapters",
   "reader.tocAppended_one": "Added {count} chapter",
   "reader.tocAppended_other": "Added {count} chapters",

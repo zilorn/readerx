@@ -153,6 +153,9 @@ pub struct BookItem {
 pub struct ChapterItem {
     pub chapter_name: String,
     pub chapter_url: String,
+    /// 所属卷标题；旧书源省略时使用平面目录。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume: Option<String>,
 }
 
 /// 批量拉取正文的单章结果

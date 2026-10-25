@@ -213,10 +213,12 @@ export async function fetchBookToc(
   }
   const chapters: ChapterItem[] = [];
   for (const raw of value as unknown[]) {
+    if (!raw || typeof raw !== "object") continue;
     const r = raw as Record<string, unknown>;
     const chapterName = typeof r.chapterName === "string" ? r.chapterName.trim() : "";
     const chapterUrl = typeof r.chapterUrl === "string" ? r.chapterUrl.trim() : "";
-    if (chapterName && chapterUrl) chapters.push({ chapterName, chapterUrl });
+    const volume = typeof r.volume === "string" ? r.volume.trim() : "";
+    if (chapterName && chapterUrl) chapters.push({ chapterName, chapterUrl, ...(volume ? { volume } : {}) });
   }
   if (chapters.length === 0) {
     log.warn(
@@ -263,6 +265,7 @@ export async function addOnlineBookToShelf(
   const localChapters: LocalBookChapter[] = chapters.map((ch, index) => ({
     cid: `c${String(index + 1).padStart(4, "0")}`,
     title: ch.chapterName,
+    ...(ch.volume ? { volume: ch.volume } : {}),
     paragraphs: [],
     url: ch.chapterUrl,
   }));
@@ -681,6 +684,7 @@ function draftFromBuild(chapter: LocalBookChapter, build: SourceContentBuild): L
   const draft: LocalBookChapter = {
     cid: chapter.cid,
     title: chapter.title,
+    ...(chapter.volume ? { volume: chapter.volume } : {}),
     paragraphs: [],
     blocks: undefined,
     url: chapter.url,
@@ -831,7 +835,7 @@ async function streamChapterTasks(options: ChapterStreamOptions): Promise<Chapte
       );
       continue;
     }
-    items.push({ index, chapter: { chapterName: chapter.title, chapterUrl: url } });
+    items.push({ index, chapter: { chapterName: chapter.title, chapterUrl: url, volume: chapter.volume } });
   }
   /** 本轮已处理的章节（取到正文或记了失败都算处理过：进度与「下载中」徽标按它推进） */
   const handled = new Set<number>();
@@ -1330,7 +1334,7 @@ async function fetchChapterNow(bookId: string, chapterIndex: number): Promise<vo
     if (chapterHasContent(chapter)) return; // 期间已被别的任务写回
     const epoch = tocEpochOf(bookId);
     const results = await fetchRemoteChapterContents(book.bookSourceId!, toBookItem(book), [
-      { chapterName: chapter.title, chapterUrl: url },
+      { chapterName: chapter.title, chapterUrl: url, volume: chapter.volume },
     ]);
     const res = results[0];
     if (!res?.ok) {
@@ -1758,7 +1762,7 @@ export async function reloadChapterContent(
   try {
     await invalidateTranslations(bookId, chapter.cid);
     const results = await fetchRemoteChapterContents(sourceId, toBookItem(book), [
-      { chapterName: chapter.title, chapterUrl: chapter.url },
+      { chapterName: chapter.title, chapterUrl: chapter.url, volume: chapter.volume },
     ]);
     const res = results[0];
     if (!res?.ok) {
@@ -1886,7 +1890,8 @@ export interface OnlineTocConflict {
 
 export type OnlineTocUpdate =
   | { kind: "none" }
-  | { kind: "append"; added: ChapterItem[] }
+  | { kind: "append"; added: ChapterItem[]; prefix: ChapterItem[] }
+  | { kind: "metadata"; prefix: ChapterItem[] }
   | { kind: "conflict"; conflict: OnlineTocConflict };
 
 /** 重新获取在线书的书源目录（阅读设置「检查书籍更新」用）。
@@ -1928,28 +1933,42 @@ export function diffOnlineBookToc(
     prefix++;
   }
   if (prefix === oldCount && newCount >= oldCount) {
-    if (newCount === oldCount) return { kind: "none" };
-    return { kind: "append", added: fresh.slice(oldCount) };
+    const heads = fresh.slice(0, oldCount);
+    if (newCount > oldCount) return { kind: "append", added: fresh.slice(oldCount), prefix: heads };
+    if (heads.some((item, i) => item.volume !== old[i].volume || item.chapterName !== old[i].title)) {
+      return { kind: "metadata", prefix: heads };
+    }
+    return { kind: "none" };
   }
   return { kind: "conflict", conflict: { oldCount, newCount, fresh } };
 }
 
-/** 执行追加更新：把末尾新增章节并入书架目录（正文留空，阅读时按窗口懒加载）。
+/** 合并目录更新：刷新原有标题 / 卷名，把末尾新增章节并入书架目录（正文留空）。
  *  写入在本书写队列内基于最新缓存构建，不会丢掉并发拉取刚写回的正文；末尾追加不动既有
  *  章节下标，因此不必打断正在跑的窗口预取 / 批量下载。返回实际追加的章节数。 */
 export async function applyOnlineTocAppend(
   bookId: string,
   added: ChapterItem[],
+  prefix?: ChapterItem[],
 ): Promise<number> {
-  if (added.length === 0) return 0;
+  if (added.length === 0 && !prefix) return 0;
   const next = await updateBookContent(bookId, (latest) => {
+    if (prefix && (latest.chapters.length !== prefix.length || prefix.some((item, i) =>
+      (latest.chapters[i].url ?? "").trim() !== item.chapterUrl.trim(),
+    ))) throw new Error(t("discover.error.tocChanged"));
     const start = latest.chapters.length;
-    const chapters = [...latest.chapters];
+    const chapters = latest.chapters.map((chapter, i) => {
+      const item = prefix?.[i];
+      return item && (item.chapterName !== chapter.title || item.volume !== chapter.volume)
+        ? { ...chapter, title: item.chapterName, volume: item.volume }
+        : chapter;
+    });
     for (let i = 0; i < added.length; i++) {
       const item = added[i];
       chapters.push({
         cid: chapterCid(start + i),
         title: item.chapterName,
+        ...(item.volume ? { volume: item.volume } : {}),
         paragraphs: [],
         url: item.chapterUrl,
       });
@@ -1957,7 +1976,7 @@ export async function applyOnlineTocAppend(
     return { ...latest, chapters };
   });
   log.info(
-    "目录追加更新完成",
+    "目录合并更新完成",
     `book=${bookId}`,
     `added=${next ? added.length : 0}`,
     `chapters=${next?.chapters.length ?? 0}`,
@@ -1988,6 +2007,7 @@ export async function applyOnlineTocOverwrite(
         const chapter: LocalBookChapter = {
           cid: chapterCid(index),
           title: item.chapterName,
+          ...(item.volume ? { volume: item.volume } : {}),
           paragraphs: carried?.paragraphs ?? [],
           url: item.chapterUrl,
         };
@@ -2028,6 +2048,7 @@ export async function switchOnlineBookSource(
       sourceTags: tags,
       chapters: fresh.map((chapter, index) => ({
         cid: chapterCid(index), title: chapter.chapterName,
+        ...(chapter.volume ? { volume: chapter.volume } : {}),
         url: chapter.chapterUrl, paragraphs: [],
       })),
     };
