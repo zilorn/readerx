@@ -481,6 +481,25 @@ fn write_state<R: tauri::Runtime>(
         let Some(incoming) = archive::read_state_entry(zip, books, key)? else {
             continue;
         };
+        if key == crate::reading_time::KEY {
+            let changed = crate::reading_time::import_backup(
+                app,
+                &incoming,
+                mode == ImportMode::Replace,
+                |id| {
+                    remap
+                        .archive_book_uids
+                        .get(id)
+                        .filter(|uid| !uid.is_empty())
+                        .cloned()
+                        .unwrap_or_else(|| crate::sync::bridge::local_uid(app, &remap.book(id)))
+                },
+            )?;
+            if changed {
+                summary.state_keys.push(key.clone());
+            }
+            continue;
+        }
         let changed = storage::update_state(app, key, |local| {
             let value = match mode {
                 ImportMode::Merge => merge::merge_state(key, local.as_ref(), &incoming, remap),

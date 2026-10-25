@@ -161,7 +161,7 @@ await setRules([rule("正字"), regex, deletion,
 const warm = player(async () => []);
 warm.warmup();
 await settle(() => requests.length === 2 && disk.size === 2);
-assert.deepEqual(requests, ["正字。", "末句。"], "章节窗口预热使用显示文本");
+assert.deepEqual([...requests].sort(), ["正字。", "末句。"].sort(), "章节窗口预热使用显示文本（并发请求顺序不限）");
 requests.length = 0;
 assert.equal(await warm.warmBook(), 4);
 assert.deepEqual(requests, ["序号12。"], "整本预热应用书籍正则与删除规则，并复用相同句子缓存");

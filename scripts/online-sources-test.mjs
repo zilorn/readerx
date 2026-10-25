@@ -32,6 +32,7 @@ let writes = 0;
 let fail = false;
 let concurrent = false;
 const online = await load("../src/lib/online.ts", {
+  "./translation/engine": { invalidateTranslations: async () => {} },
   "solid-js": { createSignal },
   "./backend": {}, "./chapterImages": {}, "./bookmarks": {}, "./bookSources": {},
   "./sourceCover": {}, "./sourceContent": {}, "./booksTypes": types,

@@ -98,6 +98,7 @@ export const tts = {
     "Audio decoding failed: the custom source must return decodable audio (mp3 / wav / ogg)",
   "tts.error.noUrl": "Set the custom source URL first (Listening settings → Custom source)",
   "tts.error.noText": "No text to read",
+  "tts.error.invalidJsonBody": "The custom speech source has an invalid JSON request template",
   "tts.error.timeout": "Custom source request timed out (45 s); check the URL and network",
   "tts.error.requestFailed": "Custom source request failed: {reason}",
   "tts.error.httpStatus": "Custom source returned an error: HTTP {status}",

@@ -1,10 +1,11 @@
 //! 阅读时长：按本机独立来源累计，同步取每个来源的最大值再求和。
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, fs, sync::Mutex};
 use tauri::AppHandle;
 
 static LOCK: Mutex<()> = Mutex::new(());
-const KEY: &str = "readerx.readingTime";
+pub(crate) const KEY: &str = "readerx.readingTime";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Contribution {
@@ -193,6 +194,69 @@ pub(crate) fn apply<R: tauri::Runtime>(
     Ok(changed)
 }
 
+/// 备份与本机累加共用时长锁，避免读改写与正在保存的阅读记录互相覆盖。
+pub(crate) fn import_backup<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    incoming: &serde_json::Value,
+    replace: bool,
+    book_uid: impl Fn(&str) -> String,
+) -> Result<bool, String> {
+    let incoming = backup_stats(incoming, book_uid)?;
+    let _guard = LOCK.lock().map_err(|_| "阅读时长锁不可用")?;
+    let previous = crate::storage::read_state(app, KEY)?;
+    let stats = if replace {
+        incoming
+    } else {
+        let mut stats = load(app)?;
+        stats.merge(incoming.contributions);
+        stats
+    };
+    let value = serde_json::to_value(&stats).map_err(|e| format!("序列化阅读时长失败: {e}"))?;
+    if previous.as_ref() == Some(&value) {
+        return Ok(false);
+    }
+    save(app, &stats)?;
+    Ok(true)
+}
+
+fn backup_stats(
+    value: &serde_json::Value,
+    book_uid: impl Fn(&str) -> String,
+) -> Result<ReadingTime, String> {
+    let mut stats: ReadingTime =
+        serde_json::from_value(value.clone()).map_err(|e| format!("备份阅读时长无效: {e}"))?;
+    match stats.schema_version {
+        1 => {
+            // v1 没有来源；按归档中的历史统计派生固定来源，重复导入同一份不重复计数。
+            // 这不能辨认已经被其它设备独立迁移的 v1 历史。
+            let bytes = serde_json::to_vec(&(&stats.days, &stats.books))
+                .map_err(|e| format!("备份阅读时长无效: {e}"))?;
+            let digest = Sha256::digest(bytes);
+            let source = readerx_sync::Ulid::from_u128(u128::from_be_bytes(
+                digest[..16].try_into().expect("SHA-256 摘要至少 16 字节"),
+            ))
+            .to_string();
+            let mut books: BTreeMap<String, u64> = BTreeMap::new();
+            for (id, value) in std::mem::take(&mut stats.books) {
+                let total = books.entry(book_uid(&id)).or_default();
+                *total = total.saturating_add(value);
+            }
+            stats.contributions = BTreeMap::from([(
+                source,
+                Contribution {
+                    days: std::mem::take(&mut stats.days),
+                    books,
+                },
+            )]);
+            stats.schema_version = 2;
+        }
+        2 => {}
+        _ => return Err("不支持的备份阅读时长版本".into()),
+    }
+    stats.summarize();
+    Ok(stats)
+}
+
 fn add(
     stats: &mut ReadingTime,
     source: String,
@@ -259,6 +323,16 @@ pub async fn readerx_reading_time_add(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn backup_rejects_unknown_versions_and_invalid_counters() {
+        for value in [
+            serde_json::json!({"schemaVersion": 3}),
+            serde_json::json!({"schemaVersion": 2, "contributions": {"source": {"days": {"2026-10-25": -1}}}}),
+        ] {
+            assert!(backup_stats(&value, str::to_owned).is_err());
+        }
+    }
+
     #[test]
     fn view_resolves_present_books_and_preserves_removed_books() {
         let books = BTreeMap::from([

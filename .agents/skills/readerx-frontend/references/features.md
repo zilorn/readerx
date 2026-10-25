@@ -41,10 +41,12 @@
 - 加入书架先存目录，正文按需逐章取回并立即保存。预取范围与实际渲染窗口是两种职责，读取实现中的 LAZY_WINDOW 与渲染窗口定义，不因后台远章落盘刷新整本阅读树。
 - 普通下载不覆盖已存在正文，显式重载才覆盖；目录覆盖推进世代，按旧下标在飞的回写必须失效。取消、重试与用户优先级沿用现有任务机制。
 - chapterHasContent 将 blocks 已定义（包括空数组）视为已取回，不能把合法空章当作未下载反复请求。正文与图片就绪分别判断，图片失败允许独立重试。
+- sourceContent.ts 的属性实体解码只接受文本：屏蔽原始标签后经 textarea 解码，不能创建普通 HTML 子节点或加载资源；回归 `node scripts/source-content-test.mjs`，事件隔离需在真实浏览器验证。
 
 ## 听书
 
 - src/lib/ttsPlayer.ts 是阅读页生命周期内的播放器；ttsEngine.ts、httpTts.ts、webAudio.ts 分别承接原生、HTTP 合成与音频播放，ttsSegment.ts 管镜像分句，audioCache.ts 管缓存。
+- httpTts.ts 的 JSON body 按完整字符串 token 替换并序列化占位值，保留 URLencoding 参数及未加引号的倍速数值；原文里的占位符不再次展开。URL/表单仍按模板编码，GET 不解析未使用的 body。回归 `node scripts/http-tts-test.mjs`。
 - 播放器 chapterAt 必须返回文本替换与简繁转换后的显示副本；分句缓存同时按章节对象与分页边界失效，HTTP 内存音频按实际句子文本和请求指纹匹配。修改该链路运行 `node scripts/tts-replacements-test.mjs`，覆盖窗口/整本预热、播放缓存与规则更新/删除；含正文或接口配置的内存缓存键不得写入日志。
 - 原生 TTS 暂停通过停止当前句实现，继续从句首重读；HTTP 播放暂停使用 AudioContext，保持句中位置。修改统一按钮时不能假设两者具有相同暂停能力。
 - 阅读视图与朗读位置独立；取消跟读或浏览跨章后，播放器推进不挪动视图，可通过「返回跟读」追回。HTTP 预热由起播或打开听书面板触发，普通阅读不发合成请求。

@@ -11,6 +11,7 @@
 //! | `readerx.textReplacements` | 规则内容（作用域 + 书 + 查找 + 替换 + 是否正则） | 同一条规则只留一份 |
 //! | `readerx.chapterRules` | 规则名 + 正则 | 同上 |
 //! | `readerx.webdavServers` | 服务器地址 | 本机已有同地址配置则不动 |
+//! | `readerx.readingTime` | 来源 + 统计项 | 由 reading_time::import_backup 在时长锁内取最大值合并 |
 //! | 其余（偏好类） | —— | 本机有就保持本机（主题 / 字号不该被别人的备份改掉） |
 //!
 //! 身份口径直接复用同步的 `identity` 模块（见 `src/sync/identity.rs`）：导入与同步
