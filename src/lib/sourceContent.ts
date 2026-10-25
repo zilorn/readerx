@@ -133,9 +133,11 @@ export function normalizeContentText(raw: string): string[] {
 
 function decodeHtmlEntities(input: string): string {
   if (!input.includes("&")) return input;
-  const el = document.createElement("div");
-  el.innerHTML = input;
-  return el.textContent ?? "";
+  // 属性值是文本：先屏蔽原始标签，再在 RCDATA 容器中解码实体。
+  // 普通 div 即使没有挂到页面，也会加载图片并执行 onerror。
+  const el = document.createElement("textarea");
+  el.innerHTML = input.replace(/</g, "&lt;");
+  return el.value;
 }
 
 // ---------------------------------------------------------------------------

@@ -32,6 +32,7 @@ async function bookContent(chapter, book) {
   `original` / `data-lazy-src` / `lazy-src` / `data-url` / `data-echo`（按上述顺序逐个尝试）。
 - 相对地址（`/imgs/1.jpg`、`../x.png`）按**正文页地址**（`chapterUrl`）自动解析为绝对地址。
 - `script` / `style` / 注释内部出现的 `<img` 不会误识别；没有可用地址的 `<img>` 会被当作不存在。
+- 图片属性的 HTML 实体只按文本解码，不执行其中的标签或事件，也不因解码加载资源。解析回归运行 `node scripts/source-content-test.mjs`；事件隔离另在真实浏览器验证。
 - 解析不了的内容（对象里没有 `text` / `images` 键）仍按普通文本返回，保持旧行为。
 
 ### 方式 B：返回对象 `{ text?, images? }`
