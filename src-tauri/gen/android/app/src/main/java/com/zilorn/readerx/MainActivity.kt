@@ -52,7 +52,10 @@ class MainActivity : TauriActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     enableEdgeToEdge()
     Log.i(TAG, "Activity created (savedState=${savedInstanceState != null})")
-    super.onCreate(savedInstanceState)
+    // Tauri manages its own WebView hierarchy. Android's saved Activity state
+    // may reference an obsolete view tree after an APK replacement; restoring
+    // it can leave a blank surface instead of attaching the new WebView.
+    super.onCreate(null)
   }
 
   override fun onDestroy() {
