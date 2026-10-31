@@ -1,17 +1,23 @@
 import { sourceId, stableId } from "./dataIds";
 /**
  * 前端与 Rust 后端的唯一通道。
- * - Tauri 环境：通过 invoke 读写 Rust 管理的 JSON 文件；
- * - 纯浏览器开发环境：只使用内存 Map 降级，不写任何 WebView 持久化存储。
+ * - Tauri 环境：通过 invoke 读写 Rust 管理的数据库与文件；
+ * - HarmonyOS / 浏览器（PWA）：用 IndexedDB（见 `webStore.ts`）持久化同一批数据，
+ *   没有任何第三方存储依赖；IndexedDB 不可用时才退化为内存。
  */
 import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
-import { bookToMeta, type BookMeta, type LocalBook, type LocalBookChapter } from "./booksTypes";
+import type { BookMeta, LocalBook, LocalBookChapter } from "./booksTypes";
 import { reportFailure } from "./errorReport";
 import { openExternal } from "./external";
 import { t } from "./i18n";
 import { createLogger } from "./logger";
 import { createTranslationSources } from "./translation/sources";
-import type { TranslationWriteEntry } from "./translation/types";
+import type {
+  TranslationBookState,
+  TranslationCache,
+  TranslationWriteEntry,
+} from "./translation/types";
+import * as webStore from "./webStore";
 import type {
   BookImageFile,
   BookImageInfo,
@@ -34,16 +40,15 @@ const tauri = isTauri();
 
 const log = createLogger("backend");
 
-const memoryState = new Map<string, unknown>();
-const memoryBooks = new Map<string, LocalBook>();
-const memoryAnnotations = new Map<string, unknown[]>();
-const memoryBookmarks = new Map<string, unknown[]>();
-const memorySources = new Map<string, BookSource>();
-
-/** 读取一条状态（readerx.* 前缀）；不存在或纯浏览器环境返回 null */
+/** 读取一条状态（readerx.* 前缀）；不存在时返回 null */
 export async function readState<T>(key: string): Promise<T | null> {
   if (!tauri) {
-    return (memoryState.get(key) as T | undefined) ?? null;
+    try {
+      return await webStore.readState<T>(key);
+    } catch (err) {
+      reportFailure(t("library.state.readFailed"), err);
+      return null;
+    }
   }
   try {
     const value = await invoke<T | null>("readerx_state_get", { key });
@@ -54,10 +59,14 @@ export async function readState<T>(key: string): Promise<T | null> {
   }
 }
 
-/** 写入一条状态；Tauri 环境失败时降级为内存值，但要让用户知道没存下来 */
+/** 写入一条状态；失败时让用户知道没存下来 */
 export async function writeState(key: string, value: unknown): Promise<void> {
   if (!tauri) {
-    memoryState.set(key, value);
+    try {
+      await webStore.writeState(key, value);
+    } catch (err) {
+      reportFailure(t("library.state.writeFailed"), err);
+    }
     return;
   }
   try {
@@ -70,17 +79,11 @@ export async function writeState(key: string, value: unknown): Promise<void> {
 /** 后端在事务中应用书架增量，避免旧快照覆盖同步来的其它书进度。 */
 export async function patchShelf(entries: Record<string, unknown>, mode: "ensure" | "update" | "reset"): Promise<void> {
   if (!tauri) {
-    const current = { ...(memoryState.get("readerx.shelf") as Record<string, unknown> | undefined) };
-    if (mode === "reset") {
-      for (const id of Object.keys(current)) current[id] = { bookId: id, chapter: 0, updatedAt: Date.now() };
-    } else {
-      for (const [id, entry] of Object.entries(entries)) {
-        if (mode === "ensure" && id in current) continue;
-        if (entry === null) delete current[id];
-        else current[id] = entry;
-      }
+    try {
+      await webStore.patchShelf(entries, mode);
+    } catch (err) {
+      reportFailure(t("library.state.writeFailed"), err);
     }
-    memoryState.set("readerx.shelf", current);
     return;
   }
   try {
@@ -92,7 +95,11 @@ export async function patchShelf(entries: Record<string, unknown>, mode: "ensure
 
 export async function removeState(key: string): Promise<void> {
   if (!tauri) {
-    memoryState.delete(key);
+    try {
+      await webStore.removeState(key);
+    } catch (err) {
+      reportFailure(t("library.state.removeFailed"), err);
+    }
     return;
   }
   try {
@@ -104,17 +111,13 @@ export async function removeState(key: string): Promise<void> {
 
 /** 书库元数据列表（章节无正文）：启动 / 书架渲染用，避免把整库正文搬进 WebView */
 export async function listRemoteBookMetas(): Promise<BookMeta[]> {
-  if (!tauri) {
-    return [...memoryBooks.values()].map((book) => bookToMeta(book));
-  }
+  if (!tauri) return webStore.listBookMetas();
   return invoke<BookMeta[]>("readerx_book_list_meta");
 }
 
 /** 读取单本书全文（阅读页打开时按需调用）；不存在返回 null */
 export async function getRemoteBook(id: string): Promise<LocalBook | null> {
-  if (!tauri) {
-    return memoryBooks.get(id) ?? null;
-  }
+  if (!tauri) return webStore.getBook(id);
   try {
     return await invoke<LocalBook | null>("readerx_book_get", { id });
   } catch (err) {
@@ -125,9 +128,7 @@ export async function getRemoteBook(id: string): Promise<LocalBook | null> {
 
 export async function saveRemoteBook(book: LocalBook): Promise<void> {
   if (!tauri) {
-    const previous = memoryBooks.get(book.id)?.chapters ?? [];
-    memoryBooks.set(book.id, structuredClone(book));
-    reconcileMemoryBookTranslations(book.id, previous);
+    await webStore.putBook(book);
     return;
   }
   book.id = await invoke<string>("readerx_book_put", { book });
@@ -144,20 +145,7 @@ export async function saveRemoteBookChapters(
   updates: Array<{ index: number; chapter: LocalBookChapter }>,
 ): Promise<void> {
   if (!tauri) {
-    const book = memoryBooks.get(bookId);
-    if (book) {
-      const previous = structuredClone(book.chapters);
-      const chapters = updates.map((update) => {
-        const matches = book.chapters.filter((item) => item.cid === update.chapter.cid);
-        if (matches.length !== 1 || !update.chapter.cid) throw new Error("章节目录已变化");
-        return matches[0];
-      });
-      updates.forEach((update, index) => {
-        chapters[index].paragraphs = structuredClone(update.chapter.paragraphs);
-        chapters[index].blocks = structuredClone(update.chapter.blocks);
-      });
-      reconcileMemoryBookTranslations(bookId, previous);
-    }
+    await webStore.putBookChapters(bookId, updates);
     return;
   }
   await invoke("readerx_book_chapters_put", { bookId, updates });
@@ -165,12 +153,7 @@ export async function saveRemoteBookChapters(
 
 export async function deleteRemoteBook(id: string): Promise<void> {
   if (!tauri) {
-    const previous = memoryBooks.get(id)?.chapters ?? [];
-    memoryBooks.delete(id);
-    reconcileMemoryBookTranslations(id, previous);
-    memoryTranslationBooks.delete(id);
-    memoryBookmarks.delete(id);
-    memoryAnnotations.delete(id);
+    await webStore.deleteBook(id);
     return;
   }
   await invoke("readerx_book_delete", { id });
@@ -186,7 +169,12 @@ export async function deleteRemoteBook(id: string): Promise<void> {
  */
 export async function readRemoteBookmarks<T>(bookId: string): Promise<T[] | null> {
   if (!tauri) {
-    return (memoryBookmarks.get(bookId) as T[] | undefined) ?? [];
+    try {
+      return await webStore.getBookmarks<T>(bookId);
+    } catch (err) {
+      reportFailure(t("library.bookmarks.readFailed"), err);
+      return null;
+    }
   }
   try {
     return await invoke<T[]>("readerx_bookmarks_get", { bookId });
@@ -202,7 +190,11 @@ export async function saveRemoteBookmarks(
   bookmarks: readonly unknown[],
 ): Promise<void> {
   if (!tauri) {
-    memoryBookmarks.set(bookId, [...bookmarks]);
+    try {
+      await webStore.putBookmarks(bookId, bookmarks);
+    } catch (err) {
+      reportFailure(t("library.bookmarks.writeFailed"), err);
+    }
     return;
   }
   try {
@@ -214,7 +206,14 @@ export async function saveRemoteBookmarks(
 
 /** 注释按书单独存储；读取失败不能当作空数据覆盖。 */
 export async function readRemoteAnnotations<T>(bookId: string): Promise<T[] | null> {
-  if (!tauri) return (memoryAnnotations.get(bookId) as T[] | undefined) ?? [];
+  if (!tauri) {
+    try {
+      return await webStore.getAnnotations<T>(bookId);
+    } catch (err) {
+      reportFailure(t("readerChrome.annotation.readFailed"), err);
+      return null;
+    }
+  }
   try {
     return await invoke<T[]>("readerx_annotations_get", { bookId });
   } catch (err) {
@@ -224,8 +223,13 @@ export async function readRemoteAnnotations<T>(bookId: string): Promise<T[] | nu
 }
 export async function saveRemoteAnnotations<T>(bookId: string, annotations: readonly T[], previous: readonly T[]): Promise<T[] | null> {
   if (!tauri) {
-    memoryAnnotations.set(bookId, [...annotations]);
-    return [...annotations];
+    try {
+      await webStore.putAnnotations(bookId, annotations);
+      return [...annotations];
+    } catch (err) {
+      reportFailure(t("readerChrome.annotation.writeFailed"), err);
+      return null;
+    }
   }
   try {
     return await invoke<T[]>("readerx_annotations_put", { bookId, annotations, previous });
@@ -252,7 +256,7 @@ export async function patchRemoteBookMeta(
   patch: BookMetaPatchInput,
 ): Promise<void> {
   if (!tauri) {
-    const book = memoryBooks.get(id);
+    const book = await webStore.getBook(id);
     if (!book) return;
     if (patch.title !== undefined) {
       book.title = patch.title.trim() || t("common.unnamedBook");
@@ -274,6 +278,7 @@ export async function patchRemoteBookMeta(
       book.sourceTags = sourceTags.length > 0 ? sourceTags : undefined;
     }
     if (patch.groupId !== undefined) book.groupId = patch.groupId;
+    await webStore.putBook(book);
     return;
   }
   await invoke("readerx_book_patch_meta", { id, patch });
@@ -281,9 +286,7 @@ export async function patchRemoteBookMeta(
 
 export async function clearRemoteBooks(): Promise<void> {
   if (!tauri) {
-    memoryBooks.clear();
-    memoryAnnotations.clear();
-    memoryBookmarks.clear();
+    await webStore.clearBooks();
     return;
   }
   const metas = await listRemoteBookMetas();
@@ -319,7 +322,14 @@ export async function readThirdPartyNotices(): Promise<string | null> {
 // ---------------------------------------------------------------------------
 
 export async function listRemoteSources(): Promise<BookSourceSummary[]> {
-  if (!tauri) return [...memorySources.values()].map((s) => toSummary(s));
+  if (!tauri) {
+    try {
+      return (await webStore.listSources()).map((source) => toSummary(source));
+    } catch (err) {
+      reportFailure(t("library.source.listFailed"), err);
+      return [];
+    }
+  }
   try {
     return await invoke<BookSourceSummary[]>("readerx_sources_list");
   } catch (err) {
@@ -329,7 +339,14 @@ export async function listRemoteSources(): Promise<BookSourceSummary[]> {
 }
 
 export async function getRemoteSource(id: string): Promise<BookSource | null> {
-  if (!tauri) return memorySources.get(id) ?? null;
+  if (!tauri) {
+    try {
+      return await webStore.getSource(id);
+    } catch (err) {
+      reportFailure(t("library.source.readFailed"), err);
+      return null;
+    }
+  }
   try {
     return await invoke<BookSource | null>("readerx_source_get", { id });
   } catch (err) {
@@ -342,8 +359,8 @@ export async function saveRemoteSource(source: BookSource): Promise<void> {
   if (!tauri) {
     const old = source.id;
     source.id = stableId(old, "s-") ? old : sourceId(source.bookSourceUrl);
-    memorySources.delete(old);
-    memorySources.set(source.id, source);
+    if (old && old !== source.id) await webStore.deleteSource(old);
+    await webStore.putSource(source);
     return;
   }
   const saved = await invoke<BookSource>("readerx_source_put", { source });
@@ -352,7 +369,7 @@ export async function saveRemoteSource(source: BookSource): Promise<void> {
 
 export async function deleteRemoteSource(id: string): Promise<void> {
   if (!tauri) {
-    memorySources.delete(id);
+    await webStore.deleteSource(id);
     return;
   }
   await invoke("readerx_source_delete", { id });
@@ -360,10 +377,10 @@ export async function deleteRemoteSource(id: string): Promise<void> {
 
 /**
  * 书源分组被删除：清空全部书源上该分组的归属，返回受影响的书源数量。
- * 源文件里的 groupId 由 Rust 侧整批改写，避免前端逐源读写。
+ * Tauri 侧由 Rust 整批改写；Web 端在 IndexedDB 中逐源更新。
  */
 export async function clearRemoteSourceGroup(groupId: string): Promise<number> {
-  if (!tauri) return 0;
+  if (!tauri) return webStore.clearSourceGroup(groupId);
   return await invoke<number>("readerx_source_group_clear", { groupId });
 }
 
@@ -799,75 +816,81 @@ export async function extractMobi(bytes: Uint8Array): Promise<MobiContent> {
 }
 
 // 智能翻译：按章读取、按批追加；失败直接交给业务层处理，不能降级成可写空缓存。
-const memoryTranslationBooks = new Map<string, import("./translation/types").TranslationBookState>();
-const memoryTranslations = new Map<string, { revision: string; entries: Record<string, TranslationWriteEntry> }>();
-const translationEpochs = new Map<string, number>();
-function reconcileMemoryBookTranslations(bookId: string, previous: LocalBookChapter[]): void {
-  const current = memoryBooks.get(bookId)?.chapters ?? [];
-  for (const cid of new Set([...previous, ...current].map((chapter) => chapter.cid))) {
-    const before = previous.find((chapter) => chapter.cid === cid);
-    const after = current.find((chapter) => chapter.cid === cid);
-    if (JSON.stringify([before?.paragraphs, before?.blocks]) !== JSON.stringify([after?.paragraphs, after?.blocks])) {
-      const key = `${bookId}|${cid}`;
-      translationEpochs.set(key, (translationEpochs.get(key) ?? 0) + 1);
-      pruneMemoryTranslations(bookId, cid);
-    }
+//
+// Web 端的 revision 与 Rust 一样由「正文快照 + 失效计数」组成：
+// 正文被编辑 / 重新导入后 revision 变化，旧译文自然不会命中；
+// 手动失效再叠加一个 epoch，正文不变也能让缓存作废。
+
+async function webTranslationContext(
+  bookId: string,
+  cid: string,
+): Promise<{ revision: string; chapter: LocalBookChapter }> {
+  const book = await webStore.getBook(bookId);
+  const chapter = book?.chapters.find((item) => item.cid === cid);
+  if (!chapter) throw new Error(t("translation.stale"));
+  const epoch = await webStore.translationEpoch(bookId, cid);
+  return {
+    revision: JSON.stringify([epoch, chapter.paragraphs, chapter.blocks]),
+    chapter,
+  };
+}
+
+export async function readTranslationBook(bookId: string): Promise<TranslationBookState> {
+  if (!tauri) {
+    return (await webStore.getTranslationBook(bookId)) ?? { overrides: {}, terms: [] };
   }
-}
-function pruneMemoryTranslations(bookId: string, cid: string): void {
-  const key = `${bookId}|${cid}`;
-  const chapter = memoryBooks.get(bookId)?.chapters.find((chapter) => chapter.cid === cid);
-  if (!chapter) { memoryTranslations.delete(key); return; }
-  const cache = memoryTranslations.get(key);
-  if (!cache) return;
-  const sources = createTranslationSources(chapter);
-  cache.entries = Object.fromEntries(Object.entries(cache.entries).filter(([, entry]) => sources.matches(entry)));
-  cache.revision = memoryTranslationRevision(bookId, cid);
-}
-export async function readTranslationBook(bookId: string): Promise<import("./translation/types").TranslationBookState> {
-  if (!tauri) return structuredClone(memoryTranslationBooks.get(bookId) ?? { overrides: {}, terms: [] });
   return invoke("readerx_translations_get", { bookId, cid: null });
 }
-export async function putTranslationBook(bookId: string, value: import("./translation/types").TranslationBookState): Promise<void> {
-  if (!tauri) { memoryTranslationBooks.set(bookId, structuredClone(value)); return; }
+
+export async function putTranslationBook(bookId: string, value: TranslationBookState): Promise<void> {
+  if (!tauri) {
+    await webStore.putTranslationBook(bookId, value);
+    return;
+  }
   await invoke("readerx_translations_put", { bookId, cid: null, revision: "", value });
 }
-function memoryTranslationRevision(bookId: string, cid: string): string {
-  const chapter = memoryBooks.get(bookId)?.chapters.find(ch => ch.cid === cid);
-  if (!chapter) throw new Error(t("translation.stale"));
-  return JSON.stringify([translationEpochs.get(`${bookId}|${cid}`) ?? 0, chapter.paragraphs, chapter.blocks]);
-}
-export async function readTranslationCache(bookId: string, cid: string): Promise<import("./translation/types").TranslationCache> {
+
+export async function readTranslationCache(bookId: string, cid: string): Promise<TranslationCache> {
   if (tauri) return invoke("readerx_translations_get", { bookId, cid });
-  const key = `${bookId}|${cid}`;
-  const revision = memoryTranslationRevision(bookId, cid);
-  pruneMemoryTranslations(bookId, cid);
-  const cache = memoryTranslations.get(key);
-  return { revision, entries: Object.fromEntries(Object.entries(cache?.entries ?? {}).map(([key, entry]) => [key, entry.text])) };
+  const { revision, chapter } = await webTranslationContext(bookId, cid);
+  const cached = await webStore.getTranslationCache(bookId, cid);
+  // 只返回仍能对应到当前段落 / 选区的译文，避免正文变化后残留旧句子。
+  const sources = createTranslationSources(chapter);
+  const entries = Object.fromEntries(
+    Object.entries(cached?.entries ?? {})
+      .filter(([, entry]) => sources.matches(entry))
+      .map(([key, entry]) => [key, entry.text]),
+  );
+  return { revision, entries };
 }
-export async function putTranslationCache(bookId: string, cid: string, revision: string, value: Record<string,TranslationWriteEntry>): Promise<boolean> {
+
+export async function putTranslationCache(bookId: string, cid: string, revision: string, value: Record<string, TranslationWriteEntry>): Promise<boolean> {
   if (tauri) return invoke("readerx_translations_put", { bookId, cid, revision, value });
-  if (memoryTranslationRevision(bookId, cid) !== revision) return false;
-  const chapter = memoryBooks.get(bookId)!.chapters.find((chapter) => chapter.cid === cid)!;
+  const { revision: current, chapter } = await webTranslationContext(bookId, cid);
+  if (current !== revision) return false;
   const sources = createTranslationSources(chapter);
   if (Object.keys(value).length > 15 || Object.values(value).some((entry) => !sources.matches(entry))) return false;
-  const key = `${bookId}|${cid}`;
-  const cache = memoryTranslations.get(key);
-  memoryTranslations.set(key, { revision, entries: { ...cache?.entries, ...structuredClone(value) } });
+  const cached = await webStore.getTranslationCache(bookId, cid);
+  // revision 变了就不再继承旧条目，否则会把上一版正文的译文混进来。
+  const base = cached?.revision === revision ? cached.entries : {};
+  await webStore.putTranslationCache(bookId, cid, {
+    revision,
+    entries: { ...base, ...structuredClone(value) },
+  });
   return true;
 }
+
 export async function invalidateRemoteTranslations(bookId: string, cid: string): Promise<void> {
   if (tauri) { await invoke("readerx_translations_invalidate", { bookId, cid }); return; }
-  const key = `${bookId}|${cid}`;
-  translationEpochs.set(key, (translationEpochs.get(key) ?? 0) + 1);
-  pruneMemoryTranslations(bookId, cid);
+  await webStore.bumpTranslationEpoch(bookId, cid);
+  await webStore.deleteTranslationCache(bookId, cid);
 }
 
 export async function readTranslationSettings<T>(): Promise<T | null> {
-  if (!tauri) return (memoryState.get("readerx.translation") as T) ?? null;
+  if (!tauri) return webStore.readState<T>("readerx.translation");
   return invoke<T | null>("readerx_state_get", { key: "readerx.translation" });
 }
 export async function putTranslationSettings(value: unknown): Promise<void> {
-  if (!tauri) { memoryState.set("readerx.translation",value); return; }
+  if (!tauri) { await webStore.writeState("readerx.translation", value); return; }
   await invoke("readerx_state_set", { key: "readerx.translation", value });
 }

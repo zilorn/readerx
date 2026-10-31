@@ -2,4 +2,6 @@ node_modules
 dist
 # 简繁转换词典资源：由 scripts/han-dict.mjs 在 dev / build 启动时生成，不入库
 src/generated
+# PWA 图标：由 scripts/pwa-icons.mjs 在 dev / build 启动时绘制，不入库
+public/icons
 .worktree

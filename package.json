@@ -7,6 +7,7 @@
     "start": "vite",
     "dev": "vite",
     "build": "vite build",
+    "build:hap": "node scripts/build-hap.mjs",
     "serve": "vite preview",
     "tauri": "tauri",
     "bump": "node scripts/bump-version.mjs",

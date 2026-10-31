@@ -162,4 +162,7 @@ export const settings = {
   "settings.update.download": "下载 {name}",
   "settings.update.downloadFailed": "打开下载失败",
   "settings.update.appOnly": "请在 ReaderX 应用中检查更新",
+  "settings.update.harmony": "HarmonyOS 版本请通过应用市场更新",
+  "settings.pwa.install": "安装到桌面",
+  "settings.pwa.installDesc": "以独立窗口运行，离线也能打开书库",
 };

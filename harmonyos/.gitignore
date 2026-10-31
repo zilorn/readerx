@@ -1,0 +1,12 @@
+# HAP 构建产物与 IDE 缓存
+.hvigor/
+build/
+oh_modules/
+entry/build/
+entry/oh_modules/
+entry/.preview/
+entry/src/main/resources/rawfile/www/
+# 图标由 scripts/pwa-icons.mjs 生成，不入库
+AppScope/resources/base/media/app_icon.png
+entry/src/main/resources/base/media/app_icon.png
+local.properties

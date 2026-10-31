@@ -1,0 +1,16 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "ReaderX HarmonyOS 应用外壳"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "ReaderX 电子书阅读器"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "ReaderX"
+    }
+  ]
+}

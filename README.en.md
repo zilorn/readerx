@@ -7,7 +7,7 @@
   <img src="https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&logoColor=white" alt="Tauri 2" />
   <img src="https://img.shields.io/badge/SolidJS-1.9-2C4F7C?logo=solid&logoColor=white" alt="SolidJS" />
   <img src="https://img.shields.io/badge/TypeScript-6.0-3178C6?logo=typescript&logoColor=white" alt="TypeScript" />
-  <img src="https://img.shields.io/badge/platform-Android%20%7C%20Linux%20%7C%20Windows-3DDC84?logo=android&logoColor=white" alt="Platform" />
+  <img src="https://img.shields.io/badge/platform-Android%20%7C%20HarmonyOS%20%7C%20Linux%20%7C%20Windows-3DDC84?logo=android&logoColor=white" alt="Platform" />
   <a href="./LICENSE"><img src="https://img.shields.io/github/license/zilorn/readerx?label=license&color=blue" alt="License" /></a>
 </p>
 
@@ -17,7 +17,9 @@
 
 # ReaderX
 
-An ebook reader built with **Tauri 2 + SolidJS + TypeScript** for **Android, Linux and Windows**, sharing the same pages and local library across platforms.
+An ebook reader built with **Tauri 2 + SolidJS + TypeScript** for **Android, HarmonyOS, Linux and Windows**, sharing the same pages and local library across platforms.
+
+HarmonyOS supports both a native HAP shell and an installable PWA, with bundled frontend assets, an IndexedDB library and no third-party packages; see [HarmonyOS support](./docs/harmonyos.md) for capabilities and installation.
 
 [Download the latest release](https://github.com/zilorn/readerx/releases/latest)
 
@@ -53,6 +55,7 @@ pnpm install
 pnpm dev                 # Web preview: http://localhost:1420, for UI work only
 pnpm tauri dev           # Desktop app
 pnpm tauri android dev   # Android device / emulator
+pnpm build:hap           # Build assets for HAP, then open harmonyos/ in DevEco Studio
 ```
 
 Checks and build:
@@ -61,6 +64,7 @@ Checks and build:
 pnpm exec tsc --noEmit
 pnpm run i18n:check
 pnpm build
+pnpm build:hap
 ```
 
 Reuse the existing development server if port 1420 is occupied. Run Rust tests from `src-tauri/`.
@@ -74,6 +78,7 @@ The documentation below is written in Chinese.
 | [Source tutorial](./docs/book-source-guide.md) · [Format specification](./docs/book-source-spec.md) · [API](./docs/book-source-api.md) | Writing and testing book sources |
 | [Web authentication](./docs/cloudflare.md) · [Source CLI](./docs/book-source-cli.md) | Login, Cloudflare and the standalone command-line tool |
 | [Sync](./docs/sync.md) · [Backup](./docs/backup.md) | Data synchronisation and recovery |
+| [HarmonyOS](./docs/harmonyos.md) | HAP / PWA installation, offline use and capabilities |
 | [Logging and troubleshooting](./docs/logging.md) | Settings → Debug → App log |
 | [Internationalisation](./docs/i18n.md) · [Repository guidelines](./AGENTS.md) | Development conventions |
 | [Contributing](./CONTRIBUTING.md) | Bug reports, feature requests and pull requests |

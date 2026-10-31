@@ -9,3 +9,5 @@
 点击下载调用系统浏览器，由浏览器负责文件下载；应用不自动安装、重启或替换自身。Android 下载后由系统安装 APK（需允许浏览器安装来源）；桌面按所选包类型安装。更新依赖发布流程现有的签名和安装机制，不使用 Tauri updater 的签名包。
 
 新增偏好 `readerx.autoAppUpdate`，旧数据缺少该键时默认开启，不改变既有书库格式。
+
+HarmonyOS HAP / PWA 没有安装包可下载：`checkAppUpdate` 在非 Tauri 环境提示「请在应用中检查更新」。HAP 随应用商店或 DevEco 安装包更新；PWA 由 Service Worker 在联网打开时更新外壳，见 [HarmonyOS 支持](./harmonyos.md)。

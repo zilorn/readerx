@@ -46,10 +46,55 @@ export function isTauriHost(): boolean {
 /**
  * 是否是移动端平台（由 UA 判定，与窗口宽度无关）。
  * 用于「只在手机上才有意义」的能力：系统文件选择器给出的临时路径等。
+ *
+ * HarmonyOS NEXT 的 ArkWeb 不再伪装成 Android，UA 里出现 `OpenHarmony` /
+ * `HarmonyOS` / `ArkWeb`，必须一并算作移动端；否则会在手机上误判成桌面能力。
  */
 export function isMobilePlatform(): boolean {
   if (typeof navigator === "undefined") return false;
-  return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+  return /Android|iPhone|iPad|iPod|OpenHarmony|HarmonyOS|ArkWeb/i.test(
+    navigator.userAgent,
+  );
+}
+
+/**
+ * 是否是 HarmonyOS / OpenHarmony 的 Web 环境（浏览器或安装后的 PWA）。
+ * 原生能力（音量键、应用内 WebView 登录等）不在此列，只用于界面与持久化降级。
+ */
+export function isHarmonyPlatform(): boolean {
+  if (typeof navigator === "undefined") return false;
+  return /OpenHarmony|HarmonyOS|ArkWeb/i.test(navigator.userAgent);
+}
+
+/**
+ * 是否运行在 HarmonyOS HAP 的 ArkWeb 外壳内。
+ *
+ * HAP 把 `dist/` 打进 rawfile，并用 `onInterceptRequest` 映射到固定域名
+ * `https://readerx.local/`，以拿到正常的 https origin（IndexedDB / fetch / CORS 都按
+ * 同源处理）。因此这里按固定 origin 识别，而不是依赖注入脚本的时序。
+ */
+export function isHarmonyHap(): boolean {
+  if (typeof window === "undefined") return false;
+  return (
+    window.location.protocol === "resource:" ||
+    window.location.origin === "https://readerx.local"
+  );
+}
+
+/**
+ * 是否以「独立窗口」运行（安装到桌面的 PWA / Web App）。
+ * Chromium 系（含 ArkWeb）用 display-mode，iOS 用 navigator.standalone。
+ */
+export function isStandaloneWebApp(): boolean {
+  if (typeof window === "undefined") return false;
+  if (
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(display-mode: standalone)").matches
+  ) {
+    return true;
+  }
+  const legacy = navigator as Navigator & { standalone?: boolean };
+  return legacy.standalone === true;
 }
 
 /**

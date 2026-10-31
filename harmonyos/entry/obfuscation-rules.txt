@@ -1,0 +1,2 @@
+# ReaderX 的 HAP 外壳只有 ArkTS 启动代码与 WebView 拦截器，默认不做名称混淆。
+# 如需开启，在 build-profile.json5 的 release.arkOptions.obfuscation 中设置 enable=true。

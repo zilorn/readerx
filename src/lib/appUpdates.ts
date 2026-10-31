@@ -1,4 +1,5 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import { isHarmonyHap } from "./platform";
 import { readState } from "./backend";
 import { t } from "./i18n";
 import { createLogger } from "./logger";
@@ -13,7 +14,11 @@ let lastAutoCheck = 0;
 export async function checkAppUpdate(manual = true): Promise<void> {
   if (appUpdateChecking()) return;
   if (!isTauri()) {
-    if (manual) showToast(t("settings.update.appOnly"));
+    if (manual) {
+      showToast(
+        t(isHarmonyHap() ? "settings.update.harmony" : "settings.update.appOnly"),
+      );
+    }
     return;
   }
   setAppUpdateChecking(true);
