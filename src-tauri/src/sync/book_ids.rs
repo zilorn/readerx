@@ -27,7 +27,8 @@ pub(crate) fn id_for_book(book: &crate::models::LocalBook) -> String {
     })
 }
 
-/// 启动时、界面及同步线程可访问书库之前完成。失败保留待办并停止启动。
+/// 页面启动后、界面及同步线程可访问书库之前完成（见 `startup` 模块）。
+/// 失败保留待办，原数据不覆盖，下次启动可重试。
 #[doc(hidden)]
 pub fn migrate<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     let root = storage::data_root(app)?;

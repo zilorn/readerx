@@ -38,6 +38,7 @@ export const shell = {
   // Startup
   "shell.startup.settingsFailed": "Couldn't load local settings",
   "shell.startup.libraryFailed": "Couldn't load the library",
+  "shell.startup.migrationFailed": "Couldn't migrate local data",
 
   // Lazy-load placeholder
   "shell.loading.page": "Loading page…",

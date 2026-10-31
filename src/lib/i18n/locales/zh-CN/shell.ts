@@ -37,6 +37,7 @@ export const shell = {
   // 启动
   "shell.startup.settingsFailed": "本地设置载入失败",
   "shell.startup.libraryFailed": "书库载入失败",
+  "shell.startup.migrationFailed": "本地数据迁移失败",
 
   // 懒加载占位
   "shell.loading.page": "页面加载中…",
