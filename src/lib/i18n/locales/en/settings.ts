@@ -169,4 +169,7 @@ export const settings = {
   "settings.update.download": "Download {name}",
   "settings.update.downloadFailed": "Could not open download",
   "settings.update.appOnly": "Check for updates in the ReaderX app",
+  "settings.update.harmony": "Update the HarmonyOS build from the app market",
+  "settings.pwa.install": "Install to desktop",
+  "settings.pwa.installDesc": "Run in its own window and open your library offline",
 };

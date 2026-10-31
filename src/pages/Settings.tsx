@@ -11,6 +11,7 @@ import { openExternal } from "../lib/external";
 import {
   BookOpenIcon,
   ChevronRightIcon,
+  DownloadIcon,
   FileTextIcon,
   GitHubIcon,
   HeadphonesIcon,
@@ -28,6 +29,7 @@ import { LogSheet } from "../components/LogSheet";
 import { ThirdPartyNoticesSheet } from "../components/ThirdPartyNoticesSheet";
 import { ToggleSwitch } from "../components/ToggleSwitch";
 import { openDevTools } from "../lib/backend";
+import { canInstallPwa, installPwa } from "../lib/pwa";
 import { isDesktopPlatform } from "../lib/platform";
 import { syncStatus } from "../lib/sync";
 import {
@@ -453,6 +455,16 @@ export default function SettingsPage() {
                 </Show>
               </div>
             )}</Show>
+            <Show when={canInstallPwa()}>
+              <Row
+                icon={<DownloadIcon size={18} />}
+                label={t("settings.pwa.install")}
+                desc={t("settings.pwa.installDesc")}
+                onClick={() => void installPwa()}
+              >
+                <ChevronRightIcon size={18} class="flex-none text-text-3" />
+              </Row>
+            </Show>
             <Row
               icon={<GitHubIcon size={18} />}
               label={t("settings.about.github")}

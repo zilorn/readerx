@@ -47,11 +47,14 @@ export interface TtsDecodeGuide {
   extras: MessageKey[];
 }
 
-/** Linux 桌面端判定：Android 的 UA 里同样带 Linux，必须先排除手机端 */
+/**
+ * Linux 桌面端判定：Android / HarmonyOS 的 UA 里同样带 Linux，
+ * 必须先排除手机端（HarmonyOS NEXT 是 `OpenHarmony ... ArkWeb`）。
+ */
 export function isLinuxDesktop(): boolean {
   if (typeof navigator === "undefined") return false;
   const ua = navigator.userAgent;
-  if (/Android|iPhone|iPad|iPod/i.test(ua)) return false;
+  if (/Android|iPhone|iPad|iPod|OpenHarmony|HarmonyOS|ArkWeb/i.test(ua)) return false;
   return /Linux/i.test(ua);
 }
 

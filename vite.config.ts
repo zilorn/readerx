@@ -2,6 +2,7 @@ import { defineConfig, type Plugin } from "vite";
 import solid from "vite-plugin-solid";
 import tailwindcss from "@tailwindcss/vite";
 import { ensureHanDictAssets } from "./scripts/han-dict.mjs";
+import { ensurePwaIcons } from "./scripts/pwa-icons.mjs";
 // @ts-expect-error type error without @types/node package
 import process from "node:process";
 // @ts-expect-error type error without @types/node package
@@ -28,9 +29,25 @@ function hanDict(): Plugin {
   };
 }
 
+/**
+ * PWA 图标（public/icons/*.png）由脚本绘制，不提交二进制文件。
+ * 与词典一样在 dev / build 启动时同步生成，manifest 与 index.html 直接引用固定路径。
+ */
+function pwaIcons(): Plugin {
+  return {
+    name: "readerx:pwa-icons",
+    buildStart() {
+      ensurePwaIcons();
+    },
+    configureServer() {
+      ensurePwaIcons();
+    },
+  };
+}
+
 // https://vite.dev/config/
 export default defineConfig(() => ({
-  plugins: [hanDict(), solid(), tailwindcss()],
+  plugins: [hanDict(), pwaIcons(), solid(), tailwindcss()],
 
   worker: {
     format: "es",

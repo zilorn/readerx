@@ -13,6 +13,7 @@ import { initSourcePrompts } from "./lib/sourcePrompt";
 import { migrateStartupData } from "./lib/startup";
 import { createLogger } from "./lib/logger";
 import { initFrontendLogLevel } from "./lib/logs";
+import { initPwa } from "./lib/pwa";
 import "./index.css";
 import App from "./App";
 
@@ -23,6 +24,8 @@ const log = createLogger("startup");
 // 本地书库（含每本书完整正文）不在首帧前加载——外壳先渲染，
 // 书库由 App 挂载后的 effect 在后台加载，书架页在数据就绪前显示加载占位。
 async function start() {
+  // HarmonyOS / 浏览器：尽早监听安装事件并注册 Service Worker；Tauri 宿主内为空操作
+  initPwa();
   // 尽早同步前端日志级别：上次开了「详细」时要让启动期的 debug 也能回传后端
   void initFrontendLogLevel();
   // 处理不了的异常（未捕获错误 / 未处理的 Promise 拒绝 / 后端内部异常）都要提示用户
