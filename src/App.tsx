@@ -1,7 +1,13 @@
 import { startAppUpdateDiscovery } from "./lib/appUpdates";
 import { lazy, onMount, onCleanup, Show, createEffect } from "solid-js";
 import type { Component } from "solid-js";
-import { Router, Route, useNavigate, type RouteSectionProps } from "@solidjs/router";
+import {
+  HashRouter,
+  Router,
+  Route,
+  useNavigate,
+  type RouteSectionProps,
+} from "@solidjs/router";
 import { Toasts } from "./components/Toasts";
 import { GroupPicker } from "./components/GroupPicker";
 import { SourcePromptDialog } from "./components/SourcePromptDialog";
@@ -14,7 +20,11 @@ import {
   closeGroupAssign,
   groupAssignBookId,
 } from "./lib/groups";
-import { isDesktopShell, isDesktopPlatform } from "./lib/platform";
+import {
+  isDesktopShell,
+  isDesktopPlatform,
+  isHarmonyHap,
+} from "./lib/platform";
 import { attachSyncNavigator } from "./lib/sync";
 import { t } from "./lib/i18n";
 
@@ -133,8 +143,8 @@ function App() {
     document.title = t("app.title");
   });
 
-  return (
-    <Router root={AppShell}>
+  const routes = () => (
+    <>
       {/* 主 Tab（/ 、/discover 、/settings）与 /webdav-import 属常驻页面，见 KEPT_PAGES */}
       <Route path="/shelf-search" component={ShelfSearchPage} />
       <Route path="/translation" component={TranslationSettingsPage} />
@@ -152,7 +162,15 @@ function App() {
       <Route path="/sync" component={SyncPage} />
       <Route path="/sync-conflicts" component={SyncConflictsPage} />
       <Route path="*404" component={NotFoundPage} />
-    </Router>
+    </>
+  );
+
+  // HAP 里的页面来自拦截后的本地资源，没有真实 HTTP 服务；用 hash 路由让
+  // `#/book/1` 这类地址只改变 hash，刷新或系统返回时不会请求不存在的路径。
+  return isHarmonyHap() ? (
+    <HashRouter root={AppShell}>{routes()}</HashRouter>
+  ) : (
+    <Router root={AppShell}>{routes()}</Router>
   );
 }
 

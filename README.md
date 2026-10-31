@@ -7,7 +7,7 @@
   <img src="https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&logoColor=white" alt="Tauri 2" />
   <img src="https://img.shields.io/badge/SolidJS-1.9-2C4F7C?logo=solid&logoColor=white" alt="SolidJS" />
   <img src="https://img.shields.io/badge/TypeScript-6.0-3178C6?logo=typescript&logoColor=white" alt="TypeScript" />
-  <img src="https://img.shields.io/badge/platform-Android%20%7C%20Linux%20%7C%20Windows-3DDC84?logo=android&logoColor=white" alt="Platform" />
+  <img src="https://img.shields.io/badge/platform-Android%20%7C%20HarmonyOS%20%7C%20Linux%20%7C%20Windows-3DDC84?logo=android&logoColor=white" alt="Platform" />
   <a href="./LICENSE"><img src="https://img.shields.io/github/license/zilorn/readerx?label=license&color=blue" alt="License" /></a>
 </p>
 
@@ -17,7 +17,9 @@
 
 # ReaderX
 
-基于 **Tauri 2 + SolidJS + TypeScript** 的电子书阅读器，支持 **Android、Linux 和 Windows**，共用同一套页面与本地书库。
+基于 **Tauri 2 + SolidJS + TypeScript** 的电子书阅读器，支持 **Android、HarmonyOS、Linux 和 Windows**，共用同一套页面与本地书库。
+
+HarmonyOS 提供原生 HAP 外壳与可安装 PWA 两种方式，前端资源内置，使用 IndexedDB 保存书库，不依赖第三方包；能力范围与安装方式见 [HarmonyOS 支持](./docs/harmonyos.md)。
 
 [下载最新版本](https://github.com/zilorn/readerx/releases/latest)
 
@@ -53,6 +55,7 @@ pnpm install
 pnpm dev                 # 网页预览：http://localhost:1420，仅用于调试界面
 pnpm tauri dev           # 桌面应用
 pnpm tauri android dev   # Android 真机 / 模拟器
+pnpm build:hap           # 构建 HAP 内置前端，随后用 DevEco Studio 打开 harmonyos/
 ```
 
 检查与构建：
@@ -61,6 +64,7 @@ pnpm tauri android dev   # Android 真机 / 模拟器
 pnpm exec tsc --noEmit
 pnpm run i18n:check
 pnpm build
+pnpm build:hap
 ```
 
 端口 1420 已被占用时，请复用现有开发服务器。Rust 测试需在 `src-tauri/` 中运行。
@@ -74,6 +78,7 @@ Actions 的手动签名 arm64 构建与 PR 检查说明见 [CI 与构建](./docs
 | [书源教程](./docs/book-source-guide.md) · [格式规范](./docs/book-source-spec.md) · [API](./docs/book-source-api.md) | 编写与调试书源 |
 | [网页认证](./docs/cloudflare.md) · [书源 CLI](./docs/book-source-cli.md) | 登录、Cloudflare 与独立命令行工具 |
 | [同步](./docs/sync.md) · [备份](./docs/backup.md) | 数据同步与恢复 |
+| [HarmonyOS](./docs/harmonyos.md) | HAP / PWA 安装、离线与能力范围 |
 | [日志与排障](./docs/logging.md) | 设置 → 调试 → 应用日志 |
 | [多语言](./docs/i18n.md) · [协作约定](./AGENTS.md) | 开发规范 |
 | [贡献指南](./CONTRIBUTING.md) | 问题反馈、功能建议与 Pull Request |

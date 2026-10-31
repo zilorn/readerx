@@ -1,0 +1,9 @@
+{
+  "name": "entry",
+  "version": "0.7.0",
+  "description": "ReaderX HarmonyOS entry module",
+  "main": "",
+  "author": "zilorn",
+  "license": "GPL-3.0-only",
+  "dependencies": {}
+}
