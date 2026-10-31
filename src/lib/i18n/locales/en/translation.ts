@@ -26,6 +26,8 @@ export const translation = {
   "translation.enabled": "Enable translation",
   "translation.globalOff": "Enable smart translation in app settings first",
   "translation.bookSettings": "Translation for this book",
+  "translation.settingsTitle": "Translation settings",
+  "translation.settingsDesc": "Display mode, service, and glossary for this book",
   "translation.inherit": "Use global defaults",
   "translation.readingText": "Reading text",
   "translation.readTranslation": "Read translation",
