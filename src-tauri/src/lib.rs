@@ -16,6 +16,7 @@ mod single_instance;
 // 书源「用户输入表单」（input.prompt）的界面桥接：事件推给前端弹层、命令收回用户填的值。
 // 对外可见同样是为了让集成测试直接验证桥接（见 tests/source_prompt_bridge.rs）。
 pub mod source_prompt;
+mod startup;
 mod storage;
 mod temporary_file;
 mod reading_time;
@@ -138,28 +139,22 @@ pub fn run() {
             if let Err(error) = temporary_file::cleanup(&storage::data_root(app.handle())?) {
                 log::warn!("启动清理存储临时文件失败：{error}");
             }
-            // 本地书的旧布局（整本 books/<id>.json、全库一份的 state/readerx.bookmarks.json）
-            // 逐本迁入 SQLite，再统一书籍 ID；必须早于界面与同步线程访问书库。
-            sync::book_ids::migrate(app.handle()).map_err(std::io::Error::other)?;
-            sync::data_ids::migrate(&storage::data_root(app.handle())?).map_err(std::io::Error::other)?;
             // 网页登录后端：把「插件（Android 原生浮层 / 桌面独立登录窗口）」注册为引擎的认证实现
             webview_login::install(app.handle().clone());
             // 用户输入表单后端：书源 `input.prompt` 弹的是前端弹层（见 source_prompt 模块）
             source_prompt::install(app.handle().clone());
-            // 局域网同步：建服务并交给界面；启用过的用户在这里开引擎、补齐落地、拉起监听。
-            // 引擎与网络都在后台线程上跑，不占启动线程。
+            // 局域网同步：这里只建服务并交给界面，不启动线程；等页面启动后完成迁移，
+            // 再由 startup::readerx_startup_migrate 拉起引擎与网络。
             let sync_service = sync::SyncService::new(app.handle().clone());
             app.manage(sync::SyncState(Arc::clone(&sync_service)));
-            let bootstrap = Arc::clone(&sync_service);
-            std::thread::Builder::new()
-                .name("readerx-sync-boot".to_string())
-                .spawn(move || bootstrap.bootstrap())
-                .ok();
+            // 本地书 / 稳定 ID 迁移放在页面启动后执行（见 startup 模块）：
+            // 迁移可能扫描并改写大量文件，不能占住 setup 阻塞 WebView 装配与首帧。
             log::info!("后端就绪，等待界面调用");
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             volume_keys::readerx_volume_keys_set_enabled,
+            startup::readerx_startup_migrate,
             commands::greet,
             app_updates::readerx_update_check,
             reading_time::readerx_reading_time_get,
