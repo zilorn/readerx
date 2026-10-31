@@ -26,6 +26,8 @@ export const translation = {
   "translation.enabled": "启用智能翻译",
   "translation.globalOff": "先在应用设置中打开智能翻译",
   "translation.bookSettings": "本书智能翻译",
+  "translation.settingsTitle": "翻译设置",
+  "translation.settingsDesc": "本书显示模式、翻译服务与术语表",
   "translation.inherit": "恢复全局默认",
   "translation.readingText": "阅读文本",
   "translation.readTranslation": "阅读译文",

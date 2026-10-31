@@ -1,12 +1,13 @@
-import { BookTranslationSettings } from "./BookTranslationSettings";
 /**
  * 阅读设置底部抽屉（入口：阅读菜单顶栏的齿轮按钮）：
  * - 顶部为与「设置」页共用的阅读设置（正文字号 / 段落间距），
  *   由 ReadingSettingsRows 提供，改动一处两处同步；
+ * - 本书智能翻译移入独立页面，这里只保留入口行；
  * - 自动翻页开关与其间隔同行同卡片，未开启自动翻页时不显示间隔；
  * - 下方调整阅读页底部状态栏的显示（开/关）与进度百分比口径（整本书 / 当前章节）。
  * 状态栏和自动翻页逻辑由 Reader.tsx 接线。
  */
+import { A } from "@solidjs/router";
 import { ReaderAutoPageControls } from "./ReaderAutoPageControls";
 import { Drawer } from "./Drawer";
 import { For, Show, type JSX } from "solid-js";
@@ -27,6 +28,7 @@ import {
   RefreshIcon,
   ReplaceIcon,
   SettingsIcon,
+  TranslateIcon,
   UpdateIcon,
 } from "./icons";
 import { ReadingSettingsRows } from "./ReadingSettingsRows";
@@ -133,7 +135,28 @@ export function ReaderSettingsSheet(props: ReaderSettingsSheetProps) {
           <Card>
             <ReadingSettingsRows group="adjustments" />
           </Card>
-          <BookTranslationSettings bookId={props.bookId} />
+
+          <div class="mt-3">
+            <Card>
+              <A
+                href={`/book/${encodeURIComponent(props.bookId)}/translation/settings`}
+                class="flex w-full items-center gap-3 px-4 py-[13px] text-left transition-colors active:bg-surface-2"
+              >
+                <span class="grid h-9 w-9 flex-none place-items-center rounded-[10px] bg-surface-2 text-accent">
+                  <TranslateIcon size={18} />
+                </span>
+                <span class="flex min-w-0 flex-1 flex-col gap-0.5">
+                  <span class="text-[14.5px] font-medium">
+                    {t("translation.settingsTitle")}
+                  </span>
+                  <span class="text-[11.5px] text-text-3">
+                    {t("translation.settingsDesc")}
+                  </span>
+                </span>
+                <ChevronRightIcon size={17} class="flex-none text-text-3" />
+              </A>
+            </Card>
+          </div>
 
           <div class="mt-3">
             <Card>
