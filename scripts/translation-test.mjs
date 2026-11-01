@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import ts from "typescript";
 import * as solid from "../node_modules/solid-js/dist/solid.js";
 import { sha256 } from "@noble/hashes/sha2.js";
+import { md5 } from "@noble/hashes/legacy.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 const { createRoot, createSignal } = solid;
 function load(path, imports) {
@@ -83,6 +84,24 @@ assert.notEqual(
   key,
 );
 assert.equal(
+  core.translationKey("text", { ...defaults, appId: "baidu-app" }, []),
+  key,
+  "非百度服务不把 APP ID 计入缓存键，旧缓存保持有效",
+);
+assert.notEqual(
+  core.translationKey(
+    "text",
+    { ...defaults, provider: "baidu", appId: "account-a" },
+    [],
+  ),
+  core.translationKey(
+    "text",
+    { ...defaults, provider: "baidu", appId: "account-b" },
+    [],
+  ),
+  "百度 APP ID 隔离账户缓存",
+);
+assert.equal(
   core.translationKey("text", defaults, [
     { source: "A", target: "B", note: "n" },
     { source: "C", target: "D", note: "" },
@@ -120,6 +139,7 @@ assert.equal(
 
 let requests = [],
   response,
+  queue = [],
   failed = false;
 const provider = await load("provider", {
   "../http": {
@@ -127,11 +147,17 @@ const provider = await load("provider", {
       requests.push({ url, init });
       if (failed)
         throw new Error("SECRET BODY https://secret.invalid?key=SECRET");
-      return new Response(JSON.stringify(response), { status: 200 });
+      const payload = queue.length ? queue.shift() : response;
+      return new Response(
+        typeof payload === "string" ? payload : JSON.stringify(payload),
+        { status: 200 },
+      );
     },
   },
   "../i18n": i18n,
   "./core": core,
+  "@noble/hashes/legacy.js": { md5 },
+  "@noble/hashes/utils.js": { bytesToHex },
 });
 const signal = new AbortController().signal;
 // 自定义地址缺失时，翻译与术语表都必须在 HTTP 调用前拒绝，不能把密钥发给默认服务。
@@ -257,6 +283,172 @@ assert.throws(
   () =>
     provider.providerEndpoint({ ...defaults, baseUrl: "file:///tmp/private" }),
   /invalidUrl/,
+);
+
+// 百度：APP ID + 密钥签名，按目标语言映射；逐条请求以免默认 QPS 限制互相撞车。
+const baiduSettings = {
+  ...defaults,
+  provider: "baidu",
+  appId: "baidu-app",
+  apiKey: "baidu-secret",
+  target: "zh-TW",
+};
+const baiduCodes = {
+  "zh-CN": "zh",
+  "zh-TW": "cht",
+  en: "en",
+  ja: "jp",
+  ko: "kor",
+  fr: "fra",
+  de: "de",
+  es: "spa",
+};
+requests = [];
+for (const [target, code] of Object.entries(baiduCodes)) {
+  response = { trans_result: [{ src: "source", dst: "譯文" }] };
+  assert.deepEqual(
+    await provider.translateBatch(
+      ["source"],
+      { ...baiduSettings, target },
+      [],
+      signal,
+    ),
+    ["譯文"],
+  );
+  const body = new URLSearchParams(requests.at(-1).init.body.toString());
+  assert.equal(requests.at(-1).url, "https://fanyi-api.baidu.com/api/trans/vip/translate");
+  assert.equal(body.get("appid"), "baidu-app");
+  assert.equal(body.get("from"), "auto");
+  assert.equal(body.get("to"), code);
+  assert.equal(body.get("q"), "source");
+  assert.equal(
+    body.get("sign"),
+    bytesToHex(
+      md5(
+        new TextEncoder().encode(
+          "baidu-app" + "source" + body.get("salt") + "baidu-secret",
+        ),
+      ),
+    ),
+    "百度 sign 必须是 appid + q + salt + 密钥 的 MD5",
+  );
+}
+requests = [];
+await assert.rejects(
+  provider.translateBatch(
+    ["source"],
+    { ...baiduSettings, appId: "  " },
+    [],
+    signal,
+  ),
+  /baiduKeyRequired/,
+);
+assert.equal(requests.length, 0, "缺少百度 APP ID 时不发请求");
+response = { error_code: "52003", error_msg: "UNAUTHORIZED USER" };
+await assert.rejects(
+  provider.translateBatch(["source"], baiduSettings, [], signal),
+  /serviceError/,
+);
+response = { trans_result: [{ src: "a", dst: "A" }, { src: "b", dst: "B" }] };
+assert.deepEqual(
+  await provider.translateBatch(["a\nb"], baiduSettings, [], signal),
+  ["A\nB"],
+  "百度按行返回的译文恢复换行",
+);
+// 超过 6000 UTF-8 字节的文本分片请求，片段按顺序拼接。
+requests = [];
+queue = [
+  { trans_result: [{ dst: "前" }] },
+  { trans_result: [{ dst: "后" }] },
+];
+const longBaidu = "字".repeat(2500);
+assert.deepEqual(
+  await provider.translateBatch([longBaidu], baiduSettings, [], signal),
+  ["前后"],
+);
+assert.equal(requests.length, 2, "中文长段落按 UTF-8 字节上限切片");
+assert.ok(
+  new URLSearchParams(requests[0].init.body.toString()).get("q").length <= 2000,
+);
+queue = [];
+
+// 必应：免费接口无需密钥；请求体是纯字符串数组，实体只解码一次。
+const bingSettings = {
+  ...defaults,
+  provider: "bing",
+  apiKey: "SHOULD-NOT-BE-SENT",
+  target: "zh-TW",
+};
+const bingCodes = {
+  "zh-CN": "zh-Hans",
+  "zh-TW": "zh-Hant",
+  en: "en",
+  ja: "ja",
+  ko: "ko",
+  fr: "fr",
+  de: "de",
+  es: "es",
+};
+requests = [];
+for (const [target, code] of Object.entries(bingCodes)) {
+  response = [{ translations: [{ text: "譯文" }] }];
+  assert.deepEqual(
+    await provider.translateBatch(
+      ["source"],
+      { ...bingSettings, target },
+      [],
+      signal,
+    ),
+    ["譯文"],
+  );
+  assert.equal(
+    requests.at(-1).url,
+    `https://edge.microsoft.com/translate/translatetext?from=&to=${code}&isEnterpriseClient=false`,
+  );
+  assert.equal(requests.at(-1).init.headers.Authorization, undefined);
+}
+response = [
+  { translations: [{ text: "AT&amp;T 和 &lt;tag&gt;" }] },
+];
+assert.deepEqual(
+  await provider.translateBatch(["AT&T 和 <tag>"], bingSettings, [], signal),
+  ["AT&T 和 <tag>"],
+  "必应返回的实体只解码一次；密钥不会发送给免费接口",
+);
+assert.deepEqual(JSON.parse(requests.at(-1).init.body), [
+  "AT&amp;T 和 &lt;tag&gt;",
+]);
+response = [
+  { translations: [{ text: "甲" }] },
+  { translations: [{ text: "乙" }] },
+];
+assert.deepEqual(
+  await provider.translateBatch(["a", "b"], bingSettings, [], signal),
+  ["甲", "乙"],
+  "必应一次请求翻译整批段落",
+);
+response = [{ translations: [{ text: "只有一条" }] }];
+await assert.rejects(
+  provider.translateBatch(["a", "b"], bingSettings, [], signal),
+  /invalidResponse/,
+);
+requests = [];
+response = [
+  { translations: [{ text: "前" }] },
+  { translations: [{ text: "后" }] },
+];
+assert.deepEqual(
+  await provider.translateBatch(["字".repeat(1900)], bingSettings, [], signal),
+  ["前后"],
+);
+assert.equal(JSON.parse(requests.at(-1).init.body).length, 2);
+await assert.rejects(
+  provider.generateTerms(samples, { ...defaults, provider: "baidu" }, signal),
+  /aiRequired/,
+);
+await assert.rejects(
+  provider.generateTerms(samples, { ...defaults, provider: "bing" }, signal),
+  /aiRequired/,
 );
 
 let disk = new Map(),
@@ -680,7 +872,21 @@ await Promise.all([
 assert.deepEqual(storedBooks.get("settings-book").overrides, { readingText: "translated", mode: "original", glossary: true });
 assert.equal(persistedSettings.translationSettings().mode, "bilingual");
 assert.equal(persistedSettings.effectiveTranslationSettings("inherited").readingText, "translated");
+for (const provider of ["baidu", "bing"]) {
+  const normalized = persistedSettings.normalizeSettings({ provider });
+  assert.equal(normalized.provider, provider, `配置接受 ${provider} 服务`);
+}
+assert.equal(
+  persistedSettings.normalizeSettings({ provider: "unknown" }).provider,
+  "google",
+  "未知服务回退 Google",
+);
+assert.equal(
+  persistedSettings.normalizeSettings({ appId: 42 }).appId,
+  "",
+  "旧配置或非法 APP ID 归一化为空字符串",
+);
 
 console.log(
-  "translation regression passed: cache, leases, cancellation, batches, concurrency, protocols, response validation, secret-safe failures, sampling, folded on-demand translation and pre-translation isolation",
+  "translation regression passed: cache, leases, cancellation, batches, concurrency, protocols, Baidu signing/language mapping, Bing free endpoint/entities, response validation, secret-safe failures, sampling, folded on-demand translation and pre-translation isolation",
 );

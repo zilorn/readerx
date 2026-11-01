@@ -48,12 +48,15 @@ export const translation = {
   "translation.lang.es": "西班牙语",
   "translation.provider": "翻译服务",
   "translation.provider.google": "Google 翻译（无需密钥）",
+  "translation.provider.baidu": "百度翻译（APP ID + 密钥）",
+  "translation.provider.bing": "必应翻译（免费）",
   "translation.provider.openai": "OpenAI",
   "translation.provider.deepseek": "DeepSeek",
   "translation.provider.custom": "自定义 AI",
   "translation.protocol": "API 协议",
   "translation.baseUrl": "Base URL",
   "translation.model": "模型",
+  "translation.appId": "APP ID",
   "translation.apiKey": "API 密钥",
   "translation.effort": "思考强度",
   "translation.effort.default": "跟随提供商",
@@ -86,6 +89,9 @@ export const translation = {
   "translation.invalidResponse": "服务返回的译文格式无效，请重试",
   "translation.invalidUrl": "请输入有效的 HTTP(S) Base URL",
   "translation.modelRequired": "请配置 AI 模型",
+  "translation.baiduKeyRequired": "请填写百度翻译的 APP ID 和密钥",
+  "translation.serviceError":
+    "翻译服务返回错误（{code}），请检查密钥、额度或稍后重试",
   "translation.aiRequired":
     "此功能需要 AI 翻译服务，请选择 OpenAI、DeepSeek 或自定义 AI",
   "translation.noSamples": "没有可供采样的书籍正文",
@@ -94,5 +100,7 @@ export const translation = {
   "translation.saved": "已保存术语表",
   "translation.publicService":
     "公开服务可能限流或不可达，失败时可切换到 AI 服务。",
+  "translation.bingNotice":
+    "必应免费接口无需密钥，可能限流或不可达；失败时可切换到 AI 服务。",
   "translation.bookInherit": "未修改的选项沿用全局设置",
 } as const;

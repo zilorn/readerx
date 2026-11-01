@@ -95,6 +95,7 @@ export async function bookTerms(
     settings.baseUrl,
     settings.effort,
     fingerprint(settings.apiKey),
+    settings.provider === "baidu" ? fingerprint(settings.appId) : "",
   ]);
   const existing = glossaryTasks.get(key);
   if (existing && !existing.controller.signal.aborted)
