@@ -25,6 +25,8 @@ const LABEL_KEYS = {
   },
   provider: {
     google: "translation.provider.google",
+    baidu: "translation.provider.baidu",
+    bing: "translation.provider.bing",
     openai: "translation.provider.openai",
     deepseek: "translation.provider.deepseek",
     custom: "translation.provider.custom",
@@ -32,9 +34,17 @@ const LABEL_KEYS = {
   field: {
     baseUrl: "translation.baseUrl",
     model: "translation.model",
+    appId: "translation.appId",
     apiKey: "translation.apiKey",
   },
 } as const;
+const AI_PROVIDERS: ReadonlyArray<TranslationSettings["provider"]> = [
+  "openai",
+  "deepseek",
+  "custom",
+];
+const isAi = (provider: TranslationSettings["provider"]) =>
+  AI_PROVIDERS.includes(provider);
 
 function Field(props: { label: string; children: JSX.Element }) {
   return (
@@ -120,13 +130,16 @@ export function TranslationOptions(props: {
                   : provider === "deepseek"
                     ? "deepseek-flash"
                     : "",
+              appId: "",
               apiKey: "",
               effort: "",
               protocol: "chat",
             });
           }}
         >
-          <For each={["google", "openai", "deepseek", "custom"] as const}>
+          <For
+            each={["google", "baidu", "bing", "openai", "deepseek", "custom"] as const}
+          >
             {(value) => (
               <option value={value}>
                 {t(LABEL_KEYS.provider[value])}
@@ -135,14 +148,43 @@ export function TranslationOptions(props: {
           </For>
         </select>
       </Field>
-      <Show
-        when={props.value.provider !== "google"}
-        fallback={
-          <p class="px-4 py-3 text-[12px] text-text-3">
-            {t("translation.publicService")}
-          </p>
-        }
-      >
+      <Show when={props.value.provider === "baidu"}>
+        <Field label={t(LABEL_KEYS.field.appId)}>
+          <input
+            class={`${inputClass} w-full`}
+            type="text"
+            autocomplete="off"
+            spellcheck={false}
+            value={props.value.appId}
+            onChange={(e) =>
+              props.onChange({ appId: e.currentTarget.value.trim() })
+            }
+          />
+        </Field>
+        <Field label={t(LABEL_KEYS.field.apiKey)}>
+          <input
+            class={`${inputClass} w-full`}
+            type="password"
+            autocomplete="off"
+            spellcheck={false}
+            value={props.value.apiKey}
+            onChange={(e) =>
+              props.onChange({ apiKey: e.currentTarget.value.trim() })
+            }
+          />
+        </Field>
+      </Show>
+      <Show when={props.value.provider === "google"}>
+        <p class="px-4 py-3 text-[12px] text-text-3">
+          {t("translation.publicService")}
+        </p>
+      </Show>
+      <Show when={props.value.provider === "bing"}>
+        <p class="px-4 py-3 text-[12px] text-text-3">
+          {t("translation.bingNotice")}
+        </p>
+      </Show>
+      <Show when={isAi(props.value.provider)}>
         <Field label={t("translation.protocol")}>
           <select
             class={inputClass}
