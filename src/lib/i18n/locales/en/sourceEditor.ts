@@ -131,15 +131,15 @@ export const sourceEditor = {
     "Cancel this reload to keep the current text and bookmarks of this chapter.",
   "sourceEditor.reload.proceed": "Reload anyway",
 
-  // Online table of contents overwrite dialog
-  "sourceEditor.toc.ariaLabel": "Overwrite the table of contents of \"{bookTitle}\"",
-  "sourceEditor.toc.title": "Table of contents differs from the shelf",
+  // Online table of contents incremental update dialog (removals / reordering)
+  "sourceEditor.toc.ariaLabel": "Update the table of contents of \"{bookTitle}\" incrementally",
+  "sourceEditor.toc.title": "The contents changed significantly",
   "sourceEditor.toc.desc":
-    "The source returned a newer table of contents for \"{bookTitle}\" ({oldCount} chapters → {newCount}). The differences are not a plain append at the end, so it cannot be merged safely.",
+    "The source returned a newer table of contents for \"{bookTitle}\" ({newCount} chapters). This update removes {removed}, adds {added}, and changes {changed}.",
   "sourceEditor.toc.effect":
-    "Overwriting replaces the whole chapter list with the latest one: chapters whose URLs are unchanged keep their cached text, while changed chapters are fetched again on demand; a changed chapter structure may affect reading progress and exact bookmark jumps.",
-  "sourceEditor.toc.confirm": "Overwrite",
-  "sourceEditor.toc.applying": "Overwriting…",
+    "Only those chapters change. Every other chapter keeps its cid, cached text, and bookmarks. Bookmarks on removed chapters are migrated by chapter title and text when possible; bookmarks without a reliable match are kept unchanged instead of being moved to a guess.",
+  "sourceEditor.toc.confirm": "Update contents",
+  "sourceEditor.toc.applying": "Updating…",
 
   // JavaScript code editor
   "sourceEditor.js.fallbackLabel": "JavaScript",

@@ -115,15 +115,15 @@ export const sourceEditor = {
   "sourceEditor.reload.keepHint": "取消本次重新加载即可保留本章现有正文与书签。",
   "sourceEditor.reload.proceed": "仍要重新加载",
 
-  // 在线目录覆盖确认弹窗
-  "sourceEditor.toc.ariaLabel": "覆盖更新《{bookTitle}》的目录",
-  "sourceEditor.toc.title": "目录与书架不一致",
+  // 在线目录增量更新确认弹窗（删除 / 重排时）
+  "sourceEditor.toc.ariaLabel": "增量更新《{bookTitle}》的目录",
+  "sourceEditor.toc.title": "目录有较大变化",
   "sourceEditor.toc.desc":
-    "《{bookTitle}》的书源返回了最新目录（{oldCount} 章 → {newCount} 章），与书架中的差异不是单纯的末尾新增，无法安全地直接追加。",
+    "《{bookTitle}》的书源返回了最新目录（共 {newCount} 章）：本次将移除 {removed} 章、新增 {added} 章、调整 {changed} 章。",
   "sourceEditor.toc.effect":
-    "覆盖将以最新目录整本替换章节列表：章节地址未变的章节会保留已缓存正文，被修改 / 调整的章节之后会按需重新获取；章节结构变动可能影响阅读进度与书签的精确跳转。",
-  "sourceEditor.toc.confirm": "覆盖更新",
-  "sourceEditor.toc.applying": "正在覆盖…",
+    "更新只改动这些章节，其余章节的 cid、已缓存正文与书签都会保留。被移除章节上的书签会按章节名与正文尝试迁移；找不到可靠位置的书签会原样保留，不会跳到猜测的位置。",
+  "sourceEditor.toc.confirm": "更新目录",
+  "sourceEditor.toc.applying": "正在更新…",
 
   // JS 代码编辑器
   "sourceEditor.js.fallbackLabel": "JS 代码",

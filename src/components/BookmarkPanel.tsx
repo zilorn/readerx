@@ -14,7 +14,15 @@ import { For, Show, createEffect, createMemo, createSignal, on, onCleanup } from
 import { t } from "../lib/i18n";
 import type { Bookmark } from "../lib/bookmarks";
 import { matchBookmarks, type BookmarkMark, type BookmarkMatch } from "../lib/bookmarkSearch";
-import { BookmarkIcon, CheckIcon, CloseIcon, SearchIcon, TrashIcon } from "./icons";
+import {
+  BookmarkIcon,
+  CheckIcon,
+  CloseIcon,
+  ExportIcon,
+  ImportIcon,
+  SearchIcon,
+  TrashIcon,
+} from "./icons";
 import { HighlightText } from "./HighlightText";
 import { ScrollArea } from "./ScrollArea";
 
@@ -25,9 +33,13 @@ export interface BookmarkPanelProps {
   currentCid?: string;
   /** 当前章节序号（本章没有书签时，据此定位到最近的一章） */
   currentIndex: number;
+  /** 导出 / 导入进行中：两个按钮一起禁用，避免重复弹出文件选择器 */
+  transferBusy?: boolean;
   onClose: () => void;
   onJump: (bookmark: Bookmark) => void;
   onDelete: (bookmark: Bookmark) => void;
+  onExport: () => void;
+  onImport: () => void;
 }
 
 /** 目标卡片放不下时顶对齐留出的上边距（px） */
@@ -276,6 +288,26 @@ export function BookmarkPanel(props: BookmarkPanelProps) {
               {t("readerChrome.bookmark.foundCount", { count: matches().length })}
             </Show>
           </span>
+          <button
+            class="grid h-10 w-10 flex-none cursor-pointer place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2 disabled:cursor-default disabled:opacity-40"
+            type="button"
+            disabled={props.transferBusy || props.bookmarks.length === 0}
+            aria-label={t("readerChrome.bookmark.exportLabel")}
+            title={t("readerChrome.bookmark.exportLabel")}
+            onClick={props.onExport}
+          >
+            <ExportIcon size={18} />
+          </button>
+          <button
+            class="grid h-10 w-10 flex-none cursor-pointer place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2 disabled:cursor-default disabled:opacity-40"
+            type="button"
+            disabled={props.transferBusy}
+            aria-label={t("readerChrome.bookmark.importLabel")}
+            title={t("readerChrome.bookmark.importLabel")}
+            onClick={props.onImport}
+          >
+            <ImportIcon size={18} />
+          </button>
           <button
             class="grid h-10 w-10 flex-none cursor-pointer place-items-center rounded-xl text-text-2 transition-[background-color,scale] duration-150 active:scale-[0.94] active:bg-surface-2"
             aria-label={t("readerChrome.bookmark.closeLabel")}

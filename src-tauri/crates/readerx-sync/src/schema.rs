@@ -317,13 +317,15 @@ impl SchemaRegistry {
                 .field("milliseconds", MergeKind::Frozen),
         );
 
-        // 书签：一条书签一旦存在就是「用户标记」，正文位置不可变；
-        // 备注可以改（并发改备注走 LWW，败方进冲突队列）；
+        // 书签：一条书签一旦存在就是「用户标记」，原文不可变；
+        // 章节归属与偏移允许随目录增量更新 / 旧错位书签修复而迁移。
+        // chapter_index 只是 cid 失效时的回退下标，旧值没有信息量，按 LwwSilent 覆盖，
+        // 避免每次目录迁移都产生无意义的冲突；备注并发修改仍走 LWW 并留档。
         // 线条样式与颜色是展示偏好，并发改动取最后写入者即可，不必进冲突队列。
         registry.register(
             Schema::new("bookmark")
                 .field("book_id", MergeKind::Frozen)
-                .field("chapter_index", MergeKind::Frozen)
+                .field("chapter_index", MergeKind::LwwSilent)
                 .field("offset", MergeKind::Frozen)
                 .field("text", MergeKind::Frozen)
                 .field("note", MergeKind::Lww)
@@ -491,6 +493,12 @@ mod tests {
             registry.get("reading_progress").field_kind("updated_at"),
             MergeKind::LwwSilent
         );
+        // 目录增量更新会迁移书签的章节下标；回退下标是派生值，并发覆盖不该进冲突队列
+        assert_eq!(
+            registry.get("bookmark").field_kind("chapter_index"),
+            MergeKind::LwwSilent
+        );
+        assert_eq!(registry.get("bookmark").field_kind("text"), MergeKind::Frozen);
         assert_eq!(registry.get("shelf").field_kind("order"), MergeKind::List);
     }
 

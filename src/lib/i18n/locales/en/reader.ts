@@ -130,11 +130,15 @@ export const reader = {
   "reader.tocAppended": "Added {count} chapters",
   "reader.tocAppended_one": "Added {count} chapter",
   "reader.tocAppended_other": "Added {count} chapters",
+  "reader.tocMerged":
+    "Contents updated (added {added}, removed {removed}, changed {changed})",
+  "reader.tocMergedWithBookmarks":
+    "Contents updated (added {added}, removed {removed}, changed {changed}); migrated bookmarks: {bookmarks}",
+  "reader.bookmarksRepaired": "Repaired {count} bookmarks",
+  "reader.bookmarksRepaired_one": "Repaired {count} bookmark",
+  "reader.bookmarksRepaired_other": "Repaired {count} bookmarks",
   "reader.updateCheckFailed": "Update check failed: {error}",
-  "reader.tocOverwritten": "Contents replaced, {count} chapters",
-  "reader.tocOverwritten_one": "Contents replaced, {count} chapter",
-  "reader.tocOverwritten_other": "Contents replaced, {count} chapters",
-  "reader.overwriteFailed": "Overwrite failed: {error}",
+  "reader.updateFailed": "Couldn't update contents: {error}",
 
   // Text-to-speech warm-up (the sheet renders the progress line)
   "reader.prewarmPreparing": "Preparing…",

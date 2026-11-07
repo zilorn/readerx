@@ -2295,6 +2295,7 @@ fn bookmark_values(value: &Value, book_uid: &str) -> BTreeMap<String, Value> {
     for (key, field) in [
         ("chapterCid", "chapter_cid"),
         ("chapterTitle", "chapter_title"),
+        ("chapterVolume", "chapter_volume"),
         ("text", "text"),
         ("before", "before"),
         ("after", "after"),
@@ -2332,6 +2333,7 @@ fn bookmark_value(id: &str, local_book_id: &str, entity: &Entity) -> Value {
         "chapterCid": text("chapter_cid"),
         "chapterIndex": text("chapter_index"),
         "chapterTitle": text("chapter_title"),
+        "chapterVolume": text("chapter_volume"),
         "unitIndex": text("unit_index"),
         "charStart": text("char_start"),
         "charEnd": text("char_end"),
@@ -2342,9 +2344,9 @@ fn bookmark_value(id: &str, local_book_id: &str, entity: &Entity) -> Value {
         "color": text("color"),
         "createdAt": text("created_at"),
     });
-    // 旧记录没有样式字段：缺省（null）不落盘，保持书签记录原有字段形状
+    // 旧记录没有这些字段：缺省（null）不落盘，保持书签记录原有字段形状
     if let Some(object) = value.as_object_mut() {
-        for field in ["style", "color"] {
+        for field in ["chapterVolume", "style", "color"] {
             if object.get(field).map(Value::is_null).unwrap_or(false) {
                 object.remove(field);
             }
@@ -2568,6 +2570,7 @@ mod tests {
             "chapterCid": "c0002",
             "chapterIndex": 1,
             "chapterTitle": "第二章",
+            "chapterVolume": "第一卷",
             "unitIndex": 4,
             "charStart": 10,
             "charEnd": 20,
@@ -2581,6 +2584,7 @@ mod tests {
         let values = bookmark_values(&mark, "b-abc");
         assert_eq!(values["book_id"], json!("b-abc"));
         assert_eq!(values["chapter_cid"], json!("c0002"));
+        assert_eq!(values["chapter_volume"], json!("第一卷"));
         assert_eq!(values["char_start"], json!(10));
         assert_eq!(values["char_end"], json!(20));
         assert_eq!(values["style"], json!("wavy"));
@@ -2600,6 +2604,7 @@ mod tests {
         let mut fields = BTreeMap::new();
         fields.insert("book_id".to_string(), json!("b-abc"));
         fields.insert("chapter_cid".to_string(), json!("c0002"));
+        fields.insert("chapter_volume".to_string(), json!("第一卷"));
         fields.insert("char_start".to_string(), json!(10));
         fields.insert("char_end".to_string(), json!(20));
         fields.insert("text".to_string(), json!("选中"));
@@ -2620,6 +2625,7 @@ mod tests {
         assert_eq!(value["id"], json!("bm-1"));
         assert_eq!(value["bookId"], json!("local-1"));
         assert_eq!(value["charEnd"], json!(20));
+        assert_eq!(value["chapterVolume"], json!("第一卷"));
         assert_eq!(value["style"], json!("marker"));
         assert_eq!(value["color"], json!("blue"));
         assert_eq!(value["chapterIndex"], Value::Null);
@@ -2638,6 +2644,7 @@ mod tests {
             },
         );
         let value = bookmark_value("bm-1", "local-1", &entity);
+        assert!(!value.as_object().unwrap().contains_key("chapterVolume"));
         assert!(!value.as_object().unwrap().contains_key("style"));
         assert!(!value.as_object().unwrap().contains_key("color"));
     }

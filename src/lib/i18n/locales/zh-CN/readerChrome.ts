@@ -115,6 +115,16 @@ export const readerChrome = {
   "readerChrome.bookmark.noMatchHint": "可搜索章节标题或书签里的文字",
   /** 章节没有标题时书签卡片显示的兜底章名 */
   "readerChrome.bookmark.chapterFallback": "第 {index} 章",
+  "readerChrome.bookmark.exportLabel": "导出书签",
+  "readerChrome.bookmark.importLabel": "导入书签",
+  "readerChrome.bookmark.exportEmpty": "本书还没有书签",
+  "readerChrome.bookmark.exported": "已导出 {count} 条书签",
+  "readerChrome.bookmark.exportFailed": "导出书签失败",
+  "readerChrome.bookmark.importInvalid": "文件不是有效的书签 JSON 数组",
+  "readerChrome.bookmark.importEmpty": "文件中没有可导入的书签",
+  "readerChrome.bookmark.imported": "已导入 {count} 条书签",
+  "readerChrome.bookmark.importedPartial": "已导入 {count} 条书签，{skipped} 条无法定位",
+  "readerChrome.bookmark.importFailed": "导入书签失败",
 
   // 重新导入前的书签失效提示
   "readerChrome.bookmarkRisk.title": "部分书签可能失效",

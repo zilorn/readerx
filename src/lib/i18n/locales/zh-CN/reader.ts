@@ -106,9 +106,12 @@ export const reader = {
   "reader.tocUpToDate": "目录已是最新，暂无更新",
   "reader.tocMetadataUpdated": "已更新章节标题与分卷",
   "reader.tocAppended": "已更新 {count} 个章节",
+  "reader.tocMerged": "目录已更新：新增 {added} 章，移除 {removed} 章，调整 {changed} 章",
+  "reader.tocMergedWithBookmarks":
+    "目录已更新：新增 {added} 章，移除 {removed} 章，调整 {changed} 章；已迁移 {bookmarks} 条书签",
+  "reader.bookmarksRepaired": "已修复 {count} 条书签",
   "reader.updateCheckFailed": "检查更新失败：{error}",
-  "reader.tocOverwritten": "目录已覆盖更新，共 {count} 章",
-  "reader.overwriteFailed": "覆盖更新失败：{error}",
+  "reader.updateFailed": "更新目录失败：{error}",
 
   // 听书预热（进度文案交给听书面板显示）
   "reader.prewarmPreparing": "准备中…",

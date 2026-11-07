@@ -73,7 +73,7 @@ Actions 的手动签名 arm64 构建与 PR 检查说明见 [CI 与构建](./docs
 | --- | --- |
 | [书源教程](./docs/book-source-guide.md) · [格式规范](./docs/book-source-spec.md) · [API](./docs/book-source-api.md) | 编写与调试书源 |
 | [网页认证](./docs/cloudflare.md) · [书源 CLI](./docs/book-source-cli.md) | 登录、Cloudflare 与独立命令行工具 |
-| [同步](./docs/sync.md) · [备份](./docs/backup.md) | 数据同步与恢复 |
+| [同步](./docs/sync.md) · [备份](./docs/backup.md) · [书签](./docs/bookmarks.md) | 数据同步、恢复与书签迁移 / 导出 |
 | [日志与排障](./docs/logging.md) | 设置 → 调试 → 应用日志 |
 | [多语言](./docs/i18n.md) · [协作约定](./AGENTS.md) | 开发规范 |
 | [贡献指南](./CONTRIBUTING.md) | 问题反馈、功能建议与 Pull Request |
