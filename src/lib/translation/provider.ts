@@ -266,10 +266,19 @@ async function googleText(
   }
   return out;
 }
-// 百度标准版限制约 1 QPS；请求逐条串行，避免并行批次直接撞限流。
+// 百度标准版限制约 1 QPS：请求逐条串行并保持约 1 秒间隔，避免连续撞限流后只能重试。
 let baiduQueue: Promise<unknown> = Promise.resolve();
-function baiduSerial<T>(task: () => Promise<T>): Promise<T> {
-  const run = baiduQueue.then(task, task);
+let baiduReadyAt = 0;
+function baiduSerial<T>(
+  task: () => Promise<T>,
+  signal: AbortSignal,
+): Promise<T> {
+  const run = baiduQueue.then(async () => {
+    const delay = baiduReadyAt - Date.now();
+    if (delay > 0) await wait(delay, signal);
+    baiduReadyAt = Date.now() + 1000;
+    return task();
+  });
   baiduQueue = run.then(
     () => undefined,
     () => undefined,
@@ -341,20 +350,18 @@ async function baiduText(
   const target = targetCode(BAIDU_LANGUAGES, settings.target);
   let out = "";
   for (const chunk of splitByBytes(text, 6000))
-    out += await baiduSerial(() =>
-      baiduRequest(chunk, appId, secret, target, signal),
+    out += await baiduSerial(
+      () => baiduRequest(chunk, appId, secret, target, signal),
+      signal,
     );
   return out;
 }
-function escapeBingText(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
 const BING_ENTITIES =
   /&(amp|lt|gt|quot|apos|#39|#(\d+)|#x([0-9a-fA-F]+));/g;
-/** 只解码一次：服务端对并入标签对齐器的原文会返回实体。 */
+/**
+ * 只解码一次：接口对部分原文会返回 HTML 实体，正文也可能是实体字面量，
+ * 因此发送时不做预转义，避免把 `<b>bold</b>` 这类文本交给标签对齐器。
+ */
 function decodeBingText(text: string): string {
   return text.replace(
     BING_ENTITIES,
@@ -401,9 +408,7 @@ async function bingTexts(
   const chunks = texts.map((text) => splitByCodePoints(text, BING_CHUNK));
   const parts: Array<{ text: number; chunk: number; value: string }> = [];
   chunks.forEach((textChunks, text) =>
-    textChunks.forEach((value, chunk) =>
-      parts.push({ text, chunk, value: escapeBingText(value) }),
-    ),
+    textChunks.forEach((value, chunk) => parts.push({ text, chunk, value })),
   );
   for (let at = 0; at < parts.length; ) {
     let end = at;

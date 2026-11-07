@@ -144,7 +144,7 @@ let requests = [],
 const provider = await load("provider", {
   "../http": {
     httpFetch: async (url, init) => {
-      requests.push({ url, init });
+      requests.push({ url, init, at: Date.now() });
       if (failed)
         throw new Error("SECRET BODY https://secret.invalid?key=SECRET");
       const payload = queue.length ? queue.shift() : response;
@@ -333,6 +333,11 @@ for (const [target, code] of Object.entries(baiduCodes)) {
     "百度 sign 必须是 appid + q + salt + 密钥 的 MD5",
   );
 }
+for (let at = 1; at < requests.length; at++)
+  assert.ok(
+    requests[at].at - requests[at - 1].at >= 900,
+    "百度连续请求保持约 1 秒间隔",
+  );
 requests = [];
 await assert.rejects(
   provider.translateBatch(
@@ -349,6 +354,19 @@ await assert.rejects(
   provider.translateBatch(["source"], baiduSettings, [], signal),
   /serviceError/,
 );
+// 54003 频率超限：退避后重试一次，成功即返回。
+requests = [];
+queue = [
+  { error_code: "54003", error_msg: "FREQUENCY LIMIT" },
+  { trans_result: [{ dst: "重试成功" }] },
+];
+assert.deepEqual(
+  await provider.translateBatch(["source"], baiduSettings, [], signal),
+  ["重试成功"],
+  "百度频率超限后退避重试",
+);
+assert.equal(requests.length, 2, "54003 重试只增加一次请求");
+queue = [];
 response = { trans_result: [{ src: "a", dst: "A" }, { src: "b", dst: "B" }] };
 assert.deepEqual(
   await provider.translateBatch(["a\nb"], baiduSettings, [], signal),
@@ -372,7 +390,7 @@ assert.ok(
 );
 queue = [];
 
-// 必应：免费接口无需密钥；请求体是纯字符串数组，实体只解码一次。
+// 必应：免费接口无需密钥；请求体是原文数组，出参实体只解码一次。
 const bingSettings = {
   ...defaults,
   provider: "bing",
@@ -415,9 +433,11 @@ assert.deepEqual(
   ["AT&T 和 <tag>"],
   "必应返回的实体只解码一次；密钥不会发送给免费接口",
 );
-assert.deepEqual(JSON.parse(requests.at(-1).init.body), [
-  "AT&amp;T 和 &lt;tag&gt;",
-]);
+assert.deepEqual(
+  JSON.parse(requests.at(-1).init.body),
+  ["AT&T 和 <tag>"],
+  "必应直接发送原文，不做 HTML 预转义",
+);
 response = [
   { translations: [{ text: "甲" }] },
   { translations: [{ text: "乙" }] },
