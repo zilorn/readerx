@@ -41,7 +41,7 @@ pub(super) struct ArchiveScan {
 }
 
 /// 打开写目标（导出）。
-pub(super) fn open_destination<R: tauri::Runtime>(
+pub(crate) fn open_destination<R: tauri::Runtime>(
     app: &AppHandle<R>,
     raw: &str,
 ) -> Result<File, String> {
@@ -49,7 +49,7 @@ pub(super) fn open_destination<R: tauri::Runtime>(
 }
 
 /// 打开读来源（导入 / 预览）。
-pub(super) fn open_source<R: tauri::Runtime>(
+pub(crate) fn open_source<R: tauri::Runtime>(
     app: &AppHandle<R>,
     raw: &str,
 ) -> Result<File, String> {

@@ -196,6 +196,51 @@ export async function readRemoteBookmarks<T>(bookId: string): Promise<T[] | null
   }
 }
 
+/** 书签 JSON 文件的导出 / 导入（系统文件选择器；浏览器开发环境退回 DOM 下载 / 选择）。 */
+export interface PickedBookmarkFile {
+  fileName: string;
+  contents: string;
+}
+
+/** 保存一段 UTF-8 文本；用户取消返回 null，成功返回实际文件名。 */
+export async function saveBookmarkFile(fileName: string, contents: string): Promise<string | null> {
+  if (!tauri) {
+    const url = URL.createObjectURL(new Blob([contents], { type: "application/json" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = fileName;
+    link.click();
+    URL.revokeObjectURL(url);
+    return fileName;
+  }
+  return await invoke<string | null>("readerx_bookmarks_export", { fileName, contents });
+}
+
+/** 选择书签 JSON 文件并读回文本；用户取消返回 null。 */
+export async function pickBookmarkFile(): Promise<PickedBookmarkFile | null> {
+  if (!tauri) {
+    return await new Promise((resolve, reject) => {
+      const input = document.createElement("input");
+      input.type = "file";
+      input.accept = ".json,application/json";
+      input.onchange = () => {
+        const file = input.files?.[0];
+        if (!file) {
+          resolve(null);
+          return;
+        }
+        file
+          .text()
+          .then((contents) => resolve({ fileName: file.name, contents }))
+          .catch(reject);
+      };
+      input.oncancel = () => resolve(null);
+      input.click();
+    });
+  }
+  return await invoke<PickedBookmarkFile | null>("readerx_bookmarks_import_pick");
+}
+
 /** 覆盖式保存一本书的书签；失败时已提示用户（内存里的书签仍可见，但没落盘） */
 export async function saveRemoteBookmarks(
   bookId: string,

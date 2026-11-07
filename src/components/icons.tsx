@@ -180,6 +180,28 @@ export function DownloadIcon(p: SvgIconProps) {
   );
 }
 
+/** 导出（箭头离开托盘） */
+export function ExportIcon(p: SvgIconProps) {
+  return (
+    <Icon {...p}>
+      <path d="M12 15V4" />
+      <polyline points="7 9 12 4 17 9" />
+      <path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />
+    </Icon>
+  );
+}
+
+/** 导入（箭头落入托盘） */
+export function ImportIcon(p: SvgIconProps) {
+  return (
+    <Icon {...p}>
+      <path d="M12 4v11" />
+      <polyline points="7 10.5 12 15.5 17 10.5" />
+      <path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />
+    </Icon>
+  );
+}
+
 /** 剪贴板（粘贴 JSON 导入书源） */
 export function ClipboardIcon(p: SvgIconProps) {
   return (

@@ -1,6 +1,7 @@
 mod app_updates;
 mod book_images;
 mod book_store;
+mod bookmark_file;
 mod annotations;
 mod mobi;
 mod mobi_huff;
@@ -176,6 +177,8 @@ pub fn run() {
             commands::readerx_annotations_put,
             commands::readerx_bookmarks_get,
             commands::readerx_bookmarks_put,
+            bookmark_file::readerx_bookmarks_export,
+            bookmark_file::readerx_bookmarks_import_pick,
             commands::readerx_tts_cache_put,
             commands::readerx_tts_cache_get,
             commands::readerx_tts_cache_stats,

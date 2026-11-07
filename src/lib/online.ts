@@ -43,6 +43,7 @@ import {
   previewChapterBookmarkReplacement,
   type BookmarkInheritPreview,
 } from "./bookmarks";
+import { migrateBookmarksForToc, type BookmarkTocMigrationResult } from "./bookmarkMigration";
 import {
   bookSourceSummaryById,
   ensureBookSourcesLoaded,
@@ -1871,28 +1872,34 @@ export async function reloadChapterContent(
 }
 
 // ---------------------------------------------------------------------------
-// 在线书「检查书籍更新」：重新获取书源目录并与书架目录比对后更新。
-// 判定规则（章节身份 = 书源侧章节地址）：
-// - 最新目录是书架现有目录的「逐位前缀 + 末尾新增」→ 纯追加（返回新增数）；
-// - 与现有目录完全一致 → 无更新；
-// - 其余情况（中段被增删 / 重排 / 章节地址变动，无法安全追加）→ conflict，
-//   交由 UI 询问是否整本覆盖。
+// 在线书「检查书籍更新」：重新获取书源目录并与书架目录比对后增量更新。
+// 章节身份依次看：书源章节地址 → 标题 + 卷名 → 标题。
+// - 与现有目录完全一致 → 无更新（仍执行一次书签修复）；
+// - 只有新增 / 标题 / 卷名 / 地址变化 → 直接增量更新，既有 cid 与正文不动；
+// - 有删除或重排 → 先弹确认框，确认后仍只增删改差异章节，并迁移书签。
 // ---------------------------------------------------------------------------
 
-export interface OnlineTocConflict {
+/** 一次目录比对的结果摘要：只描述变化量，不含章节正文。 */
+export interface OnlineTocSummary {
   /** 书架现有章节数 */
   oldCount: number;
   /** 书源最新目录章节数 */
   newCount: number;
-  /** 书源最新目录（用户确认覆盖后用于整本替换） */
-  fresh: ChapterItem[];
+  /** 新目录中新增的章节数 */
+  added: number;
+  /** 书架中被移除的章节数 */
+  removed: number;
+  /** 仍能对应、但标题 / 卷名 / 地址有变化的章节数 */
+  changed: number;
+  /** 保留章节在目录中的相对顺序发生变化 */
+  reordered: boolean;
+  /** 保留章节的绝对下标发生变化（在跑章节任务需要作废） */
+  shifts: boolean;
 }
 
 export type OnlineTocUpdate =
   | { kind: "none" }
-  | { kind: "append"; added: ChapterItem[]; prefix: ChapterItem[] }
-  | { kind: "metadata"; prefix: ChapterItem[] }
-  | { kind: "conflict"; conflict: OnlineTocConflict };
+  | { kind: "merge"; summary: OnlineTocSummary; fresh: ChapterItem[] };
 
 /** 重新获取在线书的书源目录（阅读设置「检查书籍更新」用）。
  *  书源缺失 / 停用 / 未启用目录能力，或拉取失败时抛出可读错误。 */
@@ -1917,112 +1924,248 @@ export async function fetchOnlineBookToc(book: LocalBook): Promise<ChapterItem[]
   return await fetchBookToc(source, item);
 }
 
-/** 比对书源最新目录与书架现有目录，给出本次「检查更新」的更新方式 */
+/** 目录章节身份：优先书源侧章节地址，地址缺失或变化时退回标题 + 卷名。 */
+function tocUrlKey(chapter: Pick<LocalBookChapter, "url">): string {
+  return (chapter.url ?? "").trim();
+}
+
+function tocTitleOf(title: string | undefined): string {
+  return (title ?? "").trim();
+}
+
+function tocVolumeOf(volume: string | undefined): string {
+  return (volume ?? "").trim();
+}
+
+/**
+ * 把旧章节与新目录配对：先按唯一章节地址，再按唯一「标题 + 卷名」，最后按唯一标题。
+ * 只配对唯一键，避免同名章节被随意串位；配不到的旧章节视为删除、新条目视为新增。
+ * 键为空（旧数据缺地址 / 标题）时不参与该轮配对。
+ */
+function matchTocChapters(
+  old: readonly LocalBookChapter[],
+  fresh: readonly ChapterItem[],
+): Array<{ oldIndex: number; freshIndex: number }> {
+  const pairs: Array<{ oldIndex: number; freshIndex: number }> = [];
+  const oldUsed = new Set<number>();
+  const freshUsed = new Set<number>();
+
+  const pairBy = (
+    oldKey: (chapter: LocalBookChapter) => string,
+    freshKey: (item: ChapterItem) => string,
+  ): void => {
+    const oldByKey = new Map<string, number[]>();
+    old.forEach((chapter, index) => {
+      if (oldUsed.has(index)) return;
+      const key = oldKey(chapter);
+      if (!key) return;
+      const list = oldByKey.get(key);
+      if (list) list.push(index);
+      else oldByKey.set(key, [index]);
+    });
+    const freshByKey = new Map<string, number[]>();
+    fresh.forEach((item, index) => {
+      if (freshUsed.has(index)) return;
+      const key = freshKey(item);
+      if (!key) return;
+      const list = freshByKey.get(key);
+      if (list) list.push(index);
+      else freshByKey.set(key, [index]);
+    });
+    for (const [key, oldIndexes] of oldByKey) {
+      const freshIndexes = freshByKey.get(key);
+      if (oldIndexes.length !== 1 || freshIndexes?.length !== 1) continue;
+      const oldIndex = oldIndexes[0];
+      const freshIndex = freshIndexes[0];
+      oldUsed.add(oldIndex);
+      freshUsed.add(freshIndex);
+      pairs.push({ oldIndex, freshIndex });
+    }
+  };
+
+  pairBy(tocUrlKey, (item) => (item.chapterUrl ?? "").trim());
+  pairBy(
+    (chapter) => {
+      const title = tocTitleOf(chapter.title);
+      return title ? `${title}\u0000${tocVolumeOf(chapter.volume)}` : "";
+    },
+    (item) => {
+      const title = tocTitleOf(item.chapterName);
+      return title ? `${title}\u0000${tocVolumeOf(item.volume)}` : "";
+    },
+  );
+  pairBy(
+    (chapter) => tocTitleOf(chapter.title),
+    (item) => tocTitleOf(item.chapterName),
+  );
+  return pairs.sort((a, b) => a.freshIndex - b.freshIndex);
+}
+
+/**
+ * 计算目录增删改计划（纯函数，不写盘）：
+ * - 仍能配对的章节保留原对象 / 原 cid 与已缓存正文，只刷新标题、卷名、章节地址；
+ * - 新章节分配**未被占用**的 cid（不复用被删章节的 cid，避免旧书签误挂到新章）；
+ * - 配不到的旧章节视为删除。
+ */
+export function planOnlineTocMerge(
+  old: readonly LocalBookChapter[],
+  fresh: readonly ChapterItem[],
+): { chapters: LocalBookChapter[]; summary: OnlineTocSummary } {
+  const pairs = matchTocChapters(old, fresh);
+  const oldByFresh = new Map(pairs.map((pair) => [pair.freshIndex, pair.oldIndex]));
+  const usedCids = new Set(old.map((chapter) => chapter.cid));
+  let nextCid = 0;
+  const takeCid = (): string => {
+    let cid = chapterCid(nextCid);
+    while (usedCids.has(cid)) cid = chapterCid(++nextCid);
+    usedCids.add(cid);
+    nextCid++;
+    return cid;
+  };
+
+  let changed = 0;
+  const chapters = fresh.map((item, freshIndex) => {
+    const oldIndex = oldByFresh.get(freshIndex);
+    if (oldIndex === undefined) {
+      const volume = tocVolumeOf(item.volume);
+      return {
+        cid: takeCid(),
+        title: item.chapterName,
+        ...(volume ? { volume } : {}),
+        paragraphs: [],
+        url: item.chapterUrl,
+      };
+    }
+    const previous = old[oldIndex];
+    const volume = tocVolumeOf(item.volume);
+    const differs =
+      previous.title !== item.chapterName ||
+      tocVolumeOf(previous.volume) !== volume ||
+      tocUrlKey(previous) !== (item.chapterUrl ?? "").trim();
+    if (!differs) return previous;
+    changed++;
+    const next: LocalBookChapter = { ...previous, title: item.chapterName, url: item.chapterUrl };
+    if (volume) next.volume = volume;
+    else delete next.volume;
+    return next;
+  });
+
+  let reordered = false;
+  let lastOldIndex = -1;
+  for (const pair of pairs) {
+    if (pair.oldIndex < lastOldIndex) {
+      reordered = true;
+      break;
+    }
+    lastOldIndex = pair.oldIndex;
+  }
+  const shifts = pairs.some((pair) => pair.oldIndex !== pair.freshIndex);
+  return {
+    chapters,
+    summary: {
+      oldCount: old.length,
+      newCount: fresh.length,
+      added: fresh.length - pairs.length,
+      removed: old.length - pairs.length,
+      changed,
+      reordered,
+      shifts,
+    },
+  };
+}
+
+/** 比对书源最新目录与书架现有目录，给出本次「检查更新」的更新方式。 */
 export function diffOnlineBookToc(
   book: Pick<LocalBook, "chapters">,
   fresh: ChapterItem[],
 ): OnlineTocUpdate {
-  const old = book.chapters;
-  const oldCount = old.length;
-  const newCount = fresh.length;
-  // 现有目录是否是「最新目录」的逐位前缀（章节身份按书源侧章节地址比对；
-  // 旧章节缺失地址时视为无法核对 → 交给覆盖流程）
-  let prefix = 0;
-  while (prefix < oldCount && prefix < newCount) {
-    if ((old[prefix].url ?? "").trim() !== (fresh[prefix].chapterUrl ?? "").trim()) break;
-    prefix++;
-  }
-  if (prefix === oldCount && newCount >= oldCount) {
-    const heads = fresh.slice(0, oldCount);
-    if (newCount > oldCount) return { kind: "append", added: fresh.slice(oldCount), prefix: heads };
-    if (heads.some((item, i) => item.volume !== old[i].volume || item.chapterName !== old[i].title)) {
-      return { kind: "metadata", prefix: heads };
-    }
+  const { summary } = planOnlineTocMerge(book.chapters, fresh);
+  if (
+    summary.added === 0 &&
+    summary.removed === 0 &&
+    summary.changed === 0 &&
+    !summary.reordered
+  ) {
     return { kind: "none" };
   }
-  return { kind: "conflict", conflict: { oldCount, newCount, fresh } };
+  return { kind: "merge", summary, fresh };
 }
 
-/** 合并目录更新：刷新原有标题 / 卷名，把末尾新增章节并入书架目录（正文留空）。
- *  写入在本书写队列内基于最新缓存构建，不会丢掉并发拉取刚写回的正文；末尾追加不动既有
- *  章节下标，因此不必打断正在跑的窗口预取 / 批量下载。返回实际追加的章节数。 */
-export async function applyOnlineTocAppend(
-  bookId: string,
-  added: ChapterItem[],
-  prefix?: ChapterItem[],
-): Promise<number> {
-  if (added.length === 0 && !prefix) return 0;
-  const next = await updateBookContent(bookId, (latest) => {
-    if (prefix && (latest.chapters.length !== prefix.length || prefix.some((item, i) =>
-      (latest.chapters[i].url ?? "").trim() !== item.chapterUrl.trim(),
-    ))) throw new Error(t("discover.error.tocChanged"));
-    const start = latest.chapters.length;
-    const chapters = latest.chapters.map((chapter, i) => {
-      const item = prefix?.[i];
-      return item && (item.chapterName !== chapter.title || item.volume !== chapter.volume)
-        ? { ...chapter, title: item.chapterName, volume: item.volume }
-        : chapter;
-    });
-    for (let i = 0; i < added.length; i++) {
-      const item = added[i];
-      chapters.push({
-        cid: chapterCid(start + i),
-        title: item.chapterName,
-        ...(item.volume ? { volume: item.volume } : {}),
-        paragraphs: [],
-        url: item.chapterUrl,
-      });
-    }
-    return { ...latest, chapters };
-  });
-  log.info(
-    "目录合并更新完成",
-    `book=${bookId}`,
-    `added=${next ? added.length : 0}`,
-    `chapters=${next?.chapters.length ?? 0}`,
-  );
-  return next ? added.length : 0;
+/** 目录变化是否让在跑的章节任务「下标含义」失效：删除、重排或中段插入都要停掉并推进世代。 */
+function tocInvalidatesFetches(summary: OnlineTocSummary): boolean {
+  return summary.removed > 0 || summary.reordered || summary.shifts;
 }
 
-/** 执行覆盖更新：以最新目录整本替换章节列表。
- *  章节地址未变的旧章节保留已缓存正文，其余章节正文留空（阅读时按需重新获取）。
- *  目录整体重排会让在跑的拉取「下标含义」失效：用户操作优先 —— 先停掉这些拉取，并推进
- *  目录世代，让已经发出、随后才回来的正文回写被丢弃。返回覆盖后的章节总数。 */
-export async function applyOnlineTocOverwrite(
+export interface OnlineTocApplyResult {
+  chapters: number;
+  summary: OnlineTocSummary;
+  bookmarks: BookmarkTocMigrationResult;
+}
+
+/**
+ * 执行增量目录更新：只增删改有差异的章节，保留其余章节的 cid、正文与书签。
+ * 写盘在本书写队列内基于最新缓存重建，随后按新目录修复 / 迁移书签。
+ * 中段插入、删除或重排会让在跑的拉取下标失效：先停掉任务并推进目录世代，
+ * 已发出、随后才回来的正文回写会被丢弃。
+ */
+export async function applyOnlineTocUpdate(
   bookId: string,
   fresh: ChapterItem[],
-): Promise<number> {
-  stopChapterFetches(bookId);
-  bumpTocEpoch(bookId);
+): Promise<OnlineTocApplyResult> {
+  if (fresh.length === 0) throw new Error(t("discover.error.tocEmpty"));
+  const current = localBookById(bookId);
+  if (!current) throw new Error(t("discover.error.bookGone"));
+  const preview = planOnlineTocMerge(current.chapters, fresh);
+  const changed =
+    preview.summary.added > 0 ||
+    preview.summary.removed > 0 ||
+    preview.summary.changed > 0 ||
+    preview.summary.reordered;
+  if (!changed) {
+    const bookmarks = await migrateBookmarksForToc(bookId, current.chapters);
+    return { chapters: current.chapters.length, summary: preview.summary, bookmarks };
+  }
+
+  let summary = preview.summary;
   const next = await updateBookContent(bookId, (latest) => {
-    const oldByUrl = new Map<string, LocalBookChapter>();
-    for (const ch of latest.chapters) {
-      const url = (ch.url ?? "").trim();
-      if (url && !oldByUrl.has(url)) oldByUrl.set(url, ch);
+    const plan = planOnlineTocMerge(latest.chapters, fresh);
+    summary = plan.summary;
+    const changedNow =
+      plan.summary.added > 0 ||
+      plan.summary.removed > 0 ||
+      plan.summary.changed > 0 ||
+      plan.summary.reordered;
+    if (!changedNow) return null;
+    if (tocInvalidatesFetches(plan.summary)) {
+      stopChapterFetches(bookId);
+      bumpTocEpoch(bookId);
     }
-    return {
-      ...latest,
-      chapters: fresh.map((item, index) => {
-        const carried = oldByUrl.get((item.chapterUrl ?? "").trim());
-        const chapter: LocalBookChapter = {
-          cid: chapterCid(index),
-          title: item.chapterName,
-          ...(item.volume ? { volume: item.volume } : {}),
-          paragraphs: carried?.paragraphs ?? [],
-          url: item.chapterUrl,
-        };
-        if (carried && carried.blocks !== undefined) chapter.blocks = carried.blocks;
-        return chapter;
-      }),
-    };
+    return { ...latest, chapters: plan.chapters };
   });
+  if (!next) throw new Error(t("discover.error.bookGone"));
+
+  // 目录已落盘；书签修复失败不能回滚目录，只记录并让用户从结果里看到未修复数量
+  let bookmarks: BookmarkTocMigrationResult = {
+    total: 0,
+    repaired: 0,
+    migrated: 0,
+    unresolved: 0,
+  };
+  try {
+    bookmarks = await migrateBookmarksForToc(bookId, next.chapters);
+  } catch (error) {
+    log.warn("目录更新后修复书签失败", `book=${bookId}`, error);
+  }
   log.info(
-    "目录覆盖更新完成",
+    "目录增量更新完成",
     `book=${bookId}`,
-    `fresh=${fresh.length}`,
-    `chapters=${next?.chapters.length ?? 0}`,
+    `added=${summary.added}`,
+    `removed=${summary.removed}`,
+    `changed=${summary.changed}`,
+    `bookmarks=${bookmarks.repaired}`,
+    `unresolved=${bookmarks.unresolved}`,
   );
-  return next?.chapters.length ?? 0;
+  return { chapters: next.chapters.length, summary, bookmarks };
 }
 
 /** 换源整书写入：保持稳定 ID；不复用不同来源的正文或图片引用。 */

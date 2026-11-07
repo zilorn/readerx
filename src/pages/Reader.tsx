@@ -44,8 +44,7 @@ import {
 } from "../lib/booksTypes";
 import {
   LAZY_WINDOW,
-  applyOnlineTocAppend,
-  applyOnlineTocOverwrite,
+  applyOnlineTocUpdate,
   cancelBackgroundFetch,
   cancelChapterDownload,
   cancelChapterReload,
@@ -65,6 +64,7 @@ import {
   retryReadingImage,
   windowImagesPending,
   type OnlineDownloadRange,
+  type OnlineTocSummary,
 } from "../lib/online";
 import {
   chapterImageError,
@@ -85,7 +85,7 @@ import type { ChapterItem } from "../lib/bookSourcesTypes";
 import { BookmarkPanel } from "../components/BookmarkPanel";
 import { ChapterRangeSheet } from "../components/ChapterRangeSheet";
 import { MenuPageSlider } from "../components/MenuPageSlider";
-import { OnlineTocOverwriteDialog } from "../components/OnlineTocOverwriteDialog";
+import { OnlineTocUpdateDialog } from "../components/OnlineTocUpdateDialog";
 import { ReloadChapterRiskDialog } from "../components/ReloadChapterRiskDialog";
 import {
   SelectionMenu,
@@ -198,7 +198,14 @@ import { centerInScroller } from "../lib/scrollWithin";
 import { showToast } from "../lib/toast";
 import { createLogger } from "../lib/logger";
 import { reportFailure } from "../lib/errorReport";
-import { openWebviewPage } from "../lib/backend";
+import { openWebviewPage, pickBookmarkFile, saveBookmarkFile } from "../lib/backend";
+import {
+  bookmarkExportFileName,
+  importBookmarks,
+  parseBookmarkExport,
+  readBookmarksForExport,
+} from "../lib/bookmarkTransfer";
+import { migrateBookmarksForToc } from "../lib/bookmarkMigration";
 import { openExternal } from "../lib/external";
 import {
   caretRangeAtGlobalOffset,
@@ -1076,6 +1083,7 @@ export default function ReaderPage() {
   const [menuByHover, setMenuByHover] = createSignal(false);
   const [tocByHover, setTocByHover] = createSignal(false);
   const [bmPanelOpen, setBmPanelOpen] = createSignal(false);
+  const [bookmarkTransferBusy, setBookmarkTransferBusy] = createSignal(false);
   const [readerSettingsOpen, setReaderSettingsOpen] = createSignal(false);
   const [chapterEditTarget, setChapterEditTarget] = createSignal<{ bookId: string; index: number; chapter: LocalBookChapter } | null>(null);
   const [annotationTarget, setAnnotationTarget] = createSignal<AnnotationTarget | null>(null);
@@ -1382,21 +1390,65 @@ export default function ReaderPage() {
   onCleanup(() => settleReloadRisk(false));
 
   // -------------------------------------------------------------------
-  // 在线书「检查书籍更新」：重新获取书源目录。
-  // - 最新目录 = 现有目录前缀 + 末尾新增 → 直接追加并提示新增数；
-  // - 结构冲突（中段增删/重排/地址变动，无法安全追加）→ 弹窗询问是否覆盖；
+  // 在线书「检查书籍更新」：重新获取书源目录并增量更新。
+  // - 只有新增 / 标题 / 卷名 / 地址变化 → 直接更新并提示；
+  // - 有删除或重排 → 先弹确认框，确认后仍只增删改差异章节；
+  // - 目录无变化 → 仍执行一次书签修复（旧版本覆盖更新遗留的错位书签）；
   // - 拉取失败 → 提示错误，不做任何改动。
   // 用户操作优先：有章节下载在跑也能检查 —— 末尾追加不动既有章节下标，照常执行；
-  // 覆盖更新会让在跑的拉取下标失效，由 online 层停掉它们并作废在飞的正文回写。
+  // 中段增删 / 重排会让在跑的拉取下标失效，由 online 层停掉它们并作废在飞的正文回写。
   // -------------------------------------------------------------------
   const [checkingUpdate, setCheckingUpdate] = createSignal(false);
-  const [overwriteBusy, setOverwriteBusy] = createSignal(false);
+  const [updatingToc, setUpdatingToc] = createSignal(false);
   const [updateConflict, setUpdateConflict] = createSignal<{
     bookId: string;
-    oldCount: number;
-    newCount: number;
+    summary: OnlineTocSummary;
     fresh: ChapterItem[];
   } | null>(null);
+
+  /** 目录更新完成后的提示：优先报告书签迁移数，其次按“纯追加 / 仅元信息 / 混合变更”区分。 */
+  function tocUpdateToast(result: {
+    summary: OnlineTocSummary;
+    bookmarks: { repaired: number };
+  }): string {
+    const summary = result.summary;
+    if (result.bookmarks.repaired > 0) {
+      return t("reader.tocMergedWithBookmarks", {
+        added: summary.added,
+        removed: summary.removed,
+        changed: summary.changed,
+        bookmarks: result.bookmarks.repaired,
+      });
+    }
+    if (
+      summary.added === 0 &&
+      summary.removed === 0 &&
+      summary.changed === 0 &&
+      !summary.reordered
+    ) {
+      return t("reader.tocUpToDate");
+    }
+    if (summary.added > 0 && summary.removed === 0 && summary.changed === 0) {
+      return t("reader.tocAppended", { count: summary.added });
+    }
+    if (summary.added === 0 && summary.removed === 0 && summary.changed > 0) {
+      return t("reader.tocMetadataUpdated");
+    }
+    return t("reader.tocMerged", {
+      added: summary.added,
+      removed: summary.removed,
+      changed: summary.changed,
+    });
+  }
+
+  async function applyTocUpdate(targetBookId: string, fresh: ChapterItem[]): Promise<void> {
+    const result = await applyOnlineTocUpdate(targetBookId, fresh);
+    setUpdateConflict(null);
+    // 收掉设置面板，让用户直接看到更新后的目录/正文
+    setReaderSettingsOpen(false);
+    setMenuOpen(false);
+    showToast(tocUpdateToast(result));
+  }
 
   async function checkOnlineBookUpdate(): Promise<void> {
     if (checkingUpdate()) return;
@@ -1410,27 +1462,29 @@ export default function ReaderPage() {
       const latest = localBookById(current.id) ?? current;
       const diff = diffOnlineBookToc(latest, fresh);
       if (diff.kind === "none") {
-        showToast(t("reader.tocUpToDate"));
-        return;
-      }
-      if (diff.kind === "append" || diff.kind === "metadata") {
-        const added = await applyOnlineTocAppend(current.id, diff.kind === "append" ? diff.added : [], diff.prefix);
-        // 收掉设置面板，让用户直接看到更新后的目录/正文
-        setReaderSettingsOpen(false);
-        setMenuOpen(false);
+        // 目录没变也执行一次书签修复：旧版本整本覆盖目录留下的错位书签在下一次
+        // 「检查更新」时自动归位，而不是非要等到书源再次改动目录。
+        const repaired = await migrateBookmarksForToc(current.id, latest.chapters);
+        if (repaired.repaired > 0) {
+          log.info(
+            "检查更新时修复书签",
+            `book=${current.id}`,
+            `repaired=${repaired.repaired}`,
+            `unresolved=${repaired.unresolved}`,
+          );
+        }
         showToast(
-          added > 0
-            ? t("reader.tocAppended", { count: added })
-            : t("reader.tocMetadataUpdated"),
+          repaired.repaired > 0
+            ? t("reader.bookmarksRepaired", { count: repaired.repaired })
+            : t("reader.tocUpToDate"),
         );
         return;
       }
-      setUpdateConflict({
-        bookId: current.id,
-        oldCount: diff.conflict.oldCount,
-        newCount: diff.conflict.newCount,
-        fresh: diff.conflict.fresh,
-      });
+      if (diff.summary.removed > 0 || diff.summary.reordered) {
+        setUpdateConflict({ bookId: current.id, summary: diff.summary, fresh: diff.fresh });
+        return;
+      }
+      await applyTocUpdate(current.id, diff.fresh);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       showToast(t("reader.updateCheckFailed", { error: msg }), true);
@@ -1439,26 +1493,22 @@ export default function ReaderPage() {
     }
   }
 
-  /** 冲突确认框「覆盖更新」：以最新目录整本替换（在跑的章节拉取由 online 层停掉） */
-  async function confirmOverwriteToc(): Promise<void> {
+  /** 目录变化确认框「更新目录」：只增删改有差异的章节，保留其余章节与书签。 */
+  async function confirmTocUpdate(): Promise<void> {
     const pending = updateConflict();
-    if (!pending || overwriteBusy()) return;
+    if (!pending || updatingToc()) return;
     if (pending.bookId !== bookId()) {
       setUpdateConflict(null);
       return;
     }
-    setOverwriteBusy(true);
+    setUpdatingToc(true);
     try {
-      const total = await applyOnlineTocOverwrite(pending.bookId, pending.fresh);
-      setUpdateConflict(null);
-      setReaderSettingsOpen(false);
-      setMenuOpen(false);
-      showToast(t("reader.tocOverwritten", { count: total }));
+      await applyTocUpdate(pending.bookId, pending.fresh);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      showToast(t("reader.overwriteFailed", { error: msg }), true);
+      showToast(t("reader.updateFailed", { error: msg }), true);
     } finally {
-      setOverwriteBusy(false);
+      setUpdatingToc(false);
     }
   }
 
@@ -4502,6 +4552,69 @@ export default function ReaderPage() {
     });
   }
 
+  // -------------------------------------------------------------------
+  // 书签导出 / 导入（书签面板工具栏）：
+  // - 导出：当前书全部书签 → JSON 数组（书名、章节名、章节 ID、卷名与定位字段）；
+  // - 导入：按章节 ID / 章节名 + 卷名 / 正文原文重新对应到当前目录，按 id 合并更新。
+  // -------------------------------------------------------------------
+  async function exportBookmarksToFile(): Promise<void> {
+    if (bookmarkTransferBusy()) return;
+    const current = localBookById(bookId());
+    if (!current) return;
+    setBookmarkTransferBusy(true);
+    try {
+      const { contents, count } = await readBookmarksForExport(current);
+      if (count === 0) {
+        showToast(t("readerChrome.bookmark.exportEmpty"));
+        return;
+      }
+      const saved = await saveBookmarkFile(bookmarkExportFileName(current.title), contents);
+      if (saved) {
+        log.info("书签导出完成", `book=${current.id}`, `count=${count}`);
+        showToast(t("readerChrome.bookmark.exported", { count }));
+      }
+    } catch (error) {
+      reportFailure(t("readerChrome.bookmark.exportFailed"), error);
+    } finally {
+      setBookmarkTransferBusy(false);
+    }
+  }
+
+  async function importBookmarksFromFile(): Promise<void> {
+    if (bookmarkTransferBusy()) return;
+    const current = localBookById(bookId());
+    if (!current) return;
+    setBookmarkTransferBusy(true);
+    try {
+      const picked = await pickBookmarkFile();
+      if (!picked) return;
+      const items = parseBookmarkExport(picked.contents);
+      const result = await importBookmarks(current, items);
+      const applied = result.imported + result.updated;
+      log.info(
+        "书签导入完成",
+        `book=${current.id}`,
+        `imported=${result.imported}`,
+        `updated=${result.updated}`,
+        `skipped=${result.skipped}`,
+      );
+      if (result.skipped > 0) {
+        showToast(
+          t("readerChrome.bookmark.importedPartial", { count: applied, skipped: result.skipped }),
+          applied === 0,
+        );
+      } else if (applied > 0) {
+        showToast(t("readerChrome.bookmark.imported", { count: applied }));
+      } else {
+        showToast(t("readerChrome.bookmark.importEmpty"), true);
+      }
+    } catch (error) {
+      reportFailure(t("readerChrome.bookmark.importFailed"), error);
+    } finally {
+      setBookmarkTransferBusy(false);
+    }
+  }
+
   // 等待章节/分页就绪后，把书签字符区间滚动到可见并短暂高亮。
   // 滚动模式下正文分片挂载：目标单元所在分片未挂出时保持等待（依赖 scrollShown
   // 在后续分片追加时重新触发本 effect），直到目标单元出现再定位。
@@ -5605,6 +5718,7 @@ export default function ReaderPage() {
               bookmarks={bookBookmarks()}
               currentCid={chapter()?.cid}
               currentIndex={chapterIdx()}
+              transferBusy={bookmarkTransferBusy()}
               onClose={() => setBmPanelOpen(false)}
               onJump={jumpToBookmark}
               onDelete={(bookmark) => {
@@ -5612,6 +5726,8 @@ export default function ReaderPage() {
                 removeBookmark(bookmark.id);
                 showToast(t("reader.bookmarkRemoved"));
               }}
+              onExport={() => void exportBookmarksToFile()}
+              onImport={() => void importBookmarksFromFile()}
             />
 
             <Show when={translationTarget()} keyed>{target => <TranslationPopup target={target} root={() => areaRef} insets={{ top: Math.max(safeInsets().top + 10,14), bottom: Math.max(safeInsets().bottom + 8,14) }} onClose={() => setTranslationTarget(null)} translate={signal => selectionTranslation(rawBook()!,rawAnnotationChapter()!,target.text,signal)} />}</Show>
@@ -5752,16 +5868,15 @@ export default function ReaderPage() {
               )}
             </Show>
 
-            {/* 检查书籍更新：最新目录与书架目录冲突时询问是否覆盖 */}
+            {/* 检查书籍更新：目录有删除 / 重排时确认，再执行增量更新 */}
             <Show when={updateConflict()}>
               {(conflict) => (
-                <OnlineTocOverwriteDialog
+                <OnlineTocUpdateDialog
                   bookTitle={translatedBookTitle()}
-                  oldCount={conflict().oldCount}
-                  newCount={conflict().newCount}
-                  busy={overwriteBusy()}
+                  summary={conflict().summary}
+                  busy={updatingToc()}
                   onCancel={() => setUpdateConflict(null)}
-                  onConfirm={() => void confirmOverwriteToc()}
+                  onConfirm={() => void confirmTocUpdate()}
                 />
               )}
             </Show>

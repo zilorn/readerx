@@ -113,6 +113,8 @@ export interface Bookmark {
   /** 章节序号（cid 失效时的回退） */
   chapterIndex: number;
   chapterTitle: string;
+  /** 创建时所属卷标题；没有卷或旧记录缺省时为空。导出与目录迁移据此识别章节。 */
+  chapterVolume?: string;
   /** 选中起点所在正文单元序号（chapterUnits 下标，p/h；跨段落时仍记起点单元） */
   unitIndex: number;
   /** 章节镜像文本中的全局字符区间（只含 p/h 文本；可横跨多个单元） */
@@ -254,15 +256,20 @@ export function invalidateBookmarkCache(): void {
 
 /**
  * 把某本书的书签落盘：先等这本书读完（否则可能用半份列表覆盖磁盘），
- * 再写当前内存值；写入按调用顺序排队。
+ * 再写当前内存值；写入按调用顺序排队。返回的 Promise 在本次写入完成后结束。
  */
-function persist(bookId: string): void {
+function persist(bookId: string): Promise<void> {
   dirtyBooks.add(bookId);
-  writeQueue = writeQueue.then(async () => {
+  const write = writeQueue.then(async () => {
     await ensureBookmarksLoaded(bookId);
     if (!loadedBooks.has(bookId)) return;
     await saveRemoteBookmarks(bookId, bookmarkMap()[bookId] ?? []);
   });
+  writeQueue = write.then(
+    () => undefined,
+    () => undefined,
+  );
+  return write;
 }
 
 /** 书签所属章节的展示名（章节无标题时兜底为「第 N 章」） */
@@ -271,6 +278,11 @@ export function bookmarkChapterLabel(bookmark: Bookmark): string {
     bookmark.chapterTitle ||
     t("readerChrome.bookmark.chapterFallback", { index: bookmark.chapterIndex + 1 })
   );
+}
+
+/** 某本书的书签是否已成功从磁盘读入（读失败 / 还没读过为 false）。 */
+export function bookmarksLoaded(bookId: string): boolean {
+  return loadedBooks.has(bookId);
 }
 
 /** 某本书的全部书签（响应式，无序） */
@@ -326,7 +338,17 @@ export function addBookmark(bookmark: Bookmark): void {
   const list = map[bookmark.bookId] ?? [];
   map[bookmark.bookId] = [...list, bookmark];
   setBookmarkMap(map);
-  persist(bookmark.bookId);
+  void persist(bookmark.bookId);
+}
+
+/**
+ * 整表替换某本书的书签并落盘（目录迁移 / 导入用）。
+ * 返回的 Promise 在落盘队列完成后结束；内存更新先发布，界面无需等待磁盘。
+ */
+export function replaceBookmarksForBook(bookId: string, bookmarks: Bookmark[]): Promise<void> {
+  setBookmarkMap((prev) => ({ ...prev, [bookId]: bookmarks }));
+  loadedBooks.add(bookId);
+  return persist(bookId);
 }
 
 /**
@@ -426,6 +448,7 @@ export function makeBookmark(
     chapterCid: chapter.cid,
     chapterIndex,
     chapterTitle: chapter.title,
+    ...(chapter.volume ? { chapterVolume: chapter.volume } : {}),
     unitIndex: effectiveUnit,
     charStart,
     charEnd,
@@ -465,7 +488,10 @@ function occurrencesOf(haystack: string, needle: string): number[] {
 }
 
 /** 在镜像文本里按“选中文本 + before/after 锚定”挑选最可信的起点 */
-function bestMatchStart(mirror: TextMirror, bm: Bookmark): { start: number; certain: boolean } | null {
+export function bestMatchStart(
+  mirror: TextMirror,
+  bm: Pick<Bookmark, "text" | "before" | "after" | "charStart">,
+): { start: number; certain: boolean } | null {
   const text = mirror.text;
   const needle = bm.text;
   const hits = occurrencesOf(text, needle);

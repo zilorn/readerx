@@ -73,7 +73,7 @@ The documentation below is written in Chinese.
 | --- | --- |
 | [Source tutorial](./docs/book-source-guide.md) · [Format specification](./docs/book-source-spec.md) · [API](./docs/book-source-api.md) | Writing and testing book sources |
 | [Web authentication](./docs/cloudflare.md) · [Source CLI](./docs/book-source-cli.md) | Login, Cloudflare and the standalone command-line tool |
-| [Sync](./docs/sync.md) · [Backup](./docs/backup.md) | Data synchronisation and recovery |
+| [Sync](./docs/sync.md) · [Backup](./docs/backup.md) · [Bookmarks](./docs/bookmarks.md) | Data synchronisation, recovery, bookmark migration and export |
 | [Logging and troubleshooting](./docs/logging.md) | Settings → Debug → App log |
 | [Internationalisation](./docs/i18n.md) · [Repository guidelines](./AGENTS.md) | Development conventions |
 | [Contributing](./CONTRIBUTING.md) | Bug reports, feature requests and pull requests |

@@ -1,25 +1,23 @@
 /**
- * 在线书「检查书籍更新」的目录冲突确认框（Portal 居中弹层）：
- * 书源返回的最新目录与书架现有目录不一致（不是单纯的末尾追加，例如中段被
- * 新增 / 删除 / 重排或章节地址变动），无法安全自动追加，询问用户是否覆盖。
+ * 在线书「检查书籍更新」的目录变化确认框（Portal 居中弹层）：
+ * 目录有删除或重排时无法静默处理（会改变阅读顺序、可能影响书签），
+ * 先说明本次增删改数量，再执行增量更新；未变化章节的 cid、正文与书签都会保留。
  */
 import { Show } from "solid-js";
 import { Portal } from "solid-js/web";
 import { t } from "../lib/i18n";
+import type { OnlineTocSummary } from "../lib/online";
 
-export interface OnlineTocOverwriteDialogProps {
+export interface OnlineTocUpdateDialogProps {
   bookTitle: string;
-  /** 书架现有章节数 */
-  oldCount: number;
-  /** 书源最新目录章节数 */
-  newCount: number;
-  /** 正在执行覆盖（按钮禁用 + 转圈） */
+  summary: Pick<OnlineTocSummary, "newCount" | "added" | "removed" | "changed">;
+  /** 正在执行更新（按钮禁用 + 转圈） */
   busy?: boolean;
   onCancel: () => void;
   onConfirm: () => void;
 }
 
-export function OnlineTocOverwriteDialog(props: OnlineTocOverwriteDialogProps) {
+export function OnlineTocUpdateDialog(props: OnlineTocUpdateDialogProps) {
   return (
     <Portal>
       <div
@@ -37,8 +35,10 @@ export function OnlineTocOverwriteDialog(props: OnlineTocOverwriteDialogProps) {
           <p class="mt-2 text-[12.5px] leading-[1.7] text-text-2">
             {t("sourceEditor.toc.desc", {
               bookTitle: props.bookTitle,
-              oldCount: props.oldCount,
-              newCount: props.newCount,
+              newCount: props.summary.newCount,
+              added: props.summary.added,
+              removed: props.summary.removed,
+              changed: props.summary.changed,
             })}
           </p>
           <p class="mt-2 text-[12px] leading-[1.6] text-text-3">

@@ -124,6 +124,25 @@ export const readerChrome = {
   "readerChrome.bookmark.noMatchHint": "Search chapter titles or the text inside bookmarks",
   /** Chapter label used when the chapter has no title */
   "readerChrome.bookmark.chapterFallback": "Chapter {index}",
+  "readerChrome.bookmark.exportLabel": "Export bookmarks",
+  "readerChrome.bookmark.importLabel": "Import bookmarks",
+  "readerChrome.bookmark.exportEmpty": "This book has no bookmarks yet",
+  "readerChrome.bookmark.exported": "{count} bookmarks exported",
+  "readerChrome.bookmark.exported_one": "{count} bookmark exported",
+  "readerChrome.bookmark.exported_other": "{count} bookmarks exported",
+  "readerChrome.bookmark.exportFailed": "Couldn't export bookmarks",
+  "readerChrome.bookmark.importInvalid": "This file is not a valid bookmark JSON array",
+  "readerChrome.bookmark.importEmpty": "No bookmarks found in this file",
+  "readerChrome.bookmark.imported": "{count} bookmarks imported",
+  "readerChrome.bookmark.imported_one": "{count} bookmark imported",
+  "readerChrome.bookmark.imported_other": "{count} bookmarks imported",
+  "readerChrome.bookmark.importedPartial":
+    "{count} bookmarks imported, {skipped} couldn't be located",
+  "readerChrome.bookmark.importedPartial_one":
+    "{count} bookmark imported, {skipped} couldn't be located",
+  "readerChrome.bookmark.importedPartial_other":
+    "{count} bookmarks imported, {skipped} couldn't be located",
+  "readerChrome.bookmark.importFailed": "Couldn't import bookmarks",
 
   // Bookmark-loss warning before re-importing
   "readerChrome.bookmarkRisk.title": "Some bookmarks may break",
