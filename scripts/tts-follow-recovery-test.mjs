@@ -26,12 +26,12 @@ visit(ast);
 for (const text of [pending, timer, followEffect, pageEffect, selectionEffect]) assert.ok(text);
 const names = ["cancelFollowIfActive", "pageIndexOfChar", "snapPage", "speakPageIndex",
   "speakOnCurrentScreen", "armFollowPageCheck", "checkFollowPage", "ensureSpeakVisible",
-  "turnPage", "userFlip", "seekToPage"];
+  "turnPage", "userFlip", "seekToPage", "restoreJumpOrigin"];
 for (const name of names) assert.ok(functions.has(name), `缺少 Reader.${name}`);
 const { outputText } = ts.transpileModule([
   pending, timer, "let wantLastPageCid = null;", ...names.map((name) => functions.get(name)),
   followEffect, pageEffect, selectionEffect,
-  "return { turnPage, userFlip, seekToPage, armFollowPageCheck };",
+  "return { turnPage, userFlip, seekToPage, restoreJumpOrigin, armFollowPageCheck };",
 ].join("\n"), { compilerOptions: { target: ts.ScriptTarget.ES2022 } });
 
 const pages = { pages: Array.from({ length: 8 }, (_, i) => [
@@ -52,6 +52,8 @@ function scenario({ columns = 1, animated = true } = {}) {
     const [selSpan, setSelSpan] = createSignal(null);
     const [focus, setFocus] = createSignal(focusAt(0));
     const [status, setStatus] = createSignal("playing");
+    const [resumeTarget, setResumeTarget] = createSignal(null);
+    const [jumpOrigin, setJumpOrigin] = createSignal(null);
     const intervals = new Map();
     let nextInterval = 0, finish;
     const dependencies = {
@@ -67,10 +69,16 @@ function scenario({ columns = 1, animated = true } = {}) {
         setInterval: (fn) => { intervals.set(++nextInterval, fn); return nextInterval; },
       },
       scrollRef: null, scrollToCharOffset: () => true,
+      resumeTarget, setResumeTarget, jumpOrigin, setJumpOrigin,
+      book: () => ({ chapters }),
+      dismissJumpBack: () => setJumpOrigin(null),
       isLastChapter: () => chapterIdx() === chapters.length - 1,
       isFirstChapter: () => chapterIdx() === 0,
       renderBook: () => ({ chapters }),
-      goToChapter: (ci) => batch(() => { setPaged(null); setChapterIdx(ci); setPageIdx(0); }),
+      goToChapter: (ci) => {
+        if (ci === chapterIdx()) return;
+        batch(() => { setPaged(null); setChapterIdx(ci); setPageIdx(0); });
+      },
       pageTurn: { active: () => false, finish: (_commit, fn) => { finish = fn; } },
       beginPageDrag: () => animated, setPagePreviewIndex: () => {}, offerJumpBack: () => {},
     };
@@ -78,6 +86,7 @@ function scenario({ columns = 1, animated = true } = {}) {
     state = {
       ...actions, setMode, setPaged, setPageIdx, setColumns, setFocus, setStatus,
       followEnabled, pageIdx, setFollowEnabled, setSelSpan,
+      setResumeTarget, setJumpOrigin, resumeTarget,
       select: () => { setFollowEnabled(false); setSelSpan([0, 10]); },
       clearSelection: () => setSelSpan(null),
       finishTurn: () => { const fn = finish; finish = undefined; fn?.(); },
@@ -186,6 +195,66 @@ crossChapter.setPaged(pages);
 assert.equal(crossChapter.followEnabled(), true, "跨章落回朗读章首页后恢复");
 crossChapter.dispose();
 
+// Issue #45：目录跳章后「返回原进度」落回朗读句所在屏，应恢复跟读跟随。
+// 精确定位（resumeTarget）落定前页码仍是暂态，不能在旧屏上提前判定。
+for (const columns of [1, 2]) {
+  const backToSpeak = scenario({ columns });
+  const speak = columns * 2;
+  backToSpeak.setFollowEnabled(false);
+  backToSpeak.setPageIdx(columns * 3);
+  backToSpeak.setFocus(focusAt(speak));
+  backToSpeak.setJumpOrigin({ ci: 0, cid: "a", char: speak * 100 });
+  backToSpeak.restoreJumpOrigin();
+  assert.equal(backToSpeak.followEnabled(), false, "返回原进度落定前不按暂态页码恢复");
+  assert.equal(backToSpeak.pageIdx(), columns * 3, "精确定位落定前页码不变");
+  batch(() => { backToSpeak.setPageIdx(speak); backToSpeak.setResumeTarget(null); });
+  assert.equal(backToSpeak.followEnabled(), true, "返回原进度落回跟读屏后恢复跟随");
+  backToSpeak.dispose();
+}
+
+const backToOther = scenario();
+backToOther.setFollowEnabled(false);
+backToOther.setPageIdx(4);
+backToOther.setFocus(focusAt(1));
+backToOther.setJumpOrigin({ ci: 0, cid: "a", char: 400 });
+backToOther.restoreJumpOrigin();
+batch(() => { backToOther.setPageIdx(4); backToOther.setResumeTarget(null); });
+assert.equal(backToOther.followEnabled(), false, "返回原进度落点不是朗读屏时保持取消跟读");
+backToOther.dispose();
+
+const pendingLanding = scenario();
+pendingLanding.setFollowEnabled(false);
+pendingLanding.setPageIdx(2); // 暂态页码恰好是朗读屏
+pendingLanding.setFocus(focusAt(2));
+pendingLanding.setJumpOrigin({ ci: 0, cid: "a", char: 600 }); // 实际落点在第 6 页
+pendingLanding.restoreJumpOrigin();
+assert.equal(pendingLanding.followEnabled(), false, "精确定位未落定不得按旧页码提前恢复");
+batch(() => { pendingLanding.setPageIdx(6); pendingLanding.setResumeTarget(null); });
+assert.equal(pendingLanding.followEnabled(), false, "落点不是朗读屏时不恢复");
+pendingLanding.dispose();
+
+const restoredChapter = scenario();
+restoredChapter.setFollowEnabled(false);
+restoredChapter.setPageIdx(7);
+restoredChapter.setFocus(focusAt(2));
+restoredChapter.userFlip(1); // 视图浏览到下一章
+assert.equal(restoredChapter.followEnabled(), false);
+restoredChapter.setJumpOrigin({ ci: 0, cid: "a", char: 200 });
+restoredChapter.restoreJumpOrigin();
+batch(() => { restoredChapter.setPaged(pages); restoredChapter.setPageIdx(2); restoredChapter.setResumeTarget(null); });
+assert.equal(restoredChapter.followEnabled(), true, "跨章返回原进度落回朗读章跟读屏后恢复");
+restoredChapter.dispose();
+
+const restoredChapterStart = scenario();
+restoredChapterStart.setFollowEnabled(false);
+restoredChapterStart.setPageIdx(5);
+restoredChapterStart.setFocus(focusAt(0));
+restoredChapterStart.setJumpOrigin({ ci: 0, cid: "a", char: 0 });
+restoredChapterStart.restoreJumpOrigin();
+assert.equal(restoredChapterStart.pageIdx(), 0);
+assert.equal(restoredChapterStart.followEnabled(), true, "章首原进度无需精确定位即可恢复跟读");
+restoredChapterStart.dispose();
+
 for (const status of ["playing", "paused", "loading"]) {
   const s = scenario();
   s.setStatus(status);
@@ -225,4 +294,4 @@ title.clearSelection();
 assert.equal(title.followEnabled(), false, "章节标题无正文页，不执行自动恢复");
 title.dispose();
 
-process.stdout.write("跟读恢复检查通过：选取跨屏、同步/动画翻页、单双页、进度跳页、重排/跨章等待与取消跟读边界\n");
+process.stdout.write("跟读恢复检查通过：选取跨屏、同步/动画翻页、单双页、进度跳页、返回原进度、重排/跨章等待与取消跟读边界\n");

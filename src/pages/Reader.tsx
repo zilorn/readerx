@@ -2127,6 +2127,9 @@ export default function ReaderPage() {
       setFollowPageCheckPending(false);
       return;
     }
+    // 精确定位（打开书 / 返回原进度 / 模式切换）落定前页码还是旧屏，判定会误判跟读页；
+    // 保持挂起，等 resumeTarget 清空后的补判再决定。
+    if (resumeTarget() !== null) return;
     const f = ttsPlayer.focus();
     // 滚动模式不判定「跟读页」；朗读句不在本视图章节时当前屏也不可能是跟读页
     if (!isPaged() || !f || f.item.start < 0 || f.cid !== chapter()?.cid) {
@@ -2522,12 +2525,13 @@ export default function ReaderPage() {
     return { from, to, total, count: total, spread: to > from };
   });
 
-  // 用户手动翻页 / 跳页 / 切章后落回朗读句所在屏（跟读页）→ 恢复跟读跟随。
-  // 判定要等视图就绪：跨章翻页时新章正文与分页结果都还没到，先挂着由本 effect 补判。
+  // 用户手动翻页 / 跳页 / 返回原进度落回朗读句所在屏（跟读页）→ 恢复跟读跟随。
+  // 判定要等视图就绪：跨章翻页时新章正文与分页结果都还没到，先挂着由本 effect 补判；
+  // 精确定位未落定（resumeTarget 未清空）时页码仍是暂态，同样等落定后补判。
   // 挂起状态自身也触发检查：翻页入口在页码更新后置位，不能只等待下一次视图变化。
   createEffect(
     on(
-      [followPageCheckPending, () => chapter()?.cid ?? null, isPaged, paged, pageIdx, pageColumns, selSpan],
+      [followPageCheckPending, resumeTarget, () => chapter()?.cid ?? null, isPaged, paged, pageIdx, pageColumns, selSpan],
       () => checkFollowPage(),
       { defer: true },
     ),
@@ -2674,6 +2678,9 @@ export default function ReaderPage() {
     } else if (scrollRef) {
       scrollRef.scrollTop = 0;
     }
+    // 与翻页 / 进度条跳页一致：落点若是朗读句所在屏就恢复跟读跟随。
+    // 精确定位未落定期间 checkFollowPage 会保持挂起，等 resumeTarget 清空后补判。
+    armFollowPageCheck();
   }
 
   // -------------------------------------------------------------------
