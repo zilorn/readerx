@@ -266,15 +266,33 @@ async function googleText(
   }
   return out;
 }
-// 百度标准版限制约 1 QPS；请求逐条串行，避免并行批次直接撞限流。
+// 百度标准版约 1 QPS。队列保证不并发，并让相邻请求的开始时间至少间隔 1 秒。
+const BAIDU_MIN_INTERVAL_MS = 1000;
 let baiduQueue: Promise<unknown> = Promise.resolve();
-function baiduSerial<T>(task: () => Promise<T>): Promise<T> {
-  const run = baiduQueue.then(task, task);
+let baiduNotBefore = 0;
+function baiduSerial<T>(
+  signal: AbortSignal,
+  task: () => Promise<T>,
+): Promise<T> {
+  const run = baiduQueue.then(
+    () => beginBaidu(signal, task),
+    () => beginBaidu(signal, task),
+  );
   baiduQueue = run.then(
     () => undefined,
     () => undefined,
   );
   return run;
+}
+async function beginBaidu<T>(
+  signal: AbortSignal,
+  task: () => Promise<T>,
+): Promise<T> {
+  const delay = baiduNotBefore - Date.now();
+  if (delay > 0) await wait(delay, signal);
+  signal.throwIfAborted();
+  baiduNotBefore = Date.now() + BAIDU_MIN_INTERVAL_MS;
+  return task();
 }
 async function baiduRequest(
   text: string,
@@ -341,16 +359,10 @@ async function baiduText(
   const target = targetCode(BAIDU_LANGUAGES, settings.target);
   let out = "";
   for (const chunk of splitByBytes(text, 6000))
-    out += await baiduSerial(() =>
+    out += await baiduSerial(signal, () =>
       baiduRequest(chunk, appId, secret, target, signal),
     );
   return out;
-}
-function escapeBingText(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
 }
 const BING_ENTITIES =
   /&(amp|lt|gt|quot|apos|#39|#(\d+)|#x([0-9a-fA-F]+));/g;
@@ -402,7 +414,7 @@ async function bingTexts(
   const parts: Array<{ text: number; chunk: number; value: string }> = [];
   chunks.forEach((textChunks, text) =>
     textChunks.forEach((value, chunk) =>
-      parts.push({ text, chunk, value: escapeBingText(value) }),
+      parts.push({ text, chunk, value }),
     ),
   );
   for (let at = 0; at < parts.length; ) {

@@ -144,7 +144,7 @@ let requests = [],
 const provider = await load("provider", {
   "../http": {
     httpFetch: async (url, init) => {
-      requests.push({ url, init });
+      requests.push({ url, init, at: Date.now() });
       if (failed)
         throw new Error("SECRET BODY https://secret.invalid?key=SECRET");
       const payload = queue.length ? queue.shift() : response;
@@ -368,11 +368,26 @@ assert.deepEqual(
 );
 assert.equal(requests.length, 2, "中文长段落按 UTF-8 字节上限切片");
 assert.ok(
+  requests[1].at - requests[0].at >= 900,
+  "百度相邻分片的开始时间至少间隔约 1 秒",
+);
+assert.ok(
   new URLSearchParams(requests[0].init.body.toString()).get("q").length <= 2000,
 );
+const baiduSent = requests.length;
+const baiduAbort = new AbortController();
+const baiduPending = provider.translateBatch(
+  ["source"],
+  baiduSettings,
+  [],
+  baiduAbort.signal,
+);
+baiduAbort.abort();
+await assert.rejects(baiduPending);
+assert.equal(requests.length, baiduSent, "间隔内取消不发出下一请求");
 queue = [];
 
-// 必应：免费接口无需密钥；请求体是纯字符串数组，实体只解码一次。
+// 必应：免费接口无需密钥；请求体发送原文，响应里的实体只解码一次。
 const bingSettings = {
   ...defaults,
   provider: "bing",
@@ -408,15 +423,36 @@ for (const [target, code] of Object.entries(bingCodes)) {
   assert.equal(requests.at(-1).init.headers.Authorization, undefined);
 }
 response = [
-  { translations: [{ text: "AT&amp;T 和 &lt;tag&gt;" }] },
+  { translations: [{ text: "AT&amp;T 和 &lt;b&gt;bold&lt;/b&gt;" }] },
 ];
 assert.deepEqual(
-  await provider.translateBatch(["AT&T 和 <tag>"], bingSettings, [], signal),
-  ["AT&T 和 <tag>"],
+  await provider.translateBatch(
+    ["AT&T 和 <b>bold</b>"],
+    bingSettings,
+    [],
+    signal,
+  ),
+  ["AT&T 和 <b>bold</b>"],
   "必应返回的实体只解码一次；密钥不会发送给免费接口",
 );
+assert.deepEqual(
+  JSON.parse(requests.at(-1).init.body),
+  ["AT&T 和 <b>bold</b>"],
+  "必应发送原文，不把 & 和尖括号转成实体",
+);
+response = [{ translations: [{ text: "这里使用<b>粗体</b>标签" }] }];
+assert.deepEqual(
+  await provider.translateBatch(
+    ["Use <b>bold</b> tags here"],
+    bingSettings,
+    [],
+    signal,
+  ),
+  ["这里使用<b>粗体</b>标签"],
+  "服务端已还原的尖括号标签保持原样",
+);
 assert.deepEqual(JSON.parse(requests.at(-1).init.body), [
-  "AT&amp;T 和 &lt;tag&gt;",
+  "Use <b>bold</b> tags here",
 ]);
 response = [
   { translations: [{ text: "甲" }] },
