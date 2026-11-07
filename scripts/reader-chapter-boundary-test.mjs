@@ -5,6 +5,12 @@ import {
   createComputed, createEffect, createMemo, createRoot, createSignal, on, onCleanup, untrack,
 } from "../node_modules/solid-js/dist/solid.js";
 
+const endSource = await readFile(new URL("../src/lib/readerBookEnd.ts", import.meta.url), "utf8");
+const { outputText: endJs } = ts.transpileModule(endSource, {
+  compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
+});
+const { stepBookEnd } = await import(`data:text/javascript;base64,${Buffer.from(endJs).toString("base64")}`);
+
 // 联合执行实际翻页、异步分页、译文状态刷新和位置恢复，保留 Solid 浏览器运行时的更新顺序。
 const source = await readFile(new URL("../src/pages/Reader.tsx", import.meta.url), "utf8");
 const ast = ts.createSourceFile("Reader.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
@@ -96,6 +102,7 @@ function scenario({ columns = 1, animated = false, translated = false } = {}) {
       cancelFollowIfActive: () => {}, armFollowPageCheck: () => {}, resetPageTurn: () => {},
       beginPageDrag: () => animated, setPagePreviewIndex: () => {},
       pageTurn: { active: () => false, finish: (_commit, callback) => { finish = callback; } },
+      atBookEnd: () => false, setAtBookEnd: () => {}, stepBookEnd, holdBookEnd: () => {},
       effectiveTranslationSettings: () => ({ enabled: translated, mode: "bilingual", pretranslate: 0 }),
       fingerprint: JSON.stringify, translationBookState: () => ({}), translationCacheVersion: () => 0,
       ensureTranslationSettings: async () => {}, ensureTranslationBook: async () => {},

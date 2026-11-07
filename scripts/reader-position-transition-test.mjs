@@ -20,7 +20,8 @@ const { outputText } = ts.transpileModule(transition, {
   compilerOptions: { target: ts.ScriptTarget.ES2022 },
 });
 const dependencies = ["createComputed", "on", "isPaged", "pageColumns", "chapter", "resumeTarget",
-  "scrollRef", "visibleCharAtTop", "viewOffset", "setResumeTarget", "spreadStart", "pageIdx", "setPageIdx"];
+  "scrollRef", "visibleCharAtTop", "viewOffset", "setResumeTarget", "spreadStart", "pageIdx", "setPageIdx",
+  "atBookEnd", "holdBookEnd", "setAtBookEnd"];
 const install = new Function(...dependencies, outputText);
 
 function scenario({ paged = true, columns = 1, offset = 900, visible = 1200, pending = null } = {}) {
@@ -40,8 +41,8 @@ function scenario({ paged = true, columns = 1, offset = 900, visible = 1200, pen
         assert.equal(el.isConnected, true, "必须在旧滚动 DOM 卸载前采样");
         sampled++;
         return viewport;
-      }, viewOffset, setResumeTarget, (page, count) => Math.floor(page / count) * count,
-      pageIdx, setPageIdx);
+      },       viewOffset, setResumeTarget, (page, count) => Math.floor(page / count) * count,
+      pageIdx, setPageIdx, () => false, () => {}, () => {});
     // 模拟 JSX 的模式切换以及章首滚动容器挂载。
     createRenderEffect(on(isPaged, (mode) => {
       root.isConnected = !mode;

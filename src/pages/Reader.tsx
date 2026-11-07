@@ -15,6 +15,7 @@ import {
 } from "../lib/annotations";
 import { createReaderAutoPage } from "../lib/readerAutoPage";
 import { createReaderPageTurn } from "../lib/readerPageTurn";
+import { BOOK_END_PREVIEW, bookEndDragTarget, stepBookEnd } from "../lib/readerBookEnd";
 import { trackReadingTime } from "../lib/readingTime";
 import { Drawer } from "../components/Drawer";
 import {
@@ -584,6 +585,19 @@ function renderMarkedText(
 // 阅读片段渲染（分页与滚动共用同一套版式样式）
 // ---------------------------------------------------------------------------
 
+/** 全书最后的完结说明。分页完结页与滚动模式章末共用，字号跟随正文。 */
+function BookEndNote() {
+  return (
+    <div class="flex max-w-[16rem] flex-col items-center gap-5 px-6 text-center">
+      <span class="h-px w-8 bg-border" aria-hidden="true" />
+      <p class="m-0 font-medium text-text-2" style={{ "letter-spacing": "0.06em" }}>
+        {t("reader.bookFinished")}
+      </p>
+      <span class="h-px w-8 bg-border" aria-hidden="true" />
+    </div>
+  );
+}
+
 function TitleBlock(props: {
   layout: PaginateLayout;
   title: string;
@@ -1075,6 +1089,11 @@ export default function ReaderPage() {
   const [translationTarget, setTranslationTarget] = createSignal<TranslationPopupTarget | null>(null);
   const [chapterIdx, setChapterIdx] = createSignal(0);
   const [pageIdx, setPageIdx] = createSignal(0);
+  /**
+   * 停在最后一章最后一屏之后的虚拟完结页。
+   * 不占用页码：底下的 pageIdx 仍是进入前的正文屏，阅读进度继续记那一屏的字符偏移。
+   */
+  const [atBookEnd, setAtBookEnd] = createSignal(false);
   const [menuOpen, writeMenuOpen] = createSignal(false);
   const setMenuOpen = (open: boolean) => writeMenuOpen(open && !usesWindowPageTitle());
   const [tocOpen, setTocOpen] = createSignal(false);
@@ -1166,6 +1185,7 @@ export default function ReaderPage() {
       setChapterIdx(
         Math.min(max, Math.max(0, target?.chapterIndex ?? entry?.chapter ?? 0)),
       );
+      setAtBookEnd(false);
       setPageIdx(0);
       // 内存里的“读到哪”跟着回到章首：换书 / 目录变更后它属于上一本书，留着会污染后续定位
       setViewOffset(0);
@@ -1362,6 +1382,7 @@ export default function ReaderPage() {
         const error = outcome.error ?? t("common.unknownError");
         // 重载已放弃，正文仍是原来的：把视口退回重载前的位置，不让阅读进度跟着漂
         if (snapshot && chapterIdx() === targetIndex && chapter()?.cid === snapshot.cid) {
+          setAtBookEnd(false);
           setPageIdx(snapshot.page);
           setViewOffset(snapshot.char);
           if (snapshot.char > 0) setResumeTarget({ cid: snapshot.cid, char: snapshot.char });
@@ -1372,6 +1393,7 @@ export default function ReaderPage() {
       // 重载后回到本章开头（旧正文的偏移/页码已无意义）
       if (chapterIdx() === targetIndex) {
         setResumeTarget(null);
+        setAtBookEnd(false);
         setPageIdx(0);
         setViewOffset(0);
         if (scrollRef) scrollRef.scrollTop = 0;
@@ -2148,6 +2170,8 @@ export default function ReaderPage() {
 
   /** 朗读句是否正显示在当前屏 —— 分页模式下用户口中的「跟读页」（双页模式含右页） */
   function speakOnCurrentScreen(): boolean {
+    // 完结页盖住正文，页码虽还停在最后一屏，视图上并不是跟读页。
+    if (atBookEnd()) return false;
     const f = ttsPlayer.focus();
     if (!f) return false;
     const page = speakPageIndex(f);
@@ -2361,6 +2385,8 @@ export default function ReaderPage() {
     const mir = mirror();
     if (!mir || mir.text.length === 0) return false;
     if (isPaged()) {
+      // 「返回跟读」即使朗读句就在底下那一屏，也要先揭开完结页。
+      if (atBookEnd()) setAtBookEnd(false);
       const page = speakPageIndex(f);
       if (page < 0) return false;
       // 朗读句落在本屏（含右页）就算已可见，不翻页
@@ -2611,9 +2637,13 @@ export default function ReaderPage() {
     const total = totalPages();
     if (total <= 0 || !isPaged()) return;
     const next = snapPage(page);
-    if (next === pageIdx()) return;
+    if (next === pageIdx()) {
+      if (atBookEnd()) setAtBookEnd(false);
+      return;
+    }
     cancelFollowIfActive();
     offerJumpBack();
+    setAtBookEnd(false);
     setPageIdx(next);
     armFollowPageCheck(); // 跳到的这一屏是朗读句所在屏时恢复跟读跟随
   }
@@ -2626,6 +2656,19 @@ export default function ReaderPage() {
       if (!prev) return; // 首次挂载由存档恢复流程定位。
       const modeChanged = mode !== prev[0];
       if (!mode && !modeChanged) return;
+      if (atBookEnd()) {
+        // 单双页切换仍停在完结页，只把底下的末屏夹回新的屏首。
+        // 离开分页后完结页不存在，交给下面的正文位置恢复。
+        if (mode && !modeChanged) {
+          const next = spreadStart(pageIdx(), pageColumns());
+          if (next !== pageIdx()) {
+            holdBookEnd();
+            setPageIdx(next);
+          }
+          return;
+        }
+        setAtBookEnd(false);
+      }
       const ch = chapter();
       if (!ch) return;
       // 快速连续切换 / 打开书尚未恢复时，沿用未落定的目标，不能退回旧位置。
@@ -2719,6 +2762,7 @@ export default function ReaderPage() {
     dismissJumpBack();
     if (!origin) return;
     cancelFollowIfActive();
+    setAtBookEnd(false);
     goToChapter(origin.ci);
     if (origin.char > 0) {
       const target = book()?.chapters[origin.ci];
@@ -2779,6 +2823,15 @@ export default function ReaderPage() {
   createEffect(
     on(totalPages, (total, prevTotal) => {
       if (total <= 0 || prevTotal === undefined || prevTotal <= 0) return;
+      if (atBookEnd()) {
+        // 重排不离开完结页；底下的页码改夹到新的最后一屏，供回翻落回正文。
+        const next = snapPage(total - 1);
+        if (next !== pageIdx()) {
+          holdBookEnd();
+          setPageIdx(next);
+        }
+        return;
+      }
       const ratio = pageIdx() / prevTotal;
       const next = snapPage(ratio * (total - 1));
       if (next !== pageIdx()) setPageIdx(next);
@@ -2789,8 +2842,27 @@ export default function ReaderPage() {
   createEffect(() => {
     const total = totalPages();
     const idx = pageIdx();
-    if (total > 0 && idx >= total) setPageIdx(snapPage(total - 1));
+    if (total > 0 && idx >= total) {
+      const next = snapPage(total - 1);
+      if (next !== idx) {
+        if (atBookEnd()) holdBookEnd();
+        setPageIdx(next);
+      }
+    }
   });
+
+  // 正文页码变化即离开虚拟完结页。重排夹页前先 holdBookEnd，避免字号变化把完结页打掉。
+  let retainBookEnd = false;
+  function holdBookEnd(): void {
+    retainBookEnd = true;
+  }
+  createEffect(on(pageIdx, () => {
+    if (retainBookEnd) {
+      retainBookEnd = false;
+      return;
+    }
+    if (atBookEnd()) setAtBookEnd(false);
+  }, { defer: true }));
 
   // -------------------------------------------------------------------
   // 精确进度（文本定位）：阅读位置 ↔ 章节 cid + 章节正文镜像文本字符偏移
@@ -2845,6 +2917,7 @@ export default function ReaderPage() {
    * 自绘选区的端点夹取、手柄显示与菜单避让都按这一屏算，不能只看左页。
    */
   const visibleSpan = createMemo<[number, number] | null>(() => {
+    if (atBookEnd()) return null;
     const spans = pageSpans();
     const first = snapPage(pageIdx());
     if (spans.length === 0 || first < 0 || first >= spans.length) return null;
@@ -3019,6 +3092,7 @@ export default function ReaderPage() {
       return;
     }
     if (isPaged()) {
+      if (atBookEnd()) setAtBookEnd(false);
       const pg = paged();
       if (!pg) return; // 分页重排中，等下一个 tick
       const page = pageIndexOfChar(pg.pages, mir, target.char, target.translated);
@@ -3098,9 +3172,14 @@ export default function ReaderPage() {
     const current = book();
     if (!current) return;
     const clamped = Math.max(0, Math.min(idx, current.chapters.length - 1));
-    if (clamped === chapterIdx()) return;
+    if (clamped === chapterIdx()) {
+      // 目录再次点当前章：完结页没有章节正文，回到底下那一屏。
+      if (atBookEnd()) setAtBookEnd(false);
+      return;
+    }
     if (wantLastPageCid !== current.chapters[clamped]?.cid) wantLastPageCid = null;
     if (browse) browseChapterPending = true;
+    setAtBookEnd(false);
     setChapterIdx(clamped);
     setPageIdx(0);
     setViewOffset(0);
@@ -3169,6 +3248,7 @@ export default function ReaderPage() {
 
     if (hit.kind !== "body") {
       // 标题命中 → 章首
+      setAtBookEnd(false);
       if (hit.chapterIndex !== chapterIdx()) {
         goToChapter(hit.chapterIndex);
       } else if (isPaged()) {
@@ -3179,6 +3259,7 @@ export default function ReaderPage() {
       return;
     }
 
+    setAtBookEnd(false);
     if (hit.chapterIndex !== chapterIdx()) goToChapter(hit.chapterIndex);
     const mir = buildTextMirror(chapterUnits(target));
     const pos = unitAtGlobalOffset(mir, hit.start);
@@ -3222,6 +3303,7 @@ export default function ReaderPage() {
     setMenuOpen(false);
     setBookSearchOpen(false);
     if (!prev) return;
+    setAtBookEnd(false);
     goToChapter(prev.ci);
     if (prev.char > 0) {
       const target = book()?.chapters[prev.ci];
@@ -3233,12 +3315,34 @@ export default function ReaderPage() {
     }
   }
 
-  /** 左右翻页（含章节边界衔接）；双页模式一次翻一屏（两页）。返回是否发生了位移 */
+  /** 左右翻页（含章节边界衔接与全书完结页）；双页模式一次翻一屏（两页）。返回是否发生了位移 */
   function turnPage(dir: 1 | -1): boolean {
     if (!isPaged()) return false;
     const total = totalPages();
     const idx = snapPage(pageIdx());
     const step = pageColumns();
+    const end = stepBookEnd({
+      dir,
+      atEnd: atBookEnd(),
+      hasNextContent: idx + step < total,
+      isLastChapter: isLastChapter(),
+      hasPages: total > 0,
+    });
+    if (end) {
+      if (!end.moved) return false;
+      cancelFollowIfActive();
+      if (end.atEnd) {
+        // 先盖上完结页，再清选区：清选区会同步做跟读页判定，必须已经不算正文屏。
+        setAtBookEnd(true);
+        setSelSpan(null);
+        setSelMenu(null);
+        setTranslationTarget(null);
+        log.info("打开全书完结页");
+        return true;
+      }
+      setAtBookEnd(false);
+      return true;
+    }
     if (dir > 0) {
       if (idx + step < total) {
         // 先解除跟读跟随再翻页：若翻页后才取消，朗读句的自动跟随仍可能
@@ -3305,16 +3409,28 @@ export default function ReaderPage() {
 
   function beginPageDrag(dir: 1 | -1): boolean {
     if (!pageAnimRef || !isPaged() || contentPendingGate()) return false;
-    const next = snapPage(pageIdx()) + dir * pageColumns();
-    if (next < 0 || next >= totalPages()) {
-      if (dir > 0 ? isLastChapter() : isFirstChapter()) return false;
+    const spread = snapPage(pageIdx());
+    const next = spread + dir * pageColumns();
+    const target = bookEndDragTarget({
+      dir,
+      atEnd: atBookEnd(),
+      nextSpread: next,
+      totalPages: totalPages(),
+      isLastChapter: isLastChapter(),
+      isFirstChapter: isFirstChapter(),
+    });
+    if (target === "none") return false;
+    if (target === "cross") {
       // 跨章也翻起当前纸张；目标正文尚未下载/排版时不拿本章内容作预览。
       // 确认翻页后才由 turnPage 切章，回弹不切章，加载门闩与上一章末页定位照旧。
       setPagePreviewIndex(null);
       return pageTurn.begin(pageAnimRef, undefined, dir);
     }
-    setPagePreviewIndex(next);
-    const preview = pageAnimRef.parentElement?.querySelector<HTMLElement>(`[data-reader-spread="${next}"]`);
+    const previewIndex = target === "end" ? BOOK_END_PREVIEW : target === "back" ? spread : next;
+    setPagePreviewIndex(previewIndex);
+    const preview = pageAnimRef.parentElement?.querySelector<HTMLElement>(
+      target === "end" ? "[data-reader-book-end]" : `[data-reader-spread="${previewIndex}"]`,
+    );
     return !!preview && pageTurn.begin(pageAnimRef, preview, dir);
   }
 
@@ -4111,7 +4227,8 @@ export default function ReaderPage() {
       // 手指仍在正文上或纸张正在翻动时等待，避免打断拖动和长按。
       if (gestureStart || pageTurn.active() || hasActiveTextSelection()) return true;
       if (isPaged()) {
-        if (snapPage(pageIdx()) + pageColumns() >= totalPages() && isLastChapter()) return false;
+        // 最后一屏先翻到完结页，下一次再到书末才停止。
+        if (atBookEnd()) return false;
         userFlip(1);
         return true;
       }
@@ -4630,6 +4747,7 @@ export default function ReaderPage() {
     if (p.chapter !== chapterIdx()) return; // 章节切换尚未落地
     const mir = mirror();
     if (mode) {
+      if (atBookEnd()) setAtBookEnd(false);
       if (!pg) return; // 分页重排中
       const page = pageIndexOfChar(pg.pages, mir, p.charStart);
       if (page < 0) {
@@ -4675,7 +4793,7 @@ export default function ReaderPage() {
   );
 
   function renderPagedSpread(first: number) {
-    const live = () => first === snapPage(pageIdx());
+    const live = () => first === snapPage(pageIdx()) && !atBookEnd();
     const visible = () => live() || first === pagePreviewIndex();
     const visiblePages = createMemo(() => paged()?.pages.slice(first, first + pageColumns()) ?? []);
     const visibleWidth = () => visiblePages().length * layout()!.textWidth + Math.max(0, visiblePages().length - 1) * geometry()!.gap;
@@ -4793,6 +4911,61 @@ export default function ReaderPage() {
       if (colRef === columns) colRef = undefined;
     });
     return spread;
+  }
+
+  /** 最后一章分页就绪后挂上完结页，供末屏向前翻时当作预览，也供已经翻到时显示。 */
+  const bookEndMounted = createMemo(() => {
+    if (!isPaged() || !layout()) return false;
+    // 已经翻进来时保持挂载，避免正文被隐藏后又没有这一页。
+    if (atBookEnd()) return true;
+    const current = chapter();
+    return !!current && isLastChapter() && totalPages() > 0 && chapterHasContent(current)
+      && !remoteMissing() && !remoteBodyEmpty();
+  });
+
+  function renderBookEnd() {
+    const live = () => atBookEnd();
+    const visible = () => live() || pagePreviewIndex() === BOOK_END_PREVIEW;
+    let surface!: HTMLDivElement;
+    const page = (
+      <div
+        ref={surface}
+        data-reader-book-end=""
+        class="absolute inset-0 select-none overflow-hidden bg-bg"
+        aria-hidden={!live()}
+        inert={!live() || resumeTarget() !== null}
+        style={{
+          "touch-action": "none",
+          opacity: visible() && !(live() && resumeTarget() !== null) ? "1" : "0",
+          "z-index": pagePreviewIndex() === BOOK_END_PREVIEW ? "1" : "0",
+          "pointer-events": live() ? "auto" : "none",
+        }}
+      >
+        <div
+          class="mx-auto flex h-full flex-col"
+          style={{
+            width: `${blockWidth()}px`,
+            ...asCss(readingBaseStyle(layout()!)),
+          }}
+        >
+          <div style={{ height: `${readerTopPad()}px`, flex: "none" }} />
+          <div
+            class="flex flex-none items-center justify-center"
+            style={{ height: `${layout()!.pageHeight}px` }}
+          >
+            <BookEndNote />
+          </div>
+          <div class="flex-none" style={{ height: `${bottomPadPaged()}px` }} />
+        </div>
+      </div>
+    );
+    createRenderEffect(() => {
+      if (live()) pageAnimRef = surface;
+    });
+    onCleanup(() => {
+      if (pageAnimRef === surface) pageAnimRef = undefined;
+    });
+    return page;
   }
 
   function browseAdjacentChapter(direction: -1 | 1): void {
@@ -5018,9 +5191,12 @@ export default function ReaderPage() {
                   /* 分页模式：左右翻页视图（select-none：由自绘选区接管文本选取）。
                      宽窗口下一屏并排两页（见 lib/readerLayout.ts）：块内按列宽排字，
                      中缝由 flex 的 gap 给出，末屏只剩一页时居中。 */
-                  <For each={mountedSpreads()}>
-                    {(first) => renderPagedSpread(first)}
-                  </For>
+                  <>
+                    <For each={mountedSpreads()}>
+                      {(first) => renderPagedSpread(first)}
+                    </For>
+                    <Show when={bookEndMounted()}>{renderBookEnd()}</Show>
+                  </>
                 }
               >
                 {/* 恢复期间用透明度隐藏：避免同步重挂的文字节点残留继承的 visibility:hidden。
@@ -5066,6 +5242,20 @@ export default function ReaderPage() {
                         />
                       )}
                     </For>
+                    <Show
+                      when={
+                        isLastChapter() &&
+                        chapterHasContent(chapter()!) &&
+                        scrollShown() >= displayUnits().length &&
+                        !remoteMissing() &&
+                        !remoteBodyEmpty()
+                      }
+                    >
+                      {/* 贴在正文后面偏上，避免按页下滚时把句子翻出屏幕 */}
+                      <div class="flex flex-col items-center px-6 pb-24 pt-[18vh] text-center">
+                        <BookEndNote />
+                      </div>
+                    </Show>
                   </div>
                 </div>
               </Show>
@@ -5330,6 +5520,10 @@ export default function ReaderPage() {
                 >
                   <span class="min-w-0 flex-1 truncate">{chapter()!.title}</span>
                   <span class="flex-none whitespace-nowrap tabular-nums">
+                    <Show
+                      when={!atBookEnd()}
+                      fallback={<span>{t("reader.bookFinished")}</span>}
+                    >
                     <Show when={statusPercent() !== null}>
                       <span>{statusPercent()}%</span>
                     </Show>
@@ -5340,6 +5534,7 @@ export default function ReaderPage() {
                           "reader.statusPageRange",
                         )}
                       </span>
+                    </Show>
                     </Show>
                   </span>
                 </div>
@@ -5579,7 +5774,7 @@ export default function ReaderPage() {
                       total: chapterCount(),
                       count: chapterCount(),
                     })}
-                    {isPaged() && totalPages() > 0
+                    {isPaged() && totalPages() > 0 && !atBookEnd()
                       ? pageProgressText("reader.menuPageProgress", "reader.menuPageRange")
                       : ""}
                   </span>
@@ -5702,7 +5897,7 @@ export default function ReaderPage() {
                 </ScrollArea>
                 <Show when={usesWindowPageTitle()}>
                   <ReaderDesktopTocFooter
-                    progress={t("reader.menuChapterProgress", { index: chapterIdx() + 1, total: chapterCount(), count: chapterCount() }) + (isPaged() && totalPages() > 0 ? pageProgressText("reader.menuPageProgress", "reader.menuPageRange") : "")}
+                    progress={t("reader.menuChapterProgress", { index: chapterIdx() + 1, total: chapterCount(), count: chapterCount() }) + (isPaged() && totalPages() > 0 && !atBookEnd() ? pageProgressText("reader.menuPageProgress", "reader.menuPageRange") : "")}
                     slider={isPaged() && currentMenuSliderEnabled() && totalPages() > 1 && !searchSession()}
                     page={pageIdx()} total={totalPages()} onSeek={seekToPage}
                     firstChapter={isFirstChapter()} lastChapter={isLastChapter()}
@@ -5806,6 +6001,7 @@ export default function ReaderPage() {
                 onClose={() => setChapterEditTarget(null)} onSaved={() => {
                   if (bookId() === target().bookId && chapter()?.cid === target().chapter.cid) {
                     setResumeTarget(null);
+                    setAtBookEnd(false);
                     setPageIdx(0);
                     setViewOffset(0);
                     if (scrollRef) scrollRef.scrollTop = 0;
