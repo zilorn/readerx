@@ -37,6 +37,7 @@ export const reader = {
   "reader.statusPageRange": " · {from}–{to} / {total} 页",
   "reader.menuPageProgress": " · {page}/{total}页",
   "reader.menuPageRange": " · {from}–{to}/{total}页",
+  "reader.bookFinished": "本书已读完",
 
   // 目录抽屉
   "reader.toc": "目录",

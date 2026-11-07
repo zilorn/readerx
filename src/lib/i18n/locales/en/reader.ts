@@ -56,6 +56,7 @@ export const reader = {
   "reader.menuPageRange": " · {from}–{to}/{total} pages",
   "reader.menuPageRange_one": " · {from}–{to}/{total} page",
   "reader.menuPageRange_other": " · {from}–{to}/{total} pages",
+  "reader.bookFinished": "You've finished this book",
 
   // Table of contents drawer
   "reader.toc": "Contents",

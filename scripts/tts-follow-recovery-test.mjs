@@ -3,6 +3,12 @@ import { readFile } from "node:fs/promises";
 import ts from "typescript";
 import { batch, createEffect, createRoot, createSignal, on } from "../node_modules/solid-js/dist/solid.js";
 
+const endSource = await readFile(new URL("../src/lib/readerBookEnd.ts", import.meta.url), "utf8");
+const { outputText: endJs } = ts.transpileModule(endSource, {
+  compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
+});
+const { stepBookEnd } = await import(`data:text/javascript;base64,${Buffer.from(endJs).toString("base64")}`);
+
 // 执行 Reader 的实际恢复判定、翻页入口和跟随 effect；Solid 浏览器运行时保留同步更新时序。
 const source = await readFile(new URL("../src/pages/Reader.tsx", import.meta.url), "utf8");
 const ast = ts.createSourceFile("Reader.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
@@ -54,6 +60,7 @@ function scenario({ columns = 1, animated = true } = {}) {
     const [status, setStatus] = createSignal("playing");
     const [resumeTarget, setResumeTarget] = createSignal(null);
     const [jumpOrigin, setJumpOrigin] = createSignal(null);
+    const [atBookEnd, setAtBookEnd] = createSignal(false);
     const intervals = new Map();
     let nextInterval = 0, finish;
     const dependencies = {
@@ -81,6 +88,9 @@ function scenario({ columns = 1, animated = true } = {}) {
       },
       pageTurn: { active: () => false, finish: (_commit, fn) => { finish = fn; } },
       beginPageDrag: () => animated, setPagePreviewIndex: () => {}, offerJumpBack: () => {},
+      atBookEnd, setAtBookEnd, stepBookEnd,
+      setSelSpan: () => {}, setSelMenu: () => {}, setTranslationTarget: () => {},
+      log: { info() {} },
     };
     const actions = new Function(...Object.keys(dependencies), outputText)(...Object.values(dependencies));
     state = {
