@@ -266,7 +266,9 @@ async function googleText(
   }
   return out;
 }
-// 百度标准版限制约 1 QPS：请求逐条串行并保持约 1 秒间隔，避免连续撞限流后只能重试。
+// 百度标准版限制约 1 QPS。每次实际发出的请求（含 52001/52002/54003 重试）
+// 都进入同一队列，并与上一次请求保持约 1 秒间隔。重试等待放在队列外，
+// 避免一次失败占住队列，也避免重试拉长任务后下一次请求立刻跟上。
 let baiduQueue: Promise<unknown> = Promise.resolve();
 let baiduReadyAt = 0;
 function baiduSerial<T>(
@@ -303,13 +305,17 @@ async function baiduRequest(
       salt,
       sign: bytesToHex(md5(utf8.encode(appId + text + salt + secret))),
     });
-    const response = await request(
-      BAIDU_ENDPOINT,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body,
-      },
+    const response = await baiduSerial(
+      () =>
+        request(
+          BAIDU_ENDPOINT,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body,
+          },
+          signal,
+        ),
       signal,
     );
     let data: any;
@@ -350,10 +356,7 @@ async function baiduText(
   const target = targetCode(BAIDU_LANGUAGES, settings.target);
   let out = "";
   for (const chunk of splitByBytes(text, 6000))
-    out += await baiduSerial(
-      () => baiduRequest(chunk, appId, secret, target, signal),
-      signal,
-    );
+    out += await baiduRequest(chunk, appId, secret, target, signal);
   return out;
 }
 const BING_ENTITIES =

@@ -366,6 +366,17 @@ assert.deepEqual(
   "百度频率超限后退避重试",
 );
 assert.equal(requests.length, 2, "54003 重试只增加一次请求");
+assert.ok(
+  requests[1].at - requests[0].at >= 900,
+  "54003 退避后才重试",
+);
+response = { trans_result: [{ dst: "下一段" }] };
+await provider.translateBatch(["next"], baiduSettings, [], signal);
+assert.equal(requests.length, 3);
+assert.ok(
+  requests[2].at - requests[1].at >= 900,
+  "54003 重试成功后，下一次请求仍保持约 1 秒间隔",
+);
 queue = [];
 response = { trans_result: [{ src: "a", dst: "A" }, { src: "b", dst: "B" }] };
 assert.deepEqual(
