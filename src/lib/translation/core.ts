@@ -24,6 +24,8 @@ export function translationKey(
     terms
       .map((term) => [term.source, term.target, term.note])
       .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)),
+    // 百度按 APP ID 隔离账户；其他服务不加入，保持既有缓存键不变。
+    ...(settings.provider === "baidu" ? [fingerprint(settings.appId)] : []),
   ]);
 }
 export function chapterText(chapter: LocalBookChapter): string[] {

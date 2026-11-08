@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import ts from "typescript";
 import * as solid from "../node_modules/solid-js/dist/solid.js";
 import { sha256 } from "@noble/hashes/sha2.js";
+import { md5 } from "@noble/hashes/legacy.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 
 async function load(path, imports, transformers) {
@@ -44,6 +45,8 @@ const settings = await load("lib/translation/settings.ts", {
 });
 const provider = await load("lib/translation/provider.ts", {
   "../i18n": i18n, "./core": core,
+  "@noble/hashes/legacy.js": { md5 },
+  "@noble/hashes/utils.js": { bytesToHex },
   "../http": { httpFetch: async (_url, init) => {
     requests++;
     if (pending) return pending(init);

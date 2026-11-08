@@ -48,12 +48,15 @@ export const translation = {
   "translation.lang.es": "Spanish",
   "translation.provider": "Translation service",
   "translation.provider.google": "Google Translate (no key)",
+  "translation.provider.baidu": "Baidu Translate (APP ID + key)",
+  "translation.provider.bing": "Bing Translate (free)",
   "translation.provider.openai": "OpenAI",
   "translation.provider.deepseek": "DeepSeek",
   "translation.provider.custom": "Custom AI",
   "translation.protocol": "API protocol",
   "translation.baseUrl": "Base URL",
   "translation.model": "Model",
+  "translation.appId": "APP ID",
   "translation.apiKey": "API key",
   "translation.effort": "Reasoning effort",
   "translation.effort.default": "Provider default",
@@ -89,6 +92,10 @@ export const translation = {
     "The service returned an invalid translation. Retry.",
   "translation.invalidUrl": "Enter a valid HTTP(S) base URL",
   "translation.modelRequired": "Configure an AI model first",
+  "translation.baiduKeyRequired":
+    "Enter the Baidu Translate APP ID and secret key first",
+  "translation.serviceError":
+    "Translation service error ({code}). Check your key or quota, or retry later.",
   "translation.aiRequired":
     "Choose OpenAI, DeepSeek or custom AI to use this feature.",
   "translation.noSamples": "No book text is available for sampling",
@@ -97,5 +104,7 @@ export const translation = {
   "translation.saved": "Glossary saved",
   "translation.publicService":
     "The public service may be rate limited or unavailable. Switch to an AI service if it fails.",
+  "translation.bingNotice":
+    "The free Bing endpoint needs no key and may be rate limited or unavailable. Switch to an AI service if it fails.",
   "translation.bookInherit": "Unchanged options follow global settings",
 } as const;

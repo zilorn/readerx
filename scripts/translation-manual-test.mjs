@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import ts from "typescript";
 import * as solid from "../node_modules/solid-js/dist/solid.js";
 import { sha256 } from "@noble/hashes/sha2.js";
+import { md5 } from "@noble/hashes/legacy.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 
 async function load(path, imports) {
@@ -37,6 +38,8 @@ const title = await load("lib/translation/title.ts", {
 let requests = [], pending, fail = false;
 const provider = await load("lib/translation/provider.ts", {
   "./core": core, "../i18n": i18n,
+  "@noble/hashes/legacy.js": { md5 },
+  "@noble/hashes/utils.js": { bytesToHex },
   "../http": { httpFetch: async (_url, init) => {
     const body = JSON.parse(init.body);
     const input = JSON.parse(body.input ?? body.messages[1].content);

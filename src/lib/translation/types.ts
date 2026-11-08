@@ -1,5 +1,11 @@
 export type TranslationMode = "bilingual" | "translated" | "original";
-export type TranslationProvider = "google" | "openai" | "deepseek" | "custom";
+export type TranslationProvider =
+  | "google"
+  | "baidu"
+  | "bing"
+  | "openai"
+  | "deepseek"
+  | "custom";
 export type TranslationProtocol = "chat" | "responses";
 export const TARGET_LANGUAGES = [
   "zh-CN",
@@ -22,6 +28,7 @@ export interface TranslationSettings {
   protocol: TranslationProtocol;
   baseUrl: string;
   model: string;
+  appId: string;
   apiKey: string;
   effort: string;
   pretranslate: number;
@@ -68,6 +75,7 @@ export const DEFAULT_TRANSLATION_SETTINGS: TranslationSettings = {
   protocol: "chat",
   baseUrl: "",
   model: "",
+  appId: "",
   apiKey: "",
   effort: "",
   pretranslate: 0,
