@@ -5,7 +5,7 @@ import { For } from "solid-js";
 import { checkAppUpdate, downloadAppUpdate } from "../lib/appUpdates";
 import { availableAppUpdate, appUpdateChecking, autoAppUpdate, setAutoAppUpdateEnabled } from "../lib/store";
 import { ReadingTimeSummary } from "../components/ReadingTimeSummary";
-import { createEffect, createSignal, onCleanup, Show, type JSX } from "solid-js";
+import { createEffect, createSignal, Show, type JSX } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 import { openExternal } from "../lib/external";
 import {
@@ -13,14 +13,12 @@ import {
   ChevronRightIcon,
   FileTextIcon,
   GitHubIcon,
-  HeadphonesIcon,
   LibraryIcon,
   PackageIcon,
   RegexIcon,
   SourceIcon,
   SyncIcon,
   TerminalIcon,
-  TrashIcon,
 } from "../components/icons";
 import { PageHeader } from "../components/PageHeader";
 import { LICENSE_NAME, LicenseSheet } from "../components/LicenseSheet";
@@ -35,7 +33,6 @@ import {
   SOURCE_PARALLEL_MIN,
   currentSourceParallel,
   currentTheme,
-  resetReadingProgress,
   setSourceParallel,
   setShelfSourceFilterEnabled,
   setTheme,
@@ -99,31 +96,13 @@ function Row(props: {
 export default function SettingsPage() {
   const navigate = useNavigate();
   void ensureTranslationSettings().catch(error => reportFailure(t("translation.loadFailed"), error));
-  const [resetConfirming, setResetConfirming] = createSignal(false);
   const [licenseOpen, setLicenseOpen] = createSignal(false);
   const [noticesOpen, setNoticesOpen] = createSignal(false);
   const [logOpen, setLogOpen] = createSignal(false);
-  let timer: number | undefined;
-
-  onCleanup(() => {
-    window.clearTimeout(timer);
-  });
 
   createEffect(() => {
     void loadAppVersion();
   });
-
-  function onResetProgress() {
-    if (!resetConfirming()) {
-      setResetConfirming(true);
-      window.clearTimeout(timer);
-      timer = window.setTimeout(() => setResetConfirming(false), 3000);
-      return;
-    }
-    window.clearTimeout(timer);
-    setResetConfirming(false);
-    resetReadingProgress();
-  }
 
   return (
     <div class="page">
@@ -355,31 +334,12 @@ export default function SettingsPage() {
           <div class="divide-y divide-border overflow-hidden rounded-[14px] border border-border bg-surface">
             <Row
               icon={<PackageIcon size={18} />}
-              label={t("settings.data.backup")}
-              desc={t("settings.data.backupDesc")}
-              onClick={() => navigate("/data-backup")}
+              label={t("settings.data.manage")}
+              desc={t("settings.data.manageDesc")}
+              onClick={() => navigate("/data")}
             >
               <ChevronRightIcon size={18} class="flex-none text-text-3" />
             </Row>
-            <Row
-              icon={<HeadphonesIcon size={18} />}
-              label={t("settings.data.ttsCache")}
-              desc={t("settings.data.ttsCacheDesc")}
-              onClick={() => navigate("/tts-cache")}
-            >
-              <ChevronRightIcon size={18} class="flex-none text-text-3" />
-            </Row>
-            <Row
-              icon={<TrashIcon size={18} />}
-              label={
-                resetConfirming()
-                  ? t("settings.data.resetConfirm")
-                  : t("settings.data.resetProgress")
-              }
-              desc={t("settings.data.resetProgressDesc")}
-              danger
-              onClick={onResetProgress}
-            />
           </div>
         </section>
 

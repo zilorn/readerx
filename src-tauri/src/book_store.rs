@@ -467,6 +467,12 @@ fn library_transaction() -> std::sync::MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|error| error.into_inner())
 }
 
+/// 占用统计与清理要和书库写入串行，由调用方包住整段读写。闭包内不要再取这把锁。
+pub(crate) fn with_library_lock<T>(body: impl FnOnce() -> T) -> T {
+    let _transaction = library_transaction();
+    body()
+}
+
 // ---------------------------------------------------------------------------
 // 对外读写
 // ---------------------------------------------------------------------------
@@ -509,13 +515,22 @@ pub(crate) fn get_book<R: tauri::Runtime>(
 /// 整本写入（导入 / 在线书整本替换）。
 pub(crate) fn put_book<R: tauri::Runtime>(
     app: &AppHandle<R>,
-    mut book: LocalBook,
+    book: LocalBook,
 ) -> Result<(), String> {
     let _transaction = library_transaction();
-    let root = crate::storage::data_root(app)?;
-    let mut db = sqlite::open(&root)?;
+    put_book_in(&crate::storage::data_root(app)?, book)
+}
+
+/// 把一本书写入指定数据根。测试夹具使用；调用方不必先拿书库锁。
+pub(crate) fn put_book_at(root: &Path, book: LocalBook) -> Result<(), String> {
+    let _transaction = library_transaction();
+    put_book_in(root, book)
+}
+
+fn put_book_in(root: &Path, mut book: LocalBook) -> Result<(), String> {
+    let mut db = sqlite::open(root)?;
     sqlite::valid_id(&book.id)?;
-    if sqlite::detail(&db, &book.id)?.is_none() && legacy_book_at(&root, &book.id)?.is_some() {
+    if sqlite::detail(&db, &book.id)?.is_none() && legacy_book_at(root, &book.id)?.is_some() {
         return Err("书籍数据迁移失败，请查看应用日志".into());
     }
     crate::book_images::migrate_book(&root.join("images"), &mut book);
@@ -1943,4 +1958,48 @@ pub(crate) fn translation_invalidate<R: tauri::Runtime>(app: &AppHandle<R>, id: 
     let tx = db.transaction().map_err(|e|e.to_string())?;
     sqlite::translation::invalidate_translations(&tx,id,cid)?;
     tx.commit().map_err(|e|e.to_string())
+}
+
+/// 数据管理页用的按书占用。调用方须已持有书库锁。没有数据库文件时不创建。
+pub(crate) struct BookCacheFootprint {
+    pub id: String,
+    pub content_bytes: u64,
+    pub translation_bytes: u64,
+    pub image_locals: Vec<String>,
+}
+
+pub(crate) fn storage_books(root: &Path) -> Result<Vec<BookCacheFootprint>, String> {
+    if !root.join(sqlite::DATABASE).is_file() {
+        return Ok(Vec::new());
+    }
+    let db = sqlite::open(root)?;
+    Ok(sqlite::storage_books(&db)?
+        .into_iter()
+        .map(|row| BookCacheFootprint {
+            id: row.id,
+            content_bytes: row.content_bytes,
+            translation_bytes: row.translation_bytes,
+            image_locals: row.image_locals,
+        })
+        .collect())
+}
+
+/// 删除所选书的译文缓存并推进章节租约，术语表与局部配置保留。
+/// 调用方须已持有书库锁。有删除时 VACUUM，让书库文件把空闲页还回去。
+pub(crate) fn clear_translation_caches(root: &Path, ids: &[String]) -> Result<u64, String> {
+    if ids.is_empty() || !root.join(sqlite::DATABASE).is_file() {
+        return Ok(0);
+    }
+    let mut db = sqlite::open(root)?;
+    let tx = sqlite::transaction(&mut db)?;
+    let mut rows = 0u64;
+    for id in ids {
+        rows += sqlite::translation::clear_book_translations(&tx, id)?;
+    }
+    sqlite::commit(tx)?;
+    if rows > 0 {
+        db.execute_batch("VACUUM")
+            .map_err(|error| format!("书库数据库操作失败: {error}"))?;
+    }
+    Ok(rows)
 }

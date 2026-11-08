@@ -69,3 +69,10 @@ manual.ts 的全书手动翻译仅处理已下载文字章，复用原文关联�
 [智能翻译](../../../../docs/smart-translation.md)。运行 book_store / data_transfer Rust 回归及前端
 `node scripts/translation-test.mjs`、`node scripts/translation-storage-test.mjs`、
 `node scripts/glossary-test.mjs`（术语表语言标记、AI 校验与失败重试）；无需修改同步协议。
+
+## 占用与清理
+
+- 设置页「数据」只保留进入数据管理页（`/data`）的入口。备份、听书缓存和重置阅读进度在该页；备份页与听书缓存页的行为不变。
+- `readerx_storage_usage` 只统计数据根下的普通文件，不跟随符号链接。类别字节相加等于总占用。翻译缓存是书库内的逻辑大小，单独返回，不重复计入总额。打开页面时若还没有 `books.sqlite3`，不要为了统计创建数据库。
+- `readerx_storage_cleanup` 只删除所选书的独占插图、听书目录、译文缓存行，以及归属于这些书的 `*.migrated` 留底。未归属的插图和留底只有在单独选中时才删除。仍被其他书引用的插图保留。术语表、局部配置、书籍、书签、注释和阅读进度不删除。译文清理要推进章节租约，避免进行中的回写把旧译文写回；有删除时 VACUUM。未完成迁移的正式 JSON 必须留下。
+- 清理与书库写入共用书库锁。日志只记数量，不记路径、书名或正文。检查 `cargo test -p readerx --lib storage_usage`。
