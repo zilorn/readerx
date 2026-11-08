@@ -2,7 +2,7 @@
 
 书籍、分组、规则与书架进度在应用目录与备份中使用 SQLite，书源和其他状态保持 JSON；存储边界与旧数据迁移见 [书籍存储](book-storage.md)。
 
-> 状态：**已接入 App**（设置 → 数据 → 数据备份）。本文件说明备份里有什么、归档长什么样、
+> 状态：**已接入 App**（设置 → 数据 → 数据管理 → 数据备份）。本文件说明备份里有什么、归档长什么样、
 > 导入的两种语义，以及与「局域网同步」的边界。
 
 目标：把**整台设备**的数据变成一个文件，换机 / 重装 / 归档备查时再搬回来。
@@ -153,7 +153,7 @@ src-tauri/src/data_transfer/
   commands.rs   readerx_data_export / readerx_data_import_pick / readerx_data_import
   round_trip.rs 端到端回归（真实磁盘布局 + 真实 zip，只把窗口换成 mock）
 src/lib/backup.ts               前端接线：调命令、进度、导入后按依赖顺序重载缓存
-src/pages/DataBackup.tsx        设置 → 数据 → 数据备份
+src/pages/DataBackup.tsx        设置 → 数据 → 数据管理 → 数据备份
 ```
 
 验证：

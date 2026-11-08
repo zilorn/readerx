@@ -27,6 +27,11 @@ import { createSignal } from "solid-js";
 
 const [cacheVersion, setCacheVersion] = createSignal(0);
 export const translationCacheVersion = cacheVersion;
+
+/** 数据管理页清掉译文缓存后，让仍打开的阅读页重新向后端取缓存。 */
+export function noteTranslationsCleared(): void {
+  setCacheVersion((version) => version + 1);
+}
 export async function invalidateTranslations(
   bookId: string,
   cid: string,
