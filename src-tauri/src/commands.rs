@@ -18,6 +18,7 @@ use crate::models::{
 };
 use crate::panic_guard;
 use crate::storage;
+use crate::storage_usage::{self, CleanupRequest};
 use crate::sync;
 use crate::webview_login;
 use base64::engine::general_purpose::STANDARD as B64;
@@ -285,6 +286,31 @@ pub async fn readerx_tts_cache_clear(
 ) -> Result<(), String> {
     blocking("听书缓存清理", move || {
         storage::clear_tts_cache(&app, book_id.as_deref())
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn readerx_storage_usage(app: AppHandle) -> Result<storage_usage::StorageReport, String> {
+    blocking("数据占用统计", move || storage_usage::usage(&app)).await
+}
+
+#[tauri::command]
+pub async fn readerx_storage_cleanup(
+    app: AppHandle,
+    book_ids: Vec<String>,
+    kinds: Vec<String>,
+    include_unscoped: bool,
+) -> Result<storage_usage::CleanupResult, String> {
+    blocking("数据清理", move || {
+        storage_usage::cleanup(
+            &app,
+            CleanupRequest {
+                book_ids,
+                kinds,
+                include_unscoped,
+            },
+        )
     })
     .await
 }

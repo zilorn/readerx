@@ -19,6 +19,7 @@ mod single_instance;
 pub mod source_prompt;
 mod startup;
 mod storage;
+mod storage_usage;
 mod temporary_file;
 mod reading_time;
 mod volume_keys;
@@ -184,6 +185,8 @@ pub fn run() {
             commands::readerx_tts_cache_stats,
             commands::readerx_tts_cache_apply_limit,
             commands::readerx_tts_cache_clear,
+            commands::readerx_storage_usage,
+            commands::readerx_storage_cleanup,
             commands::readerx_license_text,
             commands::readerx_pick_book_file,
             mobi::readerx_parse_mobi,

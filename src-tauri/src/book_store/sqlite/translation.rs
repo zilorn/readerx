@@ -119,6 +119,23 @@ pub(in crate::book_store) fn invalidate_translations(db: &Connection, id: &str, 
     Ok(())
 }
 
+/// 删除一本书的译文缓存，并推进全部章节租约，使进行中的回写无法把旧译文写回。
+/// 术语表与局部配置留在 translation_books。
+pub(in crate::book_store) fn clear_book_translations(db: &Connection, id: &str) -> Result<u64, String> {
+    valid_id(id)?;
+    let deleted = db
+        .execute("DELETE FROM translations WHERE book_id=?1", [id])
+        .map_err(sql)? as u64;
+    db.execute(
+        "INSERT INTO translation_epochs(book_id, cid, epoch)
+         SELECT ?1, cid, 1 FROM chapters WHERE book_id=?1
+         ON CONFLICT(book_id, cid) DO UPDATE SET epoch = epoch + 1",
+        [id],
+    )
+    .map_err(sql)?;
+    Ok(deleted)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

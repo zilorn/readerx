@@ -585,6 +585,70 @@ pub(super) fn delete(db: &Connection, id: &str) -> Result<(), String> {
     Ok(())
 }
 
+pub(super) struct StorageBookRow {
+    pub id: String,
+    pub content_bytes: u64,
+    pub translation_bytes: u64,
+    pub image_locals: Vec<String>,
+}
+
+/// 按书汇总正文 / 译文的逻辑字节，以及章节里的插图文件名。
+pub(super) fn storage_books(db: &Connection) -> Result<Vec<StorageBookRow>, String> {
+    let mut statement = db
+        .prepare(
+            "SELECT b.id,
+                    length(CAST(b.detail AS BLOB))
+                      + COALESCE((SELECT sum(length(CAST(c.chapter AS BLOB)))
+                                   FROM chapters c WHERE c.book_id = b.id), 0),
+                    COALESCE((SELECT sum(length(CAST(t.source AS BLOB))
+                                         + length(CAST(t.text AS BLOB)))
+                              FROM translations t WHERE t.book_id = b.id), 0)
+             FROM books b ORDER BY b.id",
+        )
+        .map_err(sql)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
+        .map_err(sql)?;
+    let mut books = Vec::new();
+    for row in rows {
+        let (id, content, translation) = row.map_err(sql)?;
+        books.push(StorageBookRow {
+            id,
+            content_bytes: content.max(0) as u64,
+            translation_bytes: translation.max(0) as u64,
+            image_locals: Vec::new(),
+        });
+    }
+    drop(statement);
+    let mut assets = db
+        .prepare("SELECT book_id, assets FROM chapters")
+        .map_err(sql)?;
+    let asset_rows = assets
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .map_err(sql)?;
+    let mut by_book: HashMap<String, Vec<String>> = HashMap::new();
+    for row in asset_rows {
+        let (id, raw) = row.map_err(sql)?;
+        let locals: Vec<String> = decode(&raw)?;
+        by_book.entry(id).or_default().extend(locals);
+    }
+    for book in &mut books {
+        if let Some(locals) = by_book.remove(&book.id) {
+            let mut unique = locals;
+            unique.sort();
+            unique.dedup();
+            book.image_locals = unique;
+        }
+    }
+    Ok(books)
+}
+
 #[path = "backup.rs"]
 mod backup;
 pub(super) use backup::snapshot;
