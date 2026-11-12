@@ -2,6 +2,9 @@
 #
 # 触发：推送形如 v* 的 tag 时触发（按惯例 tag 打在 main 分支的提交上），
 #       例如 `git tag v1.2.3 && git push origin v1.2.3`。
+#       发布失败后也可以用 main 上修好的工作流重跑已有 tag，不必移动 tag：
+#         gh workflow run release.yml --ref main -f tag=v1.2.3
+#       此时工作流取 main 的定义，构建与校验的仍是指定 tag 的提交。
 # 版本号：以 tag 名称为准（v1.2.3 -> 1.2.3）。
 #
 # 前置约定（发版前需在 main 上完成并提交）：
@@ -38,6 +41,14 @@ on:
   push:
     tags:
       - 'v*'
+  # 手动重跑：用于发布失败后换上修好的工作流，或只补发某个已存在的 tag。
+  # 输入的是 tag 名而不是分支，checkout 与版本校验都以该 tag 为准。
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 要重新发布的 tag（如 v1.2.3，必须已存在于仓库）
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -51,15 +62,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
+      tag: ${{ steps.check.outputs.tag }}
       version: ${{ steps.check.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          # 手动触发时工作流来自 main，但校验的对象必须是指定的 tag。
+          ref: ${{ inputs.tag || github.ref_name }}
 
       - name: Validate tag against committed version
         id: check
         env:
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           VERSION="${TAG#v}"
           if [ -z "$VERSION" ] || [ "$VERSION" = "$TAG" ]; then
@@ -72,6 +87,7 @@ jobs:
             echo "::error::请先在 main 上执行 node scripts/bump-version.mjs ${VERSION} 并提交，再打 tag。"
             exit 1
           fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Building release ${TAG} (app version ${VERSION})"
 
@@ -84,6 +100,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
 
       - name: Setup build environment
         uses: ./.github/actions/setup-build
@@ -198,11 +216,92 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
 
       - name: Setup build environment
         uses: ./.github/actions/setup-build
         with:
           rust-targets: ${{ matrix.target }}
+
+      # Windows 的 NSIS 工具链要到打包阶段才从 GitHub Releases 现拉，且没有重试：
+      # v0.7.1 的 windows-x86_64 就是 nsis_tauri_utils.dll 返回 503，编译成功后打包失败。
+      # 这里提前带重试下载好；目录与 hash 同 tauri-bundler 2.11.x 的 NSIS 实现，
+      # 齐全时 tauri 不会再联网下载。
+      - name: Warm up NSIS toolchain
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+
+          # tauri 的缓存位置：dirs::cache_dir()/tauri，Windows 上即 %LOCALAPPDATA%\tauri
+          $toolsDir = Join-Path $env:LOCALAPPDATA 'tauri'
+          $nsisDir = Join-Path $toolsDir 'NSIS'
+          $dllPath = Join-Path $nsisDir 'Plugins\x86-unicode\additional\nsis_tauri_utils.dll'
+          $makensis = Join-Path $nsisDir 'makensis.exe'
+
+          $nsisUrl = 'https://github.com/tauri-apps/binary-releases/releases/download/nsis-3.11/nsis-3.11.zip'
+          $nsisSha1 = 'EF7FF767E5CBD9EDD22ADD3A32C9B8F4500BB10D'
+          $dllUrl = 'https://github.com/tauri-apps/nsis-tauri-utils/releases/download/nsis_tauri_utils-v0.5.3/nsis_tauri_utils.dll'
+          $dllSha1 = '75197FEE3C6A814FE035788D1C34EAD39349B860'
+
+          function Save-WithRetry {
+            param(
+              [Parameter(Mandatory = $true)][string]$Url,
+              [Parameter(Mandatory = $true)][string]$OutFile,
+              [int]$Attempts = 5
+            )
+            for ($i = 1; $i -le $Attempts; $i++) {
+              try {
+                Invoke-WebRequest -Uri $Url -OutFile $OutFile -MaximumRedirection 10
+                return
+              } catch {
+                if ($i -eq $Attempts) {
+                  throw "下载失败（已重试 $Attempts 次）：$Url`n$($_.Exception.Message)"
+                }
+                $wait = 5 * $i
+                Write-Warning ("下载失败（第 {0}/{1} 次）：{2}；{3} 秒后重试。{4}" -f $i, $Attempts, $Url, $wait, $_.Exception.Message)
+                Start-Sleep -Seconds $wait
+              }
+            }
+          }
+
+          if ((Test-Path $makensis) -and (Test-Path $dllPath) -and
+              ((Get-FileHash $dllPath -Algorithm SHA1).Hash -eq $dllSha1)) {
+            Write-Host "NSIS toolchain already cached at $nsisDir"
+            exit 0
+          }
+
+          $tmp = Join-Path $env:RUNNER_TEMP 'nsis-download'
+          Remove-Item $tmp, $nsisDir -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+
+          $zip = Join-Path $tmp 'nsis-3.11.zip'
+          Save-WithRetry -Url $nsisUrl -OutFile $zip
+          $zipHash = (Get-FileHash $zip -Algorithm SHA1).Hash
+          if ($zipHash -ne $nsisSha1) {
+            throw "nsis-3.11.zip 的 SHA1 不匹配：$zipHash（期望 $nsisSha1）"
+          }
+
+          Expand-Archive -Path $zip -DestinationPath $tmp -Force
+          $extracted = Join-Path $tmp 'nsis-3.11'
+          if (-not (Test-Path $extracted)) {
+            throw 'nsis-3.11.zip 解压后未找到 nsis-3.11 目录'
+          }
+          New-Item -ItemType Directory -Path $toolsDir -Force | Out-Null
+          Move-Item -Path $extracted -Destination $nsisDir
+
+          $dll = Join-Path $tmp 'nsis_tauri_utils.dll'
+          Save-WithRetry -Url $dllUrl -OutFile $dll
+          $dllHash = (Get-FileHash $dll -Algorithm SHA1).Hash
+          if ($dllHash -ne $dllSha1) {
+            throw "nsis_tauri_utils.dll 的 SHA1 不匹配：$dllHash（期望 $dllSha1）"
+          }
+          New-Item -ItemType Directory -Path (Split-Path $dllPath) -Force | Out-Null
+          Copy-Item $dll $dllPath
+
+          Write-Host "NSIS toolchain cached at $nsisDir"
 
       - name: Build desktop bundles
         run: pnpm tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
@@ -233,12 +332,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      TAG: ${{ github.ref_name }}
+      TAG: ${{ needs.validate.outputs.tag }}
       VERSION: ${{ needs.validate.outputs.version }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
 
       # 各平台产物先汇总再发布：`gh release create` 只跑一次，避免多个 job 抢同一个 release。
       # 各 artifact 里的文件名已带平台与架构（readerx-<版本>-<平台>-<架构>…，见

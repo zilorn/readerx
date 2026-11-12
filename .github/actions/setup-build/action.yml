@@ -69,12 +69,22 @@ runs:
       with:
         targets: ${{ inputs.rust-targets }}
 
+    # rust-cache 的缓存 key 不允许逗号，而 Android 的 rust-targets 是逗号分隔的多个 ABI；
+    # 直接塞进 key 会让校验失败（每次构建报 ValidationError，缓存实际从未生效）。
+    # 这里把逗号换成短横线，得到一个合法的 key。
+    - name: Normalize cargo cache key
+      id: cache-key
+      shell: bash
+      env:
+        RUST_TARGETS: ${{ inputs.rust-targets }}
+      run: echo "targets=${RUST_TARGETS//,/-}" >> "$GITHUB_OUTPUT"
+
     # Cargo 缓存按 rust-toolchain 与平台分开；workspaces 指向 src-tauri（Cargo.toml 在那里）
     - name: Cache cargo
       uses: Swatinem/rust-cache@v2
       with:
         workspaces: src-tauri
-        key: ${{ runner.os }}-${{ inputs.rust-targets }}
+        key: ${{ runner.os }}-${{ steps.cache-key.outputs.targets }}
 
     - name: Install frontend dependencies
       shell: bash
