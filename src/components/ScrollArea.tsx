@@ -46,6 +46,9 @@ export function ScrollArea(props: ScrollAreaProps) {
   let ro: ResizeObserver | undefined;
   let measureTimer: number | undefined;
   let thumbH = THUMB_MIN;
+  /** 上次写进拇指的高度 / 位移。滚动期间高度不变就不再写，位移只走 transform。 */
+  let appliedThumbH = -1;
+  let appliedThumbY = Number.NaN;
 
   function clearHide(): void {
     if (hideTimer !== undefined) {
@@ -77,6 +80,8 @@ export function ScrollArea(props: ScrollAreaProps) {
     if (over !== canScroll()) setCanScroll(over);
     if (!over) {
       thumbH = THUMB_MIN;
+      appliedThumbH = -1;
+      appliedThumbY = Number.NaN;
       if (shown()) setShown(false);
       return;
     }
@@ -87,10 +92,18 @@ export function ScrollArea(props: ScrollAreaProps) {
     );
     const maxScroll = sh - ch;
     const travel = Math.max(1, railH - THUMB_PAD * 2 - thumbH);
-    const top =
-      THUMB_PAD + (maxScroll > 0 ? (innerEl.scrollTop / maxScroll) * travel : 0);
-    thumbEl.style.height = `${thumbH}px`;
-    thumbEl.style.top = `${Math.round(top)}px`;
+    const top = Math.round(
+      THUMB_PAD + (maxScroll > 0 ? (innerEl.scrollTop / maxScroll) * travel : 0),
+    );
+    // height 会触发布局，只在拇指长度变化时写；滚动位置用 translate，走合成。
+    if (appliedThumbH !== thumbH) {
+      thumbEl.style.height = `${thumbH}px`;
+      appliedThumbH = thumbH;
+    }
+    if (appliedThumbY !== top) {
+      thumbEl.style.transform = `translate(-50%, ${top}px)`;
+      appliedThumbY = top;
+    }
   }
 
   function queueMeasure(): void {
@@ -211,12 +224,9 @@ export function ScrollArea(props: ScrollAreaProps) {
       >
         <div
           ref={thumbEl}
-          class="absolute top-0 rounded-full"
+          class="absolute left-1/2 top-0 rounded-full"
           style={{
-            left: "50%",
-            height: `${thumbH}px`,
             width: `${thumbWidth()}px`,
-            transform: "translateX(-50%)",
             background: dragging() ? "var(--accent)" : "var(--text-2)",
             opacity: dragging() ? 1 : 0.55,
             transition:
