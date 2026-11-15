@@ -138,7 +138,23 @@ for (const dir of [1, -1]) {
   const front = overlay.children[0].firstElementChild;
   assert.equal(front.images[0].loading, "eager");
   assert.equal(front.images[0].decoding, "sync");
+  const shade = overlay.children[2];
+  const crease = overlay.children[3];
+  const shadeBackground = shade.style.background;
+  assert.match(
+    shadeBackground,
+    dir > 0 ? /to right/ : /to left/,
+    "阴影渐变按翻页方向只在开始时写一次",
+  );
   turn.draw(0.4);
+  assert.equal(shade.style.background, shadeBackground, "拖动过程不再重写渐变");
+  assert.equal(shade.style.left, undefined);
+  assert.equal(shade.style.width, undefined);
+  assert.match(shade.style.transform, /^translateX\([-\d.]+px\) scaleX\(/);
+  assert.equal(crease.style.width, "36px");
+  assert.equal(crease.style.left, undefined);
+  assert.equal(crease.style.background, "linear-gradient(to right, transparent, var(--text), transparent)");
+  assert.match(crease.style.transform, /^translateX\(/);
   turn.finish(true, () => commits++);
   assert.equal(turn.interrupt(), true);
   assert.equal(turn.interrupt(), false);

@@ -45,7 +45,7 @@ export function LanguageRow() {
                   role="radio"
                   type="button"
                   aria-checked={currentLocalePreference() === option.value}
-                  class="inline-flex items-center whitespace-nowrap rounded-lg px-[11px] py-[7px] text-[12.5px] text-text-2 transition-all duration-150"
+                  class="inline-flex items-center whitespace-nowrap rounded-lg px-[11px] py-[7px] text-[12.5px] text-text-2 transition-[background-color,color,box-shadow] duration-150"
                   classList={{
                     "bg-surface font-semibold text-text shadow-sm shadow-black/15":
                       currentLocalePreference() === option.value,

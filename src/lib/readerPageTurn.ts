@@ -69,12 +69,10 @@ export function createReaderPageTurn() {
     paper.style.transform = `translateX(${2 * edge - width}px) scaleX(-1)`;
     const strength = Math.sin(Math.PI * progress);
     shade.style.opacity = `${strength * 0.22}`;
-    shade.style.background = `linear-gradient(${direction > 0 ? "to right" : "to left"}, transparent, var(--text))`;
-    Object.assign(shade.style, { left: `${left}px`, width: `${folded}px`, right: "auto" });
-    Object.assign(crease.style, {
-      left: `${edge - 18}px`, width: "36px", right: "auto", opacity: `${strength * 0.28}`,
-      background: "linear-gradient(to right, transparent, var(--text), transparent)",
-    });
+    // 渐变在 begin() 按方向写一次。这里把整宽阴影缩到折缝上再平移，避免每帧改 left / width。
+    shade.style.transform = `translateX(${left}px) scaleX(${folded / width})`;
+    crease.style.opacity = `${strength * 0.28}`;
+    crease.style.transform = `translateX(${edge - 18}px)`;
   }
 
   function begin(surface: HTMLElement, preview: HTMLElement | undefined, dir: 1 | -1): boolean {
@@ -101,7 +99,13 @@ export function createReaderPageTurn() {
     paper.append(tint);
     back.append(paper);
     shade = layer();
+    shade.style.transformOrigin = "left center";
+    shade.style.background = `linear-gradient(${direction > 0 ? "to right" : "to left"}, transparent, var(--text))`;
     crease = layer();
+    // inset:0 会把 right 也钉死；放开 right 后 36px 宽度才生效，之后只平移。
+    crease.style.right = "auto";
+    crease.style.width = "36px";
+    crease.style.background = "linear-gradient(to right, transparent, var(--text), transparent)";
     root.append(front, back, shade, crease);
     surface.parentElement.append(root);
     draw(0);
