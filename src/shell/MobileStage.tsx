@@ -22,6 +22,8 @@
  * 路由出口（`props.children`）同一时刻只由最上层一层渲染：出口是路由的共享快照，
  * 多层同时渲染会互相抢 DOM。瞬态页面离场时改用「离场快照」（滚动区 DOM 克隆）
  * 参与退出动画，滑出 / 淡出看到的仍是离开时的那一页。
+ * 滚动区节点超过 EXIT_SNAPSHOT_NODE_LIMIT，或系统偏好减少动态效果时，不克隆、
+ * 直接切换。只改 query / hash 的导航会清掉尚未使用的快照，避免下次用到过期画面。
  */
 import {
   createEffect,
@@ -35,7 +37,11 @@ import {
   type Component,
   type JSX,
 } from "solid-js";
-import { useBeforeLeave, useLocation } from "@solidjs/router";
+import {
+  useBeforeLeave,
+  useLocation,
+  type BeforeLeaveEventArgs,
+} from "@solidjs/router";
 import { PageBody } from "../components/PageBody";
 import { TabBar } from "../components/TabBar";
 import { registerAppScrollEl } from "../lib/appScroll";
@@ -46,6 +52,11 @@ import { isFullHeightPath, isTabRoute } from "./routes";
 const EASE = "cubic-bezier(0.22, 1, 0.36, 1)";
 const DUR_SLIDE = 300;
 const DUR_FADE = 220;
+/**
+ * 离场页元素与文本节点超过该数量就不再克隆。
+ * 克隆本身不慢，重新挂载并布局才会占满一帧；长阅读页和长搜索结果走直接切换。
+ */
+const EXIT_SNAPSHOT_NODE_LIMIT = 1200;
 
 interface Pane {
   id: number;
@@ -78,6 +89,34 @@ function prefersReducedMotion(): boolean {
     typeof window.matchMedia === "function" &&
     window.matchMedia("(prefers-reduced-motion: reduce)").matches
   );
+}
+
+/** 导航目标是否仍停在当前 pathname（只改了 query / hash 或 history state）。 */
+function isSamePathnameTarget(fromPathname: string, to: string): boolean {
+  try {
+    const pathname = to.startsWith("/")
+      ? to.split(/[?#]/, 1)[0]
+      : new URL(to, window.location.href).pathname;
+    return pathname === fromPathname;
+  } catch {
+    return false;
+  }
+}
+
+/** 数到阈值即停：长页面不能为了决定「要不要克隆」先把整棵树走完。 */
+function exceedsSnapshotLimit(root: Node): boolean {
+  let count = 0;
+  const walker = document.createTreeWalker(
+    root,
+    NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT,
+  );
+  let current: Node | null = root;
+  while (current) {
+    count += 1;
+    if (count > EXIT_SNAPSHOT_NODE_LIMIT) return true;
+    current = walker.nextNode();
+  }
+  return false;
 }
 
 function resetAnimStyle(el: HTMLElement): void {
@@ -149,12 +188,18 @@ export function MobileStage(props: MobileStageProps) {
   const scrollById = new Map<number, HTMLDivElement>();
   // 入场姿态：新层在首次挂载时直接以「平移 / 透明」出生，避免先以静止态闪现一帧再跳回起点。
   const introById = new Map<number, IntroKind>();
-  const reducedMotion = prefersReducedMotion();
 
   let targetPaneId = initialPane.id; // 最近一次导航的目标层（其滚动容器注册给 appScrollEl）
   let removeTimer: number | undefined;
   /** 下一次导航要冻结的离场快照（在路由提交前抓取，此时 DOM 仍是离开的那一页） */
   let pendingExit: { paneId: number; exit: FrozenExit } | undefined;
+  /** 本次导航跳过转场：页面过长，或偏好减少动态效果。每次 before-leave 先清掉。 */
+  let skipPageTransition = false;
+
+  function clearPendingExit(): void {
+    pendingExit = undefined;
+    skipPageTransition = false;
+  }
 
   // 访问过的页面栈（去重相邻重复），用于判断当前跳转是否为「返回」：
   // 不依赖 popstate 时序，直接比较新路径与栈顶前一项是否一致。
@@ -174,12 +219,23 @@ export function MobileStage(props: MobileStageProps) {
    * 常驻层自己就是内容的持有者（不经过路由出口），切走时 DOM 原样留着，无需快照；
    * 瞬态层的内容来自路由出口，路由一变就会被换掉，因此提前克隆滚动区留给退出动画。
    */
-  useBeforeLeave(() => {
+  useBeforeLeave((event: BeforeLeaveEventArgs) => {
+    // query / hash 不会换页，但也会走进这里。先丢掉上一次没消费的快照，
+    // 否则只改搜索词后再跳转，会把过期克隆贴到下一次离场动画上。
+    clearPendingExit();
+    if (event.defaultPrevented) return;
+    if (typeof event.to === "string" && isSamePathnameTarget(event.from.pathname, event.to)) {
+      return;
+    }
     const id = currentId();
     const pane = paneById(id);
     if (!pane || pane.component) return;
     const scrollEl = scrollById.get(id);
     if (!scrollEl) return;
+    if (prefersReducedMotion() || exceedsSnapshotLimit(scrollEl)) {
+      skipPageTransition = true;
+      return;
+    }
     const node = scrollEl.cloneNode(true) as HTMLElement;
     pendingExit = { paneId: id, exit: { node, scrollTop: scrollEl.scrollTop } };
   });
@@ -288,14 +344,17 @@ export function MobileStage(props: MobileStageProps) {
       setTransientPanes((list) => [...list, pane]);
     }
 
-    // 离场的瞬态层内容会随路由换掉：贴上离场快照做退出动画
+    // 离场的瞬态层内容会随路由换掉：贴上离场快照做退出动画。
+    // 长页面与减少动态效果没有快照，同时跳过转场，避免空层滑出。
     const exitSnapshot =
       prevPane && prevPane.id !== pane.id && !prevPane.component &&
       pendingExit?.paneId === prevPane.id
         ? pendingExit.exit
         : undefined;
-    pendingExit = undefined;
-    setFrozenExit(exitSnapshot);
+    const directSwitch =
+      prefersReducedMotion() || skipPageTransition || prevId === pane.id;
+    clearPendingExit();
+    setFrozenExit(directSwitch ? undefined : exitSnapshot);
 
     setCurrentId(pane.id);
     setOutgoingId(prevPane && prevPane.id !== pane.id ? prevId : undefined);
@@ -306,8 +365,8 @@ export function MobileStage(props: MobileStageProps) {
     // 上一页可能正处于上一次过渡中：先回位成静止态，再作为滑出 / 垫底层
     if (prevEl) resetAnimStyle(prevEl);
 
-    // 系统偏好“减少动态效果”时不做过渡，直接整体切换
-    if (reducedMotion || prevId === pane.id) {
+    // 减少动态效果、超长页，或目标就是当前层：直接整体切换
+    if (directSwitch) {
       finishTransition(pane.id);
       return;
     }
