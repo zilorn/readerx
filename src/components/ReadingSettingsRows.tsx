@@ -109,7 +109,7 @@ function PageModeRow() {
           <button
             role="radio"
             aria-checked={currentPageMode() === opt.value}
-            class="inline-flex items-center whitespace-nowrap rounded-lg px-[11px] py-[7px] text-[12.5px] text-text-2 transition-all duration-150"
+            class="inline-flex items-center whitespace-nowrap rounded-lg px-[11px] py-[7px] text-[12.5px] text-text-2 transition-[background-color,color,box-shadow] duration-150"
             classList={{
               "bg-surface font-semibold text-text shadow-sm shadow-black/15":
                 currentPageMode() === opt.value,
@@ -141,7 +141,7 @@ function HanModeRow() {
           <button
             role="radio"
             aria-checked={currentHanMode() === opt.value}
-            class="inline-flex items-center whitespace-nowrap rounded-lg px-[9px] py-[7px] text-[12.5px] text-text-2 transition-all duration-150"
+            class="inline-flex items-center whitespace-nowrap rounded-lg px-[9px] py-[7px] text-[12.5px] text-text-2 transition-[background-color,color,box-shadow] duration-150"
             classList={{
               "bg-surface font-semibold text-text shadow-sm shadow-black/15":
                 currentHanMode() === opt.value,

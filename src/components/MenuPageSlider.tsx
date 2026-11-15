@@ -42,6 +42,16 @@ export function MenuPageSlider(props: MenuPageSliderProps) {
   };
   /** 进度高亮前沿（px）：始终延伸到圆球右缘之外，球完全落在高亮里 */
   const frontPx = () => ballCenterPx() + HIGHLIGHT_TRAIL;
+  /** 高亮用裁剪而不是 width：拖动时只重绘，不触发布局 */
+  const fillClip = () => {
+    const total = trackW();
+    if (total <= 0) return "inset(0 100% 0 0 round 999px)";
+    // 槽有 1px 边框：高亮（内容盒）比轨道窄 2px，right 按内容盒宽度计算，
+    // 否则右端会比旧的 width 实现短 2px。
+    const contentWidth = Math.max(0, total - 2);
+    const right = Math.max(0, contentWidth - frontPx());
+    return `inset(0 ${right}px 0 0 round 999px)`;
+  };
 
   onMount(() => {
     const el = trackRef;
@@ -138,15 +148,16 @@ export function MenuPageSlider(props: MenuPageSliderProps) {
         {/* 大框（槽）：圆角胶囊，内层为进度高亮（accent），右端未走到部分保持槽底颜色 */}
         <div class="pointer-events-none absolute inset-x-0 top-1/2 h-10 -translate-y-1/2 overflow-hidden rounded-full border border-border bg-surface shadow-[0_3px_14px_rgb(0_0_0/0.18)]">
           <div
-            class="h-full rounded-full bg-accent"
-            style={{ width: `${frontPx()}px` }}
+            class="h-full w-full rounded-full bg-accent"
+            style={{ "clip-path": fillClip() }}
           />
         </div>
 
-        {/* 圆球：整体住在进度高亮内（高亮在球右缘之外仍有延伸），随高亮前沿滑动 */}
+        {/* 圆球：整体住在进度高亮内（高亮在球右缘之外仍有延伸），随高亮前沿滑动。
+            位移只写 transform，拖动时不触发布局。 */}
         <div
-          class="pointer-events-none absolute top-1/2 h-[26px] w-[26px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-surface shadow-[0_2px_10px_rgb(0_0_0/0.45)]"
-          style={{ left: `${ballCenterPx()}px` }}
+          class="pointer-events-none absolute left-0 top-1/2 h-[26px] w-[26px] rounded-full bg-surface shadow-[0_2px_10px_rgb(0_0_0/0.45)]"
+          style={{ transform: `translateX(${ballCenterPx()}px) translate(-50%, -50%)` }}
         />
       </div>
     </div>

@@ -157,8 +157,8 @@ export function BookSourceRow(props: BookSourceRowProps) {
               onClick={() => props.onToggleEnabled(props.summary.id, !props.summary.enabled)}
             >
               <span
-                class={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-[left] duration-150 ${
-                  props.summary.enabled ? "left-[22px]" : "left-0.5"
+                class={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform duration-150 ${
+                  props.summary.enabled ? "translate-x-5" : ""
                 }`}
               />
             </button>

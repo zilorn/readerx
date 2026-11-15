@@ -46,6 +46,8 @@ export function ScrollArea(props: ScrollAreaProps) {
   let ro: ResizeObserver | undefined;
   let measureTimer: number | undefined;
   let thumbH = THUMB_MIN;
+  /** 已写进 DOM 的拇指高度：内容不变时避免逐帧重复写布局属性 */
+  let appliedThumbH = 0;
 
   function clearHide(): void {
     if (hideTimer !== undefined) {
@@ -89,8 +91,13 @@ export function ScrollArea(props: ScrollAreaProps) {
     const travel = Math.max(1, railH - THUMB_PAD * 2 - thumbH);
     const top =
       THUMB_PAD + (maxScroll > 0 ? (innerEl.scrollTop / maxScroll) * travel : 0);
-    thumbEl.style.height = `${thumbH}px`;
-    thumbEl.style.top = `${Math.round(top)}px`;
+    // 只用 transform 移动拇指：top/height 会逐帧触发布局，滚动时把主线程拖进布局。
+    // 高度只在内容或轨道尺寸变化时才写，位置交给合成层。
+    if (thumbH !== appliedThumbH) {
+      appliedThumbH = thumbH;
+      thumbEl.style.height = `${thumbH}px`;
+    }
+    thumbEl.style.transform = `translate(-50%, ${Math.round(top)}px)`;
   }
 
   function queueMeasure(): void {
@@ -214,9 +221,7 @@ export function ScrollArea(props: ScrollAreaProps) {
           class="absolute top-0 rounded-full"
           style={{
             left: "50%",
-            height: `${thumbH}px`,
             width: `${thumbWidth()}px`,
-            transform: "translateX(-50%)",
             background: dragging() ? "var(--accent)" : "var(--text-2)",
             opacity: dragging() ? 1 : 0.55,
             transition:
