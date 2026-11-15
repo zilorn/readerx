@@ -67,14 +67,13 @@ export function createReaderPageTurn() {
     back.style.clipPath = `inset(0 ${Math.max(0, width - right)}px 0 ${Math.max(0, left)}px)`;
     const paper = back.firstElementChild as HTMLElement;
     paper.style.transform = `translateX(${2 * edge - width}px) scaleX(-1)`;
+    // 每帧只写 transform / opacity / clip-path：渐变已在 begin() 按方向写死，
+    // 不再逐帧重建字符串或写 left / width 这类布局属性。
     const strength = Math.sin(Math.PI * progress);
     shade.style.opacity = `${strength * 0.22}`;
-    shade.style.background = `linear-gradient(${direction > 0 ? "to right" : "to left"}, transparent, var(--text))`;
-    Object.assign(shade.style, { left: `${left}px`, width: `${folded}px`, right: "auto" });
-    Object.assign(crease.style, {
-      left: `${edge - 18}px`, width: "36px", right: "auto", opacity: `${strength * 0.28}`,
-      background: "linear-gradient(to right, transparent, var(--text), transparent)",
-    });
+    shade.style.transform = `translateX(${left}px) scaleX(${folded / width})`;
+    crease.style.opacity = `${strength * 0.28}`;
+    crease.style.transform = `translateX(${edge - 18}px)`;
   }
 
   function begin(surface: HTMLElement, preview: HTMLElement | undefined, dir: 1 | -1): boolean {
@@ -101,7 +100,16 @@ export function createReaderPageTurn() {
     paper.append(tint);
     back.append(paper);
     shade = layer();
+    shade.style.transformOrigin = "left center";
+    shade.style.willChange = "transform, opacity";
+    shade.style.background = `linear-gradient(${direction > 0 ? "to right" : "to left"}, transparent, var(--text))`;
     crease = layer();
+    Object.assign(crease.style, {
+      width: "36px",
+      right: "auto",
+      willChange: "transform, opacity",
+      background: "linear-gradient(to right, transparent, var(--text), transparent)",
+    });
     root.append(front, back, shade, crease);
     surface.parentElement.append(root);
     draw(0);

@@ -46,6 +46,12 @@ import { isFullHeightPath, isTabRoute } from "./routes";
 const EASE = "cubic-bezier(0.22, 1, 0.36, 1)";
 const DUR_SLIDE = 300;
 const DUR_FADE = 220;
+/**
+ * 离场快照的节点上限。快照本身是 `cloneNode`，但挂进离场层并重新布局要按节点数付代价：
+ * 实测 1500 个节点时已出现 30ms+ 的帧间隔，6000 节点时导航会出现约 80ms 长任务。
+ * 超过上限的页面直接切换，保住导航响应。
+ */
+const MAX_EXIT_SNAPSHOT_NODES = 1_200;
 
 interface Pane {
   id: number;
@@ -155,6 +161,8 @@ export function MobileStage(props: MobileStageProps) {
   let removeTimer: number | undefined;
   /** 下一次导航要冻结的离场快照（在路由提交前抓取，此时 DOM 仍是离开的那一页） */
   let pendingExit: { paneId: number; exit: FrozenExit } | undefined;
+  /** 下一次导航的离场页面过大，不生成快照、直接切换 */
+  let skipExitSnapshot = false;
 
   // 访问过的页面栈（去重相邻重复），用于判断当前跳转是否为「返回」：
   // 不依赖 popstate 时序，直接比较新路径与栈顶前一项是否一致。
@@ -175,11 +183,21 @@ export function MobileStage(props: MobileStageProps) {
    * 瞬态层的内容来自路由出口，路由一变就会被换掉，因此提前克隆滚动区留给退出动画。
    */
   useBeforeLeave(() => {
+    // 每次导航重新判定：仅 query / hash 变化的导航不经过 go()，不能留下过期快照或跳过标志。
+    pendingExit = undefined;
+    skipExitSnapshot = false;
+    // 减少动态效果时根本不播离场动画，别再为快照付一次克隆成本。
+    if (reducedMotion) return;
     const id = currentId();
     const pane = paneById(id);
     if (!pane || pane.component) return;
     const scrollEl = scrollById.get(id);
     if (!scrollEl) return;
+    // 长正文（滚动模式阅读器、长搜索结果）的快照重新挂载会把导航拖成长任务。
+    if (scrollEl.getElementsByTagName("*").length > MAX_EXIT_SNAPSHOT_NODES) {
+      skipExitSnapshot = true;
+      return;
+    }
     const node = scrollEl.cloneNode(true) as HTMLElement;
     pendingExit = { paneId: id, exit: { node, scrollTop: scrollEl.scrollTop } };
   });
@@ -295,6 +313,8 @@ export function MobileStage(props: MobileStageProps) {
         ? pendingExit.exit
         : undefined;
     pendingExit = undefined;
+    const skipSnapshot = skipExitSnapshot;
+    skipExitSnapshot = false;
     setFrozenExit(exitSnapshot);
 
     setCurrentId(pane.id);
@@ -306,8 +326,8 @@ export function MobileStage(props: MobileStageProps) {
     // 上一页可能正处于上一次过渡中：先回位成静止态，再作为滑出 / 垫底层
     if (prevEl) resetAnimStyle(prevEl);
 
-    // 系统偏好“减少动态效果”时不做过渡，直接整体切换
-    if (reducedMotion || prevId === pane.id) {
+    // 系统偏好“减少动态效果”或离场页面过大时不做过渡，直接整体切换
+    if (reducedMotion || skipSnapshot || prevId === pane.id) {
       finishTransition(pane.id);
       return;
     }
