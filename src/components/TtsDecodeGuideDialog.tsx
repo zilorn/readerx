@@ -10,6 +10,7 @@
  */
 import { For, Show, createSignal, onCleanup } from "solid-js";
 import { Portal } from "solid-js/web";
+import { createAndroidBackHandler } from "../lib/androidBack";
 import { TTS_DECODE_GUIDE, type TtsGuideCommand } from "../lib/ttsDecodeGuide";
 import { t } from "../lib/i18n";
 import { CopyIcon, CheckIcon, CloseIcon, HeadphonesIcon } from "./icons";
@@ -65,6 +66,7 @@ function CommandRow(props: { command: TtsGuideCommand }) {
 
 export function TtsDecodeGuideDialog(props: TtsDecodeGuideDialogProps) {
   const guide = TTS_DECODE_GUIDE;
+  createAndroidBackHandler(() => props.open, () => props.onClose());
 
   return (
     <Show when={props.open}>

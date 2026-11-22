@@ -2,8 +2,6 @@ import { registerPageTitle, usesWindowPageTitle } from "../shell/pageTitle";
 import { ReaderDesktopSearch, ReaderDesktopTocFooter } from "../components/ReaderDesktopChrome";
 import { createReaderTranslation } from "../lib/translation/reader";
 import { selectionTranslation } from "../lib/translation/engine";
-import { translationBookState } from "../lib/translation/settings";
-import { translationKey } from "../lib/translation/core";
 import { TranslationPopup, type TranslationPopupTarget } from "../components/TranslationPopup";
 import { TranslateIcon } from "../components/icons";
 import { ChapterEditSheet } from "../components/ChapterEditSheet";
@@ -94,7 +92,6 @@ import {
   type SelectionTarget,
 } from "../components/SelectionMenu";
 import { TtsBubble } from "../components/TtsBubble";
-import { TtsDecodeGuideDialog } from "../components/TtsDecodeGuideDialog";
 import { TtsSheet } from "../components/TtsSheet";
 import { createBookTitle } from "../lib/translation/title";
 import { isFallbackBookAuthor } from "../lib/bookDisplay";
@@ -218,10 +215,17 @@ import {
   glyphRangeAtGlobalOffset,
   glyphRectOf,
 } from "../lib/textAnchor";
+import { type TtsFocus } from "../lib/ttsPlayer";
 import {
-  createTtsPlayer,
-  type TtsFocus,
-} from "../lib/ttsPlayer";
+  attachTtsReader,
+  claimTtsBook,
+  detachTtsReader,
+  globalTtsPlayer,
+  setTtsFollowEnabled,
+  ttsDecodeGuideOpen,
+  ttsFollowEnabled,
+  ttsSessionBookId,
+} from "../lib/ttsSession";
 import { currentTtsEngine, ensureTtsPrefsLoaded } from "../lib/ttsSettings";
 
 const PAD_TOP = 14; // 正文顶部留白
@@ -1625,7 +1629,7 @@ export default function ReaderPage() {
   // ensureReadingWindow 对无缺失章节直接返回，此处无需再按距离过滤。
   createEffect(
     on(
-      () => ttsPlayer.focus()?.chapterIndex ?? -1,
+      () => ttsSessionBookId() === bookId() ? ttsPlayer.focus()?.chapterIndex ?? -1 : -1,
       (ci) => {
         if (followEnabled() || ci < 0) return;
         const current = book();
@@ -2062,78 +2066,59 @@ export default function ReaderPage() {
   // 呼出菜单后可通过底栏上方的「返回跟读」把视图跳回当前朗读句并恢复跟随。
   // 播放器跨章时也依据本开关决定是否把阅读视图一并切到新章（取消跟读则不动）。
   // -------------------------------------------------------------------
-  const [followEnabled, setFollowEnabled] = createSignal(true);
+  const followEnabled = ttsFollowEnabled;
+  const setFollowEnabled = setTtsFollowEnabled;
+  const ttsPlayer = globalTtsPlayer();
+  /** 全局会话正在读的是不是当前打开的这本 */
+  const ttsHere = (): boolean => ttsSessionBookId() === bookId();
 
   let ttsPageCache: { source: LocalBookChapter; geometry: string; result: PaginatedChapter } | null = null;
-  const ttsPlayer = createTtsPlayer({
-    bookId,
-    chapterIndex: chapterIdx,
-    chapterAt: (idx) => book()?.chapters[idx],
-    chapterCount: () => book()?.chapters.length ?? 0,
-    navigateChapter: (idx) => goToChapter(idx),
-    followEnabled,
-    readingOffset: ttsReadingOffset,
-    speechText: async (text, index, signal) => {
-      const config = translation.settings();
-      if (!config.enabled || config.readingText !== "translated") return text;
-      const source = rawBook();
-      const chapter = source?.chapters[index];
-      if (!source || !chapter) throw new Error(t("translation.stale"));
-      return selectionTranslation(source, chapter, text, signal);
-    },
-    pageOffsets: async (index) => {
-      if (!isPaged()) return [];
-      // 当前章复用阅读器的真实分页；跨章跟读等待其排版完成。
-      let result = index === chapterIdx() ? paged() : null;
-      if (!result && index === chapterIdx() && paginateTask) {
-        result = await paginateTask.promise;
+  async function ttsPageOffsets(index: number): Promise<readonly number[]> {
+    if (!isPaged()) return [];
+    // 当前章复用阅读器的真实分页；跨章跟读等待其排版完成。
+    let result = index === chapterIdx() ? paged() : null;
+    if (!result && index === chapterIdx() && paginateTask) {
+      result = await paginateTask.promise;
+    }
+    const source = index === chapterIdx() ? pageSource() : renderBook()?.chapters[index];
+    const geo = layout();
+    if (!source || !geo) return [];
+    const geometryKey = JSON.stringify([geo, imageLayoutTick(), chapterAuthor()]);
+    if (!result && ttsPageCache?.source === source && ttsPageCache.geometry === geometryKey) {
+      result = ttsPageCache.result;
+    }
+    if (!result) {
+      const sizes = new Map<string, { w: number; h: number } | null>();
+      for (const image of chapterUnits(source).flatMap(unitImages)) {
+        const local = chapterImageLocal(readerImageRemote(image.src, image.remote) ?? "") || image.local || "";
+        sizes.set(readerImageKey({ ...image, local }), cachedImageSize(local) ?? null);
       }
-      const source = index === chapterIdx() ? pageSource() : renderBook()?.chapters[index];
-      const geo = layout();
-      if (!source || !geo) return [];
-      const geometryKey = JSON.stringify([geo, imageLayoutTick(), chapterAuthor()]);
-      if (!result && ttsPageCache?.source === source && ttsPageCache.geometry === geometryKey) {
-        result = ttsPageCache.result;
+      result = await startChapterPagination(source, chapterAuthor(), geo, sizes).promise;
+    }
+    if (!result) return [];
+    ttsPageCache = { source, geometry: geometryKey, result };
+    const textMirror = buildTextMirror(chapterUnits(source));
+    const offsets: number[] = [];
+    for (const page of result.pages) {
+      for (const fragment of page) {
+        if (fragment.kind !== "p" && fragment.kind !== "h") continue;
+        offsets.push((textMirror.unitStart[fragment.unit] ?? 0) + fragment.cstart);
+        break;
       }
-      if (!result) {
-        const sizes = new Map<string, { w: number; h: number } | null>();
-        for (const image of chapterUnits(source).flatMap(unitImages)) {
-          const local = chapterImageLocal(readerImageRemote(image.src, image.remote) ?? "") || image.local || "";
-          sizes.set(readerImageKey({ ...image, local }), cachedImageSize(local) ?? null);
-        }
-        result = await startChapterPagination(source, chapterAuthor(), geo, sizes).promise;
-      }
-      if (!result) return [];
-      ttsPageCache = { source, geometry: geometryKey, result };
-      const textMirror = buildTextMirror(chapterUnits(source));
-      const offsets: number[] = [];
-      for (const page of result.pages) {
-        for (const fragment of page) {
-          if (fragment.kind !== "p" && fragment.kind !== "h") continue;
-          offsets.push((textMirror.unitStart[fragment.unit] ?? 0) + fragment.cstart);
-          break;
-        }
-      }
-      return offsets;
-    },
-    notify: (message, isError) => showToast(message, !!isError),
-    // 解码失败（Linux 桌面端多为系统缺 MP3 解码插件）：弹出修复指南，
-    // 只把「弹指南」这件事交给界面，判定与「只弹一次」的口径留在播放器里
-    onDecodeFailure: () => setTtsDecodeGuideOpen(true),
-  });
-  createEffect(on(
-    () => {
-      const config = translation.settings();
-      return JSON.stringify([
-        config.enabled, config.readingText,
-        translationKey("", config, translationBookState(bookId())?.terms ?? []),
-      ]);
-    },
-    () => ttsPlayer.refreshText(),
-    { defer: true },
-  ));
+    }
+    return offsets;
+  }
+  createEffect(on(bookId, (id) => {
+    attachTtsReader({
+      bookId: id,
+      chapterIndex: chapterIdx,
+      navigateChapter: (idx) => goToChapter(idx),
+      readingOffset: ttsReadingOffset,
+      pageOffsets: ttsPageOffsets,
+    });
+    onCleanup(() => detachTtsReader(id));
+  }));
   const [ttsSettingsOpen, setTtsSettingsOpen] = createSignal(false);
-  const [ttsDecodeGuideOpen, setTtsDecodeGuideOpen] = createSignal(false);
   const [prewarmText, setPrewarmText] = createSignal<string | null>(null);
 
   /**
@@ -2152,7 +2137,7 @@ export default function ReaderPage() {
   /** 程序化定位引发的滚动窗口：此期间内的 scroll 事件不算用户手动滚动 */
   let suppressFollowCancelUntil = 0;
 
-  const ttsActive = (): boolean => ttsPlayer.status() !== "stopped";
+  const ttsActive = (): boolean => ttsHere() && ttsPlayer.status() !== "stopped";
 
   /** 用户手动翻页/滚动/切章时调用：解除“视图跟随朗读句”，语音不受影响 */
   function cancelFollowIfActive(): void {
@@ -2276,7 +2261,7 @@ export default function ReaderPage() {
     void chapter()?.cid;
     void currentTtsEngine();
     void bookId();
-    if (!warmupArmed) return;
+    if (!warmupArmed || !ttsHere()) return;
     if (ttsPlayer.status() === "stopped") {
       void ensureTtsPrefsLoaded().then(() => {
         if (warmupArmed && ttsPlayer.status() === "stopped") ttsPlayer.warmup();
@@ -2288,7 +2273,7 @@ export default function ReaderPage() {
   const speakMarks = createMemo<UnitMark[]>(() => {
     const f = ttsPlayer.focus();
     const cid = chapterCid();
-    if (!f || !cid || f.cid !== cid) return [];
+    if (!ttsHere() || !f || !cid || f.cid !== cid) return [];
     const item = f.item;
     const unitLen = mirror().unitLength[item.unit];
     if (item.ls < 0 || item.le <= item.ls || item.le > (unitLen ?? -1)) return [];
@@ -2371,6 +2356,7 @@ export default function ReaderPage() {
   // 它自己的章节，引擎不会被视图切章重锚去新章读（杜绝 idx 继承导致的跳读）。
   // 仅停止/暂停态下的显式定点跳章（目录/书签等）允许把语音重锚到目标章。
   createEffect(() => {
+    if (!ttsHere()) return;
     void chapterIdx();
     const running =
       ttsPlayer.status() === "playing" || ttsPlayer.status() === "loading";
@@ -2434,8 +2420,22 @@ export default function ReaderPage() {
   });
   onCleanup(() => {
     window.clearInterval(ttsFollowTimer);
-    ttsPlayer.dispose();
   });
+  // 回到正在听的这本书时，跟读还开着就把视图追到当前句；只在「开始处于听书中」时跳一次。
+  createEffect(on(
+    () => contentLoad() === "ready" && ttsHere() && ttsPlayer.status() !== "stopped",
+    (active, previous) => {
+      if (!active || previous) return;
+      if (!followEnabled()) return;
+      const f = ttsPlayer.focus();
+      if (!f) return;
+      if (f.cid !== chapter()?.cid) {
+        goToChapter(f.chapterIndex);
+        return;
+      }
+      ensureSpeakVisible(f);
+    },
+  ));
 
   // -------------------------------------------------------------------
   // 分页结果：图片解码后做时间分片排版，避免超大章节整章同步测量卡死页面；
@@ -4254,7 +4254,7 @@ export default function ReaderPage() {
       stopAutoPage();
       return;
     }
-    ttsPlayer.stop();
+    if (ttsHere()) ttsPlayer.stop();
     setAutoPageEnabled(true);
     setReaderSettingsOpen(false);
     setMenuOpen(false);
@@ -4607,6 +4607,7 @@ export default function ReaderPage() {
   function handleSpeakAtOffset(start: number | null): void {
     const ch = chapter();
     if (!ch) return;
+    claimTtsBook(bookId());
     // 用户明确要听：置位预热开关（听书按钮的起播同样落到这里）
     armTtsWarmup();
     // 收起选区（同时隐藏选区菜单），交给朗读句高亮展示
@@ -5017,24 +5018,21 @@ export default function ReaderPage() {
       <button
         class="grid h-10 w-10 flex-none place-items-center rounded-xl transition-[background-color,scale] duration-150 hover:bg-surface-2 active:scale-[0.94] active:bg-surface-2"
         classList={{
-          "text-accent": ttsPlayer.status() !== "stopped",
-          "text-text-2": ttsPlayer.status() === "stopped",
+          "text-accent": ttsActive(),
+          "text-text-2": !ttsActive(),
         }}
-        aria-label={
-          ttsPlayer.status() === "stopped"
-            ? t("reader.ttsListen")
-            : t("reader.ttsStop")
-        }
-        aria-pressed={ttsPlayer.status() !== "stopped"}
+        aria-label={ttsActive() ? t("reader.ttsStop") : t("reader.ttsListen")}
+        aria-pressed={ttsActive()}
         onClick={() => {
-          if (ttsPlayer.status() === "stopped") {
-            setMenuOpen(false);
-            setTocOpen(false);
-            setBmPanelOpen(false);
-            ttsPlayer.start();
-          } else {
+          if (ttsActive()) {
             ttsPlayer.stop();
+            return;
           }
+          claimTtsBook(bookId());
+          setMenuOpen(false);
+          setTocOpen(false);
+          setBmPanelOpen(false);
+          ttsPlayer.start();
         }}
       >
         <HeadphonesIcon size={21} />
@@ -5056,7 +5054,7 @@ export default function ReaderPage() {
   const renderTtsControls = () => (
     <Show
       when={
-        ttsPlayer.status() !== "stopped" &&
+        ttsActive() &&
         !tocOpen() &&
         !bmPanelOpen() &&
         !searchSession()
@@ -5989,12 +5987,6 @@ export default function ReaderPage() {
               onClose={() => setTtsSettingsOpen(false)}
             />
 
-            {/* 自定义源音频解码失败（Linux 多为缺少 GStreamer 解码插件）时的修复指南 */}
-            <TtsDecodeGuideDialog
-              open={ttsDecodeGuideOpen()}
-              onClose={() => setTtsDecodeGuideOpen(false)}
-            />
-
             {/* 阅读设置（底部状态栏显示与进度口径） */}
             <Show when={chapterEditTarget()}>
               {(target) => <ChapterEditSheet bookId={target().bookId} index={target().index} chapter={target().chapter}
@@ -6022,7 +6014,7 @@ export default function ReaderPage() {
                 onOpen: () => {
                   const original = localBookById(bookId())?.chapters[chapterIdx()];
                   if (!original || !chapterHasContent(original) || remoteReloading() || checkingUpdate()) return;
-                  ttsPlayer.stop();
+                  if (ttsHere()) ttsPlayer.stop();
                   setReaderSettingsOpen(false);
                   setMenuOpen(false);
                   setChapterEditTarget({ bookId: bookId(), index: chapterIdx(), chapter: original });

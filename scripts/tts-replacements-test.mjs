@@ -102,25 +102,32 @@ async function setRules(rules) {
   await replacements.reloadTextReplacements();
 }
 
-// 提取 Reader 真正使用的显示派生与播放器章节接线，避免测试另造一条文本路径。
+// 阅读页显示副本与全局听书会话必须走同一套替换 / 简繁派生，不能各写一条文本路径。
 const reader = ts.createSourceFile("Reader.tsx", readFileSync(
   new URL("../src/pages/Reader.tsx", import.meta.url), "utf8",
 ), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+const sessionSource = readFileSync(new URL("../src/lib/ttsSession.ts", import.meta.url), "utf8");
+const sessionFile = ts.createSourceFile("ttsSession.ts", sessionSource, ts.ScriptTarget.Latest, true);
 let bookExpression;
 let context;
-function visit(node) {
+function visitReader(node) {
   if (ts.isVariableDeclaration(node) && node.name.getText(reader) === "book") {
     bookExpression = node.initializer.getText(reader);
   }
-  if (ts.isCallExpression(node) && node.expression.getText(reader) === "createTtsPlayer") {
+  ts.forEachChild(node, visitReader);
+}
+function visitSession(node) {
+  if (ts.isCallExpression(node) && node.expression.getText(sessionFile) === "createTtsPlayer") {
     context = node.arguments[0];
   }
-  ts.forEachChild(node, visit);
+  ts.forEachChild(node, visitSession);
 }
-visit(reader);
+visitReader(reader);
+visitSession(sessionFile);
 assert.ok(bookExpression && context);
-const property = (name) => context.properties.find((node) => node.name?.getText(reader) === name)
-  .initializer.getText(reader);
+assert.match(sessionSource, /return withHanBook\(withDisplayReplacements\(book, bookId\)\)/);
+const property = (name) => context.properties.find((node) => node.name?.getText(sessionFile) === name)
+  .initializer.getText(sessionFile);
 const evaluate = (expression, dependencies) => {
   const { outputText } = ts.transpileModule(`const value = ${expression};`, {
     compilerOptions: { target: ts.ScriptTarget.ES2022 },
@@ -138,8 +145,14 @@ const dispose = solid.createRoot((cleanup) => {
   });
   return cleanup;
 });
-const chapterAt = evaluate(property("chapterAt"), { book });
-const chapterCount = evaluate(property("chapterCount"), { book });
+const sessionDeps = {
+  sessionBookId: () => raw.id,
+  localBookById: () => raw,
+  ttsDisplayBook: (source, id) => withHanBook(replacements.withDisplayReplacements(source, id)),
+};
+const chapterAt = evaluate(property("chapterAt"), sessionDeps);
+const chapterCount = evaluate(property("chapterCount"), sessionDeps);
+assert.equal(chapterAt(0).cid, book().chapters[0].cid, "听书章节与阅读页显示副本同源");
 function player(pageOffsets) {
   return createTtsPlayer({
     bookId: () => raw.id, chapterIndex: () => 0, chapterAt, chapterCount,
@@ -214,7 +227,8 @@ await setRules([]);
 let readingConfig = { enabled: true, mode: "bilingual", readingText: "translated" };
 const translationCalls = [];
 const readerSpeechText = evaluate(property("speechText"), {
-  translation: { settings: () => readingConfig }, rawBook: () => raw,
+  ...sessionDeps,
+  effectiveTranslationSettings: () => readingConfig,
   selectionTranslation: async (book, chapter, text, signal) => {
     signal.throwIfAborted();
     translationCalls.push({ book: book.id, cid: chapter.cid, text });
@@ -292,6 +306,31 @@ for (const engine of ["native", "http"]) {
   assert.equal(delayed.status(), "stopped");
   delayed.dispose();
 }
+
+// 正文尚未落地时，起播必须等 prepareChapter 把句子补上再出声。
+load("./ttsSettings").setTtsEngine("native");
+const pendingChapter = { cid: "late", title: "", paragraphs: [] };
+let prepared = false;
+const late = createTtsPlayer({
+  bookId: () => raw.id,
+  chapterIndex: () => 0,
+  chapterAt: () => pendingChapter,
+  chapterCount: () => 1,
+  navigateChapter: () => {},
+  readingOffset: () => 0,
+  prepareChapter: async () => {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    prepared = true;
+    pendingChapter.paragraphs = ["后台句子。"];
+  },
+});
+const spokenBefore = spoken.length;
+late.start();
+await settle(() => spoken.length > spokenBefore);
+assert.equal(prepared, true, "空章节起播前要先准备正文");
+assert.equal(spoken.at(-1), "后台句子。");
+late.dispose();
+load("./ttsSettings").setTtsEngine("http");
 
 assert.equal(JSON.stringify(raw), original, "显示与听书都不能改写原书");
 assert.ok(!JSON.stringify(logs).includes("正字") && !JSON.stringify(logs).includes("新字"),

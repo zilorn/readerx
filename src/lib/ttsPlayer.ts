@@ -22,7 +22,8 @@
  *   用户翻页跨章浏览时以 browse=true 通知，语音不被打断、继续读原章，待原章
  *   播完再自动进入下一章。
  *
- * 实例与阅读页同生命周期；dispose() 负责清理监听、计时器与 WebAudio 节点。
+ * 播放器本身不绑定页面。阅读页卸下后由全局会话继续供给章节；
+ * dispose() 负责清理监听、计时器与 WebAudio 节点。
  */
 import { createSignal } from "solid-js";
 import type { LocalBookChapter } from "./booksTypes";
@@ -100,6 +101,11 @@ export interface TtsPlayerCtx {
   pageOffsets?: (chapterIndex: number) => Promise<readonly number[]>;
   /** 只转换合成文本；句子高亮和跟读仍使用原文坐标。 */
   speechText?: (text: string, chapterIndex: number, signal: AbortSignal) => Promise<string>;
+  /**
+   * 进入章节前补齐正文（在线书离开阅读页后仍要能跨章）。
+   * 未提供时切章保持同步；提供时先等这一章就绪再续播。
+   */
+  prepareChapter?: (index: number) => Promise<void>;
   /** 轻提示 */
   notify?: (message: string, isError?: boolean) => void;
   /**
@@ -653,6 +659,28 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
   }
 
   /**
+   * 有章节准备回调时先停掉当前句并等正文，再执行原来的同步切章。
+   * 没有回调时保持同步，避免阅读页内的跟读时序多一次让出。
+   */
+  function runPrepared(index: number, run: () => void): void {
+    const prepare = ctx.prepareChapter;
+    if (!prepare) {
+      run();
+      return;
+    }
+    const my = bump();
+    clearNativeWait();
+    stopActiveSource();
+    void stopNativeSpeech();
+    void prepare(index).then(() => {
+      if (!disposed && my === seq) run();
+    }, () => {
+      log.warn("听书章节准备失败", `book=${ctx.bookId()}`, `chapter=${index}`);
+      if (!disposed && my === seq) run();
+    });
+  }
+
+  /**
    * 跨章跳转（引擎主动切章，如本章播完 / 上一句下一句跨章）。
    * - 跟读跟随中：先经 navigateChapter 把阅读视图切到目标章，再由
    *   noteViewChapter 的 auto 分支在“视图==目标章”下重锚续播；
@@ -662,6 +690,11 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
    *   视图本就在目标章时两种情况都无需挪动视图，统一走 noteViewChapter。
    */
   function jumpChapter(target: number, pref: "first" | "last"): void {
+    if (target < 0 || target >= ctx.chapterCount()) return;
+    runPrepared(target, () => jumpChapterNow(target, pref));
+  }
+
+  function jumpChapterNow(target: number, pref: "first" | "last"): void {
     if (target < 0 || target >= ctx.chapterCount()) return;
     pendingAutoNav = target;
     autoStartPref = pref;
@@ -717,6 +750,11 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
       pendingAutoNav = -1;
     }
     if (vi === chapterIdxEngine && items.length > 0) return; // 视图未变
+    runPrepared(vi, () => noteViewChapterNow(vi, auto));
+  }
+
+  function noteViewChapterNow(vi: number, auto: boolean): void {
+    if (disposed || status() === "stopped") return;
     // 先停掉旧章节仍在读的句子，避免新章开始前的空窗继续出声
     if (nativeWaiting || status() === "playing" || status() === "loading") {
       clearNativeWait();
@@ -765,24 +803,36 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
     void ensureTtsPrefsLoaded().then(() => {
       starting = false;
       if (disposed || status() !== "stopped") return;
-      loadItems(vi);
-      if (items.length === 0) {
-        const target = contentChapter(vi, 1);
-        if (target > vi) {
-          pendingAutoNav = target;
-          autoStartPref = "first";
-          ctx.navigateChapter(target);
-          noteViewChapter();
-        } else {
-          ctx.notify?.(t("tts.notify.chapterNoText"), true);
+      const begin = (): void => {
+        if (disposed || status() !== "stopped") return;
+        loadItems(vi);
+        if (items.length === 0) {
+          const target = contentChapter(vi, 1);
+          if (target > vi) {
+            pendingAutoNav = target;
+            autoStartPref = "first";
+            ctx.navigateChapter(target);
+            noteViewChapter();
+          } else {
+            ctx.notify?.(t("tts.notify.chapterNoText"), true);
+          }
+          return;
         }
+        const position = offset();
+        const idx = nearestIndexFor(position);
+        pausedRequested = false;
+        resetFailureStreak();
+        void playFrom(idx, false, position);
+      };
+      const prepare = ctx.prepareChapter;
+      if (!prepare) {
+        begin();
         return;
       }
-      const position = offset();
-      const idx = nearestIndexFor(position);
-      pausedRequested = false;
-      resetFailureStreak();
-      void playFrom(idx, false, position);
+      void prepare(vi).then(begin, () => {
+        log.warn("听书章节准备失败", `book=${ctx.bookId()}`, `chapter=${vi}`);
+        begin();
+      });
     });
   }
 
