@@ -218,7 +218,8 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
   /** 分钟到点后进入“读完当前章再停”的收尾阶段；此时定时模式已复位为 off。 */
   let finishChapterAfterTimer = false;
   let disposed = false;
-  let starting = false;
+  /** 起播代际：停止、重复起播或换书后，等待正文的旧起播作废 */
+  let startToken = 0;
   let speechController = new AbortController();
   function cancelSpeechText(): void {
     speechController.abort();
@@ -792,19 +793,24 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
       : ctx.readingOffset());
   }
 
-  /** 起播当前视图章节：从 offset() 所在句子开始（null/不可用回退章首）。仅停止态可用 */
+  /**
+   * 起播当前视图章节：从 offset() 所在句子开始（null/不可用回退章首）。仅停止态可用。
+   * 补齐在线正文期间会话可能已经换了书（或用户停止、再次起播）：起播带代际，
+   * 只有代际未变且仍是同一本书时才落地，避免拿着旧书的章节下标去读新书。
+   */
   function startFrom(offset: () => number | null): void {
     if (disposed) return;
     if (status() !== "stopped") return;
     const vi = ctx.chapterIndex();
     if (!ctx.chapterAt(vi)) return;
-    if (starting) return;
-    starting = true;
+    const bookId = ctx.bookId();
+    const token = ++startToken;
+    const stillWanted = (): boolean =>
+      !disposed && token === startToken && status() === "stopped" && ctx.bookId() === bookId;
     void ensureTtsPrefsLoaded().then(() => {
-      starting = false;
-      if (disposed || status() !== "stopped") return;
+      if (!stillWanted()) return;
       const begin = (): void => {
-        if (disposed || status() !== "stopped") return;
+        if (!stillWanted()) return;
         loadItems(vi);
         if (items.length === 0) {
           const target = contentChapter(vi, 1);
@@ -830,7 +836,7 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
         return;
       }
       void prepare(vi).then(begin, () => {
-        log.warn("听书章节准备失败", `book=${ctx.bookId()}`, `chapter=${vi}`);
+        log.warn("听书章节准备失败", `book=${bookId}`, `chapter=${vi}`);
         begin();
       });
     });
@@ -850,6 +856,8 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
 
   function stop(): void {
     if (disposed) return;
+    // 还在等在线正文的起播一并作废：停止后再补上正文不该自己响起来
+    startToken += 1;
     cancelSpeechText();
     void bump();
     pausedRequested = false;
@@ -1195,6 +1203,7 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
 
   function dispose(): void {
     disposed = true;
+    startToken += 1;
     speechController.abort();
     clearTimerHandle();
     clearNativeWait();

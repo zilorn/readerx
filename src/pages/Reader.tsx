@@ -219,6 +219,7 @@ import { type TtsFocus } from "../lib/ttsPlayer";
 import {
   attachTtsReader,
   claimTtsBook,
+  confirmTtsReaderView,
   detachTtsReader,
   globalTtsPlayer,
   setTtsFollowEnabled,
@@ -1154,6 +1155,11 @@ export default function ReaderPage() {
   const [resumeTarget, setResumeTarget] = createSignal<{ cid: string; char: number; translated?: boolean } | null>(
     null,
   );
+  /**
+   * 已完成初始位置恢复的书 id。听书会话要等这里置位后才接管视图：
+   * 挂载初期 chapterIdx 还是暂态的 0，直接上报会把暂停中的朗读位置重锚到章首。
+   */
+  const [restoredBookId, setRestoredBookId] = createSignal<string | null>(null);
   // 章首页回翻的目标必须优先于正文/译文重排时采样的临时章首位置。
   // 只按目标 cid 落地；目录或工具栏改跳其它章节时作废。
   let wantLastPageCid: string | null = null;
@@ -1200,6 +1206,7 @@ export default function ReaderPage() {
           ? { cid: t.chapterCid, char: t.charOffset }
           : null;
       setResumeTarget(onCid);
+      setRestoredBookId(current.id);
     }),
   );
 
@@ -2118,6 +2125,11 @@ export default function ReaderPage() {
     });
     onCleanup(() => detachTtsReader(id));
   }));
+  // 初始位置恢复落定后，阅读页才把当前章节交给听书会话（见 restoredBookId 注释）。
+  createEffect(() => {
+    if (restoredBookId() !== bookId()) return;
+    confirmTtsReaderView();
+  });
   const [ttsSettingsOpen, setTtsSettingsOpen] = createSignal(false);
   const [prewarmText, setPrewarmText] = createSignal<string | null>(null);
 

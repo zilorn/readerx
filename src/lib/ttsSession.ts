@@ -54,6 +54,8 @@ interface SessionApi {
   decodeGuideOpen: () => boolean;
   setDecodeGuideOpen: (open: boolean) => void;
   attach: (binding: TtsReaderBinding) => void;
+  /** 初始位置恢复完成后由阅读页调用：此后的章节变化才驱动朗读位置 */
+  confirmView: () => void;
   detach: (bookId: string) => void;
   claim: (bookId: string) => void;
 }
@@ -63,12 +65,21 @@ const session = createRoot((): SessionApi => {
   const [viewBookId, setViewBookId] = createSignal<string | null>(null);
   const [followWanted, setFollowWanted] = createSignal(true);
   const [decodeGuideOpen, setDecodeGuideOpen] = createSignal(false);
+  /** 已接管视图的阅读页（初始位置恢复完成后才置位） */
   let view: TtsReaderBinding | null = null;
+  /** 已挂载、但还没完成初始位置恢复的阅读页 */
+  let pendingView: TtsReaderBinding | null = null;
 
   const sameBook = (): boolean => {
     const id = sessionBookId();
     return !!id && view?.bookId === id;
   };
+
+  /**
+   * 构造期还不能读播放器自身的焦点（createTtsPlayer 尚未返回），
+   * 先回落到 0；播放器建好后改成它自己的焦点章。
+   */
+  let focusChapterFallback = (): number => 0;
 
   async function prepareChapter(index: number): Promise<void> {
     const id = sessionBookId();
@@ -95,7 +106,7 @@ const session = createRoot((): SessionApi => {
     bookId: () => sessionBookId() ?? "",
     chapterIndex: () => {
       if (sameBook() && view) return view.chapterIndex();
-      return player.focus()?.chapterIndex ?? 0;
+      return focusChapterFallback();
     },
     chapterAt: (index) => {
       const id = sessionBookId();
@@ -134,6 +145,8 @@ const session = createRoot((): SessionApi => {
     notify: (message, isError) => showToast(message, !!isError),
     onDecodeFailure: () => setDecodeGuideOpen(true),
   });
+  // 播放器建好后才能读它自己的焦点；构造期读到的是 0，不影响起播位置。
+  focusChapterFallback = () => player.focus()?.chapterIndex ?? 0;
 
   createEffect(() => {
     if (player.status() === "stopped") setFollowWanted(true);
@@ -232,15 +245,28 @@ const session = createRoot((): SessionApi => {
     decodeGuideOpen,
     setDecodeGuideOpen,
     attach: (binding) => {
-      view = binding;
+      pendingView = binding;
+      view = null;
       setViewBookId(binding.bookId);
       if (player.status() === "stopped") setSessionBookId(binding.bookId);
     },
+    /**
+     * 阅读页初始位置恢复完成、当前章节可信之后再接管视图。
+     * 恢复期间 chapterIdx 还是暂态的 0，此时把章节变化交给播放器会把
+     * 暂停中的朗读位置重锚到章首；接管前一律回落到播放器自己的焦点。
+     */
+    confirmView: () => {
+      const pending = pendingView;
+      if (!pending || viewBookId() !== pending.bookId) return;
+      pendingView = null;
+      view = pending;
+    },
     detach: (bookId) => {
+      if (pendingView?.bookId === bookId) pendingView = null;
+      if (viewBookId() === bookId) setViewBookId(null);
       if (view?.bookId !== bookId) return;
       const keep = player.status() !== "stopped" && sessionBookId() === bookId;
       view = null;
-      setViewBookId(null);
       if (keep) {
         log.info(
           "离开阅读页，听书继续",
@@ -289,6 +315,14 @@ export function setTtsDecodeGuideOpen(open: boolean): void {
 
 export function attachTtsReader(binding: TtsReaderBinding): void {
   session.attach(binding);
+}
+
+/**
+ * 阅读页初始位置（章节 + 偏移）恢复落定后调用。
+ * 调用前会话不接管视图：挂载瞬间的暂态章节不会重锚暂停中的朗读位置。
+ */
+export function confirmTtsReaderView(): void {
+  session.confirmView();
 }
 
 export function detachTtsReader(bookId: string): void {
