@@ -40,18 +40,13 @@ import { PageBody } from "../components/PageBody";
 import { TabBar } from "../components/TabBar";
 import { registerAppScrollEl } from "../lib/appScroll";
 import { shelfSelectingMode } from "../lib/store";
+import { leaveTargetsSamePath, shouldSnapshot } from "./exitSnapshot";
 import { isFullHeightPath, isTabRoute } from "./routes";
 
 /* 与阅读器翻页动画同一套缓动曲线 */
 const EASE = "cubic-bezier(0.22, 1, 0.36, 1)";
 const DUR_SLIDE = 300;
 const DUR_FADE = 220;
-/**
- * 离场快照的节点上限。快照本身是 `cloneNode`，但挂进离场层并重新布局要按节点数付代价：
- * 实测 1500 个节点时已出现 30ms+ 的帧间隔，6000 节点时导航会出现约 80ms 长任务。
- * 超过上限的页面直接切换，保住导航响应。
- */
-const MAX_EXIT_SNAPSHOT_NODES = 1_200;
 
 interface Pane {
   id: number;
@@ -181,11 +176,13 @@ export function MobileStage(props: MobileStageProps) {
    * 路由提交前抓一份顶层页面的离场快照。
    * 常驻层自己就是内容的持有者（不经过路由出口），切走时 DOM 原样留着，无需快照；
    * 瞬态层的内容来自路由出口，路由一变就会被换掉，因此提前克隆滚动区留给退出动画。
+   * 仅 query / hash 变化时路径 effect 不会进入 go()，重置标志后直接返回，避免白克隆。
    */
-  useBeforeLeave(() => {
+  useBeforeLeave((event) => {
     // 每次导航重新判定：仅 query / hash 变化的导航不经过 go()，不能留下过期快照或跳过标志。
     pendingExit = undefined;
     skipExitSnapshot = false;
+    if (leaveTargetsSamePath(event.to, path())) return;
     // 减少动态效果时根本不播离场动画，别再为快照付一次克隆成本。
     if (reducedMotion) return;
     const id = currentId();
@@ -194,7 +191,7 @@ export function MobileStage(props: MobileStageProps) {
     const scrollEl = scrollById.get(id);
     if (!scrollEl) return;
     // 长正文（滚动模式阅读器、长搜索结果）的快照重新挂载会把导航拖成长任务。
-    if (scrollEl.getElementsByTagName("*").length > MAX_EXIT_SNAPSHOT_NODES) {
+    if (!shouldSnapshot(scrollEl.getElementsByTagName("*").length)) {
       skipExitSnapshot = true;
       return;
     }
@@ -326,7 +323,10 @@ export function MobileStage(props: MobileStageProps) {
     // 上一页可能正处于上一次过渡中：先回位成静止态，再作为滑出 / 垫底层
     if (prevEl) resetAnimStyle(prevEl);
 
-    // 系统偏好“减少动态效果”或离场页面过大时不做过渡，直接整体切换
+    // 减少动态效果，或离场页超过快照上限：不播过渡，立刻卸掉离场层。
+    // 瞬态页的旧画面只在快照里。没有快照时，再等 waitPageReady 也遮不住新页的
+    // Suspense 占位，因此与减少动态效果一样直接切换。超长页进入首次加载的
+    // 懒加载路由时，加载画面会露出来；这是为了避开整页克隆长任务。
     if (reducedMotion || skipSnapshot || prevId === pane.id) {
       finishTransition(pane.id);
       return;
