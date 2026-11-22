@@ -128,7 +128,7 @@ export default function SettingsPage() {
                   <button
                     role="radio"
                     aria-checked={currentTheme() === opt.value}
-                    class="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg px-[11px] py-[7px] text-[12.5px] text-text-2 transition-all duration-150"
+                    class="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg px-[11px] py-[7px] text-[12.5px] text-text-2 transition-[background-color,color,box-shadow] duration-150"
                     classList={{
                       "bg-surface font-semibold text-text shadow-sm shadow-black/15":
                         currentTheme() === opt.value,
