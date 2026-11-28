@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="tts_channel_name">听书</string>
+    <string name="tts_previous">上一句</string>
+    <string name="tts_pause">暂停</string>
+    <string name="tts_resume">继续</string>
+    <string name="tts_next">下一句</string>
+    <string name="tts_stop">停止</string>
+</resources>

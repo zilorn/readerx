@@ -22,7 +22,8 @@
  *   用户翻页跨章浏览时以 browse=true 通知，语音不被打断、继续读原章，待原章
  *   播完再自动进入下一章。
  *
- * 实例与阅读页同生命周期；dispose() 负责清理监听、计时器与 WebAudio 节点。
+ * 播放器本身不绑定页面。阅读页卸下后由全局会话继续供给章节；
+ * dispose() 负责清理监听、计时器与 WebAudio 节点。
  */
 import { createSignal } from "solid-js";
 import type { LocalBookChapter } from "./booksTypes";
@@ -100,6 +101,11 @@ export interface TtsPlayerCtx {
   pageOffsets?: (chapterIndex: number) => Promise<readonly number[]>;
   /** 只转换合成文本；句子高亮和跟读仍使用原文坐标。 */
   speechText?: (text: string, chapterIndex: number, signal: AbortSignal) => Promise<string>;
+  /**
+   * 进入章节前补齐正文（在线书离开阅读页后仍要能跨章）。
+   * 未提供时切章保持同步；提供时先等这一章就绪再续播。
+   */
+  prepareChapter?: (index: number) => Promise<void>;
   /** 轻提示 */
   notify?: (message: string, isError?: boolean) => void;
   /**
@@ -212,7 +218,8 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
   /** 分钟到点后进入“读完当前章再停”的收尾阶段；此时定时模式已复位为 off。 */
   let finishChapterAfterTimer = false;
   let disposed = false;
-  let starting = false;
+  /** 起播代际：停止、重复起播或换书后，等待正文的旧起播作废 */
+  let startToken = 0;
   let speechController = new AbortController();
   function cancelSpeechText(): void {
     speechController.abort();
@@ -653,6 +660,28 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
   }
 
   /**
+   * 有章节准备回调时先停掉当前句并等正文，再执行原来的同步切章。
+   * 没有回调时保持同步，避免阅读页内的跟读时序多一次让出。
+   */
+  function runPrepared(index: number, run: () => void): void {
+    const prepare = ctx.prepareChapter;
+    if (!prepare) {
+      run();
+      return;
+    }
+    const my = bump();
+    clearNativeWait();
+    stopActiveSource();
+    void stopNativeSpeech();
+    void prepare(index).then(() => {
+      if (!disposed && my === seq) run();
+    }, () => {
+      log.warn("听书章节准备失败", `book=${ctx.bookId()}`, `chapter=${index}`);
+      if (!disposed && my === seq) run();
+    });
+  }
+
+  /**
    * 跨章跳转（引擎主动切章，如本章播完 / 上一句下一句跨章）。
    * - 跟读跟随中：先经 navigateChapter 把阅读视图切到目标章，再由
    *   noteViewChapter 的 auto 分支在“视图==目标章”下重锚续播；
@@ -662,6 +691,11 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
    *   视图本就在目标章时两种情况都无需挪动视图，统一走 noteViewChapter。
    */
   function jumpChapter(target: number, pref: "first" | "last"): void {
+    if (target < 0 || target >= ctx.chapterCount()) return;
+    runPrepared(target, () => jumpChapterNow(target, pref));
+  }
+
+  function jumpChapterNow(target: number, pref: "first" | "last"): void {
     if (target < 0 || target >= ctx.chapterCount()) return;
     pendingAutoNav = target;
     autoStartPref = pref;
@@ -717,6 +751,11 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
       pendingAutoNav = -1;
     }
     if (vi === chapterIdxEngine && items.length > 0) return; // 视图未变
+    runPrepared(vi, () => noteViewChapterNow(vi, auto));
+  }
+
+  function noteViewChapterNow(vi: number, auto: boolean): void {
+    if (disposed || status() === "stopped") return;
     // 先停掉旧章节仍在读的句子，避免新章开始前的空窗继续出声
     if (nativeWaiting || status() === "playing" || status() === "loading") {
       clearNativeWait();
@@ -754,35 +793,52 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
       : ctx.readingOffset());
   }
 
-  /** 起播当前视图章节：从 offset() 所在句子开始（null/不可用回退章首）。仅停止态可用 */
+  /**
+   * 起播当前视图章节：从 offset() 所在句子开始（null/不可用回退章首）。仅停止态可用。
+   * 补齐在线正文期间会话可能已经换了书（或用户停止、再次起播）：起播带代际，
+   * 只有代际未变且仍是同一本书时才落地，避免拿着旧书的章节下标去读新书。
+   */
   function startFrom(offset: () => number | null): void {
     if (disposed) return;
     if (status() !== "stopped") return;
     const vi = ctx.chapterIndex();
     if (!ctx.chapterAt(vi)) return;
-    if (starting) return;
-    starting = true;
+    const bookId = ctx.bookId();
+    const token = ++startToken;
+    const stillWanted = (): boolean =>
+      !disposed && token === startToken && status() === "stopped" && ctx.bookId() === bookId;
     void ensureTtsPrefsLoaded().then(() => {
-      starting = false;
-      if (disposed || status() !== "stopped") return;
-      loadItems(vi);
-      if (items.length === 0) {
-        const target = contentChapter(vi, 1);
-        if (target > vi) {
-          pendingAutoNav = target;
-          autoStartPref = "first";
-          ctx.navigateChapter(target);
-          noteViewChapter();
-        } else {
-          ctx.notify?.(t("tts.notify.chapterNoText"), true);
+      if (!stillWanted()) return;
+      const begin = (): void => {
+        if (!stillWanted()) return;
+        loadItems(vi);
+        if (items.length === 0) {
+          const target = contentChapter(vi, 1);
+          if (target > vi) {
+            pendingAutoNav = target;
+            autoStartPref = "first";
+            ctx.navigateChapter(target);
+            noteViewChapter();
+          } else {
+            ctx.notify?.(t("tts.notify.chapterNoText"), true);
+          }
+          return;
         }
+        const position = offset();
+        const idx = nearestIndexFor(position);
+        pausedRequested = false;
+        resetFailureStreak();
+        void playFrom(idx, false, position);
+      };
+      const prepare = ctx.prepareChapter;
+      if (!prepare) {
+        begin();
         return;
       }
-      const position = offset();
-      const idx = nearestIndexFor(position);
-      pausedRequested = false;
-      resetFailureStreak();
-      void playFrom(idx, false, position);
+      void prepare(vi).then(begin, () => {
+        log.warn("听书章节准备失败", `book=${bookId}`, `chapter=${vi}`);
+        begin();
+      });
     });
   }
 
@@ -800,6 +856,8 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
 
   function stop(): void {
     if (disposed) return;
+    // 还在等在线正文的起播一并作废：停止后再补上正文不该自己响起来
+    startToken += 1;
     cancelSpeechText();
     void bump();
     pausedRequested = false;
@@ -1145,6 +1203,7 @@ export function createTtsPlayer(ctx: TtsPlayerCtx): TtsPlayer {
 
   function dispose(): void {
     disposed = true;
+    startToken += 1;
     speechController.abort();
     clearTimerHandle();
     clearNativeWait();

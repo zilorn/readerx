@@ -71,6 +71,8 @@ export const tts = {
   "tts.bubble.next": "Next sentence",
   "tts.bubble.pause": "Pause",
   "tts.bubble.play": "Play",
+  "tts.now.open": "Return to the book being read aloud",
+  "tts.now.stop": "Stop listening",
 
   // Playback notices (ttsPlayer notify)
   "tts.notify.bookFinished": "Finished reading this book",

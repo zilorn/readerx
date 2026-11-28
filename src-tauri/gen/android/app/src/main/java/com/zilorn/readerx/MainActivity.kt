@@ -16,6 +16,12 @@ class MainActivity : TauriActivity() {
   override fun onWebViewCreate(webView: WebView) {
     super.onWebViewCreate(webView)
     mainWebView = webView
+    TtsForegroundService.dispatch = { control ->
+      webView.evaluateJavascript(
+        "window.dispatchEvent(new CustomEvent('readerx-tts-control', {detail: '$control'}));",
+        null,
+      )
+    }
     Log.i(TAG, "WebView created")
     requestInitialPaintIfReady()
   }
@@ -47,6 +53,8 @@ class MainActivity : TauriActivity() {
   override fun onPause() {
     volumeKeys?.clearPresses()
     super.onPause()
+    // 听书切后台时 WebView 会暂停 JS 定时器，逐句推进依赖它；朗读中保持运行。
+    if (TtsForegroundService.running) mainWebView?.resumeTimers()
   }
 
   override fun onCreate(savedInstanceState: Bundle?) {
@@ -61,6 +69,7 @@ class MainActivity : TauriActivity() {
   override fun onDestroy() {
     Log.i(TAG, "Activity destroyed (webViewCreated=${mainWebView != null})")
     mainWebView = null
+    TtsForegroundService.dispatch = null
     super.onDestroy()
   }
 

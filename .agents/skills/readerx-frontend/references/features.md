@@ -48,7 +48,8 @@
 
 ## 听书
 
-- src/lib/ttsPlayer.ts 是阅读页生命周期内的播放器；ttsEngine.ts、httpTts.ts、webAudio.ts 分别承接原生、HTTP 合成与音频播放，ttsSegment.ts 管镜像分句，audioCache.ts 管缓存。
+- src/lib/ttsSession.ts 持有全局播放器：离开阅读页后继续朗读，其它页面用底部控制条回到原书。阅读页用 attachTtsReader 提供跟读、分页和视图跳转；卸下后章节改读库内显示副本，在线书跨章会先补齐正文。同一时间只读一本书。ttsPlayer.ts 负责逐句播放；ttsEngine.ts、httpTts.ts、webAudio.ts 分别承接原生、HTTP 合成与音频播放，ttsSegment.ts 管镜像分句，audioCache.ts 管缓存。系统把应用挂起后（安卓回到桌面）语音仍可能被系统暂停，那不在这次会话转移的范围内。
+- 会话在模块求值时构造播放器，构造期不能读播放器自身的焦点（此时尚未赋值）；阅读页挂载后先 attachTtsReader 登记绑定，等初始位置（章节 + 偏移）恢复落定再 confirmTtsReaderView 接管视图，接管前章节目录的暂态变化不得重锚暂停中的朗读位置。在线章节起播带代际与书籍校验：等待正文期间换书、停止或再次起播都会作废旧起播，不能拿旧书的章节下标去读新书。修改会话生命周期运行 `node scripts/tts-session-test.mjs`，覆盖启动构造、暂停重开与换书起播。
 - httpTts.ts 的 JSON body 按完整字符串 token 替换并序列化占位值，保留 URLencoding 参数及未加引号的倍速数值；原文里的占位符不再次展开。URL/表单仍按模板编码，GET 不解析未使用的 body。回归 `node scripts/http-tts-test.mjs`。
 - 播放器 chapterAt 必须返回文本替换与简繁转换后的显示副本；分句缓存同时按章节对象与分页边界失效，HTTP 内存音频按实际句子文本和请求指纹匹配。修改该链路运行 `node scripts/tts-replacements-test.mjs`，覆盖窗口/整本预热、播放缓存与规则更新/删除；含正文或接口配置的内存缓存键不得写入日志。
 - 原生 TTS 暂停通过停止当前句实现，继续从句首重读；HTTP 播放暂停使用 AudioContext，保持句中位置。修改统一按钮时不能假设两者具有相同暂停能力。

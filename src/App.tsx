@@ -3,6 +3,8 @@ import { lazy, onMount, onCleanup, Show, createEffect } from "solid-js";
 import type { Component } from "solid-js";
 import { Router, Route, useNavigate, type RouteSectionProps } from "@solidjs/router";
 import { Toasts } from "./components/Toasts";
+import { TtsDecodeGuideDialog } from "./components/TtsDecodeGuideDialog";
+import { TtsNowPlaying } from "./components/TtsNowPlaying";
 import { GroupPicker } from "./components/GroupPicker";
 import { SourcePromptDialog } from "./components/SourcePromptDialog";
 import { MobileStage } from "./shell/MobileStage";
@@ -17,6 +19,7 @@ import {
 import { isDesktopShell, isDesktopPlatform } from "./lib/platform";
 import { attachSyncNavigator } from "./lib/sync";
 import { t } from "./lib/i18n";
+import { setTtsDecodeGuideOpen, ttsDecodeGuideOpen } from "./lib/ttsSession";
 
 // ---- 路由页面全部走代码分割 + 懒加载（配合页面栈内 Suspense） ----
 const BookshelfPage = lazy(() => import("./pages/Bookshelf"));
@@ -88,6 +91,11 @@ const AppShell: Component<RouteSectionProps> = (props) => {
         </Show>
 
         <Toasts />
+        <TtsNowPlaying />
+        <TtsDecodeGuideDialog
+          open={ttsDecodeGuideOpen()}
+          onClose={() => setTtsDecodeGuideOpen(false)}
+        />
 
         {/* 书源输入表单（input.prompt）：书源引擎在等这份输入，弹层必须盖在任何页面之上 */}
         <SourcePromptDialog />

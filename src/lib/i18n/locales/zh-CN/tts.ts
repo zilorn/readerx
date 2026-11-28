@@ -63,6 +63,8 @@ export const tts = {
   "tts.bubble.next": "下一句",
   "tts.bubble.pause": "暂停",
   "tts.bubble.play": "播放",
+  "tts.now.open": "回到正在听的书",
+  "tts.now.stop": "停止听书",
 
   // 播放提示（ttsPlayer 的 notify）
   "tts.notify.bookFinished": "本书已朗读完毕",
