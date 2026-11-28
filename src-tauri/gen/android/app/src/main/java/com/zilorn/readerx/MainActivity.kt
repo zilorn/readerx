@@ -16,6 +16,12 @@ class MainActivity : TauriActivity() {
   override fun onWebViewCreate(webView: WebView) {
     super.onWebViewCreate(webView)
     mainWebView = webView
+    TtsForegroundService.dispatch = { control ->
+      webView.evaluateJavascript(
+        "window.dispatchEvent(new CustomEvent('readerx-tts-control', {detail: '$control'}));",
+        null,
+      )
+    }
     Log.i(TAG, "WebView created")
     requestInitialPaintIfReady()
   }
@@ -63,6 +69,7 @@ class MainActivity : TauriActivity() {
   override fun onDestroy() {
     Log.i(TAG, "Activity destroyed (webViewCreated=${mainWebView != null})")
     mainWebView = null
+    TtsForegroundService.dispatch = null
     super.onDestroy()
   }
 

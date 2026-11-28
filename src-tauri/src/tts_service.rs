@@ -24,6 +24,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
 pub async fn readerx_tts_service_set_active(
     app: tauri::AppHandle,
     active: bool,
+    playing: bool,
     title: String,
     text: String,
 ) -> Result<(), String> {
@@ -35,12 +36,12 @@ pub async fn readerx_tts_service_set_active(
             .0
             .run_mobile_plugin_async(
                 "setActive",
-                serde_json::json!({ "active": active, "title": title, "text": text }),
+                serde_json::json!({ "active": active, "playing": playing, "title": title, "text": text }),
             )
             .await
             .map_err(|error| format!("听书后台服务切换失败: {error}"))?;
     }
     #[cfg(not(target_os = "android"))]
-    let _ = (app, active, title, text);
+    let _ = (app, active, playing, title, text);
     Ok(())
 }

@@ -10,6 +10,7 @@ import * as solid from "../node_modules/solid-js/dist/solid.js";
 // 3. 在线章节还没补齐时起播，换书后旧起播不能把新书读起来。
 
 globalThis.window = globalThis;
+globalThis.addEventListener ??= () => {};
 
 const files = new Map();
 function makeBook(id, chapters) {

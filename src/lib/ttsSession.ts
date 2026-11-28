@@ -216,14 +216,31 @@ const session = createRoot((): SessionApi => {
     bind("stop", () => player.stop());
   }
 
-  // 朗读中开启 Android 前台服务（后台保活 + 通知栏），停止 / 暂停时关闭
+  // 听书会话未停止时保持 Android 前台服务（通知栏可暂停 / 继续），停止或出错时关闭
   createEffect(() => {
     const status = player.status();
     const id = sessionBookId();
-    const active = status === "playing" || status === "loading";
+    const active = status !== "stopped" && status !== "error";
+    const playing = status === "playing" || status === "loading";
     const title = id ? hanText(bookMetaById(id)?.title ?? "") : "";
-    syncTtsForegroundService(active, title, player.focus()?.chapterTitle ?? "");
+    syncTtsForegroundService({
+      active,
+      playing,
+      title,
+      text: player.focus()?.chapterTitle ?? "",
+    });
   });
+
+  // 通知栏按钮经 MainActivity 转成事件，这里执行与媒体键相同的控制
+  if (typeof window !== "undefined") {
+    window.addEventListener("readerx-tts-control", (event) => {
+      const action = (event as CustomEvent<string>).detail;
+      if (action === "previous") player.prev();
+      else if (action === "next") player.next();
+      else if (action === "toggle") player.togglePlay();
+      else if (action === "stop") player.stop();
+    });
+  }
 
   createEffect(() => {
     const status = player.status();
