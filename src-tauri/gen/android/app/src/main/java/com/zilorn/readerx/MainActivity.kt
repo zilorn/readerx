@@ -47,6 +47,8 @@ class MainActivity : TauriActivity() {
   override fun onPause() {
     volumeKeys?.clearPresses()
     super.onPause()
+    // 听书切后台时 WebView 会暂停 JS 定时器，逐句推进依赖它；朗读中保持运行。
+    if (TtsForegroundService.running) mainWebView?.resumeTimers()
   }
 
   override fun onCreate(savedInstanceState: Bundle?) {

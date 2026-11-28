@@ -22,6 +22,7 @@ mod storage;
 mod storage_usage;
 mod temporary_file;
 mod reading_time;
+mod tts_service;
 mod volume_keys;
 
 /// 数据根覆盖入口（集成测试专用；见 `storage::pin_data_root`）。
@@ -103,6 +104,7 @@ pub fn run() {
 
     let result = builder
         .plugin(volume_keys::init())
+        .plugin(tts_service::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_http::init())
@@ -156,6 +158,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             volume_keys::readerx_volume_keys_set_enabled,
+            tts_service::readerx_tts_service_set_active,
             startup::readerx_startup_migrate,
             commands::greet,
             app_updates::readerx_update_check,

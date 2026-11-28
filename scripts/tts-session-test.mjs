@@ -127,6 +127,7 @@ const mocks = {
     stopSourceNode: () => {},
   },
   "./ttsDecodeGuide": { isLinuxDesktop: () => false },
+  "./ttsService": { syncTtsForegroundService: () => {} },
 };
 
 function load(name) {

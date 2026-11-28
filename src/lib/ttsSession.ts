@@ -26,6 +26,7 @@ import { showToast } from "./toast";
 import { t } from "./i18n";
 import { createLogger } from "./logger";
 import { createTtsPlayer, type TtsPlayer } from "./ttsPlayer";
+import { syncTtsForegroundService } from "./ttsService";
 
 const log = createLogger("tts");
 
@@ -214,6 +215,15 @@ const session = createRoot((): SessionApi => {
     bind("nexttrack", () => player.next());
     bind("stop", () => player.stop());
   }
+
+  // 朗读中开启 Android 前台服务（后台保活 + 通知栏），停止 / 暂停时关闭
+  createEffect(() => {
+    const status = player.status();
+    const id = sessionBookId();
+    const active = status === "playing" || status === "loading";
+    const title = id ? hanText(bookMetaById(id)?.title ?? "") : "";
+    syncTtsForegroundService(active, title, player.focus()?.chapterTitle ?? "");
+  });
 
   createEffect(() => {
     const status = player.status();
